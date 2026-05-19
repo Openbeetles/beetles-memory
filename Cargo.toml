@@ -4,6 +4,7 @@ members = [
     "crates/store",
     "crates/sdk",
     "crates/replay",
+    "crates/evolve",
 ]
 resolver = "2"
 
@@ -15,6 +16,7 @@ bm-core = { path = "crates/core" }
 bm-store = { path = "crates/store" }
 bm-sdk = { path = "crates/sdk" }
 bm-replay = { path = "crates/replay" }
+bm-evolve = { path = "crates/evolve" }
 rusqlite = "0.32"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

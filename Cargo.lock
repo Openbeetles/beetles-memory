@@ -28,6 +28,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bm-evolve"
+version = "0.1.0"
+dependencies = [
+ "bm-core",
+]
+
+[[package]]
 name = "bm-replay"
 version = "0.1.0"
 dependencies = [
@@ -41,6 +48,7 @@ name = "bm-sdk"
 version = "0.1.0"
 dependencies = [
  "bm-core",
+ "bm-evolve",
  "bm-store",
 ]
 

@@ -2,13 +2,13 @@
 
 use bm_core::{
     CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport, DisclosureSurface,
-    EvidenceState, GovernanceReport, MemoryPlane, MentalPrivacyLayer, MentalPrivacyQuotePolicy,
-    NewMemoryRecord, PrivacyDisclosureDecision, ProjectionBlock, ProjectionReport,
-    ProjectionSurface, PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown,
-    RecallSelection, RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile,
-    SkippedRecallCandidate, SoulGovernanceReason, SourceKind, SourceRef, SubjectAssemblyReport,
-    SubjectAssemblySource, SubjectAssemblySourceRef, WriteCandidate, WriteDecision,
-    WriteRejectReason, WriteReport,
+    EvidenceState, EvolutionInput, EvolutionProposal, EvolutionProposalBatch, GovernanceReport,
+    MemoryPlane, MentalPrivacyLayer, MentalPrivacyQuotePolicy, NewMemoryRecord,
+    PrivacyDisclosureDecision, ProjectionBlock, ProjectionReport, ProjectionSurface,
+    PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown, RecallSelection,
+    RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile, SkippedRecallCandidate,
+    SoulGovernanceReason, SourceKind, SourceRef, SubjectAssemblyReport, SubjectAssemblySource,
+    SubjectAssemblySourceRef, WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
 };
 use bm_store::{MemoryStore, StoreError};
 
@@ -369,6 +369,22 @@ where
             warnings: projection_warnings(report),
             blocks,
         }
+    }
+
+    pub fn propose_evolution(&self, mut input: EvolutionInput) -> EvolutionProposalBatch {
+        input.profile = self.profile;
+        bm_evolve::deterministic_evolve(input).batch
+    }
+
+    pub fn submit_evolution_proposal(&mut self, proposal: &EvolutionProposal) -> WriteReport {
+        let Some(candidate) = proposal.candidate_write.clone() else {
+            return WriteReport::rejected_with_reason(
+                WriteRejectReason::NeedsDistillation,
+                self.profile,
+            );
+        };
+
+        self.write(candidate)
     }
 }
 

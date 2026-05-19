@@ -2,6 +2,7 @@
 
 mod adapter;
 mod domain;
+mod evolution;
 mod projection;
 mod recall;
 mod soul;
@@ -10,6 +11,7 @@ mod write;
 
 pub use adapter::*;
 pub use domain::*;
+pub use evolution::*;
 pub use projection::*;
 pub use recall::*;
 pub use soul::*;

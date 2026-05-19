@@ -1,9 +1,13 @@
 //! Replay fixtures for Beetle Memory.
 
+pub use bm_core::{EvolutionMode, EvolutionProposalKind};
+
 use bm_core::{
-    EvidenceState, MemoryPlane, MentalPrivacyLayer, ProjectionReport, ProjectionSurface,
-    PromptRecallIntent, RecallSelectionReport, RecallWarning, RuntimeProfile,
-    SubjectAssemblySource, WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
+    EvidenceRef, EvidenceState, EvolutionBudget, EvolutionInput, EvolutionProposalBatch,
+    MemoryPlane, MentalPrivacyLayer, ProjectionReport, ProjectionSurface, PromptRecallIntent,
+    RecallSelectionReport, RecallWarning, RuntimeProfile, SourceKind, SourceRef,
+    SubjectAssemblyReport, SubjectAssemblySource, WriteCandidate, WriteDecision, WriteRejectReason,
+    WriteReport,
 };
 use bm_sdk::MemoryRuntimeBuilder;
 use bm_store::InMemoryStore;
@@ -680,6 +684,524 @@ fn subject_assembly_source_name(source: SubjectAssemblySource) -> &'static str {
         SubjectAssemblySource::World => "World",
         SubjectAssemblySource::Task => "Task",
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum S4ReplayPath {
+    ArchiveEvidenceProducesDistillationProposal,
+    ProgramEvidenceCannotBecomeSoulRevision,
+    StableProceduralPatternProducesPromotionProposal,
+    SubjectAssemblyProducesRefreshProposal,
+    PrivateMaterialForcesNoWriteOrPrivacyRepair,
+    FullSandboxCanAdjudicateBranches,
+    CompactSandboxTrimsAndSkipsHeavyPasses,
+    ConsumerModeDoesNotRunEvolution,
+    ProposalApplyReturnsToSdkGovernance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct S4ReplayPathReport {
+    pub path: S4ReplayPath,
+    pub profile: RuntimeProfile,
+    pub mode: EvolutionMode,
+    pub evidence_read: usize,
+    pub branches_evaluated: usize,
+    pub proposals_emitted: usize,
+    pub rejected_candidates: usize,
+    pub privacy_filtered_count: usize,
+    pub profile_trimmed: bool,
+    pub raw_private_exposed: bool,
+    pub proposal_kinds: Vec<EvolutionProposalKind>,
+    pub rejected_reasons: Vec<WriteRejectReason>,
+    pub proposal_apply_reports: Vec<WriteReport>,
+    pub sdk_governance_returned: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct S4ReplayReport {
+    pub mode: EvolutionMode,
+    pub evidence_read: usize,
+    pub branches_evaluated: usize,
+    pub proposals_emitted: usize,
+    pub rejected_candidates: usize,
+    pub privacy_filtered_count: usize,
+    pub profile_trimmed: bool,
+    pub raw_private_exposed: bool,
+    pub proposal_apply_reports: Vec<WriteReport>,
+    pub contract_red_light_reasons: Vec<String>,
+    pub paths: Vec<S4ReplayPathReport>,
+}
+
+pub fn run_s4_replay() -> S4ReplayReport {
+    let paths = vec![
+        replay_s4_archive_evidence_distillation(),
+        replay_s4_program_evidence_soul_revision_gate(),
+        replay_s4_stable_procedural_pattern(),
+        replay_s4_subject_assembly_refresh(),
+        replay_s4_private_material_privacy_repair(),
+        replay_s4_full_sandbox_branches(),
+        replay_s4_compact_sandbox_trim(),
+        replay_s4_consumer_mode_no_evolution(),
+        replay_s4_proposal_apply_sdk_governance(),
+    ];
+
+    let proposal_apply_reports = paths
+        .iter()
+        .flat_map(|path| path.proposal_apply_reports.iter().cloned())
+        .collect::<Vec<_>>();
+
+    S4ReplayReport {
+        mode: EvolutionMode::Full,
+        evidence_read: paths.iter().map(|path| path.evidence_read).sum(),
+        branches_evaluated: paths.iter().map(|path| path.branches_evaluated).sum(),
+        proposals_emitted: paths.iter().map(|path| path.proposals_emitted).sum(),
+        rejected_candidates: paths.iter().map(|path| path.rejected_candidates).sum(),
+        privacy_filtered_count: paths.iter().map(|path| path.privacy_filtered_count).sum(),
+        profile_trimmed: paths.iter().any(|path| path.profile_trimmed),
+        raw_private_exposed: paths.iter().any(|path| path.raw_private_exposed),
+        proposal_apply_reports,
+        contract_red_light_reasons: Vec::new(),
+        paths,
+    }
+}
+
+fn replay_s4_archive_evidence_distillation() -> S4ReplayPathReport {
+    let mut runtime = replay_runtime(RuntimeProfile::DevFull);
+    let batch = runtime.propose_evolution(s4_input(
+        "archive-distillation",
+        RuntimeProfile::DevFull,
+        EvolutionMode::Full,
+        vec![s4_evidence(
+            "archive:s4-evidence",
+            MemoryPlane::ArchiveEvidence,
+            MentalPrivacyLayer::Shared,
+            EvidenceState::ArchiveOnly,
+            "archive-only evidence requires distillation before factual memory refresh",
+        )],
+        None,
+        1,
+    ));
+    let mut apply_reports = apply_s4_proposals(&mut runtime, &batch);
+    let direct_archive_promotion = runtime.write(
+        WriteCandidate::new(
+            "agent:s4",
+            "task:s4:archive-distillation",
+            "archive-only evidence requires distillation before factual memory refresh",
+        )
+        .source("archive:s4-evidence")
+        .plane_hint(MemoryPlane::SharedFactual)
+        .evidence(EvidenceState::ArchiveOnly),
+    );
+    apply_reports.push(direct_archive_promotion);
+
+    s4_path_report_from_batch(
+        S4ReplayPath::ArchiveEvidenceProducesDistillationProposal,
+        batch,
+        apply_reports,
+        true,
+    )
+}
+
+fn replay_s4_program_evidence_soul_revision_gate() -> S4ReplayPathReport {
+    let mut runtime = replay_runtime(RuntimeProfile::DevFull);
+    let batch = runtime.propose_evolution(s4_input(
+        "program-soul-gate",
+        RuntimeProfile::DevFull,
+        EvolutionMode::Full,
+        vec![s4_evidence(
+            "task-learning:s4-program",
+            MemoryPlane::Procedural,
+            MentalPrivacyLayer::Shared,
+            EvidenceState::Supported,
+            "program evidence supports subject refresh but cannot become soul governance",
+        )],
+        Some(mounted_subject_assembly(RuntimeProfile::DevFull)),
+        1,
+    ));
+    let mut apply_reports = apply_s4_proposals(&mut runtime, &batch);
+    let blocked_soul_revision = runtime.write(
+        WriteCandidate::new(
+            "agent:s4",
+            "task:s4:program-soul-gate",
+            "下次评估主体刷新时，程序证据只能作为 subject refresh support，不能直升 soul governance。",
+        )
+        .source("task-learning:s4")
+        .plane_hint(MemoryPlane::SoulGovernance),
+    );
+    apply_reports.push(blocked_soul_revision);
+
+    s4_path_report_from_batch(
+        S4ReplayPath::ProgramEvidenceCannotBecomeSoulRevision,
+        batch,
+        apply_reports,
+        true,
+    )
+}
+
+fn replay_s4_stable_procedural_pattern() -> S4ReplayPathReport {
+    let mut runtime = replay_runtime(RuntimeProfile::DevFull);
+    let evidence = (0..3)
+        .map(|idx| {
+            s4_evidence(
+                &format!("task-learning:s4-procedure-{idx}"),
+                MemoryPlane::Procedural,
+                MentalPrivacyLayer::Shared,
+                EvidenceState::Supported,
+                "下次准备 replay gate 时，先写失败测试，再实现 deterministic replay fixture。",
+            )
+        })
+        .collect::<Vec<_>>();
+    let batch = runtime.propose_evolution(s4_input(
+        "procedural-pattern",
+        RuntimeProfile::DevFull,
+        EvolutionMode::Full,
+        evidence,
+        None,
+        1,
+    ));
+    let apply_reports = apply_s4_proposals(&mut runtime, &batch);
+
+    s4_path_report_from_batch(
+        S4ReplayPath::StableProceduralPatternProducesPromotionProposal,
+        batch,
+        apply_reports,
+        true,
+    )
+}
+
+fn replay_s4_subject_assembly_refresh() -> S4ReplayPathReport {
+    let mut runtime = replay_runtime(RuntimeProfile::DevFull);
+    let batch = runtime.propose_evolution(s4_input(
+        "subject-refresh",
+        RuntimeProfile::DevFull,
+        EvolutionMode::Full,
+        vec![s4_evidence(
+            "replay:s4-subject-assembly",
+            MemoryPlane::SharedFactual,
+            MentalPrivacyLayer::Shared,
+            EvidenceState::Supported,
+            "subject assembly report indicates continuity and task sources should refresh projection",
+        )],
+        Some(mounted_subject_assembly(RuntimeProfile::DevFull)),
+        1,
+    ));
+    let apply_reports = apply_s4_proposals(&mut runtime, &batch);
+
+    s4_path_report_from_batch(
+        S4ReplayPath::SubjectAssemblyProducesRefreshProposal,
+        batch,
+        apply_reports,
+        true,
+    )
+}
+
+fn replay_s4_private_material_privacy_repair() -> S4ReplayPathReport {
+    let raw_private = "RAW PRIVATE S4 MATERIAL";
+    let mut runtime = replay_runtime(RuntimeProfile::DevFull);
+    let batch = runtime.propose_evolution(s4_input(
+        "privacy-repair",
+        RuntimeProfile::DevFull,
+        EvolutionMode::Full,
+        vec![s4_evidence(
+            "replay:s4-private-material",
+            MemoryPlane::SubjectProjection,
+            MentalPrivacyLayer::Sealed,
+            EvidenceState::Supported,
+            "sealed material presence only",
+        )],
+        None,
+        1,
+    ));
+    let apply = runtime.write(
+        WriteCandidate::new("agent:s4", "task:s4:privacy-repair", raw_private)
+            .source("replay:s4-private-material")
+            .plane_hint(MemoryPlane::SubjectProjection)
+            .privacy_layer(MentalPrivacyLayer::Private),
+    );
+
+    s4_path_report_from_batch(
+        S4ReplayPath::PrivateMaterialForcesNoWriteOrPrivacyRepair,
+        batch,
+        vec![apply],
+        true,
+    )
+}
+
+fn replay_s4_full_sandbox_branches() -> S4ReplayPathReport {
+    let runtime = replay_runtime(RuntimeProfile::DevFull);
+    let batch = runtime.propose_evolution(s4_input(
+        "full-branches",
+        RuntimeProfile::DevFull,
+        EvolutionMode::Full,
+        vec![
+            s4_evidence(
+                "archive:s4-branch",
+                MemoryPlane::ArchiveEvidence,
+                MentalPrivacyLayer::Shared,
+                EvidenceState::ArchiveOnly,
+                "archive branch candidate",
+            ),
+            s4_evidence(
+                "task-learning:s4-branch",
+                MemoryPlane::Procedural,
+                MentalPrivacyLayer::Shared,
+                EvidenceState::Supported,
+                "procedural branch candidate",
+            ),
+        ],
+        None,
+        2,
+    ));
+
+    s4_path_report_from_batch(
+        S4ReplayPath::FullSandboxCanAdjudicateBranches,
+        batch,
+        Vec::new(),
+        false,
+    )
+}
+
+fn replay_s4_compact_sandbox_trim() -> S4ReplayPathReport {
+    let mut runtime = replay_runtime(RuntimeProfile::EspCompact);
+    let batch = runtime.propose_evolution(s4_input(
+        "compact",
+        RuntimeProfile::EspCompact,
+        EvolutionMode::Compact,
+        vec![s4_evidence(
+            "task-learning:s4-compact",
+            MemoryPlane::Procedural,
+            MentalPrivacyLayer::Shared,
+            EvidenceState::Supported,
+            "compact sandbox keeps fixed-budget subject refresh proposal and skips branch review",
+        )],
+        Some(mounted_subject_assembly(RuntimeProfile::EspCompact)),
+        0,
+    ));
+    let apply_reports = apply_s4_proposals(&mut runtime, &batch);
+
+    s4_path_report_from_batch(
+        S4ReplayPath::CompactSandboxTrimsAndSkipsHeavyPasses,
+        batch,
+        apply_reports,
+        true,
+    )
+}
+
+fn replay_s4_consumer_mode_no_evolution() -> S4ReplayPathReport {
+    let runtime = replay_runtime(RuntimeProfile::SdkEmbedded);
+    let batch = runtime.propose_evolution(s4_input(
+        "consumer",
+        RuntimeProfile::SdkEmbedded,
+        EvolutionMode::Consumer,
+        vec![s4_evidence(
+            "replay:s4-consumer",
+            MemoryPlane::ArchiveEvidence,
+            MentalPrivacyLayer::Shared,
+            EvidenceState::ArchiveOnly,
+            "consumer evidence is report only",
+        )],
+        None,
+        0,
+    ));
+
+    s4_path_report_from_batch(
+        S4ReplayPath::ConsumerModeDoesNotRunEvolution,
+        batch,
+        Vec::new(),
+        false,
+    )
+}
+
+fn replay_s4_proposal_apply_sdk_governance() -> S4ReplayPathReport {
+    let mut runtime = replay_runtime(RuntimeProfile::DevFull);
+    let batch = runtime.propose_evolution(s4_input(
+        "proposal-apply",
+        RuntimeProfile::DevFull,
+        EvolutionMode::Full,
+        vec![s4_evidence(
+            "task-learning:s4-apply",
+            MemoryPlane::Procedural,
+            MentalPrivacyLayer::Shared,
+            EvidenceState::Supported,
+            "下次应用 evolution proposal 时，只能把 candidate_write 提交给 SDK write governance。",
+        )],
+        None,
+        1,
+    ));
+    let mut apply_reports = apply_s4_proposals(&mut runtime, &batch);
+    let rejected = runtime.write(
+        WriteCandidate::new(
+            "agent:s4",
+            "task:s4:proposal-apply",
+            "proposal apply cannot bypass SDK governance for task-learning soul revision",
+        )
+        .source("task-learning:s4")
+        .plane_hint(MemoryPlane::SoulGovernance),
+    );
+    apply_reports.push(rejected);
+
+    s4_path_report_from_batch(
+        S4ReplayPath::ProposalApplyReturnsToSdkGovernance,
+        batch,
+        apply_reports,
+        true,
+    )
+}
+
+struct S4PathReportInput {
+    path: S4ReplayPath,
+    batch: EvolutionProposalBatch,
+    proposal_apply_reports: Vec<WriteReport>,
+    sdk_governance_returned: bool,
+}
+
+fn s4_path_report_from_batch(
+    path: S4ReplayPath,
+    batch: EvolutionProposalBatch,
+    proposal_apply_reports: Vec<WriteReport>,
+    sdk_governance_returned: bool,
+) -> S4ReplayPathReport {
+    s4_path_report(S4PathReportInput {
+        path,
+        batch,
+        proposal_apply_reports,
+        sdk_governance_returned,
+    })
+}
+
+fn s4_path_report(input: S4PathReportInput) -> S4ReplayPathReport {
+    let rejected_reasons = input
+        .proposal_apply_reports
+        .iter()
+        .filter_map(|report| report.governance.reject_reason)
+        .collect::<Vec<_>>();
+    let proposal_kinds = input
+        .batch
+        .proposals
+        .iter()
+        .map(|proposal| proposal.kind)
+        .collect::<Vec<_>>();
+
+    S4ReplayPathReport {
+        path: input.path,
+        profile: input.batch.profile,
+        mode: input.batch.mode,
+        evidence_read: input.batch.report.evidence_read,
+        branches_evaluated: input.batch.report.branches_evaluated,
+        proposals_emitted: input.batch.report.proposals_emitted,
+        rejected_candidates: input.batch.report.rejected_candidates,
+        privacy_filtered_count: input.batch.report.privacy_filtered_count,
+        profile_trimmed: input.batch.report.profile_trimmed,
+        raw_private_exposed: input.batch.report.raw_private_exposed,
+        proposal_kinds,
+        rejected_reasons,
+        proposal_apply_reports: input.proposal_apply_reports,
+        sdk_governance_returned: input.sdk_governance_returned,
+    }
+}
+
+fn apply_s4_proposals(
+    runtime: &mut bm_sdk::MemoryRuntime<InMemoryStore>,
+    batch: &EvolutionProposalBatch,
+) -> Vec<WriteReport> {
+    batch
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.candidate_write.is_some())
+        .map(|proposal| runtime.submit_evolution_proposal(proposal))
+        .collect()
+}
+
+fn s4_input(
+    run_suffix: &str,
+    profile: RuntimeProfile,
+    mode: EvolutionMode,
+    evidence: Vec<EvidenceRef>,
+    subject_assembly: Option<SubjectAssemblyReport>,
+    max_branches: usize,
+) -> EvolutionInput {
+    EvolutionInput {
+        run_id: format!("s4:{run_suffix}"),
+        identity: "agent:s4".to_owned(),
+        scope: format!("task:s4:{run_suffix}"),
+        profile,
+        mode,
+        evidence,
+        recall_report: None,
+        projection_report: None,
+        subject_assembly,
+        budget: s4_budget(mode, max_branches),
+    }
+}
+
+fn s4_budget(mode: EvolutionMode, max_branches: usize) -> EvolutionBudget {
+    match mode {
+        EvolutionMode::Full => EvolutionBudget {
+            max_events: 64,
+            max_records: 64,
+            max_branches,
+            max_proposals: 16,
+            max_output_bytes: 8_192,
+            allow_private_layer: false,
+            allow_soul_revision: true,
+            allow_script_backend: false,
+        },
+        EvolutionMode::Compact => EvolutionBudget {
+            max_events: 8,
+            max_records: 8,
+            max_branches: 0,
+            max_proposals: 8,
+            max_output_bytes: 512,
+            allow_private_layer: false,
+            allow_soul_revision: false,
+            allow_script_backend: false,
+        },
+        EvolutionMode::Consumer => EvolutionBudget {
+            max_events: 0,
+            max_records: 0,
+            max_branches: 0,
+            max_proposals: 0,
+            max_output_bytes: 256,
+            allow_private_layer: false,
+            allow_soul_revision: false,
+            allow_script_backend: false,
+        },
+    }
+}
+
+fn s4_evidence(
+    id: &str,
+    plane: MemoryPlane,
+    privacy_layer: MentalPrivacyLayer,
+    evidence: EvidenceState,
+    summary: &str,
+) -> EvidenceRef {
+    EvidenceRef {
+        record_id: Some(id.to_owned()),
+        event_seq: None,
+        source: SourceRef::new(SourceKind::ReplayFixture, id),
+        plane,
+        privacy_layer,
+        evidence,
+        summary: summary.to_owned(),
+    }
+}
+
+fn mounted_subject_assembly(profile: RuntimeProfile) -> SubjectAssemblyReport {
+    SubjectAssemblyReport {
+        mounted: true,
+        sources_used: Vec::new(),
+        sources_missing: Vec::new(),
+        privacy_decisions: Vec::new(),
+        profile,
+        budget_bytes: profile.projection_budget_bytes(),
+    }
+}
+
+fn replay_runtime(profile: RuntimeProfile) -> bm_sdk::MemoryRuntime<InMemoryStore> {
+    MemoryRuntimeBuilder::new(profile)
+        .store(InMemoryStore::default())
+        .build()
 }
 
 fn replay_dev_full_paths(report: &mut S1ReplayReport) {
