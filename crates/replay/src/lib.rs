@@ -3,11 +3,12 @@
 pub use bm_core::{EvolutionMode, EvolutionProposalKind};
 
 use bm_core::{
-    EvidenceRef, EvidenceState, EvolutionBudget, EvolutionInput, EvolutionProposalBatch,
-    MemoryPlane, MentalPrivacyLayer, ProjectionReport, ProjectionSurface, PromptRecallIntent,
-    RecallSelectionReport, RecallWarning, RuntimeProfile, SourceKind, SourceRef,
-    SubjectAssemblyReport, SubjectAssemblySource, WriteCandidate, WriteDecision, WriteRejectReason,
-    WriteReport,
+    ArchiveEvidenceLink, ArchiveRecordLocator, ArchiveRecordSource, ArchiveSearchQuery, Confidence,
+    EvidenceRef, EvidenceState, EvolutionBudget, EvolutionInput, EvolutionProposalBatch, Freshness,
+    LongTermMemoryKind, MemoryPlane, MentalPrivacyLayer, ProjectionReport, ProjectionSurface,
+    PromptRecallIntent, RecallSelectionReport, RecallWarning, RuntimeProfile, SourceKind,
+    SourceRef, SubjectAssemblyReport, SubjectAssemblySource, WriteCandidate, WriteDecision,
+    WriteRejectReason, WriteReport,
 };
 use bm_sdk::MemoryRuntimeBuilder;
 use bm_store::InMemoryStore;
@@ -161,6 +162,79 @@ pub fn run_s3_replay() -> S3ReplayReport {
     report
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct S5ReplayReport {
+    pub inserted: usize,
+    pub replaced: usize,
+    pub rejected: usize,
+    pub deleted: usize,
+    pub archive_hits: usize,
+    pub warnings: Vec<String>,
+}
+
+pub fn run_s5_replay() -> S5ReplayReport {
+    let store = InMemoryStore::default();
+    let mut runtime = MemoryRuntimeBuilder::new(RuntimeProfile::DevFull)
+        .store(store)
+        .build();
+    let mut report = S5ReplayReport::default();
+
+    let first = runtime.write(s5_fact("S5 long-term kernel is active").observed_at(10));
+    if first.decision == WriteDecision::Accepted {
+        report.inserted += 1;
+    }
+    let replaced =
+        runtime.write(s5_fact("S5 long-term kernel includes archive evidence").observed_at(20));
+    if replaced.decision == WriteDecision::Merged {
+        report.replaced += 1;
+    }
+    let archive_reject = runtime.write(
+        WriteCandidate::new("agent:s5", "task:s5:replay", "archive-only fact")
+            .source("archive:transcript:replay")
+            .plane_hint(MemoryPlane::SharedFactual),
+    );
+    if archive_reject.decision == WriteDecision::Rejected {
+        report.rejected += 1;
+    }
+    runtime.write(
+        WriteCandidate::new(
+            "agent:s5",
+            "task:s5:replay",
+            "archive evidence supports S5 replay",
+        )
+        .source("archive:transcript:replay")
+        .plane_hint(MemoryPlane::ArchiveEvidence)
+        .topic("S5 replay")
+        .evidence(EvidenceState::ArchiveOnly),
+    );
+    let archive = runtime.search_archive(ArchiveSearchQuery::new(
+        "task:s5:replay",
+        "archive replay",
+        RuntimeProfile::DevFull,
+    ));
+    report.archive_hits = archive.hits.len();
+    let recall = runtime
+        .recall(bm_core::RecallQuery::new("task:s5:replay").intent(PromptRecallIntent::Evidence));
+    report
+        .warnings
+        .extend(recall.warnings.iter().map(|warning| format!("{warning:?}")));
+
+    let raw = r#"[{"plane":"factual","op":"delete","kind":"project","topic":"S5 replay"}]"#;
+    let prepared = runtime.prepare_long_term_extraction(
+        raw,
+        "agent:s5",
+        "task:s5:replay",
+        SourceRef::new(
+            SourceKind::LongTermExtraction,
+            "long-term-extraction:replay",
+        ),
+    );
+    let applied = runtime.apply_long_term_extraction(prepared);
+    report.deleted = applied.deleted;
+
+    report
+}
+
 fn replay_s3_soul_governance_summary(report: &mut S3ReplayReport) {
     let raw_private = "RAW PRIVATE SOUL MATERIAL";
     let store = InMemoryStore::default();
@@ -224,6 +298,26 @@ fn replay_s3_soul_governance_summary(report: &mut S3ReplayReport) {
             raw_private_probe: Some(raw_private),
         },
     );
+}
+
+fn s5_fact(content: &str) -> WriteCandidate {
+    WriteCandidate::new("agent:s5", "task:s5:replay", content)
+        .source("replay:s5")
+        .plane_hint(MemoryPlane::SharedFactual)
+        .long_term_kind(LongTermMemoryKind::Project)
+        .topic("S5 replay")
+        .confidence(Confidence::Medium)
+        .freshness(Freshness::Current)
+        .canonical(true)
+        .archive_links(vec![ArchiveEvidenceLink {
+            locator: ArchiveRecordLocator {
+                source: ArchiveRecordSource::Transcript,
+                scope: "task:s5:replay".to_owned(),
+                record_id: "archive:transcript:replay".to_owned(),
+            },
+            supports: true,
+            reason: "replay evidence link".to_owned(),
+        }])
 }
 
 fn replay_s3_program_evidence_subject_assembly(report: &mut S3ReplayReport) {

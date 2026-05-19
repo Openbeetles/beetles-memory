@@ -1,7 +1,7 @@
 use bm_core::{
-    MemoryPlane, MemoryRecord, NewMemoryRecord, ProjectionBlock, ProjectionSurface,
-    PromptRecallIntent, RecallQuery, RecallSelectionReport, RuntimeProfile, WriteCandidate,
-    WriteDecision,
+    MemoryPlane, MemoryRecord, MemoryRecordMeta, NewMemoryRecord, ProjectionBlock,
+    ProjectionSurface, PromptRecallIntent, RecallQuery, RecallSelectionReport, RuntimeProfile,
+    WriteCandidate, WriteDecision,
 };
 use bm_sdk::MemoryRuntimeBuilder;
 use bm_store::{FileStore, MemoryStore};
@@ -84,7 +84,7 @@ fn event_log_replay_keeps_sequences_contiguous_and_snapshot_reopen_does_not_dupl
         assert_record_ids(&records, &["mem-1", "mem-2"]);
 
         let snapshot = reopened.snapshot().expect("snapshot replayed records");
-        assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(snapshot.schema_version, 2);
         assert_eq!(snapshot.snapshot_event_seq, 2);
         assert_eq!(snapshot.record_count, 2);
     }
@@ -135,6 +135,7 @@ fn new_record(plane: MemoryPlane, content: &str, source: &str) -> NewMemoryRecor
         source: source.to_owned(),
         domain: plane.domain(),
         plane,
+        meta: MemoryRecordMeta::default_for_plane(plane),
     }
 }
 

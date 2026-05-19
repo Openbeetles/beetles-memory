@@ -1,14 +1,20 @@
 //! SDK runtime entrypoint for Beetle Memory.
 
 use bm_core::{
-    CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport, DisclosureSurface,
-    EvidenceState, EvolutionInput, EvolutionProposal, EvolutionProposalBatch, GovernanceReport,
-    MemoryPlane, MentalPrivacyLayer, MentalPrivacyQuotePolicy, NewMemoryRecord,
-    PrivacyDisclosureDecision, ProjectionBlock, ProjectionReport, ProjectionSurface,
-    PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown, RecallSelection,
-    RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile, SkippedRecallCandidate,
-    SoulGovernanceReason, SourceKind, SourceRef, SubjectAssemblyReport, SubjectAssemblySource,
-    SubjectAssemblySourceRef, WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
+    archive_record_from_memory, build_archive_evidence_block, canonicalize_long_term_draft,
+    inspect_long_term_merge, merge_long_term_record_meta, parse_long_term_extraction_response,
+    prepare_long_term_extraction, search_archive_records, select_archive_hits_for_prompt,
+    ArchiveEvidenceBlock, ArchiveSearchBackendKind, ArchiveSearchQuery, ArchiveSearchResult,
+    Confidence, CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport,
+    DisclosureSurface, EvidenceState, EvolutionInput, EvolutionProposal, EvolutionProposalBatch,
+    Freshness, GovernanceReport, LongTermExtractionApplyReport, LongTermMemoryDraft,
+    LongTermMemoryKind, LongTermWriteAction, MemoryPlane, MemoryRecord, MemoryRecordMeta,
+    MentalPrivacyLayer, MentalPrivacyQuotePolicy, NewMemoryRecord, PrivacyDisclosureDecision,
+    ProjectionBlock, ProjectionReport, ProjectionSurface, PromptRecallIntent, RecallPlaneReport,
+    RecallQuery, RecallScoreBreakdown, RecallSelection, RecallSelectionReport, RecallSkipReason,
+    RecallWarning, RuntimeProfile, SkippedRecallCandidate, SoulGovernanceReason, SourceKind,
+    SourceRef, SubjectAssemblyReport, SubjectAssemblySource, SubjectAssemblySourceRef,
+    WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
 };
 use bm_store::{MemoryStore, StoreError};
 
@@ -59,7 +65,7 @@ where
     S: MemoryStore,
 {
     pub fn write(&mut self, candidate: WriteCandidate) -> WriteReport {
-        let content = candidate.content.trim();
+        let content = candidate.content.trim().to_owned();
         if content.is_empty() {
             return WriteReport::rejected_with_reason(
                 WriteRejectReason::EmptyContent,
@@ -81,7 +87,7 @@ where
         }
 
         let source_ref = source_ref_for(source);
-        if looks_like_raw_payload_or_log(content) {
+        if looks_like_raw_payload_or_log(&content) {
             return rejected_report(
                 WriteRejectReason::RawPayloadOrLog,
                 self.profile,
@@ -91,7 +97,7 @@ where
         }
 
         let plane = candidate.plane_hint.unwrap_or_else(|| {
-            if looks_like_procedural_memory(content) {
+            if looks_like_procedural_memory(&content) {
                 MemoryPlane::Procedural
             } else {
                 MemoryPlane::SharedFactual
@@ -128,7 +134,7 @@ where
         if matches!(plane, MemoryPlane::SoulGovernance)
             && (source.starts_with("task-learning")
                 || source.starts_with("task:")
-                || looks_like_procedural_memory(content))
+                || looks_like_procedural_memory(&content))
         {
             return rejected_report(
                 WriteRejectReason::NeedsDistillation,
@@ -161,13 +167,19 @@ where
             );
         }
 
+        if matches!(plane, MemoryPlane::SharedFactual) {
+            return self.write_long_term(candidate, source_ref, content);
+        }
+
+        let meta = memory_meta_for_candidate(&candidate, plane, &content);
         let record = match self.store.insert(NewMemoryRecord {
             identity: candidate.identity,
             scope: candidate.scope,
-            content: content.to_owned(),
+            content,
             source: source.to_owned(),
             domain: plane.domain(),
             plane,
+            meta,
         }) {
             Ok(record) => record,
             Err(err) => {
@@ -180,6 +192,7 @@ where
                         .with_detail(store_error_detail(&err)),
                     source: Some(source_ref),
                     profile: Some(self.profile),
+                    long_term: None,
                 };
             }
         };
@@ -190,6 +203,132 @@ where
             source_ref,
             governance_reason_for(plane, candidate.plane_hint),
         )
+    }
+
+    fn write_long_term(
+        &mut self,
+        candidate: WriteCandidate,
+        source_ref: SourceRef,
+        content: String,
+    ) -> WriteReport {
+        let draft = canonicalize_long_term_draft(LongTermMemoryDraft {
+            kind: candidate.long_term_kind.unwrap_or(LongTermMemoryKind::Fact),
+            identity: candidate.identity.clone(),
+            scope: candidate.scope.clone(),
+            topic: candidate
+                .topic
+                .clone()
+                .unwrap_or_else(|| first_words(&content, 8)),
+            content: content.clone(),
+            keywords: candidate.keywords.clone(),
+            source: source_ref.clone(),
+            evidence: candidate.evidence,
+            confidence: candidate.confidence.unwrap_or(Confidence::Medium),
+            freshness: candidate.freshness.unwrap_or(Freshness::Unknown),
+            observed_at: candidate.observed_at,
+            canonical: candidate.canonical
+                || !matches!(candidate.evidence, EvidenceState::ArchiveOnly),
+            archive_links: candidate.archive_links.clone(),
+        });
+        let slot_id = draft.slot().stable_id();
+        let existing = match self.store.records() {
+            Ok(records) => records
+                .into_iter()
+                .find(|record| record.meta.slot_id.as_deref() == Some(slot_id.as_str())),
+            Err(err) => {
+                return WriteReport {
+                    decision: WriteDecision::Deferred,
+                    domain: Some(MemoryPlane::SharedFactual.domain()),
+                    plane: Some(MemoryPlane::SharedFactual),
+                    record_id: None,
+                    governance: GovernanceReport::new("store_unavailable")
+                        .with_detail(store_error_detail(&err)),
+                    source: Some(source_ref),
+                    profile: Some(self.profile),
+                    long_term: None,
+                };
+            }
+        };
+        let merge = inspect_long_term_merge(existing.as_ref(), &draft);
+        if matches!(merge.action, LongTermWriteAction::Rejected) {
+            return WriteReport {
+                decision: WriteDecision::Rejected,
+                domain: Some(MemoryPlane::SharedFactual.domain()),
+                plane: Some(MemoryPlane::SharedFactual),
+                record_id: existing.as_ref().map(|record| record.id.clone()),
+                governance: GovernanceReport::new(merge.reason.as_str())
+                    .with_detail(report_detail(&source_ref, self.profile)),
+                source: Some(source_ref),
+                profile: Some(self.profile),
+                long_term: Some(merge),
+            };
+        }
+
+        let updated_at = next_record_timestamp(existing.as_ref());
+        let stored = match existing {
+            Some(mut record) => {
+                if !matches!(merge.action, LongTermWriteAction::Refreshed) {
+                    record.content = content;
+                }
+                record.source = candidate.source.unwrap_or_else(|| source_ref.id.clone());
+                merge_long_term_record_meta(&mut record, &draft);
+                record.meta.updated_at = updated_at;
+                match self.store.replace(record) {
+                    Ok(record) => record,
+                    Err(err) => {
+                        return store_deferred_report(
+                            self.profile,
+                            MemoryPlane::SharedFactual,
+                            source_ref,
+                            err,
+                        )
+                    }
+                }
+            }
+            None => {
+                let meta = draft.clone().into_meta(updated_at);
+                match self.store.insert(NewMemoryRecord {
+                    identity: candidate.identity,
+                    scope: candidate.scope,
+                    content,
+                    source: candidate.source.unwrap_or_else(|| source_ref.id.clone()),
+                    domain: MemoryPlane::SharedFactual.domain(),
+                    plane: MemoryPlane::SharedFactual,
+                    meta,
+                }) {
+                    Ok(record) => record,
+                    Err(err) => {
+                        return store_deferred_report(
+                            self.profile,
+                            MemoryPlane::SharedFactual,
+                            source_ref,
+                            err,
+                        )
+                    }
+                }
+            }
+        };
+        let mut merge = merge;
+        merge.new_record_id = Some(stored.id.clone());
+        let decision = match merge.action {
+            LongTermWriteAction::Inserted => WriteDecision::Accepted,
+            LongTermWriteAction::Replaced
+            | LongTermWriteAction::Merged
+            | LongTermWriteAction::Refreshed => WriteDecision::Merged,
+            LongTermWriteAction::Deleted => WriteDecision::Superseded,
+            LongTermWriteAction::Rejected => WriteDecision::Rejected,
+        };
+        WriteReport {
+            decision,
+            domain: Some(stored.domain),
+            plane: Some(stored.plane),
+            record_id: Some(stored.id),
+            governance: GovernanceReport::new(merge.reason.as_str())
+                .with_detail(report_detail(&source_ref, self.profile)),
+            source: Some(source_ref),
+            profile: Some(self.profile),
+            long_term: Some(merge),
+        }
     }
 
     pub fn recall(&self, query: RecallQuery) -> RecallSelectionReport {
@@ -386,6 +525,84 @@ where
 
         self.write(candidate)
     }
+
+    pub fn search_archive(&self, query: ArchiveSearchQuery) -> ArchiveSearchResult {
+        let archive_records = self
+            .store
+            .records()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(archive_record_from_memory)
+            .collect::<Vec<_>>();
+        search_archive_records(
+            &query,
+            &archive_records,
+            ArchiveSearchBackendKind::StoreScan,
+        )
+    }
+
+    pub fn select_archive_for_prompt(&self, query: ArchiveSearchQuery) -> ArchiveEvidenceBlock {
+        let result = self.search_archive(query);
+        let selection = select_archive_hits_for_prompt(result.hits, self.profile);
+        build_archive_evidence_block(result.report, selection)
+    }
+
+    pub fn prepare_long_term_extraction(
+        &self,
+        raw_json: &str,
+        identity: &str,
+        scope: &str,
+        source: SourceRef,
+    ) -> bm_core::PreparedLongTermExtraction {
+        prepare_long_term_extraction(parse_long_term_extraction_response(
+            raw_json, identity, scope, source,
+        ))
+    }
+
+    pub fn apply_long_term_extraction(
+        &mut self,
+        prepared: bm_core::PreparedLongTermExtraction,
+    ) -> LongTermExtractionApplyReport {
+        let mut reports = Vec::new();
+        let mut deleted = 0;
+        for draft in prepared.upserts {
+            let mut candidate = WriteCandidate::new(
+                draft.identity.clone(),
+                draft.scope.clone(),
+                draft.content.clone(),
+            )
+            .source(draft.source.id.clone())
+            .plane_hint(MemoryPlane::SharedFactual)
+            .long_term_kind(draft.kind)
+            .topic(draft.topic.clone())
+            .keywords(draft.keywords.clone())
+            .confidence(draft.confidence)
+            .freshness(draft.freshness)
+            .canonical(draft.canonical)
+            .archive_links(draft.archive_links.clone());
+            if let Some(observed_at) = draft.observed_at {
+                candidate = candidate.observed_at(observed_at);
+            }
+            reports.push(self.write(candidate));
+        }
+        for slot in prepared.deletes {
+            if let Ok(records) = self.store.records() {
+                for record in records {
+                    if record.meta.slot_id.as_deref() == Some(slot.stable_id().as_str())
+                        && self.store.delete(&record.id).unwrap_or(false)
+                    {
+                        deleted += 1;
+                    }
+                }
+            }
+        }
+        LongTermExtractionApplyReport {
+            reports,
+            deleted,
+            routed_to_procedural: prepared.routed_to_procedural.len(),
+            dropped_duplicates: prepared.dropped_duplicates,
+        }
+    }
 }
 
 fn accepted_report(
@@ -402,6 +619,7 @@ fn accepted_report(
         governance: GovernanceReport::new(reason).with_detail(report_detail(&source, profile)),
         source: Some(source),
         profile: Some(profile),
+        long_term: None,
     }
 }
 
@@ -422,7 +640,53 @@ fn rejected_report(
         }),
         source,
         profile: Some(profile),
+        long_term: None,
     }
+}
+
+fn store_deferred_report(
+    profile: RuntimeProfile,
+    plane: MemoryPlane,
+    source: SourceRef,
+    err: StoreError,
+) -> WriteReport {
+    WriteReport {
+        decision: WriteDecision::Deferred,
+        domain: Some(plane.domain()),
+        plane: Some(plane),
+        record_id: None,
+        governance: GovernanceReport::new("store_unavailable")
+            .with_detail(store_error_detail(&err)),
+        source: Some(source),
+        profile: Some(profile),
+        long_term: None,
+    }
+}
+
+fn memory_meta_for_candidate(
+    candidate: &WriteCandidate,
+    plane: MemoryPlane,
+    content: &str,
+) -> MemoryRecordMeta {
+    let mut meta = MemoryRecordMeta::default_for_plane(plane);
+    meta.evidence = candidate.evidence;
+    meta.confidence = candidate.confidence.unwrap_or(Confidence::Medium);
+    meta.freshness = candidate.freshness.unwrap_or(Freshness::Unknown);
+    meta.canonical = candidate.canonical || !matches!(plane, MemoryPlane::ArchiveEvidence);
+    meta.topic = candidate
+        .topic
+        .clone()
+        .or_else(|| Some(first_words(content, 8)));
+    meta.keywords = candidate.keywords.clone();
+    meta.observed_at = candidate.observed_at;
+    meta.archive_links = candidate.archive_links.clone();
+    meta
+}
+
+fn next_record_timestamp(existing: Option<&MemoryRecord>) -> u64 {
+    existing
+        .map(|record| record.meta.updated_at.saturating_add(1))
+        .unwrap_or(1)
 }
 
 fn report_detail(source: &SourceRef, profile: RuntimeProfile) -> String {
@@ -470,6 +734,10 @@ fn recall_store_unavailable_report(
 fn source_ref_for(source: &str) -> SourceRef {
     let kind = if source.starts_with("archive:") {
         SourceKind::ArchiveEvidence
+    } else if source.starts_with("archive-import:") {
+        SourceKind::ArchiveImport
+    } else if source.starts_with("long-term-extraction:") {
+        SourceKind::LongTermExtraction
     } else if source.starts_with("task-learning") || source.starts_with("task:") {
         SourceKind::TaskLearning
     } else if source.starts_with("replay:") {
@@ -605,6 +873,19 @@ fn recall_warnings(profile: RuntimeProfile, selected: &[RecallSelection]) -> Vec
             warnings.push(RecallWarning::EvidenceNotCanonical {
                 record_id: selection.record_id.clone(),
             });
+            warnings.push(RecallWarning::ArchiveEvidenceNotCanonical {
+                record_id: selection.record_id.clone(),
+            });
+        }
+        if matches!(selection.meta.evidence, EvidenceState::Conflict) {
+            warnings.push(RecallWarning::ArchiveConflict {
+                record_id: selection.record_id.clone(),
+            });
+        }
+        if matches!(selection.meta.freshness, Freshness::Stale) {
+            warnings.push(RecallWarning::StaleLongTermMemory {
+                record_id: selection.record_id.clone(),
+            });
         }
         if selection.privacy_filtered {
             warnings.push(RecallWarning::PrivacyFiltered {
@@ -613,6 +894,13 @@ fn recall_warnings(profile: RuntimeProfile, selected: &[RecallSelection]) -> Vec
         }
     }
     warnings
+}
+
+fn first_words(text: &str, max_words: usize) -> String {
+    text.split_whitespace()
+        .take(max_words)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn project_content(selection: &RecallSelection, surface: ProjectionSurface) -> String {
@@ -801,6 +1089,15 @@ fn projection_warnings(report: &RecallSelectionReport) -> Vec<String> {
             }
             RecallWarning::EvidenceNotCanonical { record_id } => {
                 format!("evidence_not_canonical:record_id={record_id}")
+            }
+            RecallWarning::ArchiveEvidenceNotCanonical { record_id } => {
+                format!("archive_evidence_not_canonical:record_id={record_id}")
+            }
+            RecallWarning::ArchiveConflict { record_id } => {
+                format!("archive_conflict:record_id={record_id}")
+            }
+            RecallWarning::StaleLongTermMemory { record_id } => {
+                format!("stale_long_term_memory:record_id={record_id}")
             }
             RecallWarning::StoreUnavailable { operation, message } => {
                 format!("store_unavailable:operation={operation};message={message}")

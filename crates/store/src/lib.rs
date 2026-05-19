@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStore;
 
-pub const STORE_SCHEMA_VERSION: u32 = 1;
+pub const STORE_SCHEMA_VERSION: u32 = 2;
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
@@ -41,6 +41,8 @@ pub enum StoreOperation {
     AppendEvent,
     ReadRecords,
     InsertRecord,
+    ReplaceRecord,
+    DeleteRecord,
 }
 
 impl StoreOperation {
@@ -55,6 +57,8 @@ impl StoreOperation {
             Self::AppendEvent => "append_event",
             Self::ReadRecords => "read_records",
             Self::InsertRecord => "insert_record",
+            Self::ReplaceRecord => "replace_record",
+            Self::DeleteRecord => "delete_record",
         }
     }
 }
@@ -136,6 +140,8 @@ pub struct StoreHealthReport {
 
 pub trait MemoryStore {
     fn insert(&mut self, record: NewMemoryRecord) -> StoreResult<MemoryRecord>;
+    fn replace(&mut self, record: MemoryRecord) -> StoreResult<MemoryRecord>;
+    fn delete(&mut self, record_id: &str) -> StoreResult<bool>;
     fn records(&self) -> StoreResult<Vec<MemoryRecord>>;
     fn snapshot(&mut self) -> StoreResult<StoreSnapshotReport>;
     fn health(&self) -> StoreHealthReport;
@@ -170,11 +176,36 @@ impl MemoryStore for InMemoryStore {
             source: record.source,
             domain: record.domain,
             plane: record.plane,
+            meta: record.meta,
         };
         self.next_id += 1;
         self.last_event_seq += 1;
         self.records.push(stored.clone());
         Ok(stored)
+    }
+
+    fn replace(&mut self, record: MemoryRecord) -> StoreResult<MemoryRecord> {
+        if let Some(existing) = self
+            .records
+            .iter_mut()
+            .find(|existing| existing.id == record.id)
+        {
+            *existing = record.clone();
+            self.last_event_seq += 1;
+            Ok(record)
+        } else {
+            Ok(record)
+        }
+    }
+
+    fn delete(&mut self, record_id: &str) -> StoreResult<bool> {
+        let before = self.records.len();
+        self.records.retain(|record| record.id != record_id);
+        let deleted = self.records.len() != before;
+        if deleted {
+            self.last_event_seq += 1;
+        }
+        Ok(deleted)
     }
 
     fn records(&self) -> StoreResult<Vec<MemoryRecord>> {
@@ -299,6 +330,7 @@ impl MemoryStore for FileStore {
             source: record.source,
             domain: record.domain,
             plane: record.plane,
+            meta: record.meta,
         };
         let seq = self.last_event_seq + 1;
         append_event(&self.root, StoreEvent::record_inserted(seq, stored.clone()))?;
@@ -308,6 +340,39 @@ impl MemoryStore for FileStore {
         self.last_event_seq = seq;
         self.write_manifest()?;
         Ok(stored)
+    }
+
+    fn replace(&mut self, record: MemoryRecord) -> StoreResult<MemoryRecord> {
+        let seq = self.last_event_seq + 1;
+        append_event(&self.root, StoreEvent::record_replaced(seq, record.clone()))?;
+        if let Some(existing) = self
+            .records
+            .iter_mut()
+            .find(|existing| existing.id == record.id)
+        {
+            *existing = record.clone();
+        } else {
+            self.records.push(record.clone());
+        }
+        self.last_event_seq = seq;
+        self.write_manifest()?;
+        Ok(record)
+    }
+
+    fn delete(&mut self, record_id: &str) -> StoreResult<bool> {
+        let before = self.records.len();
+        self.records.retain(|record| record.id != record_id);
+        let deleted = self.records.len() != before;
+        if deleted {
+            let seq = self.last_event_seq + 1;
+            append_event(
+                &self.root,
+                StoreEvent::record_deleted(seq, record_id.to_owned()),
+            )?;
+            self.last_event_seq = seq;
+            self.write_manifest()?;
+        }
+        Ok(deleted)
     }
 
     fn records(&self) -> StoreResult<Vec<MemoryRecord>> {
@@ -383,7 +448,8 @@ struct StoreEvent {
     event_id: String,
     kind: String,
     record_id: String,
-    record: MemoryRecord,
+    #[serde(default)]
+    record: Option<MemoryRecord>,
 }
 
 impl StoreEvent {
@@ -393,7 +459,27 @@ impl StoreEvent {
             event_id: format!("evt-{seq}"),
             kind: "record_inserted".to_owned(),
             record_id: record.id.clone(),
-            record,
+            record: Some(record),
+        }
+    }
+
+    fn record_replaced(seq: u64, record: MemoryRecord) -> Self {
+        Self {
+            seq,
+            event_id: format!("evt-{seq}"),
+            kind: "record_replaced".to_owned(),
+            record_id: record.id.clone(),
+            record: Some(record),
+        }
+    }
+
+    fn record_deleted(seq: u64, record_id: String) -> Self {
+        Self {
+            seq,
+            event_id: format!("evt-{seq}"),
+            kind: "record_deleted".to_owned(),
+            record_id,
+            record: None,
         }
     }
 }
@@ -467,19 +553,49 @@ fn replay_events(
         if event.seq <= snapshot_event_seq {
             continue;
         }
-        if event.kind == "record_inserted" {
-            records.push(event.record);
-        } else {
-            return Err(StoreError::new(
-                StoreErrorKind::CorruptEventLog,
-                StoreOperation::ReadEventLog,
-                format!("unknown event kind {}", event.kind),
-            )
-            .path(&path)
-            .recoverable(false));
+        match event.kind.as_str() {
+            "record_inserted" => {
+                let record = event_record(&event, &path)?;
+                records.push(record);
+            }
+            "record_replaced" => {
+                let record = event_record(&event, &path)?;
+                if let Some(existing) = records
+                    .iter_mut()
+                    .find(|existing| existing.id == event.record_id)
+                {
+                    *existing = record;
+                } else {
+                    records.push(record);
+                }
+            }
+            "record_deleted" => {
+                records.retain(|record| record.id != event.record_id);
+            }
+            _ => {
+                return Err(StoreError::new(
+                    StoreErrorKind::CorruptEventLog,
+                    StoreOperation::ReadEventLog,
+                    format!("unknown event kind {}", event.kind),
+                )
+                .path(&path)
+                .recoverable(false));
+            }
         }
     }
     Ok(last_seq)
+}
+
+fn event_record(event: &StoreEvent, path: &Path) -> StoreResult<MemoryRecord> {
+    event.record.clone().ok_or_else(|| {
+        StoreError::new(
+            StoreErrorKind::CorruptEventLog,
+            StoreOperation::ReadEventLog,
+            format!("event {} is missing record", event.event_id),
+        )
+        .path(path)
+        .recoverable(false)
+    })
 }
 
 fn append_event(root: &Path, event: StoreEvent) -> StoreResult<()> {
@@ -548,7 +664,7 @@ where
 }
 
 fn validate_schema(version: u32, operation: StoreOperation, path: PathBuf) -> StoreResult<()> {
-    if version == STORE_SCHEMA_VERSION {
+    if version == 1 || version == STORE_SCHEMA_VERSION {
         return Ok(());
     }
     Err(StoreError::new(

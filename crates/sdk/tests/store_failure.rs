@@ -26,6 +26,22 @@ impl MemoryStore for FailingStore {
         }
     }
 
+    fn replace(&mut self, _record: MemoryRecord) -> StoreResult<MemoryRecord> {
+        Err(StoreError::new(
+            StoreErrorKind::BackendUnavailable,
+            StoreOperation::ReplaceRecord,
+            "replace backend unavailable",
+        ))
+    }
+
+    fn delete(&mut self, _record_id: &str) -> StoreResult<bool> {
+        Err(StoreError::new(
+            StoreErrorKind::BackendUnavailable,
+            StoreOperation::DeleteRecord,
+            "delete backend unavailable",
+        ))
+    }
+
     fn records(&self) -> StoreResult<Vec<MemoryRecord>> {
         if self.fail_records {
             Err(StoreError::new(

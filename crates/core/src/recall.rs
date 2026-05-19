@@ -1,4 +1,4 @@
-use crate::{MemoryDomain, MemoryPlane, RuntimeProfile, SourceKind, SourceRef};
+use crate::{MemoryDomain, MemoryPlane, MemoryRecordMeta, RuntimeProfile, SourceKind, SourceRef};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum PromptRecallIntent {
@@ -90,6 +90,7 @@ pub struct RecallSelection {
     pub score: RecallScoreBreakdown,
     pub canonical: bool,
     pub privacy_filtered: bool,
+    pub meta: MemoryRecordMeta,
 }
 
 impl From<crate::MemoryRecord> for RecallSelection {
@@ -101,11 +102,13 @@ impl From<crate::MemoryRecord> for RecallSelection {
             content: record.content,
             source: SourceRef::new(SourceKind::AdapterEvent, record.source),
             score: RecallScoreBreakdown::exact_match(),
-            canonical: !matches!(record.plane, MemoryPlane::ArchiveEvidence),
+            canonical: record.meta.canonical
+                && !matches!(record.plane, MemoryPlane::ArchiveEvidence),
             privacy_filtered: matches!(
                 record.plane,
                 MemoryPlane::SubjectProjection | MemoryPlane::SoulGovernance
             ),
+            meta: record.meta,
         }
     }
 }
@@ -178,6 +181,15 @@ pub enum RecallWarning {
         plane: MemoryPlane,
     },
     EvidenceNotCanonical {
+        record_id: String,
+    },
+    ArchiveEvidenceNotCanonical {
+        record_id: String,
+    },
+    ArchiveConflict {
+        record_id: String,
+    },
+    StaleLongTermMemory {
         record_id: String,
     },
     StoreUnavailable {

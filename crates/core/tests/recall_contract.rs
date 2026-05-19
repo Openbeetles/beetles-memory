@@ -1,8 +1,8 @@
 use bm_core::{
     CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport, MemoryDomain,
-    MemoryPlane, PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown,
-    RecallSelection, RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile,
-    SkippedRecallCandidate, SourceKind, SourceRef,
+    MemoryPlane, MemoryRecordMeta, PromptRecallIntent, RecallPlaneReport, RecallQuery,
+    RecallScoreBreakdown, RecallSelection, RecallSelectionReport, RecallSkipReason, RecallWarning,
+    RuntimeProfile, SkippedRecallCandidate, SourceKind, SourceRef,
 };
 
 #[test]
@@ -32,6 +32,7 @@ fn recall_report_explains_selection_skips_rerank_and_warnings() {
         score: score.clone(),
         canonical: true,
         privacy_filtered: false,
+        meta: MemoryRecordMeta::default_for_plane(MemoryPlane::Procedural),
     };
 
     let skipped = SkippedRecallCandidate {

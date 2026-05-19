@@ -1,4 +1,4 @@
-use bm_core::{MemoryPlane, NewMemoryRecord};
+use bm_core::{MemoryPlane, MemoryRecordMeta, NewMemoryRecord};
 use bm_store::{
     InMemoryStore, MemoryStore, StoreError, StoreErrorKind, StoreOperation, StoreResult,
 };
@@ -13,6 +13,7 @@ fn in_memory_store_uses_store_result_contract() -> StoreResult<()> {
         source: "unit-test".to_owned(),
         domain: MemoryPlane::SharedFactual.domain(),
         plane: MemoryPlane::SharedFactual,
+        meta: MemoryRecordMeta::default_for_plane(MemoryPlane::SharedFactual),
     })?;
 
     assert_eq!(inserted.id, "mem-1");
@@ -20,7 +21,7 @@ fn in_memory_store_uses_store_result_contract() -> StoreResult<()> {
     assert_eq!(store.health().record_count, 1);
 
     let snapshot = store.snapshot()?;
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
     assert_eq!(snapshot.record_count, 1);
     assert_eq!(snapshot.snapshot_event_seq, 1);
     Ok(())
@@ -53,11 +54,12 @@ fn snapshot_report_exposes_schema_and_event_seq() -> StoreResult<()> {
         source: "unit-test".to_owned(),
         domain: MemoryPlane::SharedFactual.domain(),
         plane: MemoryPlane::SharedFactual,
+        meta: MemoryRecordMeta::default_for_plane(MemoryPlane::SharedFactual),
     })?;
 
     let snapshot = store.snapshot()?;
 
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
     assert_eq!(snapshot.snapshot_event_seq, 1);
     assert_eq!(snapshot.record_count, 1);
     Ok(())

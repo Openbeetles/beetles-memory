@@ -1,5 +1,6 @@
 use crate::{
-    EvidenceState, MemoryDomain, MemoryPlane, MentalPrivacyLayer, RuntimeProfile, SourceRef,
+    ArchiveEvidenceLink, Confidence, EvidenceState, Freshness, LongTermMemoryKind,
+    LongTermMergeReport, MemoryDomain, MemoryPlane, MentalPrivacyLayer, RuntimeProfile, SourceRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +52,13 @@ pub struct WriteCandidate {
     pub privacy_layer: MentalPrivacyLayer,
     pub evidence: EvidenceState,
     pub canonical: bool,
+    pub long_term_kind: Option<LongTermMemoryKind>,
+    pub topic: Option<String>,
+    pub keywords: Vec<String>,
+    pub confidence: Option<Confidence>,
+    pub freshness: Option<Freshness>,
+    pub observed_at: Option<u64>,
+    pub archive_links: Vec<ArchiveEvidenceLink>,
 }
 
 impl WriteCandidate {
@@ -68,6 +76,13 @@ impl WriteCandidate {
             privacy_layer: MentalPrivacyLayer::Shared,
             evidence: EvidenceState::Supported,
             canonical: false,
+            long_term_kind: None,
+            topic: None,
+            keywords: Vec::new(),
+            confidence: None,
+            freshness: None,
+            observed_at: None,
+            archive_links: Vec::new(),
         }
     }
 
@@ -93,6 +108,41 @@ impl WriteCandidate {
 
     pub fn canonical(mut self, canonical: bool) -> Self {
         self.canonical = canonical;
+        self
+    }
+
+    pub fn long_term_kind(mut self, kind: LongTermMemoryKind) -> Self {
+        self.long_term_kind = Some(kind);
+        self
+    }
+
+    pub fn topic(mut self, topic: impl Into<String>) -> Self {
+        self.topic = Some(topic.into());
+        self
+    }
+
+    pub fn keywords(mut self, keywords: Vec<String>) -> Self {
+        self.keywords = keywords;
+        self
+    }
+
+    pub fn confidence(mut self, confidence: Confidence) -> Self {
+        self.confidence = Some(confidence);
+        self
+    }
+
+    pub fn freshness(mut self, freshness: Freshness) -> Self {
+        self.freshness = Some(freshness);
+        self
+    }
+
+    pub fn observed_at(mut self, observed_at: u64) -> Self {
+        self.observed_at = Some(observed_at);
+        self
+    }
+
+    pub fn archive_links(mut self, links: Vec<ArchiveEvidenceLink>) -> Self {
+        self.archive_links = links;
         self
     }
 }
@@ -136,6 +186,7 @@ pub struct WriteReport {
     pub governance: GovernanceReport,
     pub source: Option<SourceRef>,
     pub profile: Option<RuntimeProfile>,
+    pub long_term: Option<LongTermMergeReport>,
 }
 
 impl WriteReport {
@@ -148,6 +199,7 @@ impl WriteReport {
             governance: GovernanceReport::new("accepted"),
             source: None,
             profile: None,
+            long_term: None,
         }
     }
 
@@ -167,6 +219,7 @@ impl WriteReport {
             governance: GovernanceReport::new(reason),
             source: None,
             profile: None,
+            long_term: None,
         }
     }
 
@@ -179,6 +232,44 @@ impl WriteReport {
             governance: GovernanceReport::rejected(reason),
             source: None,
             profile: Some(profile),
+            long_term: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MemoryRecordMeta {
+    pub long_term_kind: Option<LongTermMemoryKind>,
+    pub topic: Option<String>,
+    pub keywords: Vec<String>,
+    pub evidence: EvidenceState,
+    pub confidence: Confidence,
+    pub freshness: Freshness,
+    pub canonical: bool,
+    pub slot_id: Option<String>,
+    pub observed_at: Option<u64>,
+    pub updated_at: u64,
+    pub archive_links: Vec<ArchiveEvidenceLink>,
+}
+
+impl MemoryRecordMeta {
+    pub fn default_for_plane(plane: MemoryPlane) -> Self {
+        Self {
+            long_term_kind: crate::default_long_term_kind_for_plane(plane),
+            topic: None,
+            keywords: Vec::new(),
+            evidence: if matches!(plane, MemoryPlane::ArchiveEvidence) {
+                EvidenceState::ArchiveOnly
+            } else {
+                EvidenceState::Supported
+            },
+            confidence: Confidence::Medium,
+            freshness: Freshness::Unknown,
+            canonical: !matches!(plane, MemoryPlane::ArchiveEvidence),
+            slot_id: None,
+            observed_at: None,
+            updated_at: 0,
+            archive_links: Vec::new(),
         }
     }
 }
@@ -191,6 +282,8 @@ pub struct NewMemoryRecord {
     pub source: String,
     pub domain: MemoryDomain,
     pub plane: MemoryPlane,
+    #[serde(default = "default_meta_for_deserialize")]
+    pub meta: MemoryRecordMeta,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -202,4 +295,10 @@ pub struct MemoryRecord {
     pub source: String,
     pub domain: MemoryDomain,
     pub plane: MemoryPlane,
+    #[serde(default = "default_meta_for_deserialize")]
+    pub meta: MemoryRecordMeta,
+}
+
+fn default_meta_for_deserialize() -> MemoryRecordMeta {
+    MemoryRecordMeta::default_for_plane(MemoryPlane::SharedFactual)
 }

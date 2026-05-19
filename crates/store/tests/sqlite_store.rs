@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bm_core::{MemoryPlane, NewMemoryRecord};
+use bm_core::{MemoryPlane, MemoryRecordMeta, NewMemoryRecord};
 use bm_store::{MemoryStore, SqliteStore, StoreResult};
 use rusqlite::Connection;
 
@@ -42,6 +42,7 @@ fn sqlite_store_initializes_s2_schema() -> StoreResult<()> {
             column("source", "TEXT", true, 0),
             column("domain", "TEXT", true, 0),
             column("plane", "TEXT", true, 0),
+            column("metadata_json", "TEXT", true, 0),
         ]
     );
     assert_eq!(
@@ -152,6 +153,7 @@ fn new_record(content: &str, plane: MemoryPlane) -> NewMemoryRecord {
         source: "sqlite-store-test".to_owned(),
         domain: plane.domain(),
         plane,
+        meta: MemoryRecordMeta::default_for_plane(plane),
     }
 }
 

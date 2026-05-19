@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use bm_core::{MemoryDomain, MemoryPlane, MemoryRecord, NewMemoryRecord};
+use bm_core::{MemoryDomain, MemoryPlane, MemoryRecord, MemoryRecordMeta, NewMemoryRecord};
 use rusqlite::{params, Connection};
 
 use crate::{
@@ -45,7 +45,8 @@ impl SqliteStore {
                     content TEXT NOT NULL,
                     source TEXT NOT NULL,
                     domain TEXT NOT NULL,
-                    plane TEXT NOT NULL
+                    plane TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS store_events (
                     seq INTEGER PRIMARY KEY,
@@ -58,13 +59,14 @@ impl SqliteStore {
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
-                INSERT OR IGNORE INTO store_meta (key, value) VALUES ('schema_version', '1');
+                INSERT OR IGNORE INTO store_meta (key, value) VALUES ('schema_version', '2');
                 INSERT OR IGNORE INTO store_meta (key, value) VALUES ('next_id', '1');
                 INSERT OR IGNORE INTO store_meta (key, value) VALUES ('last_event_seq', '0');
                 INSERT OR IGNORE INTO store_meta (key, value) VALUES ('snapshot_event_seq', '0');
                 ",
             )
-            .map_err(|err| sqlite_error(StoreOperation::OpenBackend, err))
+            .map_err(|err| sqlite_error(StoreOperation::OpenBackend, err))?;
+        self.migrate_schema_v2()
     }
 
     fn validate_schema(&self) -> StoreResult<()> {
@@ -99,6 +101,70 @@ impl SqliteStore {
         })
     }
 
+    fn migrate_schema_v2(&self) -> StoreResult<()> {
+        if !self.has_column("memory_records", "metadata_json")? {
+            self.conn
+                .execute(
+                    "ALTER TABLE memory_records ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )
+                .map_err(|err| sqlite_error(StoreOperation::WriteManifest, err))?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, plane FROM memory_records")
+                .map_err(|err| sqlite_error(StoreOperation::ReadRecords, err))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|err| sqlite_error(StoreOperation::ReadRecords, err))?;
+            for row in rows {
+                let (id, plane) =
+                    row.map_err(|err| sqlite_error(StoreOperation::ReadRecords, err))?;
+                let plane = parse_plane(&plane)?;
+                let metadata_json = serde_json::to_string(&MemoryRecordMeta::default_for_plane(
+                    plane,
+                ))
+                .map_err(|err| {
+                    StoreError::new(
+                        StoreErrorKind::Json,
+                        StoreOperation::WriteManifest,
+                        err.to_string(),
+                    )
+                })?;
+                self.conn
+                    .execute(
+                        "UPDATE memory_records SET metadata_json = ?1 WHERE id = ?2",
+                        params![metadata_json, id],
+                    )
+                    .map_err(|err| sqlite_error(StoreOperation::WriteManifest, err))?;
+            }
+        }
+        self.conn
+            .execute(
+                "UPDATE store_meta SET value = ?1 WHERE key = 'schema_version'",
+                params![STORE_SCHEMA_VERSION.to_string()],
+            )
+            .map_err(|err| sqlite_error(StoreOperation::WriteManifest, err))?;
+        Ok(())
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> StoreResult<bool> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|err| sqlite_error(StoreOperation::LoadManifest, err))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| sqlite_error(StoreOperation::LoadManifest, err))?;
+        for row in rows {
+            if row.map_err(|err| sqlite_error(StoreOperation::LoadManifest, err))? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn record_count(&self) -> StoreResult<usize> {
         self.conn
             .query_row("SELECT COUNT(*) FROM memory_records", [], |row| {
@@ -121,6 +187,7 @@ impl crate::MemoryStore for SqliteStore {
             source: record.source,
             domain: record.domain,
             plane: record.plane,
+            meta: record.meta,
         };
         let payload_json = serde_json::to_string(&stored).map_err(|err| {
             StoreError::new(
@@ -135,8 +202,8 @@ impl crate::MemoryStore for SqliteStore {
             .transaction()
             .map_err(|err| sqlite_error(StoreOperation::InsertRecord, err))?;
         tx.execute(
-            "INSERT INTO memory_records (id, identity, scope, content, source, domain, plane)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO memory_records (id, identity, scope, content, source, domain, plane, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &stored.id,
                 &stored.identity,
@@ -145,6 +212,13 @@ impl crate::MemoryStore for SqliteStore {
                 &stored.source,
                 stored.domain.as_str(),
                 stored.plane.as_str(),
+                serde_json::to_string(&stored.meta).map_err(|err| {
+                    StoreError::new(
+                        StoreErrorKind::Json,
+                        StoreOperation::InsertRecord,
+                        err.to_string(),
+                    )
+                })?,
             ],
         )
         .map_err(|err| sqlite_error(StoreOperation::InsertRecord, err))?;
@@ -175,11 +249,105 @@ impl crate::MemoryStore for SqliteStore {
         Ok(stored)
     }
 
+    fn replace(&mut self, record: MemoryRecord) -> StoreResult<MemoryRecord> {
+        let seq = self.meta_u64("last_event_seq", StoreOperation::ReplaceRecord)? + 1;
+        let payload_json = serde_json::to_string(&record).map_err(|err| {
+            StoreError::new(
+                StoreErrorKind::Json,
+                StoreOperation::AppendEvent,
+                err.to_string(),
+            )
+        })?;
+        let metadata_json = serde_json::to_string(&record.meta).map_err(|err| {
+            StoreError::new(
+                StoreErrorKind::Json,
+                StoreOperation::ReplaceRecord,
+                err.to_string(),
+            )
+        })?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| sqlite_error(StoreOperation::ReplaceRecord, err))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO memory_records (id, identity, scope, content, source, domain, plane, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &record.id,
+                &record.identity,
+                &record.scope,
+                &record.content,
+                &record.source,
+                record.domain.as_str(),
+                record.plane.as_str(),
+                metadata_json,
+            ],
+        )
+        .map_err(|err| sqlite_error(StoreOperation::ReplaceRecord, err))?;
+        tx.execute(
+            "INSERT INTO store_events (seq, event_id, kind, record_id, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                seq as i64,
+                format!("evt-{seq}"),
+                "record_replaced",
+                &record.id,
+                &payload_json,
+            ],
+        )
+        .map_err(|err| sqlite_error(StoreOperation::AppendEvent, err))?;
+        tx.execute(
+            "UPDATE store_meta SET value = ?1 WHERE key = 'last_event_seq'",
+            params![seq.to_string()],
+        )
+        .map_err(|err| sqlite_error(StoreOperation::WriteManifest, err))?;
+        tx.commit()
+            .map_err(|err| sqlite_error(StoreOperation::ReplaceRecord, err))?;
+        Ok(record)
+    }
+
+    fn delete(&mut self, record_id: &str) -> StoreResult<bool> {
+        let seq = self.meta_u64("last_event_seq", StoreOperation::DeleteRecord)? + 1;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| sqlite_error(StoreOperation::DeleteRecord, err))?;
+        let deleted = tx
+            .execute(
+                "DELETE FROM memory_records WHERE id = ?1",
+                params![record_id],
+            )
+            .map_err(|err| sqlite_error(StoreOperation::DeleteRecord, err))?
+            > 0;
+        if deleted {
+            tx.execute(
+                "INSERT INTO store_events (seq, event_id, kind, record_id, payload_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    seq as i64,
+                    format!("evt-{seq}"),
+                    "record_deleted",
+                    record_id,
+                    "{}",
+                ],
+            )
+            .map_err(|err| sqlite_error(StoreOperation::AppendEvent, err))?;
+            tx.execute(
+                "UPDATE store_meta SET value = ?1 WHERE key = 'last_event_seq'",
+                params![seq.to_string()],
+            )
+            .map_err(|err| sqlite_error(StoreOperation::WriteManifest, err))?;
+        }
+        tx.commit()
+            .map_err(|err| sqlite_error(StoreOperation::DeleteRecord, err))?;
+        Ok(deleted)
+    }
+
     fn records(&self) -> StoreResult<Vec<MemoryRecord>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, identity, scope, content, source, domain, plane
+                "SELECT id, identity, scope, content, source, domain, plane, metadata_json
                  FROM memory_records
                  ORDER BY id",
             )
@@ -194,6 +362,7 @@ impl crate::MemoryStore for SqliteStore {
                     source: row.get(4)?,
                     domain: row.get(5)?,
                     plane: row.get(6)?,
+                    metadata_json: row.get(7)?,
                 })
             })
             .map_err(|err| sqlite_error(StoreOperation::ReadRecords, err))?;
@@ -201,6 +370,14 @@ impl crate::MemoryStore for SqliteStore {
         let mut records = Vec::new();
         for row in rows {
             let row = row.map_err(|err| sqlite_error(StoreOperation::ReadRecords, err))?;
+            let meta = serde_json::from_str(&row.metadata_json).map_err(|err| {
+                StoreError::new(
+                    StoreErrorKind::Json,
+                    StoreOperation::ReadRecords,
+                    format!("invalid metadata_json for {}: {err}", row.id),
+                )
+                .recoverable(false)
+            })?;
             records.push(MemoryRecord {
                 id: row.id,
                 identity: row.identity,
@@ -209,6 +386,7 @@ impl crate::MemoryStore for SqliteStore {
                 source: row.source,
                 domain: parse_domain(&row.domain)?,
                 plane: parse_plane(&row.plane)?,
+                meta,
             });
         }
         Ok(records)
@@ -257,6 +435,7 @@ struct StoredRecordRow {
     source: String,
     domain: String,
     plane: String,
+    metadata_json: String,
 }
 
 fn parse_domain(value: &str) -> StoreResult<MemoryDomain> {

@@ -1,15 +1,19 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum SourceKind {
     Manual,
     AdapterEvent,
     Extraction,
+    LongTermExtraction,
     TaskLearning,
     SnapshotImport,
     ArchiveEvidence,
+    ArchiveImport,
     ReplayFixture,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum SourceScope {
     User,
     Agent,
@@ -19,7 +23,7 @@ pub enum SourceScope {
     System,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum EvidenceState {
     Canonical,
     Supported,
@@ -29,7 +33,7 @@ pub enum EvidenceState {
     ArchiveOnly,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum Freshness {
     Current,
     Recent,
@@ -38,14 +42,24 @@ pub enum Freshness {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum Confidence {
     High,
     Medium,
     Low,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl Confidence {
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceRef {
     pub kind: SourceKind,
     pub id: String,

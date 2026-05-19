@@ -1,4 +1,4 @@
-use bm_core::{MemoryPlane, MemoryRecord, NewMemoryRecord};
+use bm_core::{MemoryPlane, MemoryRecord, MemoryRecordMeta, NewMemoryRecord};
 use bm_store::{FileStore, MemoryStore, StoreErrorKind, StoreOperation};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ fn file_store_persists_records_across_reopen() {
         assert_eq!(inserted.plane, MemoryPlane::SharedFactual);
 
         let snapshot = store.snapshot().expect("write snapshot");
-        assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(snapshot.schema_version, 2);
         assert_eq!(snapshot.snapshot_event_seq, 1);
         assert_eq!(snapshot.record_count, 1);
     }
@@ -163,6 +163,7 @@ fn new_record(plane: MemoryPlane, content: &str, source: &str) -> NewMemoryRecor
         source: source.to_owned(),
         domain: plane.domain(),
         plane,
+        meta: MemoryRecordMeta::default_for_plane(plane),
     }
 }
 
