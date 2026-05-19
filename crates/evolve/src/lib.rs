@@ -261,7 +261,7 @@ fn procedural_promotion_proposal(
         input.identity.clone(),
         input.scope.clone(),
         format!(
-            "distilled procedural pattern from {} governed evidence refs",
+            "When this governed pattern appears again, first inspect the relevant evidence, then run the narrow replay or contract test, then apply the smallest governed fix. Distilled from {} governed evidence refs.",
             evidence.len()
         ),
     )

@@ -5,7 +5,9 @@ pub use bm_core::{EvolutionMode, EvolutionProposalKind};
 use bm_core::{
     ArchiveEvidenceLink, ArchiveRecordLocator, ArchiveRecordSource, ArchiveSearchQuery, Confidence,
     EvidenceRef, EvidenceState, EvolutionBudget, EvolutionInput, EvolutionProposalBatch, Freshness,
-    LongTermMemoryKind, MemoryPlane, MentalPrivacyLayer, ProjectionReport, ProjectionSurface,
+    LongTermMemoryKind, MemoryPlane, MentalPrivacyLayer, ProceduralEvidenceRef,
+    ProceduralSkillDraft, ProceduralSkillImportEnvelope, ProceduralSkillOrigin,
+    ProceduralSkillRecallQuery, ProceduralSkillReuseOutcome, ProjectionReport, ProjectionSurface,
     PromptRecallIntent, RecallSelectionReport, RecallWarning, RuntimeProfile, SourceKind,
     SourceRef, SubjectAssemblyReport, SubjectAssemblySource, WriteCandidate, WriteDecision,
     WriteRejectReason, WriteReport,
@@ -235,6 +237,110 @@ pub fn run_s5_replay() -> S5ReplayReport {
     report
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct S6ReplayReport {
+    pub user_provided_inserted: usize,
+    pub import_quarantined: usize,
+    pub import_adopted: usize,
+    pub runtime_rejected: usize,
+    pub runtime_accepted: usize,
+    pub outcome_updates: usize,
+    pub recall_selected: usize,
+    pub projection_blocks: usize,
+    pub warnings: Vec<String>,
+}
+
+pub fn run_s6_replay() -> S6ReplayReport {
+    let store = InMemoryStore::default();
+    let mut runtime = MemoryRuntimeBuilder::new(RuntimeProfile::DevFull)
+        .store(store)
+        .build();
+    let mut report = S6ReplayReport::default();
+
+    let user = runtime.write_procedural_skill(s6_user_skill());
+    if user.decision == WriteDecision::Accepted {
+        report.user_provided_inserted += 1;
+    }
+
+    let envelope = ProceduralSkillImportEnvelope::new(s6_imported_skill(), "digest-s6");
+    let envelope_json = match serde_json::to_string(&envelope) {
+        Ok(json) => json,
+        Err(error) => {
+            report
+                .warnings
+                .push(format!("s6 envelope serialization failed: {error}"));
+            return report;
+        }
+    };
+    let imported = runtime.import_procedural_skill(&envelope_json, false);
+    report.import_quarantined += imported.quarantined;
+    if imported.quarantined > 0 {
+        report
+            .warnings
+            .push("quarantined imported procedural skill".to_owned());
+    }
+    let adopted = runtime.import_procedural_skill(&envelope_json, true);
+    report.import_adopted += adopted.adopted;
+
+    let rejected = runtime.write_procedural_skill(ProceduralSkillDraft::new(
+        "agent:s6",
+        "task:s6:replay",
+        ProceduralSkillOrigin::RuntimeLearned,
+        "Runtime recovery",
+        "runtime recovery",
+        "When recovery is needed, first inspect the narrow log, then run the replay.",
+    ));
+    if rejected.decision == WriteDecision::Rejected {
+        report.runtime_rejected += 1;
+    }
+
+    let accepted = runtime.write_procedural_skill(
+        ProceduralSkillDraft::new(
+            "agent:s6",
+            "task:s6:replay",
+            ProceduralSkillOrigin::RuntimeLearned,
+            "Runtime recovery",
+            "runtime recovery",
+            "When recovery is needed, first inspect the narrow log, then run the replay.",
+        )
+        .evidence(vec![ProceduralEvidenceRef::new(
+            "replay:s6",
+            "runtime recovery worked under replay",
+        )]),
+    );
+    if accepted.decision == WriteDecision::Accepted {
+        report.runtime_accepted += 1;
+    }
+    if let Some(record_id) = accepted.record_id {
+        report.outcome_updates += runtime
+            .record_procedural_skill_outcome(
+                std::slice::from_ref(&record_id),
+                ProceduralSkillReuseOutcome::Succeeded,
+                10,
+                "reused successfully",
+            )
+            .updated;
+        report.outcome_updates += runtime
+            .record_procedural_skill_outcome(
+                std::slice::from_ref(&record_id),
+                ProceduralSkillReuseOutcome::Mismatch,
+                20,
+                "needs revision",
+            )
+            .updated;
+    }
+
+    let recall = runtime.recall_procedural_skills(ProceduralSkillRecallQuery::new(
+        "task:s6:replay",
+        "release checklist runtime recovery",
+    ));
+    report.recall_selected = recall.selected_count;
+    report.warnings.extend(recall.warnings.clone());
+    let projection = runtime.project_procedural_skills(&recall, ProjectionSurface::Prompt);
+    report.projection_blocks = projection.blocks.len();
+    report
+}
+
 fn replay_s3_soul_governance_summary(report: &mut S3ReplayReport) {
     let raw_private = "RAW PRIVATE SOUL MATERIAL";
     let store = InMemoryStore::default();
@@ -320,6 +426,28 @@ fn s5_fact(content: &str) -> WriteCandidate {
         }])
 }
 
+fn s6_user_skill() -> ProceduralSkillDraft {
+    ProceduralSkillDraft::new(
+        "agent:s6",
+        "task:s6:replay",
+        ProceduralSkillOrigin::UserProvided,
+        "Release checklist",
+        "release checklist",
+        "When preparing a release, first verify status, then run tests, then commit.",
+    )
+}
+
+fn s6_imported_skill() -> ProceduralSkillDraft {
+    ProceduralSkillDraft::new(
+        "agent:s6",
+        "task:s6:replay",
+        ProceduralSkillOrigin::RuntimeLearned,
+        "Serial recovery",
+        "serial recovery",
+        "When serial framing stalls, first reset the reader, then retry one narrow probe.",
+    )
+}
+
 fn replay_s3_program_evidence_subject_assembly(report: &mut S3ReplayReport) {
     let store = InMemoryStore::default();
     let mut runtime = MemoryRuntimeBuilder::new(RuntimeProfile::DevFull)
@@ -354,6 +482,14 @@ fn replay_s3_program_evidence_subject_assembly(report: &mut S3ReplayReport) {
         .source("task-learning:s3")
         .plane_hint(MemoryPlane::Procedural),
     );
+    if let Some(record_id) = procedural_write.record_id.as_ref() {
+        runtime.record_procedural_skill_outcome(
+            std::slice::from_ref(record_id),
+            ProceduralSkillReuseOutcome::Succeeded,
+            10,
+            "validated by S3 replay fixture",
+        );
+    }
     let task_write = runtime.write(
         WriteCandidate::new(
             "agent:s3",
@@ -1340,6 +1476,14 @@ fn replay_dev_full_paths(report: &mut S1ReplayReport) {
         )
         .source("task-learning:replay"),
     );
+    if let Some(record_id) = procedural_write.record_id.as_ref() {
+        runtime.record_procedural_skill_outcome(
+            std::slice::from_ref(record_id),
+            ProceduralSkillReuseOutcome::Succeeded,
+            10,
+            "validated by replay fixture",
+        );
+    }
     let procedural_recall = runtime.recall(
         bm_core::RecallQuery::new("task:s1:procedural")
             .intent(PromptRecallIntent::Procedural)

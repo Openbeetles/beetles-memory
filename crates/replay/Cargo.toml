@@ -11,3 +11,4 @@ path = "src/lib.rs"
 bm-core.workspace = true
 bm-sdk.workspace = true
 bm-store.workspace = true
+serde_json.workspace = true

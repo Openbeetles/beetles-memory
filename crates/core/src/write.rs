@@ -1,6 +1,7 @@
 use crate::{
     ArchiveEvidenceLink, Confidence, EvidenceState, Freshness, LongTermMemoryKind,
-    LongTermMergeReport, MemoryDomain, MemoryPlane, MentalPrivacyLayer, RuntimeProfile, SourceRef,
+    LongTermMergeReport, MemoryDomain, MemoryPlane, MentalPrivacyLayer, ProceduralSkillMeta,
+    ProceduralSkillWriteReport, RuntimeProfile, SourceRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -187,6 +188,7 @@ pub struct WriteReport {
     pub source: Option<SourceRef>,
     pub profile: Option<RuntimeProfile>,
     pub long_term: Option<LongTermMergeReport>,
+    pub procedural: Option<ProceduralSkillWriteReport>,
 }
 
 impl WriteReport {
@@ -200,6 +202,7 @@ impl WriteReport {
             source: None,
             profile: None,
             long_term: None,
+            procedural: None,
         }
     }
 
@@ -220,6 +223,7 @@ impl WriteReport {
             source: None,
             profile: None,
             long_term: None,
+            procedural: None,
         }
     }
 
@@ -233,6 +237,7 @@ impl WriteReport {
             source: None,
             profile: Some(profile),
             long_term: None,
+            procedural: None,
         }
     }
 }
@@ -250,6 +255,8 @@ pub struct MemoryRecordMeta {
     pub observed_at: Option<u64>,
     pub updated_at: u64,
     pub archive_links: Vec<ArchiveEvidenceLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedural: Option<ProceduralSkillMeta>,
 }
 
 impl MemoryRecordMeta {
@@ -270,6 +277,7 @@ impl MemoryRecordMeta {
             observed_at: None,
             updated_at: 0,
             archive_links: Vec::new(),
+            procedural: None,
         }
     }
 }

@@ -1,7 +1,7 @@
 use bm_core::{
-    EvidenceState, MemoryPlane, MentalPrivacyLayer, ProjectionSurface, PromptRecallIntent,
-    RecallQuery, RuntimeProfile, SubjectAssemblySource, WriteCandidate, WriteDecision,
-    WriteRejectReason,
+    EvidenceState, MemoryPlane, MentalPrivacyLayer, ProceduralSkillReuseOutcome, ProjectionSurface,
+    PromptRecallIntent, RecallQuery, RuntimeProfile, SubjectAssemblySource, WriteCandidate,
+    WriteDecision, WriteRejectReason,
 };
 use bm_sdk::MemoryRuntimeBuilder;
 use bm_store::InMemoryStore;
@@ -167,6 +167,13 @@ fn program_memory_supports_subject_assembly_without_becoming_soul_core() {
         .evidence(EvidenceState::Supported),
     );
     assert_eq!(procedural.decision, WriteDecision::Accepted);
+    let record_id = procedural.record_id.expect("procedural record id");
+    runtime.record_procedural_skill_outcome(
+        std::slice::from_ref(&record_id),
+        ProceduralSkillReuseOutcome::Succeeded,
+        10,
+        "validated by S3 pipeline test",
+    );
 
     let program_to_soul = runtime.write(
         WriteCandidate::new(

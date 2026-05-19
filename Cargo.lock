@@ -42,6 +42,7 @@ dependencies = [
  "bm-core",
  "bm-sdk",
  "bm-store",
+ "serde_json",
 ]
 
 [[package]]
@@ -51,6 +52,7 @@ dependencies = [
  "bm-core",
  "bm-evolve",
  "bm-store",
+ "serde_json",
 ]
 
 [[package]]

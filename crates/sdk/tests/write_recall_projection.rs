@@ -12,8 +12,9 @@ fn runtime_writes_recalls_and_projects_governed_memory() {
         .store(store)
         .build();
 
+    let content = "When a tool result should be reused, first inspect the source evidence, then apply it only if current constraints match.";
     let report = runtime.write(
-        WriteCandidate::new("user:1", "task:1", "tool result should be reused")
+        WriteCandidate::new("user:1", "task:1", content)
             .source("unit-test")
             .plane_hint(MemoryPlane::Procedural),
     );
@@ -22,7 +23,7 @@ fn runtime_writes_recalls_and_projects_governed_memory() {
     assert_eq!(report.domain, Some(MemoryDomain::Program));
     assert_eq!(report.plane, Some(MemoryPlane::Procedural));
     assert!(report.record_id.is_some());
-    assert_eq!(report.governance.reason, "accepted");
+    assert_eq!(report.governance.reason, "user_provided_accepted");
 
     let recalled = runtime.recall(
         RecallQuery::new("task:1")
@@ -34,17 +35,19 @@ fn runtime_writes_recalls_and_projects_governed_memory() {
     assert_eq!(recalled.selected.len(), 1);
     assert!(recalled.skipped.is_empty());
     assert_eq!(recalled.profile, RuntimeProfile::DevFull);
-    assert_eq!(recalled.selected[0].content, "tool result should be reused");
+    assert_eq!(recalled.selected[0].content, content);
 
     let projection = runtime.project(&recalled, ProjectionSurface::Prompt);
 
     assert_eq!(projection.surface, ProjectionSurface::Prompt);
     assert_eq!(projection.blocks.len(), 1);
     assert_eq!(projection.blocks[0].plane, MemoryPlane::Procedural);
-    assert_eq!(
-        projection.blocks[0].content,
-        "Procedural memory reference, not execution authority: tool result should be reused"
-    );
+    assert!(projection.blocks[0]
+        .content
+        .starts_with("Procedural skill hint, not execution authority: "));
+    assert!(projection.blocks[0]
+        .content
+        .contains("tool result should be reused"));
     assert!(!projection.blocks[0].privacy_filtered);
 }
 

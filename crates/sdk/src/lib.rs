@@ -3,18 +3,24 @@
 use bm_core::{
     archive_record_from_memory, build_archive_evidence_block, canonicalize_long_term_draft,
     inspect_long_term_merge, merge_long_term_record_meta, parse_long_term_extraction_response,
-    prepare_long_term_extraction, search_archive_records, select_archive_hits_for_prompt,
-    ArchiveEvidenceBlock, ArchiveSearchBackendKind, ArchiveSearchQuery, ArchiveSearchResult,
-    Confidence, CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport,
-    DisclosureSurface, EvidenceState, EvolutionInput, EvolutionProposal, EvolutionProposalBatch,
-    Freshness, GovernanceReport, LongTermExtractionApplyReport, LongTermMemoryDraft,
-    LongTermMemoryKind, LongTermWriteAction, MemoryPlane, MemoryRecord, MemoryRecordMeta,
-    MentalPrivacyLayer, MentalPrivacyQuotePolicy, NewMemoryRecord, PrivacyDisclosureDecision,
-    ProjectionBlock, ProjectionReport, ProjectionSurface, PromptRecallIntent, RecallPlaneReport,
-    RecallQuery, RecallScoreBreakdown, RecallSelection, RecallSelectionReport, RecallSkipReason,
-    RecallWarning, RuntimeProfile, SkippedRecallCandidate, SoulGovernanceReason, SourceKind,
-    SourceRef, SubjectAssemblyReport, SubjectAssemblySource, SubjectAssemblySourceRef,
-    WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
+    parse_procedural_skill_import_envelope, prepare_long_term_extraction,
+    procedural_skill_meta_from_draft, procedural_skill_slot_id, score_procedural_skill_record,
+    search_archive_records, select_archive_hits_for_prompt, ArchiveEvidenceBlock,
+    ArchiveSearchBackendKind, ArchiveSearchQuery, ArchiveSearchResult, Confidence,
+    CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport, DisclosureSurface,
+    EvidenceState, EvolutionInput, EvolutionProposal, EvolutionProposalBatch, Freshness,
+    GovernanceReport, LongTermExtractionApplyReport, LongTermMemoryDraft, LongTermMemoryKind,
+    LongTermWriteAction, MemoryPlane, MemoryRecord, MemoryRecordMeta, MentalPrivacyLayer,
+    MentalPrivacyQuotePolicy, NewMemoryRecord, PrivacyDisclosureDecision, ProceduralEvidenceRef,
+    ProceduralSkillDraft, ProceduralSkillImportReport, ProceduralSkillOrigin,
+    ProceduralSkillRecallCandidate, ProceduralSkillRecallQuery, ProceduralSkillRecallReport,
+    ProceduralSkillReuseOutcome, ProceduralSkillSkippedCandidate, ProceduralSkillState,
+    ProceduralSkillStrategyDiff, ProceduralSkillWriteAction, ProceduralSkillWriteReason,
+    ProceduralSkillWriteReport, ProjectionBlock, ProjectionReport, ProjectionSurface,
+    PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown, RecallSelection,
+    RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile, SkippedRecallCandidate,
+    SoulGovernanceReason, SourceKind, SourceRef, SubjectAssemblyReport, SubjectAssemblySource,
+    SubjectAssemblySourceRef, WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
 };
 use bm_store::{MemoryStore, StoreError};
 
@@ -167,8 +173,22 @@ where
             );
         }
 
+        if matches!(plane, MemoryPlane::SharedFactual) && looks_like_procedural_memory(&content) {
+            return rejected_report(
+                WriteRejectReason::RoutedToProcedural,
+                self.profile,
+                Some(MemoryPlane::Procedural),
+                Some(source_ref),
+            );
+        }
+
         if matches!(plane, MemoryPlane::SharedFactual) {
             return self.write_long_term(candidate, source_ref, content);
+        }
+
+        if matches!(plane, MemoryPlane::Procedural) {
+            let draft = procedural_draft_from_candidate(&candidate, &source_ref, &content);
+            return self.write_procedural_skill(draft);
         }
 
         let meta = memory_meta_for_candidate(&candidate, plane, &content);
@@ -193,6 +213,7 @@ where
                     source: Some(source_ref),
                     profile: Some(self.profile),
                     long_term: None,
+                    procedural: None,
                 };
             }
         };
@@ -203,6 +224,483 @@ where
             source_ref,
             governance_reason_for(plane, candidate.plane_hint),
         )
+    }
+
+    pub fn write_procedural_skill(&mut self, draft: ProceduralSkillDraft) -> WriteReport {
+        let imported = draft.provenance.imported;
+        let state = if imported {
+            ProceduralSkillState::Quarantined
+        } else {
+            match draft.origin {
+                bm_core::ProceduralSkillOrigin::UserProvided => ProceduralSkillState::Active,
+                bm_core::ProceduralSkillOrigin::RuntimeLearned => ProceduralSkillState::Candidate,
+            }
+        };
+        self.write_procedural_skill_with_state(draft, state)
+    }
+
+    fn write_procedural_skill_with_state(
+        &mut self,
+        draft: ProceduralSkillDraft,
+        state: ProceduralSkillState,
+    ) -> WriteReport {
+        let source_ref = procedural_source_ref(&draft);
+        let slot_id = procedural_skill_slot_id(&draft);
+        let inspection = bm_core::inspect_procedural_skill_draft(&draft);
+        if !inspection.accepted {
+            return procedural_rejected_report(
+                self.profile,
+                source_ref,
+                slot_id,
+                inspection.reason,
+                inspection.detail,
+            );
+        }
+        if !self.profile.allows_plane(MemoryPlane::Procedural) {
+            return procedural_rejected_report(
+                self.profile,
+                source_ref,
+                slot_id,
+                ProceduralSkillWriteReason::ProfileRejected,
+                "profile rejected procedural plane",
+            );
+        }
+
+        let now = draft.observed_at.unwrap_or(1);
+        let mut meta = MemoryRecordMeta::default_for_plane(MemoryPlane::Procedural);
+        meta.topic = Some(draft.trigger.clone());
+        meta.keywords = draft
+            .trigger
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        meta.canonical = true;
+        meta.slot_id = Some(slot_id.clone());
+        meta.observed_at = draft.observed_at;
+        meta.updated_at = now;
+        let procedural_meta = procedural_skill_meta_from_draft(&draft, state, now);
+        meta.procedural = Some(procedural_meta);
+
+        let existing = match self.store.records() {
+            Ok(records) => records.into_iter().find(|record| {
+                record.plane == MemoryPlane::Procedural
+                    && record.meta.slot_id.as_deref() == Some(slot_id.as_str())
+            }),
+            Err(err) => {
+                return store_deferred_report(
+                    self.profile,
+                    MemoryPlane::Procedural,
+                    source_ref,
+                    err,
+                )
+            }
+        };
+
+        let mut action = match state {
+            ProceduralSkillState::Quarantined => ProceduralSkillWriteAction::Quarantined,
+            _ => ProceduralSkillWriteAction::Inserted,
+        };
+        let record = match existing {
+            Some(mut existing) => {
+                let existing_meta = existing.meta.procedural.clone();
+                let incoming_meta = meta.procedural.clone();
+                let existing_quality = existing_meta
+                    .as_ref()
+                    .map(|meta| meta.quality_score)
+                    .unwrap_or_default();
+                let incoming_quality = incoming_meta
+                    .as_ref()
+                    .map(|meta| meta.quality_score)
+                    .unwrap_or_default();
+                let existing_digest = existing_meta
+                    .as_ref()
+                    .and_then(|meta| meta.lineage.last())
+                    .map(|node| node.strategy_digest.clone());
+                let incoming_digest = incoming_meta
+                    .as_ref()
+                    .and_then(|meta| meta.lineage.last())
+                    .map(|node| node.strategy_digest.clone());
+                let existing_state = existing_meta
+                    .as_ref()
+                    .map(|meta| meta.state)
+                    .unwrap_or(ProceduralSkillState::Candidate);
+                if existing_state == ProceduralSkillState::Active
+                    && state == ProceduralSkillState::Quarantined
+                {
+                    return procedural_rejected_report(
+                        self.profile,
+                        source_ref,
+                        slot_id,
+                        ProceduralSkillWriteReason::LowerQualityRejected,
+                        "trusted local procedural skill preserved over quarantined import",
+                    );
+                }
+                if incoming_quality < existing_quality {
+                    return procedural_rejected_report(
+                        self.profile,
+                        source_ref,
+                        slot_id,
+                        ProceduralSkillWriteReason::LowerQualityRejected,
+                        "lower quality procedural skill rejected",
+                    );
+                }
+                if incoming_digest == existing_digest {
+                    action = ProceduralSkillWriteAction::Refreshed;
+                } else if incoming_quality >= existing_quality {
+                    action = ProceduralSkillWriteAction::Superseded;
+                } else {
+                    action = ProceduralSkillWriteAction::Merged;
+                }
+                if let (Some(mut next_meta), Some(previous_meta)) =
+                    (meta.procedural.clone(), existing_meta)
+                {
+                    if incoming_digest != existing_digest {
+                        let from_node_id = previous_meta
+                            .lineage
+                            .last()
+                            .map(|node| node.node_id.clone())
+                            .unwrap_or_else(|| existing.id.clone());
+                        let to_node_id = next_meta
+                            .lineage
+                            .last()
+                            .map(|node| node.node_id.clone())
+                            .unwrap_or_else(|| draft.trigger.clone());
+                        next_meta.strategy_diffs = previous_meta.strategy_diffs;
+                        next_meta.strategy_diffs.push(ProceduralSkillStrategyDiff {
+                            recorded_at: now,
+                            from_node_id,
+                            to_node_id,
+                            summary: "procedure strategy changed under the same trigger".to_owned(),
+                        });
+                        next_meta.supersedes = previous_meta.supersedes.clone();
+                        if !next_meta.supersedes.contains(&existing.id) {
+                            next_meta.supersedes.push(existing.id.clone());
+                        }
+                    }
+                    let incoming_lineage = next_meta.lineage.clone();
+                    next_meta.lineage = previous_meta.lineage.clone();
+                    for node in incoming_lineage {
+                        if !next_meta
+                            .lineage
+                            .iter()
+                            .any(|existing| existing.node_id == node.node_id)
+                        {
+                            next_meta.lineage.push(node);
+                        }
+                    }
+                    next_meta.use_count = previous_meta.use_count;
+                    next_meta.validated_success_count = previous_meta.validated_success_count;
+                    next_meta.mismatch_count = previous_meta.mismatch_count;
+                    next_meta.revision_count = previous_meta.revision_count;
+                    next_meta.revision_pending = previous_meta.revision_pending;
+                    next_meta.last_used_at = previous_meta.last_used_at;
+                    next_meta.last_outcome_at = previous_meta.last_outcome_at;
+                    next_meta.last_outcome_note = previous_meta.last_outcome_note;
+                    next_meta.quality_score = bm_core::compute_procedural_skill_quality(&next_meta);
+                    meta.procedural = Some(next_meta);
+                }
+                existing.content = draft.procedure.clone();
+                existing.source = source_ref.id.clone();
+                existing.meta = meta;
+                match self.store.replace(existing) {
+                    Ok(record) => record,
+                    Err(err) => {
+                        return store_deferred_report(
+                            self.profile,
+                            MemoryPlane::Procedural,
+                            source_ref,
+                            err,
+                        )
+                    }
+                }
+            }
+            None => match self.store.insert(NewMemoryRecord {
+                identity: draft.identity.clone(),
+                scope: draft.scope.clone(),
+                content: draft.procedure.clone(),
+                source: source_ref.id.clone(),
+                domain: MemoryPlane::Procedural.domain(),
+                plane: MemoryPlane::Procedural,
+                meta,
+            }) {
+                Ok(record) => record,
+                Err(err) => {
+                    return store_deferred_report(
+                        self.profile,
+                        MemoryPlane::Procedural,
+                        source_ref,
+                        err,
+                    )
+                }
+            },
+        };
+
+        let procedural = procedural_write_report(
+            action,
+            state,
+            draft.origin,
+            slot_id,
+            record
+                .meta
+                .procedural
+                .as_ref()
+                .map(|meta| meta.quality_score)
+                .unwrap_or_default(),
+        );
+        WriteReport {
+            decision: if action == ProceduralSkillWriteAction::Rejected {
+                WriteDecision::Rejected
+            } else if matches!(
+                action,
+                ProceduralSkillWriteAction::Merged
+                    | ProceduralSkillWriteAction::Refreshed
+                    | ProceduralSkillWriteAction::Superseded
+            ) {
+                WriteDecision::Merged
+            } else {
+                WriteDecision::Accepted
+            },
+            domain: Some(MemoryPlane::Procedural.domain()),
+            plane: Some(MemoryPlane::Procedural),
+            record_id: Some(record.id),
+            governance: GovernanceReport::new(procedural.reason.as_str())
+                .with_detail(report_detail(&source_ref, self.profile)),
+            source: Some(source_ref),
+            profile: Some(self.profile),
+            long_term: None,
+            procedural: Some(procedural),
+        }
+    }
+
+    pub fn import_procedural_skill(
+        &mut self,
+        envelope_json: &str,
+        adjudicated: bool,
+    ) -> ProceduralSkillImportReport {
+        let envelope = match parse_procedural_skill_import_envelope(envelope_json) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                return ProceduralSkillImportReport {
+                    rejected: 1,
+                    reports: vec![ProceduralSkillWriteReport {
+                        action: ProceduralSkillWriteAction::Rejected,
+                        reason: ProceduralSkillWriteReason::EmptyOrInvalid,
+                        state: ProceduralSkillState::Quarantined,
+                        slot_id: String::new(),
+                        quality_score: 0,
+                        detail: error,
+                    }],
+                    ..ProceduralSkillImportReport::default()
+                }
+            }
+        };
+        let state = if adjudicated {
+            ProceduralSkillState::Active
+        } else {
+            ProceduralSkillState::Quarantined
+        };
+        let write = self.write_procedural_skill_with_state(envelope.draft, state);
+        let mut report = ProceduralSkillImportReport::default();
+        if let Some(item) = write.procedural {
+            match item.action {
+                ProceduralSkillWriteAction::Rejected => report.rejected += 1,
+                ProceduralSkillWriteAction::Quarantined => {
+                    report.imported += 1;
+                    report.quarantined += 1;
+                }
+                _ if state == ProceduralSkillState::Active => {
+                    report.imported += 1;
+                    report.adopted += 1;
+                }
+                _ => report.imported += 1,
+            }
+            report.reports.push(item);
+        }
+        report
+    }
+
+    pub fn record_procedural_skill_outcome(
+        &mut self,
+        record_ids: &[String],
+        outcome: ProceduralSkillReuseOutcome,
+        now_secs: u64,
+        note: &str,
+    ) -> bm_core::ProceduralSkillOutcomeReport {
+        let mut report = bm_core::ProceduralSkillOutcomeReport {
+            submitted: record_ids.len(),
+            ..bm_core::ProceduralSkillOutcomeReport::default()
+        };
+        let records = match self.store.records() {
+            Ok(records) => records,
+            Err(_) => {
+                report.missing = record_ids.len();
+                return report;
+            }
+        };
+        for record_id in record_ids {
+            let Some(mut record) = records
+                .iter()
+                .find(|record| &record.id == record_id)
+                .cloned()
+            else {
+                report.missing += 1;
+                continue;
+            };
+            let Some(mut procedural) = record.meta.procedural.clone() else {
+                report.missing += 1;
+                continue;
+            };
+            procedural.use_count = procedural.use_count.saturating_add(1);
+            match outcome {
+                ProceduralSkillReuseOutcome::Neutral => {}
+                ProceduralSkillReuseOutcome::Succeeded => {
+                    procedural.validated_success_count =
+                        procedural.validated_success_count.saturating_add(1);
+                    procedural.state = ProceduralSkillState::Active;
+                    procedural.revision_pending = false;
+                }
+                ProceduralSkillReuseOutcome::Mismatch => {
+                    procedural.mismatch_count = procedural.mismatch_count.saturating_add(1);
+                    procedural.revision_count = procedural.revision_count.saturating_add(1);
+                    procedural.revision_pending = true;
+                }
+            }
+            procedural.last_used_at = Some(now_secs);
+            procedural.last_outcome_at = Some(now_secs);
+            procedural.last_outcome_note = trim_to_budget(note.trim().to_owned(), 160);
+            procedural.quality_score = bm_core::compute_procedural_skill_quality(&procedural);
+            record.meta.procedural = Some(procedural);
+            record.meta.updated_at = now_secs.max(record.meta.updated_at);
+            if self.store.replace(record).is_ok() {
+                report.updated += 1;
+            } else {
+                report.missing += 1;
+            }
+        }
+        report
+    }
+
+    pub fn recall_procedural_skills(
+        &self,
+        query: ProceduralSkillRecallQuery,
+    ) -> ProceduralSkillRecallReport {
+        let records = match self.store.records() {
+            Ok(records) => records,
+            Err(err) => {
+                return ProceduralSkillRecallReport {
+                    query: Some(query),
+                    backend: "store_scan".to_owned(),
+                    warnings: vec![store_error_detail(&err)],
+                    ..ProceduralSkillRecallReport::default()
+                }
+            }
+        };
+        let mut candidates = Vec::new();
+        let mut skipped = Vec::new();
+        let mut warnings = Vec::new();
+        for record in records
+            .into_iter()
+            .filter(|record| record.scope == query.scope && record.plane == MemoryPlane::Procedural)
+        {
+            let Some(meta) = record.meta.procedural.as_ref() else {
+                skipped.push(ProceduralSkillSkippedCandidate {
+                    record_id: record.id,
+                    state: ProceduralSkillState::Deprecated,
+                    reason: "missing_procedural_meta".to_owned(),
+                });
+                continue;
+            };
+            if !matches!(meta.state, ProceduralSkillState::Active) {
+                warnings.push(format!("{:?} procedural skill skipped", meta.state));
+                skipped.push(ProceduralSkillSkippedCandidate {
+                    record_id: record.id,
+                    state: meta.state,
+                    reason: format!("{:?}", meta.state),
+                });
+                continue;
+            }
+            let score = score_procedural_skill_record(&record, &query.query, &query.scope);
+            candidates.push(ProceduralSkillRecallCandidate {
+                record_id: record.id,
+                title: record
+                    .meta
+                    .topic
+                    .clone()
+                    .unwrap_or_else(|| meta.trigger.clone()),
+                trigger: meta.trigger.clone(),
+                procedure: record.content,
+                state: meta.state,
+                origin: meta.origin,
+                quality_score: meta.quality_score,
+                validated_success_count: meta.validated_success_count,
+                score,
+            });
+        }
+        let candidate_count = candidates.len() + skipped.len();
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .total_score
+                .cmp(&left.score.total_score)
+                .then_with(|| right.quality_score.cmp(&left.quality_score))
+                .then_with(|| left.record_id.cmp(&right.record_id))
+        });
+        candidates.truncate(query.limit);
+        let selected_ids = candidates
+            .iter()
+            .map(|candidate| candidate.record_id.clone())
+            .collect::<Vec<_>>();
+        ProceduralSkillRecallReport {
+            query: Some(query),
+            backend: "store_scan".to_owned(),
+            candidate_count,
+            selected_count: candidates.len(),
+            selected_ids,
+            miss_reason: candidates
+                .is_empty()
+                .then(|| "no_active_procedural_skill_candidates".to_owned()),
+            selection_note: (!candidates.is_empty())
+                .then(|| "procedural_skill_selected".to_owned()),
+            selected: candidates,
+            skipped,
+            warnings,
+        }
+    }
+
+    pub fn project_procedural_skills(
+        &self,
+        report: &ProceduralSkillRecallReport,
+        surface: ProjectionSurface,
+    ) -> ProjectionReport {
+        let blocks = report
+            .selected
+            .iter()
+            .map(|candidate| ProjectionBlock {
+                record_id: candidate.record_id.clone(),
+                domain: MemoryPlane::Procedural.domain(),
+                plane: MemoryPlane::Procedural,
+                content: trim_to_budget(
+                    format!(
+                        "Procedural skill hint, not execution authority: [{}] when {}; do {}; quality={}; state={:?}",
+                        candidate.title,
+                        candidate.trigger,
+                        candidate.procedure,
+                        candidate.quality_score,
+                        candidate.state
+                    ),
+                    self.profile.projection_budget_bytes(),
+                ),
+                source: SourceRef::new(SourceKind::AdapterEvent, "procedural-skill".to_owned()),
+                privacy_filtered: false,
+            })
+            .collect();
+        ProjectionReport {
+            surface,
+            blocks,
+            privacy_filtered_count: 0,
+            subject_assembly: None,
+            warnings: report.warnings.clone(),
+        }
     }
 
     fn write_long_term(
@@ -246,6 +744,7 @@ where
                     source: Some(source_ref),
                     profile: Some(self.profile),
                     long_term: None,
+                    procedural: None,
                 };
             }
         };
@@ -261,6 +760,7 @@ where
                 source: Some(source_ref),
                 profile: Some(self.profile),
                 long_term: Some(merge),
+                procedural: None,
             };
         }
 
@@ -328,6 +828,7 @@ where
             source: Some(source_ref),
             profile: Some(self.profile),
             long_term: Some(merge),
+            procedural: None,
         }
     }
 
@@ -368,6 +869,21 @@ where
                     record_id: record.id,
                     plane: record.plane,
                     reason: RecallSkipReason::ProfileBudget,
+                });
+                continue;
+            }
+
+            if record.plane == MemoryPlane::Procedural
+                && !record
+                    .meta
+                    .procedural
+                    .as_ref()
+                    .is_some_and(|meta| meta.state == ProceduralSkillState::Active)
+            {
+                skipped.push(SkippedRecallCandidate {
+                    record_id: record.id,
+                    plane: record.plane,
+                    reason: RecallSkipReason::PrivacyPolicy,
                 });
                 continue;
             }
@@ -620,6 +1136,7 @@ fn accepted_report(
         source: Some(source),
         profile: Some(profile),
         long_term: None,
+        procedural: None,
     }
 }
 
@@ -641,6 +1158,7 @@ fn rejected_report(
         source,
         profile: Some(profile),
         long_term: None,
+        procedural: None,
     }
 }
 
@@ -660,6 +1178,7 @@ fn store_deferred_report(
         source: Some(source),
         profile: Some(profile),
         long_term: None,
+        procedural: None,
     }
 }
 
@@ -746,6 +1265,114 @@ fn source_ref_for(source: &str) -> SourceRef {
         SourceKind::AdapterEvent
     };
     SourceRef::new(kind, source.to_owned())
+}
+
+fn procedural_source_ref(draft: &ProceduralSkillDraft) -> SourceRef {
+    let source = draft
+        .provenance
+        .source_ref
+        .clone()
+        .unwrap_or_else(|| match draft.origin {
+            ProceduralSkillOrigin::UserProvided => "procedural:user-provided".to_owned(),
+            ProceduralSkillOrigin::RuntimeLearned => "procedural:runtime-learned".to_owned(),
+        });
+    source_ref_for(&source)
+}
+
+fn procedural_draft_from_candidate(
+    candidate: &WriteCandidate,
+    source: &SourceRef,
+    content: &str,
+) -> ProceduralSkillDraft {
+    let title = candidate
+        .topic
+        .clone()
+        .unwrap_or_else(|| first_words(content, 6));
+    let origin = if matches!(
+        source.kind,
+        SourceKind::TaskLearning | SourceKind::ReplayFixture
+    ) {
+        ProceduralSkillOrigin::RuntimeLearned
+    } else {
+        ProceduralSkillOrigin::UserProvided
+    };
+    let mut draft = ProceduralSkillDraft::new(
+        candidate.identity.clone(),
+        candidate.scope.clone(),
+        origin,
+        title.clone(),
+        title,
+        content.to_owned(),
+    );
+    draft.provenance.source_ref = Some(source.id.clone());
+    if matches!(
+        source.kind,
+        SourceKind::TaskLearning | SourceKind::ReplayFixture
+    ) {
+        draft.evidence = vec![ProceduralEvidenceRef::new(
+            source.id.clone(),
+            "procedural write candidate source",
+        )];
+    }
+    draft
+}
+
+fn procedural_rejected_report(
+    profile: RuntimeProfile,
+    source: SourceRef,
+    slot_id: String,
+    reason: ProceduralSkillWriteReason,
+    detail: impl Into<String>,
+) -> WriteReport {
+    let procedural = ProceduralSkillWriteReport {
+        action: ProceduralSkillWriteAction::Rejected,
+        reason,
+        state: ProceduralSkillState::Candidate,
+        slot_id,
+        quality_score: 0,
+        detail: detail.into(),
+    };
+    WriteReport {
+        decision: WriteDecision::Rejected,
+        domain: Some(MemoryPlane::Procedural.domain()),
+        plane: Some(MemoryPlane::Procedural),
+        record_id: None,
+        governance: GovernanceReport::new(reason.as_str())
+            .with_detail(report_detail(&source, profile)),
+        source: Some(source),
+        profile: Some(profile),
+        long_term: None,
+        procedural: Some(procedural),
+    }
+}
+
+fn procedural_write_report(
+    action: ProceduralSkillWriteAction,
+    state: ProceduralSkillState,
+    origin: ProceduralSkillOrigin,
+    slot_id: String,
+    quality_score: u8,
+) -> ProceduralSkillWriteReport {
+    let reason = match action {
+        ProceduralSkillWriteAction::Quarantined => {
+            ProceduralSkillWriteReason::ImportedRequiresAdjudication
+        }
+        ProceduralSkillWriteAction::Rejected => ProceduralSkillWriteReason::WeakProcedure,
+        _ => match origin {
+            ProceduralSkillOrigin::UserProvided => ProceduralSkillWriteReason::UserProvidedAccepted,
+            ProceduralSkillOrigin::RuntimeLearned => {
+                ProceduralSkillWriteReason::RuntimeEvidenceAccepted
+            }
+        },
+    };
+    ProceduralSkillWriteReport {
+        action,
+        reason,
+        state,
+        slot_id,
+        quality_score,
+        detail: format!("state={state:?};quality={quality_score}"),
+    }
 }
 
 fn governance_reason_for(plane: MemoryPlane, plane_hint: Option<MemoryPlane>) -> &'static str {
@@ -917,10 +1544,24 @@ fn project_content(selection: &RecallSelection, surface: ProjectionSurface) -> S
         (MemoryPlane::SubjectProjection, ProjectionSurface::OperatorInspection) => {
             "subject projection presence: current-turn frame available".to_owned()
         }
-        (MemoryPlane::Procedural, _) => format!(
-            "Procedural memory reference, not execution authority: {}",
-            selection.content
-        ),
+        (MemoryPlane::Procedural, _) => {
+            let trigger = selection
+                .meta
+                .procedural
+                .as_ref()
+                .map(|meta| meta.trigger.as_str())
+                .unwrap_or("procedural memory");
+            let quality = selection
+                .meta
+                .procedural
+                .as_ref()
+                .map(|meta| meta.quality_score)
+                .unwrap_or_default();
+            format!(
+                "Procedural skill hint, not execution authority: when {}; do {}; quality={}",
+                trigger, selection.content, quality
+            )
+        }
         (MemoryPlane::ArchiveEvidence, _) => {
             format!(
                 "Archive evidence reference, not canonical fact: {}",

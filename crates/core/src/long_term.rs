@@ -134,6 +134,7 @@ impl LongTermMemoryDraft {
             observed_at: self.observed_at,
             updated_at,
             archive_links: self.archive_links,
+            procedural: None,
         }
     }
 }
