@@ -395,8 +395,6 @@ fn source_ref_for(source: &str) -> SourceRef {
         SourceKind::TaskLearning
     } else if source.starts_with("replay:") {
         SourceKind::ReplayFixture
-    } else if source.starts_with("beetle:") {
-        SourceKind::BeetleMigration
     } else {
         SourceKind::AdapterEvent
     };

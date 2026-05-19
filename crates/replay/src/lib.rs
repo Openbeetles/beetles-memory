@@ -186,7 +186,7 @@ fn replay_dev_full_paths(report: &mut S1ReplayReport) {
             "task:s1:soul",
             "当前回合使用 compact 主体挂载帧；私域原文已过滤。",
         )
-        .source("beetle:subject-state")
+        .source("host:subject-state")
         .plane_hint(MemoryPlane::SubjectProjection),
     );
     let subject_recall = runtime.recall(

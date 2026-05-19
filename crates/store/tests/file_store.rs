@@ -58,7 +58,7 @@ fn file_store_reloads_archive_evidence_and_subject_projection_planes() {
             .insert(new_record(
                 MemoryPlane::SubjectProjection,
                 "当前回合使用 compact 主体挂载帧；私域原文已过滤。",
-                "beetle:subject-state",
+                "host:subject-state",
             ))
             .expect("insert subject projection");
     }
@@ -79,7 +79,7 @@ fn file_store_reloads_archive_evidence_and_subject_projection_planes() {
         "mem-2",
         MemoryPlane::SubjectProjection,
         "当前回合使用 compact 主体挂载帧；私域原文已过滤。",
-        "beetle:subject-state",
+        "host:subject-state",
     );
 }
 

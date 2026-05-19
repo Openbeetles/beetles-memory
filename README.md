@@ -2,9 +2,11 @@
 
 `Beetle Memory` 是一个 Rust SDK-first 的 Agent Memory Runtime。目录名 `agent-memory` 只是当前工程目录名，不是项目名称。
 
-项目目标是把 Beetle 已经验证过的记忆体系抽象成独立、可部署、可硬件裁剪、可 SDK 集成、可协议调度、可迁移、可审计、可回放的 Agent 记忆基础设施。
+项目目标是把 Beetle 项目里已经验证过的记忆模块单独提出来，整理成独立、可部署、可硬件裁剪、可 SDK 集成、可协议调度、可迁移、可审计、可回放的 Agent 记忆基础设施。
 
-它不是普通 RAG、不是向量数据库、不是聊天历史模块，也不是 Beetle 的子模块。Beetle 是第一抽取源、第一迁移对象和第一回接验收目标，不是产品边界。
+它不是普通 RAG、不是向量数据库、不是聊天历史模块，也不是 Beetle 的子模块。在当前抽离阶段，Beetle 是记忆系统的唯一代码真源、参考源和代码提炼源；这是研发来源事实，不是调用方绑定、部署绑定或项目身份绑定。
+
+代码真源不等于架构上限。Beetle Memory 必须以独立记忆基础设施的姿态设计自己的 SDK、runtime/server、profile、store、adapter、replay、inspection、operator 和硬件裁剪能力；如果项目改名、开源发布，或原项目永远不作为宿主接入 SDK，这套架构仍必须成立。
 
 ## 当前真源
 
@@ -23,11 +25,11 @@
 
 - 硬件编译：ESP、Linux 硬件设备。
 - 端和服务器编译：macOS、Windows、Linux server。
-- SDK 集成：Beetle 回接、agent-tools 协同、任意其他 AI 项目作为记忆系统集成 SDK。
+- SDK 集成：任意 AI 项目作为记忆系统集成 SDK；Beetle 只作为当前代码真源和工程取证来源。
 
 ## 首版边界
 
-首版聚焦 memory kernel、memory planes、write governance、recall report、projection preview、privacy gate、procedural memory、profile compiler、event recorder、replay fixture、Rust SDK builder、CLI inspection 和 Beetle bridge 入口。
+首版聚焦 memory kernel、memory planes、write governance、recall report、projection preview、privacy gate、procedural memory、profile compiler、event recorder、replay fixture、Rust SDK builder、CLI inspection，以及 Beetle 真源审计和对照 fixture 边界。
 
 首版不实现 skill executor、workflow runner、tool runtime、skill marketplace、完整 Web 控制台、非 Rust SDK 或分布式商业权限平台。
 
@@ -39,6 +41,5 @@
 - `crates/store`：store trait 与 `InMemoryStore`。
 - `crates/sdk`：`MemoryRuntime` 与 `MemoryRuntimeBuilder`。
 - `crates/replay`：基础 replay fixture。
-- `crates/bridge-beetle`：Beetle 迁移合同与 source provenance。
 
-S0 已跑通 `WriteCandidate -> MemoryRuntime -> write governance -> store -> WriteReport -> RecallSelectionReport -> ProjectionReport -> replay` 的最小闭环。Beetle 旧 memory 主体实现还没有迁入；后续只能按当前合同逐段吸收。
+S0 已跑通 `WriteCandidate -> MemoryRuntime -> write governance -> store -> WriteReport -> RecallSelectionReport -> ProjectionReport -> replay` 的最小闭环。Beetle 旧 memory 主体实现还没有按独立合同抽象落地；后续只能把已验证能力逐段吸收到通用内核，不能把 Beetle 产品关系写成项目主线。

@@ -2,7 +2,7 @@ use bm_core::{MemoryPlane, RuntimeProfile, WriteRejectReason};
 use bm_replay::{run_s1_replay, S1ReplayPath};
 
 #[test]
-fn s1_replay_fixture_reports_required_bridge_and_projection_paths() {
+fn s1_replay_fixture_reports_required_capability_and_projection_paths() {
     let report = run_s1_replay();
 
     assert!(report.accepted >= 5);

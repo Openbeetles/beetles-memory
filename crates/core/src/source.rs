@@ -7,7 +7,6 @@ pub enum SourceKind {
     SnapshotImport,
     ArchiveEvidence,
     ReplayFixture,
-    BeetleMigration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
