@@ -1,11 +1,13 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum MemoryDomain {
     Program,
     Subject,
     Soul,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum MemoryPlane {
     SharedFactual,
     Procedural,
@@ -28,9 +30,31 @@ impl MemoryPlane {
             Self::SoulGovernance => MemoryDomain::Soul,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SharedFactual => "SharedFactual",
+            Self::Procedural => "Procedural",
+            Self::ContinuityCapsule => "ContinuityCapsule",
+            Self::ArchiveEvidence => "ArchiveEvidence",
+            Self::TaskRecall => "TaskRecall",
+            Self::SubjectProjection => "SubjectProjection",
+            Self::SoulGovernance => "SoulGovernance",
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+impl MemoryDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Program => "Program",
+            Self::Subject => "Subject",
+            Self::Soul => "Soul",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum RuntimeProfile {
     EspCompact,
     LinuxDevice,

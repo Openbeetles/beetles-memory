@@ -14,7 +14,7 @@ fn long_term_fact_inventory_keeps_origin_and_canonical_metadata() {
                 evidence: EvidenceState::Canonical,
             });
 
-    let plan = MigrationPlanner::default().plan(source);
+    let plan = MigrationPlanner.plan(source);
 
     assert_eq!(plan.origin_path, "src/memory/long_term.rs");
     assert_eq!(
@@ -33,7 +33,7 @@ fn long_term_fact_inventory_keeps_origin_and_canonical_metadata() {
 
 #[test]
 fn inventory_routes_runtime_skill_archive_subject_and_soul_sources() {
-    let planner = MigrationPlanner::default();
+    let planner = MigrationPlanner;
 
     let skill = planner.plan(
         BeetleMemorySource::new("beetle-runtime-skill", "skill-1", "when X fails, run Y")
@@ -82,7 +82,7 @@ fn private_sources_register_presence_without_migrating_raw_material() {
     .origin_path("src/memory/private_garden.rs")
     .origin_kind(BeetleOriginKind::PrivatePresence);
 
-    let plan = MigrationPlanner::default().plan(source);
+    let plan = MigrationPlanner.plan(source);
 
     assert_eq!(plan.target_plane, MemoryPlane::SoulGovernance);
     assert!(!plan.canonical);

@@ -6,3 +6,6 @@ edition.workspace = true
 [lib]
 name = "bm_core"
 path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true

@@ -1,4 +1,5 @@
 use crate::{MemoryDomain, MemoryPlane, RuntimeProfile, SourceRef};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum WriteDecision {
@@ -157,7 +158,7 @@ impl WriteReport {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NewMemoryRecord {
     pub identity: String,
     pub scope: String,
@@ -167,7 +168,7 @@ pub struct NewMemoryRecord {
     pub plane: MemoryPlane,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: String,
     pub identity: String,

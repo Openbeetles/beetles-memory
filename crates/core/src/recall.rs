@@ -180,6 +180,10 @@ pub enum RecallWarning {
     EvidenceNotCanonical {
         record_id: String,
     },
+    StoreUnavailable {
+        operation: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

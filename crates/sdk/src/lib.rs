@@ -7,7 +7,7 @@ use bm_core::{
     RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile, SkippedRecallCandidate,
     SourceKind, SourceRef, WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
 };
-use bm_store::MemoryStore;
+use bm_store::{MemoryStore, StoreError};
 
 pub struct MemoryRuntimeBuilder {
     profile: RuntimeProfile,
@@ -113,14 +113,28 @@ where
             );
         }
 
-        let record = self.store.insert(NewMemoryRecord {
+        let record = match self.store.insert(NewMemoryRecord {
             identity: candidate.identity,
             scope: candidate.scope,
             content: content.to_owned(),
             source: source.to_owned(),
             domain: plane.domain(),
             plane,
-        });
+        }) {
+            Ok(record) => record,
+            Err(err) => {
+                return WriteReport {
+                    decision: WriteDecision::Deferred,
+                    domain: Some(plane.domain()),
+                    plane: Some(plane),
+                    record_id: None,
+                    governance: GovernanceReport::new("store_unavailable")
+                        .with_detail(store_error_detail(&err)),
+                    source: Some(source_ref),
+                    profile: Some(self.profile),
+                };
+            }
+        };
 
         accepted_report(
             &record,
@@ -138,7 +152,12 @@ where
             .map(|plane| (plane, 0))
             .collect();
 
-        for record in self.store.records() {
+        let records = match self.store.records() {
+            Ok(records) => records,
+            Err(err) => return recall_store_unavailable_report(self.profile, query, err),
+        };
+
+        for record in records {
             if record.scope != query.scope {
                 continue;
             }
@@ -329,6 +348,44 @@ fn rejected_report(
 
 fn report_detail(source: &SourceRef, profile: RuntimeProfile) -> String {
     format!("source={};profile={}", source.id, profile.as_str())
+}
+
+fn store_error_detail(err: &StoreError) -> String {
+    match err.path.as_deref() {
+        Some(path) => format!(
+            "operation={};path={};recoverable={};message={}",
+            err.operation.as_str(),
+            path,
+            err.recoverable,
+            err.message
+        ),
+        None => format!(
+            "operation={};recoverable={};message={}",
+            err.operation.as_str(),
+            err.recoverable,
+            err.message
+        ),
+    }
+}
+
+fn recall_store_unavailable_report(
+    profile: RuntimeProfile,
+    query: RecallQuery,
+    err: StoreError,
+) -> RecallSelectionReport {
+    let intent = query.intent;
+    RecallSelectionReport {
+        query,
+        profile,
+        selected: Vec::new(),
+        skipped: Vec::new(),
+        plane_reports: Vec::new(),
+        rerank: CrossPlaneRerankReport::empty(intent),
+        warnings: vec![RecallWarning::StoreUnavailable {
+            operation: err.operation.as_str().to_owned(),
+            message: store_error_detail(&err),
+        }],
+    }
 }
 
 fn source_ref_for(source: &str) -> SourceRef {

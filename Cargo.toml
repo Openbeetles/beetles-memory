@@ -17,3 +17,6 @@ bm-store = { path = "crates/store" }
 bm-sdk = { path = "crates/sdk" }
 bm-replay = { path = "crates/replay" }
 bm-bridge-beetle = { path = "crates/bridge-beetle" }
+rusqlite = "0.32"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

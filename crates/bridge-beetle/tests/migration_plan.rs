@@ -6,7 +6,7 @@ fn bridge_creates_source_provenance_without_beetle_product_logic() {
     let source = BeetleMemorySource::new("beetle-shared-factual", "record-1", "stable fact")
         .origin_path("src/memory/legacy.rs");
 
-    let plan = MigrationPlanner::default().plan(source);
+    let plan = MigrationPlanner.plan(source);
 
     assert_eq!(plan.source.system, "beetle-shared-factual");
     assert_eq!(plan.target_domain, MemoryDomain::Program);
