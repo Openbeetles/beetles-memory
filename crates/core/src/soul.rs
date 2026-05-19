@@ -1,4 +1,4 @@
-use crate::RuntimeProfile;
+use crate::{MemoryPlane, RuntimeProfile};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum MentalPrivacyLayer {
@@ -30,6 +30,51 @@ pub enum MentalPrivacyQuotePolicy {
     NeverQuote,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum DisclosureSurface {
+    Prompt,
+    ToolContext,
+    OperatorInspection,
+    Adapter,
+    Replay,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SoulFeedbackLane {
+    Reply,
+    Initiative,
+    Strategy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SubjectAssemblySource {
+    SelfCore,
+    SelfContinuity,
+    Relationship,
+    ProgramMemory,
+    World,
+    Task,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SoulGovernanceDecision {
+    Accepted,
+    Rejected,
+    Deferred,
+    RevisionRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SoulGovernanceReason {
+    StableIdentity,
+    RelationshipBoundary,
+    PrivacyFiltered,
+    RawPrivateRejected,
+    WeakEvidence,
+    ProfileRejected,
+    ProgramEvidenceOnly,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MentalPrivacyPolicy {
     pub layer: MentalPrivacyLayer,
@@ -55,6 +100,45 @@ pub enum SoulSourceKind {
     PrivateKernel,
     PrivateGarden,
     SoulKernelStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivacyDisclosureDecision {
+    pub surface: DisclosureSurface,
+    pub layer: MentalPrivacyLayer,
+    pub allowed: bool,
+    pub quote_policy: MentalPrivacyQuotePolicy,
+    pub reason: SoulGovernanceReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubjectAssemblySourceRef {
+    pub source: SubjectAssemblySource,
+    pub record_id: String,
+    pub plane: MemoryPlane,
+    pub privacy_layer: MentalPrivacyLayer,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubjectAssemblyReport {
+    pub mounted: bool,
+    pub sources_used: Vec<SubjectAssemblySourceRef>,
+    pub sources_missing: Vec<SubjectAssemblySource>,
+    pub privacy_decisions: Vec<PrivacyDisclosureDecision>,
+    pub profile: RuntimeProfile,
+    pub budget_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SoulGovernanceRecord {
+    pub source_id: String,
+    pub source_kind: SoulSourceKind,
+    pub layer: MentalPrivacyLayer,
+    pub policy: MentalPrivacyPolicy,
+    pub decision: SoulGovernanceDecision,
+    pub reason: SoulGovernanceReason,
+    pub feedback_lanes: Vec<SoulFeedbackLane>,
+    pub revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

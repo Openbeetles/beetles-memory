@@ -1,4 +1,6 @@
-use crate::{MemoryDomain, MemoryPlane, RuntimeProfile, SourceRef};
+use crate::{
+    EvidenceState, MemoryDomain, MemoryPlane, MentalPrivacyLayer, RuntimeProfile, SourceRef,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -19,6 +21,7 @@ pub enum WriteRejectReason {
     WeakCanonicalStatement,
     NeedsDistillation,
     ProfileRejected,
+    RawPrivateRejected,
     RoutedToProcedural,
 }
 
@@ -32,6 +35,7 @@ impl WriteRejectReason {
             Self::WeakCanonicalStatement => "weak_canonical_statement",
             Self::NeedsDistillation => "needs_distillation",
             Self::ProfileRejected => "profile_rejected",
+            Self::RawPrivateRejected => "raw_private_rejected",
             Self::RoutedToProcedural => "routed_to_procedural",
         }
     }
@@ -44,6 +48,9 @@ pub struct WriteCandidate {
     pub content: String,
     pub source: Option<String>,
     pub plane_hint: Option<MemoryPlane>,
+    pub privacy_layer: MentalPrivacyLayer,
+    pub evidence: EvidenceState,
+    pub canonical: bool,
 }
 
 impl WriteCandidate {
@@ -58,6 +65,9 @@ impl WriteCandidate {
             content: content.into(),
             source: None,
             plane_hint: None,
+            privacy_layer: MentalPrivacyLayer::Shared,
+            evidence: EvidenceState::Supported,
+            canonical: false,
         }
     }
 
@@ -68,6 +78,21 @@ impl WriteCandidate {
 
     pub fn plane_hint(mut self, plane: MemoryPlane) -> Self {
         self.plane_hint = Some(plane);
+        self
+    }
+
+    pub fn privacy_layer(mut self, layer: MentalPrivacyLayer) -> Self {
+        self.privacy_layer = layer;
+        self
+    }
+
+    pub fn evidence(mut self, evidence: EvidenceState) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
+    pub fn canonical(mut self, canonical: bool) -> Self {
+        self.canonical = canonical;
         self
     }
 }

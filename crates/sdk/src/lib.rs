@@ -1,11 +1,14 @@
 //! SDK runtime entrypoint for Beetle Memory.
 
 use bm_core::{
-    CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport, GovernanceReport,
-    MemoryPlane, NewMemoryRecord, ProjectionBlock, ProjectionReport, ProjectionSurface,
-    PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown, RecallSelection,
-    RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile, SkippedRecallCandidate,
-    SourceKind, SourceRef, WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
+    CrossPlanePlaneSignal, CrossPlaneRerankCandidate, CrossPlaneRerankReport, DisclosureSurface,
+    EvidenceState, GovernanceReport, MemoryPlane, MentalPrivacyLayer, MentalPrivacyQuotePolicy,
+    NewMemoryRecord, PrivacyDisclosureDecision, ProjectionBlock, ProjectionReport,
+    ProjectionSurface, PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown,
+    RecallSelection, RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile,
+    SkippedRecallCandidate, SoulGovernanceReason, SourceKind, SourceRef, SubjectAssemblyReport,
+    SubjectAssemblySource, SubjectAssemblySourceRef, WriteCandidate, WriteDecision,
+    WriteRejectReason, WriteReport,
 };
 use bm_store::{MemoryStore, StoreError};
 
@@ -95,9 +98,54 @@ where
             }
         });
 
-        if source.starts_with("archive:") && matches!(plane, MemoryPlane::SharedFactual) {
+        if matches!(
+            candidate.privacy_layer,
+            MentalPrivacyLayer::Private | MentalPrivacyLayer::Sealed
+        ) {
+            return rejected_report(
+                WriteRejectReason::RawPrivateRejected,
+                self.profile,
+                Some(plane),
+                Some(source_ref),
+            );
+        }
+
+        if (source.starts_with("archive:")
+            || matches!(candidate.evidence, EvidenceState::ArchiveOnly))
+            && matches!(
+                plane,
+                MemoryPlane::SharedFactual | MemoryPlane::SoulGovernance
+            )
+        {
             return rejected_report(
                 WriteRejectReason::NeedsDistillation,
+                self.profile,
+                Some(plane),
+                Some(source_ref),
+            );
+        }
+
+        if matches!(plane, MemoryPlane::SoulGovernance)
+            && (source.starts_with("task-learning")
+                || source.starts_with("task:")
+                || looks_like_procedural_memory(content))
+        {
+            return rejected_report(
+                WriteRejectReason::NeedsDistillation,
+                self.profile,
+                Some(plane),
+                Some(source_ref),
+            );
+        }
+
+        if candidate.canonical
+            && !matches!(
+                candidate.evidence,
+                EvidenceState::Supported | EvidenceState::Canonical
+            )
+        {
+            return rejected_report(
+                WriteRejectReason::WeakCanonicalStatement,
                 self.profile,
                 Some(plane),
                 Some(source_ref),
@@ -292,6 +340,7 @@ where
         report: &RecallSelectionReport,
         surface: ProjectionSurface,
     ) -> ProjectionReport {
+        let mut privacy_filtered_count = 0;
         let blocks = report
             .selected
             .iter()
@@ -299,13 +348,27 @@ where
                 record_id: selection.record_id.clone(),
                 domain: selection.domain,
                 plane: selection.plane,
-                content: project_content(selection),
+                content: trim_to_budget(
+                    project_content(selection, surface),
+                    report.profile.projection_budget_bytes(),
+                ),
                 source: selection.source.clone(),
-                privacy_filtered: selection.privacy_filtered,
+                privacy_filtered: privacy_filtered_for_projection(selection, surface),
+            })
+            .inspect(|block| {
+                if block.privacy_filtered {
+                    privacy_filtered_count += 1;
+                }
             })
             .collect();
 
-        ProjectionReport { surface, blocks }
+        ProjectionReport {
+            surface,
+            subject_assembly: build_subject_assembly(report, surface),
+            privacy_filtered_count,
+            warnings: projection_warnings(report),
+            blocks,
+        }
     }
 }
 
@@ -536,13 +599,25 @@ fn recall_warnings(profile: RuntimeProfile, selected: &[RecallSelection]) -> Vec
     warnings
 }
 
-fn project_content(selection: &RecallSelection) -> String {
-    match selection.plane {
-        MemoryPlane::Procedural => format!(
+fn project_content(selection: &RecallSelection, surface: ProjectionSurface) -> String {
+    match (selection.plane, surface) {
+        (MemoryPlane::SoulGovernance, ProjectionSurface::Prompt) => {
+            "soul governance presence: governed summary available for subject assembly".to_owned()
+        }
+        (MemoryPlane::SoulGovernance, ProjectionSurface::ToolContext) => {
+            "soul governance presence: use subject assembly report, not raw text".to_owned()
+        }
+        (MemoryPlane::SoulGovernance, ProjectionSurface::OperatorInspection) => {
+            "soul governance presence: raw private material is not exposed by projection".to_owned()
+        }
+        (MemoryPlane::SubjectProjection, ProjectionSurface::OperatorInspection) => {
+            "subject projection presence: current-turn frame available".to_owned()
+        }
+        (MemoryPlane::Procedural, _) => format!(
             "Procedural memory reference, not execution authority: {}",
             selection.content
         ),
-        MemoryPlane::ArchiveEvidence => {
+        (MemoryPlane::ArchiveEvidence, _) => {
             format!(
                 "Archive evidence reference, not canonical fact: {}",
                 selection.content
@@ -550,6 +625,184 @@ fn project_content(selection: &RecallSelection) -> String {
         }
         _ => selection.content.clone(),
     }
+}
+
+fn privacy_filtered_for_projection(
+    selection: &RecallSelection,
+    surface: ProjectionSurface,
+) -> bool {
+    selection.privacy_filtered
+        || matches!(selection.plane, MemoryPlane::SoulGovernance)
+        || matches!(
+            (selection.plane, surface),
+            (
+                MemoryPlane::SubjectProjection,
+                ProjectionSurface::OperatorInspection
+            )
+        )
+}
+
+fn build_subject_assembly(
+    report: &RecallSelectionReport,
+    surface: ProjectionSurface,
+) -> Option<SubjectAssemblyReport> {
+    let sources_used = report
+        .selected
+        .iter()
+        .filter_map(subject_source_for_selection)
+        .collect::<Vec<_>>();
+    if sources_used.is_empty() {
+        return None;
+    }
+
+    let privacy_decisions = report
+        .selected
+        .iter()
+        .map(|selection| PrivacyDisclosureDecision {
+            surface: disclosure_surface_for(surface),
+            layer: privacy_layer_for_selection(selection),
+            allowed: !privacy_filtered_for_projection(selection, surface),
+            quote_policy: quote_policy_for_selection(selection, surface),
+            reason: privacy_decision_reason(selection, surface),
+        })
+        .collect();
+
+    Some(SubjectAssemblyReport {
+        mounted: true,
+        sources_missing: missing_subject_sources(&sources_used),
+        sources_used,
+        privacy_decisions,
+        profile: report.profile,
+        budget_bytes: report.profile.projection_budget_bytes(),
+    })
+}
+
+fn subject_source_for_selection(selection: &RecallSelection) -> Option<SubjectAssemblySourceRef> {
+    let source = match selection.plane {
+        MemoryPlane::SoulGovernance => SubjectAssemblySource::SelfCore,
+        MemoryPlane::SubjectProjection => SubjectAssemblySource::SelfContinuity,
+        MemoryPlane::TaskRecall => SubjectAssemblySource::Task,
+        MemoryPlane::Procedural
+        | MemoryPlane::SharedFactual
+        | MemoryPlane::ContinuityCapsule
+        | MemoryPlane::ArchiveEvidence => SubjectAssemblySource::ProgramMemory,
+    };
+    Some(SubjectAssemblySourceRef {
+        source,
+        record_id: selection.record_id.clone(),
+        plane: selection.plane,
+        privacy_layer: privacy_layer_for_selection(selection),
+    })
+}
+
+fn missing_subject_sources(
+    sources_used: &[SubjectAssemblySourceRef],
+) -> Vec<SubjectAssemblySource> {
+    let mut missing = Vec::new();
+    if !sources_used
+        .iter()
+        .any(|source| source.source == SubjectAssemblySource::SelfCore)
+    {
+        missing.push(SubjectAssemblySource::SelfCore);
+    }
+    if !sources_used
+        .iter()
+        .any(|source| source.source == SubjectAssemblySource::SelfContinuity)
+    {
+        missing.push(SubjectAssemblySource::SelfContinuity);
+    }
+    missing
+}
+
+fn privacy_decision_reason(
+    selection: &RecallSelection,
+    surface: ProjectionSurface,
+) -> SoulGovernanceReason {
+    if matches!(selection.plane, MemoryPlane::SoulGovernance) {
+        return SoulGovernanceReason::PrivacyFiltered;
+    }
+    if matches!(
+        (selection.plane, surface),
+        (
+            MemoryPlane::SubjectProjection,
+            ProjectionSurface::OperatorInspection
+        )
+    ) {
+        return SoulGovernanceReason::PrivacyFiltered;
+    }
+    if selection.privacy_filtered {
+        return SoulGovernanceReason::PrivacyFiltered;
+    }
+    SoulGovernanceReason::StableIdentity
+}
+
+fn disclosure_surface_for(surface: ProjectionSurface) -> DisclosureSurface {
+    match surface {
+        ProjectionSurface::Prompt => DisclosureSurface::Prompt,
+        ProjectionSurface::ToolContext => DisclosureSurface::ToolContext,
+        ProjectionSurface::OperatorInspection => DisclosureSurface::OperatorInspection,
+        ProjectionSurface::Adapter => DisclosureSurface::Adapter,
+        ProjectionSurface::Replay => DisclosureSurface::Replay,
+    }
+}
+
+fn privacy_layer_for_selection(selection: &RecallSelection) -> MentalPrivacyLayer {
+    match selection.plane {
+        MemoryPlane::SoulGovernance => MentalPrivacyLayer::Private,
+        MemoryPlane::SubjectProjection => MentalPrivacyLayer::Relational,
+        _ => MentalPrivacyLayer::Shared,
+    }
+}
+
+fn quote_policy_for_selection(
+    selection: &RecallSelection,
+    surface: ProjectionSurface,
+) -> MentalPrivacyQuotePolicy {
+    if privacy_filtered_for_projection(selection, surface) {
+        MentalPrivacyQuotePolicy::SummaryOnly
+    } else {
+        MentalPrivacyQuotePolicy::Raw
+    }
+}
+
+fn projection_warnings(report: &RecallSelectionReport) -> Vec<String> {
+    report
+        .warnings
+        .iter()
+        .map(|warning| match warning {
+            RecallWarning::ProfileBudgetTrimmed {
+                profile,
+                before,
+                after,
+            } => format!(
+                "profile_budget_trimmed:profile={};before={};after={}",
+                profile.as_str(),
+                before,
+                after
+            ),
+            RecallWarning::PrivacyFiltered { plane } => {
+                format!("privacy_filtered:plane={}", plane.as_str())
+            }
+            RecallWarning::EvidenceNotCanonical { record_id } => {
+                format!("evidence_not_canonical:record_id={record_id}")
+            }
+            RecallWarning::StoreUnavailable { operation, message } => {
+                format!("store_unavailable:operation={operation};message={message}")
+            }
+        })
+        .collect()
+}
+
+fn trim_to_budget(content: String, budget: usize) -> String {
+    if content.len() <= budget {
+        return content;
+    }
+
+    let mut end = budget;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[..end].to_owned()
 }
 
 struct MemoryPlaneSet;

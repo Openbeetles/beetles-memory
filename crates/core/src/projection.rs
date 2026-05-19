@@ -1,10 +1,12 @@
-use crate::{MemoryDomain, MemoryPlane, SourceRef};
+use crate::{MemoryDomain, MemoryPlane, SourceRef, SubjectAssemblyReport};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ProjectionSurface {
     Prompt,
-    Inspection,
+    ToolContext,
+    OperatorInspection,
     Adapter,
+    Replay,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,4 +23,7 @@ pub struct ProjectionBlock {
 pub struct ProjectionReport {
     pub surface: ProjectionSurface,
     pub blocks: Vec<ProjectionBlock>,
+    pub privacy_filtered_count: usize,
+    pub subject_assembly: Option<SubjectAssemblyReport>,
+    pub warnings: Vec<String>,
 }
