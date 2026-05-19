@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/store",
+    "crates/sdk",
+    "crates/replay",
+    "crates/bridge-beetle",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+bm-core = { path = "crates/core" }
+bm-store = { path = "crates/store" }
+bm-sdk = { path = "crates/sdk" }
+bm-replay = { path = "crates/replay" }
+bm-bridge-beetle = { path = "crates/bridge-beetle" }

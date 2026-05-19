@@ -1,0 +1,11 @@
+[package]
+name = "bm-store"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "bm_store"
+path = "src/lib.rs"
+
+[dependencies]
+bm-core.workspace = true

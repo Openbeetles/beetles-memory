@@ -1,0 +1,8 @@
+[package]
+name = "bm-core"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "bm_core"
+path = "src/lib.rs"
