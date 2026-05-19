@@ -32,7 +32,7 @@ fn runtime_writes_recalls_and_projects_governed_memory() {
     );
 
     assert_eq!(recalled.selected.len(), 1);
-    assert_eq!(recalled.skipped, 0);
+    assert!(recalled.skipped.is_empty());
     assert_eq!(recalled.profile, RuntimeProfile::DevFull);
     assert_eq!(recalled.selected[0].content, "tool result should be reused");
 
@@ -41,7 +41,11 @@ fn runtime_writes_recalls_and_projects_governed_memory() {
     assert_eq!(projection.surface, ProjectionSurface::Prompt);
     assert_eq!(projection.blocks.len(), 1);
     assert_eq!(projection.blocks[0].plane, MemoryPlane::Procedural);
-    assert_eq!(projection.blocks[0].content, "tool result should be reused");
+    assert_eq!(
+        projection.blocks[0].content,
+        "Procedural memory reference, not execution authority: tool result should be reused"
+    );
+    assert!(!projection.blocks[0].privacy_filtered);
 }
 
 #[test]
