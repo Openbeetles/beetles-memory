@@ -1,12 +1,16 @@
+use crate::agent::ActiveWorkStore;
 use crate::error::Result;
 use crate::memory::{
     AutonomyStrategyStore, ContinuityCapsuleStore, CoreRevisionLedgerStore, ExecutionStateStore,
     FeltSignificanceStore, InnerConflictStore, InnerLifeStore, LongTermMemoryExtractionStateStore,
-    LongTermMemoryStore, MentalPrivacyStore, OuterVoiceStore, PrivateDocStore, PrivateGardenStore,
-    RelationshipConstitutionStore, RelationshipPortfolioStore, RelationshipTopologyStore,
-    SelfAuthoredCoreStore, SelfContinuityStore, SelfModelStore, SessionStore, SessionSummaryStore,
-    TemperamentContinuityStore, TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
+    LongTermMemoryStore, MemoryStore, MentalPrivacyStore, OuterVoiceStore, PrivateDocStore,
+    PrivateGardenStore, RelationshipConstitutionStore, RelationshipPortfolioStore,
+    RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore,
+    SelfModelStore, SessionStore, SessionSummaryStore, TemperamentContinuityStore,
+    TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
 };
+use crate::task::TaskStore;
+use crate::task_execution::{TaskArtifactStore, TaskLearningStore, TaskRunStore};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -76,6 +80,8 @@ pub trait Platform: Send + Sync {
     fn state_fs(&self) -> Arc<dyn StateFs>;
     fn skill_storage(&self) -> Arc<dyn SkillStorage>;
     fn skill_meta_store(&self) -> Arc<dyn SkillMetaStore>;
+    fn active_work_store(&self) -> Arc<dyn ActiveWorkStore>;
+    fn memory_store(&self) -> Arc<dyn MemoryStore>;
     fn session_store(&self) -> Arc<dyn SessionStore>;
     fn session_summary_store(&self) -> Arc<dyn SessionSummaryStore>;
     fn long_term_memory_store(&self) -> Arc<dyn LongTermMemoryStore>;
@@ -103,6 +109,11 @@ pub trait Platform: Send + Sync {
     fn private_doc_store(&self) -> Arc<dyn PrivateDocStore>;
     fn private_garden_store(&self) -> Arc<dyn PrivateGardenStore>;
     fn turn_continuity_evidence_store(&self) -> Arc<dyn TurnContinuityEvidenceStore>;
+    fn remind_at_store(&self) -> Arc<dyn RemindAtStore>;
+    fn task_store(&self) -> Arc<dyn TaskStore>;
+    fn task_run_store(&self) -> Arc<dyn TaskRunStore>;
+    fn task_artifact_store(&self) -> Arc<dyn TaskArtifactStore>;
+    fn task_learning_store(&self) -> Arc<dyn TaskLearningStore>;
 }
 
 pub fn state_mount_path() -> PathBuf {

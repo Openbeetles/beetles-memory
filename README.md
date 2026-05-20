@@ -17,6 +17,7 @@
 - [dev-docs/engineering-workflow.md](dev-docs/engineering-workflow.md)：工程工作流与验收门禁。
 - [dev-docs/code-quality-governance.md](dev-docs/code-quality-governance.md)：完整搬迁后的代码质量治理标准。
 - [dev-docs/code-quality-audit.md](dev-docs/code-quality-audit.md)：代码质量治理第一刀审计报告与收敛台账。
+- [dev-docs/sdk-profile-contract-plan.md](dev-docs/sdk-profile-contract-plan.md)：SDK/Profile 阶段实施真源。
 - [dev-docs/procedural-memory-and-skill.md](dev-docs/procedural-memory-and-skill.md)：skill / procedural memory 边界。
 - [dev-docs/profile-and-platform-boundary.md](dev-docs/profile-and-platform-boundary.md)：profile 与平台边界。
 - [dev-docs/soul-and-subject-memory-boundary.md](dev-docs/soul-and-subject-memory-boundary.md)：灵魂治理与主体记忆边界。

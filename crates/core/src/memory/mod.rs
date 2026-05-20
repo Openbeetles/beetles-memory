@@ -4,6 +4,8 @@ use crate::bus::PcMsg;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 
+pub use crate::bus::IngressKind;
+
 #[cfg(all(test, not(any(target_arch = "xtensa", target_arch = "riscv32"))))]
 mod archive_benchmark;
 mod archive_plane;
@@ -325,9 +327,9 @@ pub(crate) use recall_rerank::{
 };
 #[cfg(test)]
 pub(crate) use recall_rerank::{CrossPlanePlaneSignal, CrossPlaneRerankCandidate};
+pub use recall_router::PromptRecallIntent;
 pub(crate) use recall_router::{
-    build_continuity_recall_query, decide_prompt_recall_route, PromptRecallIntent,
-    PromptRecallRouterDecision,
+    build_continuity_recall_query, decide_prompt_recall_route, PromptRecallRouterDecision,
 };
 pub use recent_persona_evidence::{
     derive_recent_persona_evidence, derive_recent_persona_evidence_from_continuity_evidence,

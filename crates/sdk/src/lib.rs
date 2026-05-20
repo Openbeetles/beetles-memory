@@ -1,6 +1,11 @@
 //! Public SDK facade for Beetle Memory.
 
+mod capability;
+mod ops;
+mod runtime;
+
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ActiveWorkStore, ForegroundWorkStatus};
+pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{LlmClient, LlmHttpClient};
 pub use bm_core::memory::{
     apply_long_term_memory_extraction, build_long_term_memory_extraction_input,
@@ -9,17 +14,20 @@ pub use bm_core::memory::{
     inspect_task_recall, inspect_working_recall, load_prompt_memory_context,
     recall_long_term_memory_block, run_post_reply_memory_maintenance,
     search_archive_records_detailed, AutonomyStrategyStore, ContinuityCapsuleMaintenanceOutcome,
-    ContinuityCapsuleStore, CoreRevisionLedgerStore, ExecutionStateStore, FeltSignificanceStore,
-    InnerConflictStore, InnerLifeStore, LongTermMemoryDraft, LongTermMemoryEntry,
+    ContinuityCapsuleStore, ContinuitySnapshot, ContinuitySnapshotImportMode,
+    ContinuitySnapshotImportOutcome, ContinuitySnapshotMode, CoreRevisionLedgerStore,
+    ExecutionStateStore, FeltSignificanceStore, IngressKind, InnerConflictStore, InnerLifeStore,
+    IntelligenceReplayInspection, LongTermMemoryDraft, LongTermMemoryEntry,
     LongTermMemoryExtractionStateStore, LongTermMemoryQuery, LongTermMemoryStore, MemoryProfile,
     MemoryStore, MemorySystemKind as MemoryRuntimeSystemKind, MentalPrivacyStore, OuterVoiceStore,
-    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostReplyMemoryMaintenanceOutcome, PrivateDocStore, PrivateGardenStore, PromptMemoryContext,
-    PromptMemoryContextParams, PromptParticipationPlan, RecallCandidate, RecallPlane, RecallQuery,
-    RecallSelectionReport, RelationshipConstitutionStore, RelationshipPortfolioStore,
-    RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore,
-    SelfModelStore, SessionStore, SessionSummaryStore, TemperamentContinuityStore,
-    TurnContinuityEvidenceStore, TurnLedgerStore, WorkingRecallInspection, WorldSenseStore,
+    ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
+    PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome, PrivateDocStore,
+    PrivateGardenStore, PromptMemoryContext, PromptMemoryContextParams, PromptParticipationPlan,
+    PromptRecallIntent, RecallCandidate, RecallPlane, RecallQuery, RecallSelectionReport,
+    RelationshipConstitutionStore, RelationshipPortfolioStore, RelationshipTopologyStore,
+    RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore, SelfModelStore, SessionStore,
+    SessionSummaryStore, TemperamentContinuityStore, TurnContinuityEvidenceStore, TurnLedgerStore,
+    WorkingRecallInspection, WorldSenseStore,
 };
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::{
@@ -43,6 +51,21 @@ pub use bm_core::task_execution::{
     TaskArtifactStore, TaskExecutionLedgerStore, TaskLearningStore, TaskRunStore,
 };
 pub use bm_core::{Error, Result};
+pub use capability::{
+    resolve_memory_capabilities, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
+    MemoryIndexedRecallVisibility, MemoryOperationVisibility, MemoryPrivacyPolicy,
+};
+pub use ops::{
+    MemoryExportReport, MemoryExportRequest, MemoryImportReport, MemoryImportRequest,
+    MemoryInspectionReport, MemoryInspectionRequest, MemoryMaintenanceReport,
+    MemoryMaintenanceRequest, MemoryProceduralWriteReport, MemoryProjectionReport,
+    MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest, MemoryReplayReport,
+    MemoryReplayRequest, MemoryWriteReport, MemoryWriteRequest,
+};
+pub use runtime::{
+    MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,
+    MemoryRuntimeBuilder, MemoryRuntimeConfig, MemoryScope, NoopMemoryAuditSink, SystemMemoryClock,
+};
 
 pub fn write_procedural_memory(
     storage: &dyn SkillStorage,

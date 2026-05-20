@@ -1,20 +1,18 @@
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
 use std::sync::Arc;
 
 use bm_sdk::{
     ActiveWorkStore, AutonomyStrategyStore, ContinuityCapsuleStore, CoreRevisionLedgerStore,
     ExecutionStateStore, FeltSignificanceStore, InnerConflictStore, InnerLifeStore,
-    LongTermMemoryExtractionStateStore, LongTermMemoryStore, MemoryCapabilityCatalog,
-    MemoryCapabilityPolicy, MemoryIdentity, MemoryProfile, MemoryRuntime, MemoryRuntimeConfig,
-    MemoryRuntimeSystemKind, MemoryScope, MemoryStore, MemoryWriteRequest, MentalPrivacyStore,
-    OuterVoiceStore, Platform, PlatformMemorySystemKind, PostReplyMemoryMaintenanceContext,
-    PrivateDocStore, PrivateGardenStore, PromptMemoryContextParams, PromptParticipationPlan,
-    RelationshipConstitutionStore, RelationshipPortfolioStore, RelationshipTopologyStore,
-    RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore, SelfModelStore, SessionStore,
-    SessionSummaryStore, SkillMetaStore, SkillStorage, StateFs, TaskArtifactStore,
-    TaskLearningStore, TaskRunStore, TaskStore, TemperamentContinuityStore,
-    TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
+    LongTermMemoryExtractionStateStore, LongTermMemoryStore, MemoryCapabilityPolicy, MemoryClock,
+    MemoryIdentity, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStore,
+    MentalPrivacyStore, NoopMemoryAuditSink, OuterVoiceStore, Platform, PlatformMemorySystemKind,
+    PrivateDocStore, PrivateGardenStore, ProfileId, RelationshipConstitutionStore,
+    RelationshipPortfolioStore, RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore,
+    SelfContinuityStore, SelfModelStore, SessionStore, SessionSummaryStore, SkillMetaStore,
+    SkillStorage, StateFs, TaskArtifactStore, TaskLearningStore, TaskRunStore, TaskStore,
+    TemperamentContinuityStore, TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
 };
 
 struct HostPlatform;
@@ -167,51 +165,47 @@ impl Platform for HostPlatform {
     }
 }
 
-fn prompt_context_contract_is_sdk_importable<'a>(
-    params: PromptMemoryContextParams<'a>,
-) -> PromptMemoryContextParams<'a> {
-    params
+struct FixedMemoryClock {
+    now_secs: u64,
 }
 
-fn post_reply_context_contract_is_sdk_importable<'a>(
-    ctx: PostReplyMemoryMaintenanceContext<'a>,
-) -> PostReplyMemoryMaintenanceContext<'a> {
-    ctx
+impl FixedMemoryClock {
+    fn new(now_secs: u64) -> Self {
+        Self { now_secs }
+    }
 }
 
-fn task_store_traits_are_sdk_importable(
-    _task_store: &dyn TaskStore,
-    _run_store: &dyn TaskRunStore,
-    _artifact_store: &dyn TaskArtifactStore,
-    _learning_store: &dyn TaskLearningStore,
-) {
-}
-
-fn sdk_runtime_contract_types_are_importable(
-    _runtime: Option<MemoryRuntime>,
-    _config: Option<MemoryRuntimeConfig>,
-    _catalog: Option<MemoryCapabilityCatalog>,
-    _policy: MemoryCapabilityPolicy,
-    _identity: MemoryIdentity,
-    _scope: MemoryScope,
-    _write: Option<MemoryWriteRequest>,
-) {
+impl MemoryClock for FixedMemoryClock {
+    fn now_secs(&self) -> u64 {
+        self.now_secs
+    }
 }
 
 #[test]
-fn profile_and_system_kind_aliases_are_unambiguous() {
-    let runtime_kind: MemoryRuntimeSystemKind = MemoryProfile::Embedded.memory_system_kind();
-    assert_eq!(runtime_kind, MemoryRuntimeSystemKind::EspCompact);
-    assert_eq!(runtime_kind.memory_profile(), MemoryProfile::Embedded);
+fn runtime_builder_rejects_empty_identity_and_scope() {
+    let err = MemoryIdentity::new("", "owner").expect_err("empty agent id rejected");
+    assert_eq!(err.stage(), "memory_identity");
 
-    let platform_kind = HostPlatform.memory_system_kind();
-    assert_eq!(platform_kind, PlatformMemorySystemKind::SdkEmbedded);
-    assert_eq!(platform_kind.as_str(), "sdk_embedded");
+    let err = MemoryScope::new("local", "").expect_err("empty chat id rejected");
+    assert_eq!(err.stage(), "memory_scope");
 }
 
 #[test]
-fn prompt_participation_plan_is_available_from_sdk() {
-    let plan = PromptParticipationPlan::embedded_first_turn_default();
-    assert!(plan.load_l1_constitutional);
-    assert!(!plan.load_l2_governed_recall);
+fn runtime_builder_exposes_capabilities_without_calling_core_directly() {
+    let platform = Arc::new(HostPlatform);
+    let runtime = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+        .profile(ProfileId::EspEmbeddedSdk)
+        .platform(platform)
+        .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(NoopMemoryAuditSink))
+        .build()
+        .expect("runtime");
+
+    assert_eq!(runtime.identity().agent_id, "agent-main");
+    assert_eq!(runtime.scope().chat_id, "chat-1");
+    assert_eq!(runtime.capabilities().profile, ProfileId::EspEmbeddedSdk);
 }

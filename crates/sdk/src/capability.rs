@@ -1,0 +1,325 @@
+use bm_core::feature_gate::{
+    compiled_feature_report, profile_capability_catalog, CompiledFeatureReport,
+    ProfileCapabilityCatalogEntry, ProfileId, RoleFeature, TargetFeature,
+};
+
+use crate::{Error, Result};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryCapabilityPolicy {
+    pub write_enabled: bool,
+    pub recall_enabled: bool,
+    pub projection_enabled: bool,
+    pub maintenance_enabled: bool,
+    pub inspection_enabled: bool,
+    pub replay_enabled: bool,
+    pub export_enabled: bool,
+    pub import_enabled: bool,
+    pub communication_adapter_enabled: bool,
+}
+
+impl MemoryCapabilityPolicy {
+    pub const fn strict_profile() -> Self {
+        Self {
+            write_enabled: true,
+            recall_enabled: true,
+            projection_enabled: true,
+            maintenance_enabled: true,
+            inspection_enabled: true,
+            replay_enabled: true,
+            export_enabled: true,
+            import_enabled: true,
+            communication_adapter_enabled: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryPrivacyPolicy {
+    pub prompt_projection_allowed: bool,
+    pub private_plane_projection_allowed: bool,
+    pub operator_inspection_allowed: bool,
+    pub export_allowed: bool,
+    pub import_allowed: bool,
+}
+
+impl MemoryPrivacyPolicy {
+    pub const fn standard_private_boundary() -> Self {
+        Self {
+            prompt_projection_allowed: true,
+            private_plane_projection_allowed: false,
+            operator_inspection_allowed: true,
+            export_allowed: true,
+            import_allowed: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryOperationVisibility {
+    pub profile_allowed: bool,
+    pub compiled: bool,
+    pub config_enabled: bool,
+    pub permission_allowed: bool,
+    pub privacy_allowed: bool,
+    pub visible: bool,
+}
+
+impl MemoryOperationVisibility {
+    pub const fn hidden() -> Self {
+        Self {
+            profile_allowed: false,
+            compiled: false,
+            config_enabled: false,
+            permission_allowed: false,
+            privacy_allowed: false,
+            visible: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryIndexedRecallVisibility {
+    pub archive: MemoryOperationVisibility,
+    pub continuity_capsule: MemoryOperationVisibility,
+    pub runtime_skill: MemoryOperationVisibility,
+    pub task_learning: MemoryOperationVisibility,
+}
+
+impl MemoryIndexedRecallVisibility {
+    pub const fn hidden() -> Self {
+        Self {
+            archive: MemoryOperationVisibility::hidden(),
+            continuity_capsule: MemoryOperationVisibility::hidden(),
+            runtime_skill: MemoryOperationVisibility::hidden(),
+            task_learning: MemoryOperationVisibility::hidden(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryCapabilityCatalog {
+    pub profile: ProfileId,
+    pub target: TargetFeature,
+    pub role: RoleFeature,
+    pub compiled: CompiledFeatureReport,
+    pub write: MemoryOperationVisibility,
+    pub recall: MemoryOperationVisibility,
+    pub projection: MemoryOperationVisibility,
+    pub maintenance: MemoryOperationVisibility,
+    pub inspection: MemoryOperationVisibility,
+    pub replay: MemoryOperationVisibility,
+    pub export: MemoryOperationVisibility,
+    pub import: MemoryOperationVisibility,
+    pub communication_adapter: MemoryOperationVisibility,
+    pub sqlite_index_recall: MemoryIndexedRecallVisibility,
+}
+
+impl MemoryCapabilityCatalog {
+    pub fn empty(profile: ProfileId, target: TargetFeature, role: RoleFeature) -> Self {
+        Self {
+            profile,
+            target,
+            role,
+            compiled: compiled_feature_report(),
+            write: MemoryOperationVisibility::hidden(),
+            recall: MemoryOperationVisibility::hidden(),
+            projection: MemoryOperationVisibility::hidden(),
+            maintenance: MemoryOperationVisibility::hidden(),
+            inspection: MemoryOperationVisibility::hidden(),
+            replay: MemoryOperationVisibility::hidden(),
+            export: MemoryOperationVisibility::hidden(),
+            import: MemoryOperationVisibility::hidden(),
+            communication_adapter: MemoryOperationVisibility::hidden(),
+            sqlite_index_recall: MemoryIndexedRecallVisibility::hidden(),
+        }
+    }
+
+    fn from_entry(
+        entry: ProfileCapabilityCatalogEntry,
+        compiled: CompiledFeatureReport,
+        policy: &MemoryCapabilityPolicy,
+        privacy: &MemoryPrivacyPolicy,
+    ) -> Self {
+        let profile_kind = profile_kind(entry.profile);
+        Self {
+            profile: entry.profile,
+            target: entry.target,
+            role: entry.role,
+            compiled,
+            write: visible(true, true, policy.write_enabled, true, true),
+            recall: visible(true, true, policy.recall_enabled, true, true),
+            projection: visible(
+                true,
+                true,
+                policy.projection_enabled,
+                true,
+                privacy.prompt_projection_allowed,
+            ),
+            maintenance: visible(
+                profile_kind.maintenance_allowed,
+                true,
+                policy.maintenance_enabled,
+                true,
+                true,
+            ),
+            inspection: visible(
+                profile_kind.inspection_allowed,
+                true,
+                policy.inspection_enabled,
+                true,
+                privacy.operator_inspection_allowed,
+            ),
+            replay: visible(
+                profile_kind.replay_allowed,
+                true,
+                policy.replay_enabled,
+                true,
+                true,
+            ),
+            export: visible(
+                profile_kind.export_allowed,
+                true,
+                policy.export_enabled,
+                true,
+                privacy.export_allowed,
+            ),
+            import: visible(
+                profile_kind.import_allowed,
+                true,
+                policy.import_enabled,
+                true,
+                privacy.import_allowed,
+            ),
+            communication_adapter: visible(
+                entry.communication_adapter_allowed,
+                true,
+                policy.communication_adapter_enabled,
+                true,
+                true,
+            ),
+            sqlite_index_recall: MemoryIndexedRecallVisibility {
+                archive: indexed_visible(
+                    entry.indexed_archive_recall_allowed,
+                    compiled,
+                    policy.recall_enabled,
+                ),
+                continuity_capsule: indexed_visible(
+                    entry.indexed_continuity_capsule_recall_allowed,
+                    compiled,
+                    policy.recall_enabled,
+                ),
+                runtime_skill: indexed_visible(
+                    entry.indexed_runtime_skill_recall_allowed,
+                    compiled,
+                    policy.recall_enabled,
+                ),
+                task_learning: indexed_visible(
+                    entry.indexed_task_learning_recall_allowed,
+                    compiled,
+                    policy.recall_enabled,
+                ),
+            },
+        }
+    }
+}
+
+pub fn resolve_memory_capabilities(
+    profile: ProfileId,
+    policy: &MemoryCapabilityPolicy,
+    privacy: &MemoryPrivacyPolicy,
+) -> Result<MemoryCapabilityCatalog> {
+    let entry = profile_capability_catalog()
+        .iter()
+        .find(|entry| entry.profile == profile)
+        .copied()
+        .ok_or_else(|| Error::config("memory_capability_catalog", profile.as_str()))?;
+
+    Ok(MemoryCapabilityCatalog::from_entry(
+        entry,
+        compiled_feature_report(),
+        policy,
+        privacy,
+    ))
+}
+
+fn visible(
+    profile_allowed: bool,
+    compiled: bool,
+    config_enabled: bool,
+    permission_allowed: bool,
+    privacy_allowed: bool,
+) -> MemoryOperationVisibility {
+    MemoryOperationVisibility {
+        profile_allowed,
+        compiled,
+        config_enabled,
+        permission_allowed,
+        privacy_allowed,
+        visible: profile_allowed
+            && compiled
+            && config_enabled
+            && permission_allowed
+            && privacy_allowed,
+    }
+}
+
+fn indexed_visible(
+    profile_allowed: bool,
+    compiled: CompiledFeatureReport,
+    config_enabled: bool,
+) -> MemoryOperationVisibility {
+    visible(
+        profile_allowed,
+        compiled.sqlite_index_compiled,
+        config_enabled,
+        true,
+        true,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ProfileOperationDefaults {
+    maintenance_allowed: bool,
+    inspection_allowed: bool,
+    replay_allowed: bool,
+    export_allowed: bool,
+    import_allowed: bool,
+}
+
+fn profile_kind(profile: ProfileId) -> ProfileOperationDefaults {
+    match profile {
+        ProfileId::EspStandaloneMemory | ProfileId::LinuxDeviceStandaloneMemory => {
+            ProfileOperationDefaults {
+                maintenance_allowed: true,
+                inspection_allowed: true,
+                replay_allowed: false,
+                export_allowed: true,
+                import_allowed: true,
+            }
+        }
+        ProfileId::EspEmbeddedSdk
+        | ProfileId::DesktopMacosEmbeddedSdk
+        | ProfileId::DesktopWindowsEmbeddedSdk => ProfileOperationDefaults {
+            maintenance_allowed: false,
+            inspection_allowed: true,
+            replay_allowed: false,
+            export_allowed: false,
+            import_allowed: false,
+        },
+        ProfileId::ServerLinuxMemoryGateway => ProfileOperationDefaults {
+            maintenance_allowed: true,
+            inspection_allowed: true,
+            replay_allowed: false,
+            export_allowed: true,
+            import_allowed: true,
+        },
+        ProfileId::ServerLinuxDevFull => ProfileOperationDefaults {
+            maintenance_allowed: true,
+            inspection_allowed: true,
+            replay_allowed: true,
+            export_allowed: true,
+            import_allowed: true,
+        },
+    }
+}
