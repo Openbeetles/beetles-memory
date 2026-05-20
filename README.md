@@ -15,12 +15,15 @@
 - [dev-docs/project-initiation.md](dev-docs/project-initiation.md)：当前立项真源。
 - [dev-docs/agent-constitution.md](dev-docs/agent-constitution.md)：架构宪法。
 - [dev-docs/engineering-workflow.md](dev-docs/engineering-workflow.md)：工程工作流与验收门禁。
+- [dev-docs/code-quality-governance.md](dev-docs/code-quality-governance.md)：完整搬迁后的代码质量治理标准。
+- [dev-docs/code-quality-audit.md](dev-docs/code-quality-audit.md)：代码质量治理第一刀审计报告与收敛台账。
 - [dev-docs/procedural-memory-and-skill.md](dev-docs/procedural-memory-and-skill.md)：skill / procedural memory 边界。
 - [dev-docs/profile-and-platform-boundary.md](dev-docs/profile-and-platform-boundary.md)：profile 与平台边界。
 - [dev-docs/soul-and-subject-memory-boundary.md](dev-docs/soul-and-subject-memory-boundary.md)：灵魂治理与主体记忆边界。
 - [dev-docs/communication-and-adapter-boundary.md](dev-docs/communication-and-adapter-boundary.md)：通信与 adapter 边界。
 - [dev-docs/beetle-source-audit-and-capability-map.md](dev-docs/beetle-source-audit-and-capability-map.md)：Beetle 代码真源审计。
 - [dev-docs/full-port-plan.md](dev-docs/full-port-plan.md)：Beetle 记忆真源完整搬迁与验收真源。
+- [dev-docs/post-port-roadmap.md](dev-docs/post-port-roadmap.md)：完整搬迁后的后续实施路线图。
 
 ## 一等目标
 
@@ -47,4 +50,6 @@
 
 当前未实现外部通信 adapter；HTTP、Webhook、WSS、MQTT、MCP、CLI 仍只在文档中固定边界，不能在内核里分叉记忆语义。
 
-当前验收已经通过 `cargo fmt --all -- --check`、`cargo check --workspace`、`cargo test --workspace`、`cargo test -p bm-store --features sqlite`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo clippy -p bm-store --features sqlite --all-targets -- -D warnings`，并完成 Beetle 专属 adapter/source kind 与外部通信服务实现的漂移扫描。
+当前第一轮代码质量治理已经完成：SDK-only host contract 已补齐，sqlite/index 后端改为显式 `sqlite-index` feature，ESP standalone / embedded SDK profile 不再拉入 `rusqlite`，未使用的 `base64` / `urlencoding` 已移除。
+
+当前验收已经通过 `cargo fmt --all -- --check`、`cargo check --workspace`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/check_profile_matrix.sh`、`cargo test -p bm-core --features sqlite-index`、`cargo clippy -p bm-core --features sqlite-index --all-targets -- -D warnings`，并完成 Beetle 专属 adapter/source kind 与外部通信服务实现的漂移扫描。

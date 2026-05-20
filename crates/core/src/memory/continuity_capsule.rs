@@ -7,14 +7,14 @@ use crate::task_execution::{
     current_or_next_step, TaskArtifactRecord, TaskLearningRecord, TaskLearningRoute, TaskRunRecord,
 };
 use crate::util::truncate_content_to_max;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use std::path::PathBuf;
 
 use super::{
@@ -36,11 +36,11 @@ const MAX_CONTINUITY_CAPSULE_LIST_ITEMS: usize = 4;
 const MAX_CONTINUITY_CAPSULE_RECALL_CANDIDATES: usize = 12;
 const MAX_CONTINUITY_CAPSULE_RECALL_SELECTED: usize = 3;
 const CONTINUITY_CAPSULE_STALE_AFTER_SECS: u64 = 14 * 24 * 60 * 60;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const CONTINUITY_CAPSULE_INDEX_VERSION: u32 = 1;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const REL_PATH_CONTINUITY_CAPSULE_INDEX: &str = "memory/continuity_capsule_index.sqlite3";
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const CONTINUITY_CAPSULE_INDEX_CANDIDATE_LIMIT: usize = 24;
 
 pub(crate) struct PostReplyContinuityInput<'a> {
@@ -54,7 +54,7 @@ pub(crate) struct PostReplyContinuityInput<'a> {
     pub summary_text: Option<&'a str>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct ContinuityCapsuleIndexSignature {
     capsule_count: usize,
@@ -781,7 +781,7 @@ fn continuity_capsule_index_hints(
     terms: &[String],
     preferred_chat_id: Option<&str>,
 ) -> (HashMap<String, ContinuityCapsuleIndexHint>, &'static str) {
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "sqlite-index")]
     {
         if capsules.is_empty()
             || scope_id.is_empty()
@@ -805,7 +805,7 @@ fn continuity_capsule_index_hints(
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(feature = "sqlite-index"))]
     {
         let _ = (
             capsules,
@@ -819,7 +819,7 @@ fn continuity_capsule_index_hints(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn continuity_capsule_index_hints_sqlite(
     capsules: &[ContinuityCapsule],
     scope_kind: ContinuityCapsuleScopeKind,
@@ -850,7 +850,7 @@ fn continuity_capsule_index_hints_sqlite(
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn build_continuity_capsule_index_signature(
     capsules: &[ContinuityCapsule],
 ) -> ContinuityCapsuleIndexSignature {
@@ -886,12 +886,12 @@ fn build_continuity_capsule_index_signature(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn continuity_capsule_index_path(_signature: &ContinuityCapsuleIndexSignature) -> PathBuf {
     crate::platform::state_mount_path().join(REL_PATH_CONTINUITY_CAPSULE_INDEX)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn ensure_continuity_capsule_sqlite_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS continuity_capsule_meta (
@@ -934,7 +934,7 @@ fn ensure_continuity_capsule_sqlite_schema(conn: &Connection) -> Result<()> {
     .map_err(|e| crate::error::Error::config("continuity_capsule_index", e.to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn continuity_capsule_sqlite_needs_rebuild(
     conn: &Connection,
     signature: &ContinuityCapsuleIndexSignature,
@@ -966,7 +966,7 @@ fn continuity_capsule_sqlite_needs_rebuild(
     Ok(parsed != *signature)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn continuity_capsule_sqlite_rebuild(
     conn: &mut Connection,
     capsules: &[ContinuityCapsule],
@@ -1051,7 +1051,7 @@ fn continuity_capsule_sqlite_rebuild(
         .map_err(|e| crate::error::Error::config("continuity_capsule_index", e.to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn query_continuity_capsule_hints_sqlite(
     conn: &Connection,
     scope_kind: ContinuityCapsuleScopeKind,
@@ -1133,7 +1133,7 @@ fn query_continuity_capsule_hints_sqlite(
     Ok(hints)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn continuity_capsule_match_expression(normalized_query: &str, terms: &[String]) -> Option<String> {
     let mut parts = Vec::new();
     if normalized_query.contains(' ') {

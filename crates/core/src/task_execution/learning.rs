@@ -14,14 +14,14 @@ use crate::reasoning::{
 };
 use crate::skills::is_runtime_skill_name;
 use crate::util::{epoch_to_ymdhms, truncate_content_to_max};
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use std::hash::{DefaultHasher, Hash, Hasher};
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use std::path::PathBuf;
 
 use super::{
@@ -37,11 +37,11 @@ pub const REL_DIR_TASK_LEARNING: &str = "memory/task_learning";
 const MAX_TASK_LEARNING_RECORDS_PER_CHAT: usize = 64;
 const MAX_TASK_LEARNING_HITS: usize = 6;
 const MIN_TASK_RECALL_BLOCK_LEN: usize = 180;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const REL_PATH_TASK_LEARNING_INDEX: &str = "memory/task_learning_index.sqlite3";
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const TASK_LEARNING_INDEX_VERSION: u32 = 1;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const TASK_LEARNING_INDEX_CANDIDATE_LIMIT: usize = 16;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,6 +165,7 @@ pub struct TaskLearningHit {
 #[serde(rename_all = "snake_case")]
 pub enum TaskLearningRecallBackend {
     Heuristic,
+    #[cfg(feature = "sqlite-index")]
     SqliteFtsHybrid,
 }
 
@@ -172,6 +173,7 @@ impl TaskLearningRecallBackend {
     pub fn label(self) -> &'static str {
         match self {
             Self::Heuristic => "task_learning_heuristic",
+            #[cfg(feature = "sqlite-index")]
             Self::SqliteFtsHybrid => "task_learning_sqlite_fts_hybrid",
         }
     }
@@ -199,7 +201,7 @@ pub struct TaskLearningScoreBreakdown {
     pub reason_fragments: Vec<String>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct TaskLearningIndexSignature {
     record_count: usize,
@@ -828,7 +830,7 @@ fn task_learning_index_hints(
     HashMap<String, TaskLearningIndexHint>,
     TaskLearningRecallBackend,
 ) {
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "sqlite-index")]
     {
         if records.is_empty() || normalized_query.is_empty() || terms.is_empty() {
             return (HashMap::new(), TaskLearningRecallBackend::Heuristic);
@@ -841,14 +843,14 @@ fn task_learning_index_hints(
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(feature = "sqlite-index"))]
     {
         let _ = (records, normalized_query, terms, active_run_id);
         (HashMap::new(), TaskLearningRecallBackend::Heuristic)
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn task_learning_index_hints_sqlite(
     records: &[TaskLearningRecord],
     normalized_query: &str,
@@ -869,7 +871,7 @@ fn task_learning_index_hints_sqlite(
     query_task_learning_hints_sqlite(&conn, normalized_query, terms, active_run_id)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn build_task_learning_index_signature(
     records: &[TaskLearningRecord],
 ) -> TaskLearningIndexSignature {
@@ -906,12 +908,12 @@ fn build_task_learning_index_signature(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn task_learning_index_path(_signature: &TaskLearningIndexSignature) -> PathBuf {
     crate::platform::state_mount_path().join(REL_PATH_TASK_LEARNING_INDEX)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn ensure_task_learning_sqlite_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS task_learning_meta (
@@ -951,7 +953,7 @@ fn ensure_task_learning_sqlite_schema(conn: &Connection) -> Result<()> {
     .map_err(|e| Error::config("task_learning_index", e.to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn task_learning_sqlite_needs_rebuild(
     conn: &Connection,
     signature: &TaskLearningIndexSignature,
@@ -983,7 +985,7 @@ fn task_learning_sqlite_needs_rebuild(
     Ok(parsed != *signature)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn task_learning_sqlite_rebuild(
     conn: &mut Connection,
     records: &[TaskLearningRecord],
@@ -1055,7 +1057,7 @@ fn task_learning_sqlite_rebuild(
         .map_err(|e| Error::config("task_learning_index", e.to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn query_task_learning_hints_sqlite(
     conn: &Connection,
     normalized_query: &str,
@@ -1137,7 +1139,7 @@ fn query_task_learning_hints_sqlite(
     Ok(hints)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn task_learning_match_expression(normalized_query: &str, terms: &[String]) -> Option<String> {
     let mut parts = Vec::new();
     if normalized_query.contains(' ') {
@@ -2516,7 +2518,7 @@ mod tests {
         let inspection =
             inspect_task_learning(&store, "telegram", "chat-1", "Need the release fix path");
 
-        let expected_backend = if cfg!(target_os = "linux") {
+        let expected_backend = if cfg!(feature = "sqlite-index") {
             "task_learning_sqlite_fts_hybrid"
         } else {
             "task_learning_heuristic"

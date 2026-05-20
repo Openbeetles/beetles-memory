@@ -1,21 +1,30 @@
 //! Public SDK facade for Beetle Memory.
 
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ActiveWorkStore, ForegroundWorkStatus};
+pub use bm_core::llm::{LlmClient, LlmHttpClient};
 pub use bm_core::memory::{
     apply_long_term_memory_extraction, build_long_term_memory_extraction_input,
     inspect_archive_recall, inspect_continuity_capsule_recall, inspect_memory_hygiene,
     inspect_personality_governance, inspect_runtime_skill_recall, inspect_shared_factual_recall,
     inspect_task_recall, inspect_working_recall, load_prompt_memory_context,
     recall_long_term_memory_block, run_post_reply_memory_maintenance,
-    search_archive_records_detailed, ContinuityCapsuleMaintenanceOutcome, LongTermMemoryDraft,
-    LongTermMemoryEntry, LongTermMemoryQuery, LongTermMemoryStore, MemoryProfile,
+    search_archive_records_detailed, AutonomyStrategyStore, ContinuityCapsuleMaintenanceOutcome,
+    ContinuityCapsuleStore, CoreRevisionLedgerStore, ExecutionStateStore, FeltSignificanceStore,
+    InnerConflictStore, InnerLifeStore, LongTermMemoryDraft, LongTermMemoryEntry,
+    LongTermMemoryExtractionStateStore, LongTermMemoryQuery, LongTermMemoryStore, MemoryProfile,
+    MemoryStore, MemorySystemKind as MemoryRuntimeSystemKind, MentalPrivacyStore, OuterVoiceStore,
     PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostReplyMemoryMaintenanceOutcome, PromptMemoryContext, PromptMemoryContextParams,
-    RecallCandidate, RecallPlane, RecallQuery, RecallSelectionReport, WorkingRecallInspection,
+    PostReplyMemoryMaintenanceOutcome, PrivateDocStore, PrivateGardenStore, PromptMemoryContext,
+    PromptMemoryContextParams, PromptParticipationPlan, RecallCandidate, RecallPlane, RecallQuery,
+    RecallSelectionReport, RelationshipConstitutionStore, RelationshipPortfolioStore,
+    RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore,
+    SelfModelStore, SessionStore, SessionSummaryStore, TemperamentContinuityStore,
+    TurnContinuityEvidenceStore, TurnLedgerStore, WorkingRecallInspection, WorldSenseStore,
 };
+pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::{
-    build_memory_operator_surface as build_operator_surface, Platform, SkillMetaStore,
-    SkillStorage, StateFs,
+    build_memory_operator_surface as build_operator_surface,
+    MemorySystemKind as PlatformMemorySystemKind, Platform, SkillMetaStore, SkillStorage, StateFs,
 };
 pub use bm_core::runtime::{
     ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, RuntimeModeSnapshot,
@@ -28,6 +37,10 @@ pub use bm_core::skills::{
     CapabilityAtomImportOutcome, CapabilityAtomSyncOutcome, RuntimeSkillGovernanceOutcome,
     RuntimeSkillHit, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteOutcome,
     RuntimeSkillWriteSource,
+};
+pub use bm_core::task::{TaskItem, TaskPriority, TaskQuery, TaskStatus, TaskStore};
+pub use bm_core::task_execution::{
+    TaskArtifactStore, TaskExecutionLedgerStore, TaskLearningStore, TaskRunStore,
 };
 pub use bm_core::{Error, Result};
 

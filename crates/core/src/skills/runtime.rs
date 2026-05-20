@@ -7,13 +7,13 @@ use crate::util::{
     collect_retrieval_terms, looks_like_raw_payload_text, normalize_retrieval_text,
     procedural_text_signal_count, trigram_overlap_score, truncate_content_to_max,
 };
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use rusqlite::{params, Connection, OptionalExtension};
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use std::collections::hash_map::DefaultHasher;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use std::hash::{Hash, Hasher};
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use std::path::PathBuf;
 
 const RUNTIME_SKILL_MARKER: &str = "<!-- beetle:runtime-skill -->";
@@ -27,18 +27,18 @@ const MAX_RUNTIME_SKILL_GENOME_NODES: usize = 8;
 const MAX_RUNTIME_SKILL_STRATEGY_DIFFS: usize = 8;
 const MAX_RUNTIME_SKILL_DOCTRINE_RECORDS: usize = 6;
 const MAX_RUNTIME_SKILL_GENOME_RECORDS: usize = 6;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const RUNTIME_SKILL_INDEX_VERSION: u32 = 1;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const RUNTIME_SKILL_INDEX_CANDIDATE_LIMIT: usize = 24;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const REL_PATH_RUNTIME_SKILL_INDEX: &str = "memory/runtime_skill_index.sqlite3";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RuntimeSkillRecallBackend {
     #[default]
     Heuristic,
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "sqlite-index")]
     SqliteFtsHybrid,
 }
 
@@ -46,7 +46,7 @@ impl RuntimeSkillRecallBackend {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Heuristic => "runtime_skill_hybrid",
-            #[cfg(target_os = "linux")]
+            #[cfg(feature = "sqlite-index")]
             Self::SqliteFtsHybrid => "runtime_skill_sqlite_fts_hybrid",
         }
     }
@@ -58,7 +58,7 @@ pub(crate) struct RuntimeSkillRecallResult {
     pub backend: RuntimeSkillRecallBackend,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct RuntimeSkillIndexSignature {
     record_count: usize,
@@ -1066,7 +1066,7 @@ fn runtime_skill_index_hints(
     std::collections::HashMap<String, RuntimeSkillIndexHint>,
     RuntimeSkillRecallBackend,
 ) {
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "sqlite-index")]
     {
         if records.is_empty() || normalized_query.is_empty() || terms.is_empty() {
             return (
@@ -1086,7 +1086,7 @@ fn runtime_skill_index_hints(
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(feature = "sqlite-index"))]
     {
         let _ = (records, normalized_query, terms, preferred_chat_id);
         (
@@ -1096,7 +1096,7 @@ fn runtime_skill_index_hints(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn runtime_skill_index_hints_sqlite(
     records: &[RuntimeSkillRecord],
     normalized_query: &str,
@@ -1118,7 +1118,7 @@ fn runtime_skill_index_hints_sqlite(
     query_runtime_skill_hints_sqlite(&conn, normalized_query, terms, preferred_chat_id)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn build_runtime_skill_index_signature(
     records: &[RuntimeSkillRecord],
 ) -> RuntimeSkillIndexSignature {
@@ -1149,12 +1149,12 @@ fn build_runtime_skill_index_signature(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn runtime_skill_index_path(_signature: &RuntimeSkillIndexSignature) -> PathBuf {
     crate::platform::state_mount_path().join(REL_PATH_RUNTIME_SKILL_INDEX)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn ensure_runtime_skill_sqlite_schema(conn: &Connection) -> crate::error::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS runtime_skill_meta (
@@ -1195,7 +1195,7 @@ fn ensure_runtime_skill_sqlite_schema(conn: &Connection) -> crate::error::Result
     .map_err(|e| crate::error::Error::config("runtime_skill_index", e.to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn runtime_skill_sqlite_needs_rebuild(
     conn: &Connection,
     signature: &RuntimeSkillIndexSignature,
@@ -1227,7 +1227,7 @@ fn runtime_skill_sqlite_needs_rebuild(
     Ok(parsed != *signature)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn runtime_skill_sqlite_rebuild(
     conn: &mut Connection,
     records: &[RuntimeSkillRecord],
@@ -1302,7 +1302,7 @@ fn runtime_skill_sqlite_rebuild(
         .map_err(|e| crate::error::Error::config("runtime_skill_index", e.to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn query_runtime_skill_hints_sqlite(
     conn: &Connection,
     normalized_query: &str,
@@ -1378,7 +1378,7 @@ fn query_runtime_skill_hints_sqlite(
     Ok(hints)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn runtime_skill_match_expression(normalized_query: &str, terms: &[String]) -> Option<String> {
     let mut parts = Vec::new();
     if normalized_query.contains(' ') {

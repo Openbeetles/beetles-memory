@@ -106,9 +106,25 @@ pub trait Platform: Send + Sync {
 }
 
 pub fn state_mount_path() -> PathBuf {
-    std::env::var_os("BEETLE_MEMORY_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    if let Some(path) = std::env::var_os("BEETLE_MEMORY_STATE_DIR") {
+        return PathBuf::from(path);
+    }
+    #[cfg(test)]
+    {
+        let thread_id = format!("{:?}", std::thread::current().id())
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>();
+        std::env::temp_dir().join(format!(
+            "beetle-memory-core-test-{}-{}",
+            std::process::id(),
+            thread_id
+        ))
+    }
+    #[cfg(not(test))]
+    {
+        PathBuf::from(".")
+    }
 }
 
 pub mod task_wdt {

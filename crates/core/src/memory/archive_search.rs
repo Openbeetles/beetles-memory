@@ -5,11 +5,11 @@ use crate::util::{
     collect_retrieval_terms, normalize_retrieval_text, trigram_overlap_score,
     truncate_content_to_max,
 };
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -24,9 +24,9 @@ const DEFAULT_ARCHIVE_GET_CONTENT_LEN: usize = 1800;
 const ARCHIVE_SEARCH_EXCERPT_LEN: usize = 220;
 const ARCHIVE_GET_EXCERPT_LEN: usize = 320;
 const ARCHIVE_TRACE_MAX_MATCHED_TERMS: usize = 4;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const ARCHIVE_INDEX_VERSION: u32 = 2;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 const REL_PATH_ARCHIVE_INDEX: &str = "memory/archive_index.sqlite3";
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -35,6 +35,7 @@ pub enum ArchiveSearchBackendKind {
     #[default]
     Lexical,
     IndexedHybrid,
+    #[cfg(feature = "sqlite-index")]
     SqliteFtsHybrid,
 }
 
@@ -336,7 +337,7 @@ struct ArchiveSearchCandidate {
     backend_fts_score: u32,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct ArchiveSourceSignature {
     sessions_files: u64,
@@ -388,7 +389,7 @@ pub fn search_archive_records_detailed(
 ) -> Result<ArchiveSearchResult> {
     let terms = collect_archive_match_terms(query.query);
     let prepared = PreparedArchiveSearchQuery::new(query, &terms);
-    #[cfg(all(target_os = "linux", not(test)))]
+    #[cfg(all(feature = "sqlite-index", not(test)))]
     match search_archive_records_from_sqlite_detailed(
         session_store,
         memory_store,
@@ -459,7 +460,7 @@ pub(crate) fn maintain_archive_search_backend(
     memory_store: &dyn MemoryStore,
     turn_ledger_store: &dyn TurnLedgerStore,
 ) -> Result<bool> {
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "sqlite-index")]
     {
         let signature = build_archive_source_signature()?;
         let path = archive_index_path();
@@ -487,7 +488,7 @@ pub(crate) fn maintain_archive_search_backend(
         }
         Ok(needs_rebuild)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(feature = "sqlite-index"))]
     {
         let _ = session_store;
         let _ = memory_store;
@@ -635,7 +636,7 @@ fn collect_live_archive_candidates(
     Ok(candidates)
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "sqlite-index", not(test)))]
 fn search_archive_records_from_sqlite_detailed(
     session_store: &dyn SessionStore,
     memory_store: &dyn MemoryStore,
@@ -721,12 +722,12 @@ fn search_archive_records_from_sqlite_detailed(
     }))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn archive_index_path() -> PathBuf {
     crate::platform::state_mount_path().join(REL_PATH_ARCHIVE_INDEX)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn ensure_archive_sqlite_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS archive_meta (
@@ -773,7 +774,7 @@ fn ensure_archive_sqlite_schema(conn: &Connection) -> Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn archive_sqlite_needs_rebuild(
     conn: &Connection,
     signature: &ArchiveSourceSignature,
@@ -805,7 +806,7 @@ fn archive_sqlite_needs_rebuild(
     Ok(parsed != *signature)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn archive_sqlite_rebuild(
     conn: &mut Connection,
     candidates: &[ArchiveSearchCandidate],
@@ -872,7 +873,7 @@ fn archive_sqlite_rebuild(
         .map_err(|e| crate::error::Error::config("archive_index", e.to_string()))
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "sqlite-index", not(test)))]
 fn query_archive_candidates_sqlite(
     conn: &Connection,
     query: PreparedArchiveSearchQuery<'_>,
@@ -932,7 +933,7 @@ fn query_archive_candidates_sqlite(
     Ok(out.into_values().collect())
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "sqlite-index", not(test)))]
 fn map_archive_sqlite_candidate_row(
     row: &rusqlite::Row<'_>,
     preferred_chat_id: Option<&str>,
@@ -987,7 +988,7 @@ fn map_archive_sqlite_candidate_row(
     ))
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "sqlite-index", not(test)))]
 fn upsert_archive_candidate(
     slot: std::collections::hash_map::Entry<'_, String, ArchiveSearchCandidate>,
     candidate: ArchiveSearchCandidate,
@@ -1004,7 +1005,7 @@ fn upsert_archive_candidate(
     }
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "sqlite-index", not(test)))]
 fn archive_candidate_matches_query(
     candidate: &ArchiveSearchCandidate,
     query: ArchiveSearchQuery<'_>,
@@ -1017,7 +1018,7 @@ fn archive_candidate_matches_query(
     query.sources.is_empty() || query.sources.contains(&candidate.source)
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "sqlite-index", not(test)))]
 fn archive_sqlite_match_expression(terms: &[String]) -> Option<String> {
     let mut parts = Vec::new();
     for term in terms {
@@ -1030,7 +1031,7 @@ fn archive_sqlite_match_expression(terms: &[String]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" OR "))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn build_archive_source_signature() -> Result<ArchiveSourceSignature> {
     let root = crate::platform::state_mount_path();
     let sessions = scan_path_signature(&root.join(super::REL_PATH_SESSIONS_DIR))?;
@@ -1051,7 +1052,7 @@ fn build_archive_source_signature() -> Result<ArchiveSourceSignature> {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn scan_path_signature(path: &Path) -> Result<(u64, u64, u64, u64)> {
     if !path.exists() {
         return Ok((0, 0, 0, 0));
@@ -1103,7 +1104,7 @@ fn scan_path_signature(path: &Path) -> Result<(u64, u64, u64, u64)> {
     Ok((files, bytes, latest, fingerprint))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn modified_unix_nanos(meta: &std::fs::Metadata) -> u64 {
     meta.modified()
         .ok()
@@ -1112,7 +1113,7 @@ fn modified_unix_nanos(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn archive_signature_hash_update(hash: &mut u64, bytes: &[u8]) {
     const FNV_PRIME: u64 = 0x100000001b3;
     for byte in bytes {
@@ -1121,7 +1122,7 @@ fn archive_signature_hash_update(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "sqlite-index")]
 fn file_content_fingerprint(path: &Path) -> Result<u64> {
     let bytes = std::fs::read(path).map_err(|e| crate::error::Error::io("archive_index", e))?;
     let mut hash = 0xcbf29ce484222325u64;
@@ -2346,7 +2347,7 @@ mod tests {
         assert_eq!(error.stage(), "archive_search_chat_ids");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "sqlite-index")]
     #[test]
     fn archive_source_signature_changes_on_same_length_rewrite() {
         let root = std::env::temp_dir().join(format!(
