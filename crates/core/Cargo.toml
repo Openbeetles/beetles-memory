@@ -10,3 +10,11 @@ path = "src/lib.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true
+base64.workspace = true
+urlencoding.workspace = true
+log.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite.workspace = true

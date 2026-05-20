@@ -8,10 +8,7 @@ name = "bm_store"
 path = "src/lib.rs"
 
 [features]
-sqlite = ["dep:rusqlite"]
+sqlite = []
 
 [dependencies]
 bm-core.workspace = true
-rusqlite = { workspace = true, optional = true }
-serde.workspace = true
-serde_json.workspace = true

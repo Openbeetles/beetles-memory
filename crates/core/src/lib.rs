@@ -1,29 +1,31 @@
-//! Core Beetle Memory contracts.
+//! Beetle Memory core.
+//!
+//! This crate contains the standalone memory kernel extracted from the Beetle
+//! source truth. Host projects integrate through neutral SDK/store traits; no
+//! external communication adapter is implemented here.
+#![allow(dead_code, unused_imports, unexpected_cfgs)]
 
-mod adapter;
-mod archive;
-mod context;
-mod domain;
-mod evolution;
-mod extraction;
-mod long_term;
-mod procedural;
-mod projection;
-mod recall;
-mod soul;
-mod source;
-mod write;
+mod bus;
+pub mod memory;
+pub mod skills;
 
-pub use adapter::*;
-pub use archive::*;
-pub use context::*;
-pub use domain::*;
-pub use evolution::*;
-pub use extraction::*;
-pub use long_term::*;
-pub use procedural::*;
-pub use projection::*;
-pub use recall::*;
-pub use soul::*;
-pub use source::*;
-pub use write::*;
+pub mod agent;
+mod constants;
+pub mod error;
+pub mod i18n;
+pub mod llm;
+pub mod metrics;
+pub mod orchestrator;
+pub mod platform;
+pub mod reasoning;
+pub mod reminder;
+pub mod runtime;
+pub mod state;
+pub mod task;
+pub mod task_execution;
+pub mod tools;
+pub mod util;
+
+pub use error::{Error, Result};
+pub use platform::Platform;
+pub use reasoning::{load_idle_memory_forge_operator_summary, IdleMemoryForgeAdjudicationState};
