@@ -2,6 +2,7 @@
 
 mod adapter;
 mod archive;
+mod context;
 mod domain;
 mod evolution;
 mod extraction;
@@ -15,6 +16,7 @@ mod write;
 
 pub use adapter::*;
 pub use archive::*;
+pub use context::*;
 pub use domain::*;
 pub use evolution::*;
 pub use extraction::*;

@@ -8,9 +8,9 @@ use bm_core::{
     LongTermMemoryKind, MemoryPlane, MentalPrivacyLayer, ProceduralEvidenceRef,
     ProceduralSkillDraft, ProceduralSkillImportEnvelope, ProceduralSkillOrigin,
     ProceduralSkillRecallQuery, ProceduralSkillReuseOutcome, ProjectionReport, ProjectionSurface,
-    PromptRecallIntent, RecallSelectionReport, RecallWarning, RuntimeProfile, SourceKind,
-    SourceRef, SubjectAssemblyReport, SubjectAssemblySource, WriteCandidate, WriteDecision,
-    WriteRejectReason, WriteReport,
+    PromptRecallIntent, RecallAssemblyRequest, RecallSelectionReport, RecallWarning,
+    RuntimeProfile, SourceKind, SourceRef, SubjectAssemblyReport, SubjectAssemblySource,
+    WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
 };
 use bm_sdk::MemoryRuntimeBuilder;
 use bm_store::InMemoryStore;
@@ -339,6 +339,190 @@ pub fn run_s6_replay() -> S6ReplayReport {
     let projection = runtime.project_procedural_skills(&recall, ProjectionSurface::Prompt);
     report.projection_blocks = projection.blocks.len();
     report
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct S7ReplayReport {
+    pub prompt_assemblies: usize,
+    pub projection_blocks: usize,
+    pub sanitized_fragments: usize,
+    pub budget_trimmed: bool,
+    pub raw_private_exposed: bool,
+    pub intents: Vec<PromptRecallIntent>,
+    pub selected_planes: Vec<MemoryPlane>,
+    pub profiles: Vec<RuntimeProfile>,
+    pub warnings: Vec<String>,
+}
+
+pub fn run_s7_replay() -> S7ReplayReport {
+    let mut report = S7ReplayReport::default();
+    let private_probe = "SECRET-S7-REPLAY";
+
+    let mut runtime = replay_runtime(RuntimeProfile::DevFull);
+    seed_s7_records(&mut runtime, "task:s7:replay", private_probe);
+
+    let prompt = runtime.assemble_recall(
+        RecallAssemblyRequest::new(
+            "agent:s7",
+            "task:s7:replay",
+            "继续",
+            ProjectionSurface::Prompt,
+            RuntimeProfile::DevFull,
+        )
+        .active_task("继续 S7 replay")
+        .recent_grounding("S5/S6 replay already passed")
+        .redact_fragment(private_probe),
+    );
+    record_s7_assembly(&mut report, &prompt, private_probe);
+
+    let evidence = runtime.assemble_recall(RecallAssemblyRequest::new(
+        "agent:s7",
+        "task:s7:replay",
+        "日志证据",
+        ProjectionSurface::Replay,
+        RuntimeProfile::DevFull,
+    ));
+    record_s7_assembly(&mut report, &evidence, private_probe);
+
+    let adapter = runtime.project_context(
+        RecallAssemblyRequest::new(
+            "agent:s7",
+            "task:s7:replay",
+            "检查主体",
+            ProjectionSurface::Adapter,
+            RuntimeProfile::DevFull,
+        )
+        .intent_hint(PromptRecallIntent::Continuity)
+        .redact_fragment(private_probe),
+    );
+    report.projection_blocks += adapter.blocks.len();
+    report.raw_private_exposed |= adapter
+        .blocks
+        .iter()
+        .any(|block| block.content.contains(private_probe));
+    report.warnings.extend(adapter.warnings);
+
+    let mut compact = replay_runtime(RuntimeProfile::EspCompact);
+    compact.write(
+        WriteCandidate::new(
+            "agent:s7",
+            "task:s7:compact",
+            "compact active continuity ".repeat(80),
+        )
+        .source("replay:s7:compact")
+        .plane_hint(MemoryPlane::ContinuityCapsule),
+    );
+    let compact_assembly = compact.assemble_recall(
+        RecallAssemblyRequest::new(
+            "agent:s7",
+            "task:s7:compact",
+            "继续",
+            ProjectionSurface::Prompt,
+            RuntimeProfile::EspCompact,
+        )
+        .active_task("compact profile must trim prompt assembly ".repeat(40)),
+    );
+    record_s7_assembly(&mut report, &compact_assembly, private_probe);
+
+    report
+}
+
+fn seed_s7_records(
+    runtime: &mut bm_sdk::MemoryRuntime<InMemoryStore>,
+    scope: &str,
+    private_probe: &str,
+) {
+    runtime.write(
+        WriteCandidate::new(
+            "agent:s7",
+            scope,
+            "S7 replay fact: recall orchestration precedes communication adapters",
+        )
+        .source("replay:s7:factual")
+        .plane_hint(MemoryPlane::SharedFactual),
+    );
+    runtime.write(
+        WriteCandidate::new(
+            "agent:s7",
+            scope,
+            "archive evidence: prompt budget and sanitizer must be reported",
+        )
+        .source("archive:turn:s7")
+        .plane_hint(MemoryPlane::ArchiveEvidence)
+        .evidence(EvidenceState::ArchiveOnly),
+    );
+    let procedural = runtime.write(
+        WriteCandidate::new(
+            "agent:s7",
+            scope,
+            "下次做阶段内核时，先写红灯测试，再补 SDK 编排和 replay gate。",
+        )
+        .source("task-learning:s7")
+        .plane_hint(MemoryPlane::Procedural),
+    );
+    if let Some(record_id) = procedural.record_id.as_ref() {
+        runtime.record_procedural_skill_outcome(
+            std::slice::from_ref(record_id),
+            ProceduralSkillReuseOutcome::Succeeded,
+            30,
+            "validated by S7 replay",
+        );
+    }
+    runtime.write(
+        WriteCandidate::new(
+            "agent:s7",
+            scope,
+            "继续 S7 replay: active work is prompt assembly",
+        )
+        .source("replay:s7:continuity")
+        .plane_hint(MemoryPlane::ContinuityCapsule),
+    );
+    runtime.write(
+        WriteCandidate::new(
+            "agent:s7",
+            scope,
+            format!("subject projection summary, {private_probe} must be redacted"),
+        )
+        .source("replay:s7:subject")
+        .plane_hint(MemoryPlane::SubjectProjection),
+    );
+}
+
+fn record_s7_assembly(
+    report: &mut S7ReplayReport,
+    assembly: &bm_core::PromptAssemblyReport,
+    private_probe: &str,
+) {
+    report.prompt_assemblies += 1;
+    report.projection_blocks += assembly.blocks.len();
+    report.sanitized_fragments += assembly.sanitizer.redacted_fragments;
+    report.budget_trimmed |= assembly.budget.total.trimmed
+        || assembly.budget.active_task.trimmed
+        || assembly.budget.governed_memory.trimmed;
+    report.raw_private_exposed |= assembly
+        .blocks
+        .iter()
+        .any(|block| block.content.contains(private_probe));
+    extend_unique_prompt_intent(&mut report.intents, assembly.router.intent);
+    extend_unique_runtime_profile(&mut report.profiles, assembly.profile);
+    for block in &assembly.blocks {
+        if !report.selected_planes.contains(&block.plane) {
+            report.selected_planes.push(block.plane);
+        }
+    }
+    report.warnings.extend(assembly.warnings.clone());
+}
+
+fn extend_unique_prompt_intent(target: &mut Vec<PromptRecallIntent>, value: PromptRecallIntent) {
+    if !target.contains(&value) {
+        target.push(value);
+    }
+}
+
+fn extend_unique_runtime_profile(target: &mut Vec<RuntimeProfile>, value: RuntimeProfile) {
+    if !target.contains(&value) {
+        target.push(value);
+    }
 }
 
 fn replay_s3_soul_governance_summary(report: &mut S3ReplayReport) {

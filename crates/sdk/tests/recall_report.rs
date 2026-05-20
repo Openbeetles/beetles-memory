@@ -42,14 +42,33 @@ fn recall_report_contains_plane_reports_rerank_and_skip_reasons() {
 
     assert_eq!(report.selected.len(), 1);
     assert_eq!(report.selected[0].plane, MemoryPlane::Procedural);
+    assert!(report.selected[0]
+        .reason_fragments
+        .iter()
+        .any(|reason| reason.contains("intent=Procedural")));
     assert!(!report.skipped.is_empty());
+    assert!(report.skipped[0]
+        .reason_fragments
+        .iter()
+        .any(|reason| reason.contains("limit_reached")));
     assert!(report
         .plane_reports
         .iter()
-        .any(|plane| plane.plane == MemoryPlane::Procedural && plane.selected == 1));
+        .any(|plane| plane.plane == MemoryPlane::Procedural
+            && plane.selected == 1
+            && plane.top_score.is_some()
+            && plane.top_reason.is_some()));
     assert_eq!(report.rerank.intent, PromptRecallIntent::Procedural);
+    assert_eq!(report.rerank.top_planes[0].candidate_count, 1);
+    assert_eq!(report.rerank.top_planes[0].selected_count, 1);
     assert_eq!(
         report.rerank.top_candidates[0].plane,
         MemoryPlane::Procedural
     );
+    assert!(report.rerank.top_candidates[0].selected);
+    assert!(
+        report.rerank.top_candidates[0].rerank_score
+            >= report.rerank.top_candidates[0].original_score
+    );
+    assert!(!report.rerank.skipped_candidates.is_empty());
 }

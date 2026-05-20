@@ -16,11 +16,15 @@ use bm_core::{
     ProceduralSkillRecallCandidate, ProceduralSkillRecallQuery, ProceduralSkillRecallReport,
     ProceduralSkillReuseOutcome, ProceduralSkillSkippedCandidate, ProceduralSkillState,
     ProceduralSkillStrategyDiff, ProceduralSkillWriteAction, ProceduralSkillWriteReason,
-    ProceduralSkillWriteReport, ProjectionBlock, ProjectionReport, ProjectionSurface,
-    PromptRecallIntent, RecallPlaneReport, RecallQuery, RecallScoreBreakdown, RecallSelection,
-    RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile, SkippedRecallCandidate,
-    SoulGovernanceReason, SourceKind, SourceRef, SubjectAssemblyReport, SubjectAssemblySource,
-    SubjectAssemblySourceRef, WriteCandidate, WriteDecision, WriteRejectReason, WriteReport,
+    ProceduralSkillWriteReport, ProjectionBlock, ProjectionReport, ProjectionSanitizerReport,
+    ProjectionSurface, PromptAssemblyBudgetReport, PromptAssemblyBudgetSlice, PromptAssemblyGroups,
+    PromptAssemblyReport, PromptContextBlock, PromptContextGroup, PromptRecallIntent,
+    PromptRecallRouterDecision, PromptRecallRouterSignal, RecallAssemblyRequest,
+    RecallPlaneExecutionReport, RecallPlaneReport, RecallQuery, RecallScoreBreakdown,
+    RecallSelection, RecallSelectionReport, RecallSkipReason, RecallWarning, RuntimeProfile,
+    SkippedRecallCandidate, SoulGovernanceReason, SourceKind, SourceRef, SubjectAssemblyReport,
+    SubjectAssemblySource, SubjectAssemblySourceRef, WriteCandidate, WriteDecision,
+    WriteRejectReason, WriteReport,
 };
 use bm_store::{MemoryStore, StoreError};
 
@@ -851,17 +855,16 @@ where
             }
             increment_plane_count(&mut available_by_plane, record.plane);
 
-            if query
-                .identity
-                .as_deref()
-                .is_some_and(|identity| identity != record.identity)
-            {
-                skipped.push(SkippedRecallCandidate {
-                    record_id: record.id,
-                    plane: record.plane,
-                    reason: RecallSkipReason::ScopeMismatch,
-                });
-                continue;
+            if let Some(identity) = query.identity.as_deref() {
+                if identity != record.identity {
+                    skipped.push(SkippedRecallCandidate {
+                        record_id: record.id,
+                        plane: record.plane,
+                        reason: RecallSkipReason::ScopeMismatch,
+                        reason_fragments: vec![format!("identity_mismatch:expected={identity}")],
+                    });
+                    continue;
+                }
             }
 
             if !self.profile.allows_plane(record.plane) {
@@ -869,6 +872,11 @@ where
                     record_id: record.id,
                     plane: record.plane,
                     reason: RecallSkipReason::ProfileBudget,
+                    reason_fragments: vec![format!(
+                        "profile_rejected:profile={};plane={}",
+                        self.profile.as_str(),
+                        record.plane.as_str()
+                    )],
                 });
                 continue;
             }
@@ -884,6 +892,7 @@ where
                     record_id: record.id,
                     plane: record.plane,
                     reason: RecallSkipReason::PrivacyPolicy,
+                    reason_fragments: vec!["procedural_skill_not_active".to_owned()],
                 });
                 continue;
             }
@@ -893,6 +902,7 @@ where
                     record_id: record.id,
                     plane: record.plane,
                     reason: RecallSkipReason::DomainFiltered,
+                    reason_fragments: vec!["domain_filter_mismatch".to_owned()],
                 });
                 continue;
             }
@@ -902,12 +912,19 @@ where
                     record_id: record.id,
                     plane: record.plane,
                     reason: RecallSkipReason::PlaneFiltered,
+                    reason_fragments: vec!["plane_filter_mismatch".to_owned()],
                 });
                 continue;
             }
 
             let mut selection = RecallSelection::from(record);
             selection.score = score_selection(query.intent, selection.plane);
+            selection
+                .reason_fragments
+                .push(format!("intent={:?}", query.intent));
+            selection
+                .reason_fragments
+                .push(format!("plane={}", selection.plane.as_str()));
             allowed.push(selection);
         }
 
@@ -922,10 +939,13 @@ where
             if selected.len() < query.limit {
                 selected.push(selection);
             } else {
+                let mut reason_fragments = selection.reason_fragments;
+                reason_fragments.push(format!("limit_reached:limit={}", query.limit));
                 skipped.push(SkippedRecallCandidate {
                     record_id: selection.record_id,
                     plane: selection.plane,
                     reason: RecallSkipReason::LimitReached,
+                    reason_fragments,
                 });
             }
         }
@@ -942,15 +962,22 @@ where
                     .iter()
                     .filter(|candidate| candidate.plane == plane)
                     .count();
+                let top_selection = selected
+                    .iter()
+                    .filter(|selection| selection.plane == plane)
+                    .max_by_key(|selection| selection.score.total);
                 RecallPlaneReport {
                     plane,
                     available,
                     selected: selected_count,
                     skipped: skipped_count,
+                    top_score: top_selection.map(|selection| selection.score.total),
+                    top_reason: top_selection.map(|selection| selection.reason_fragments.join(";")),
                 }
             })
             .collect::<Vec<_>>();
 
+        let warnings = recall_warnings(self.profile, &selected);
         let rerank = CrossPlaneRerankReport {
             intent: query.intent,
             top_planes: plane_reports
@@ -958,12 +985,10 @@ where
                 .filter(|report| report.selected > 0)
                 .map(|report| CrossPlanePlaneSignal {
                     plane: report.plane,
-                    score: selected
-                        .iter()
-                        .filter(|selection| selection.plane == report.plane)
-                        .map(|selection| selection.score.total)
-                        .max()
-                        .unwrap_or_default(),
+                    score: report.top_score.unwrap_or_default(),
+                    candidate_count: report.available,
+                    selected_count: report.selected,
+                    top_reason: report.top_reason.clone(),
                 })
                 .collect(),
             top_candidates: selected
@@ -971,13 +996,21 @@ where
                 .map(|selection| CrossPlaneRerankCandidate {
                     record_id: selection.record_id.clone(),
                     plane: selection.plane,
+                    selected: true,
+                    original_score: selection.score.total,
+                    rerank_score: selection.score.total,
                     score: selection.score.total,
                     source: selection.source.clone(),
+                    reason_fragments: {
+                        let mut reasons = selection.reason_fragments.clone();
+                        reasons.push(format!("rerank:intent={:?}", query.intent));
+                        reasons
+                    },
                 })
                 .collect(),
+            skipped_candidates: skipped.clone(),
+            warnings: recall_warning_messages(&warnings),
         };
-
-        let warnings = recall_warnings(self.profile, &selected);
 
         RecallSelectionReport {
             selected,
@@ -1026,9 +1059,200 @@ where
         }
     }
 
+    pub fn assemble_recall(&self, mut request: RecallAssemblyRequest) -> PromptAssemblyReport {
+        request.profile = self.profile;
+        request.limits.max_bytes = request.limits.max_bytes.min(
+            self.profile
+                .projection_budget_profile(request.surface)
+                .total_bytes,
+        );
+        let intent = decide_assembly_intent(&request);
+        let mut plane_reports = Vec::new();
+        for plane in MemoryPlaneSet::all() {
+            plane_reports.push(self.recall_plane_for_assembly(&request, intent, plane));
+        }
+        let router = build_router_decision(&request, intent, &plane_reports);
+        let selected = selected_for_assembly(&plane_reports, intent, request.limits.max_blocks);
+        let rerank = rerank_for_assembly(intent, &selected, &plane_reports);
+        let budget_profile = self.profile.projection_budget_profile(request.surface);
+        let mut sanitizer = ProjectionSanitizerReport::new(request.surface);
+        let mut context_blocks = Vec::new();
+        let mut blocks = Vec::new();
+        let mut groups = PromptAssemblyGroups::default();
+        let active_seed = active_context_text(&request);
+        push_group_text(
+            &mut groups.active_task_context,
+            sanitize_projection_text(&active_seed, &request, &mut sanitizer),
+        );
+
+        for selection in selected {
+            let group = group_for_selection(&selection);
+            let projected = project_content_for_context(&selection, request.surface);
+            let sanitized = sanitize_projection_text(&projected, &request, &mut sanitizer);
+            if sanitized.trim().is_empty() {
+                continue;
+            }
+            let content = trim_to_budget(sanitized, budget_profile.block_bytes);
+            let block = ProjectionBlock {
+                record_id: selection.record_id.clone(),
+                domain: selection.domain,
+                plane: selection.plane,
+                content,
+                source: selection.source.clone(),
+                privacy_filtered: privacy_filtered_for_projection(&selection, request.surface)
+                    || surface_requires_report_first(selection.plane, request.surface),
+            };
+            push_group_text(group_text_mut(&mut groups, group), block.content.clone());
+            context_blocks.push(PromptContextBlock {
+                group,
+                projection: block.clone(),
+            });
+            blocks.push(block);
+        }
+
+        let budget = normalize_assembly_groups(&mut groups, &budget_profile);
+        let privacy_filtered_count = blocks.iter().filter(|block| block.privacy_filtered).count();
+        let mut warnings = assembly_warnings(
+            &plane_reports,
+            &budget,
+            &sanitizer,
+            request.surface,
+            privacy_filtered_count,
+        );
+        if blocks.is_empty() {
+            warnings.push("prompt_assembly:no_projection_blocks".to_owned());
+        }
+
+        PromptAssemblyReport {
+            surface: request.surface,
+            profile: self.profile,
+            request,
+            router,
+            rerank,
+            plane_reports,
+            groups,
+            context_blocks,
+            blocks,
+            budget,
+            sanitizer,
+            privacy_filtered_count,
+            warnings,
+        }
+    }
+
+    pub fn inspect_recall(
+        &self,
+        request: RecallAssemblyRequest,
+    ) -> bm_core::WorkingRecallInspectionReport {
+        let assembly = self.assemble_recall(request);
+        let selected = assembly
+            .plane_reports
+            .iter()
+            .map(|report| report.selected_count)
+            .sum();
+        let skipped = assembly
+            .plane_reports
+            .iter()
+            .map(|report| report.skipped_count)
+            .sum();
+        let warnings = assembly.warnings.clone();
+        bm_core::WorkingRecallInspectionReport {
+            assembly,
+            selected,
+            skipped,
+            warnings,
+        }
+    }
+
+    pub fn project_context(&self, request: RecallAssemblyRequest) -> ProjectionReport {
+        let assembly = self.assemble_recall(request);
+        let mut warnings = assembly.warnings.clone();
+        warnings.push(format!(
+            "prompt_assembly:intent={:?};planes={};sanitized={}",
+            assembly.router.intent,
+            assembly.plane_reports.len(),
+            assembly.sanitizer.redacted_fragments
+        ));
+        ProjectionReport {
+            surface: assembly.surface,
+            blocks: assembly.blocks,
+            privacy_filtered_count: assembly.privacy_filtered_count,
+            subject_assembly: None,
+            warnings,
+        }
+    }
+
     pub fn propose_evolution(&self, mut input: EvolutionInput) -> EvolutionProposalBatch {
         input.profile = self.profile;
         bm_evolve::deterministic_evolve(input).batch
+    }
+
+    fn recall_plane_for_assembly(
+        &self,
+        request: &RecallAssemblyRequest,
+        intent: PromptRecallIntent,
+        plane: MemoryPlane,
+    ) -> RecallPlaneExecutionReport {
+        let query = request.recall_query(intent, plane);
+        if !self.profile.allows_plane(plane) {
+            return RecallPlaneExecutionReport {
+                plane,
+                query: query.clone(),
+                backend: "profile_gate".to_owned(),
+                candidate_count: 0,
+                selected_count: 0,
+                selected_ids: Vec::new(),
+                skipped_count: 0,
+                miss_reason: Some("profile_rejected".to_owned()),
+                selection_note: None,
+                warnings: vec![format!("profile_rejected:plane={}", plane.as_str())],
+                recall: RecallSelectionReport {
+                    query,
+                    profile: self.profile,
+                    selected: Vec::new(),
+                    skipped: Vec::new(),
+                    plane_reports: Vec::new(),
+                    rerank: CrossPlaneRerankReport::empty(intent),
+                    warnings: Vec::new(),
+                },
+            };
+        }
+        let recall = self.recall(query.clone());
+        let plane_summary = recall
+            .plane_reports
+            .iter()
+            .find(|report| report.plane == plane);
+        let candidate_count = plane_summary.map(|report| report.available).unwrap_or(0);
+        let selected_count = recall.selected.len();
+        let skipped_count = recall.skipped.len();
+        let selected_ids = recall
+            .selected
+            .iter()
+            .map(|selection| selection.record_id.clone())
+            .collect::<Vec<_>>();
+        let miss_reason = (selected_count == 0).then(|| {
+            if candidate_count == 0 {
+                "no_candidate_for_plane".to_owned()
+            } else {
+                "no_selected_candidate_for_plane".to_owned()
+            }
+        });
+        let selection_note =
+            (selected_count > 0).then(|| "selected_for_prompt_assembly".to_owned());
+        let warnings = projection_warnings(&recall);
+        RecallPlaneExecutionReport {
+            plane,
+            query,
+            backend: "store_scan".to_owned(),
+            candidate_count,
+            selected_count,
+            selected_ids,
+            skipped_count,
+            miss_reason,
+            selection_note,
+            warnings,
+            recall,
+        }
     }
 
     pub fn submit_evolution_proposal(&mut self, proposal: &EvolutionProposal) -> WriteReport {
@@ -1523,6 +1747,42 @@ fn recall_warnings(profile: RuntimeProfile, selected: &[RecallSelection]) -> Vec
     warnings
 }
 
+fn recall_warning_messages(warnings: &[RecallWarning]) -> Vec<String> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            RecallWarning::ProfileBudgetTrimmed {
+                profile,
+                before,
+                after,
+            } => format!(
+                "profile_budget_trimmed:profile={};before={};after={}",
+                profile.as_str(),
+                before,
+                after
+            ),
+            RecallWarning::PrivacyFiltered { plane } => {
+                format!("privacy_filtered:plane={}", plane.as_str())
+            }
+            RecallWarning::EvidenceNotCanonical { record_id } => {
+                format!("evidence_not_canonical:record_id={record_id}")
+            }
+            RecallWarning::ArchiveEvidenceNotCanonical { record_id } => {
+                format!("archive_evidence_not_canonical:record_id={record_id}")
+            }
+            RecallWarning::ArchiveConflict { record_id } => {
+                format!("archive_conflict:record_id={record_id}")
+            }
+            RecallWarning::StaleLongTermMemory { record_id } => {
+                format!("stale_long_term_memory:record_id={record_id}")
+            }
+            RecallWarning::StoreUnavailable { operation, message } => {
+                format!("store_unavailable:operation={operation};message={message}")
+            }
+        })
+        .collect()
+}
+
 fn first_words(text: &str, max_words: usize) -> String {
     text.split_whitespace()
         .take(max_words)
@@ -1745,6 +2005,455 @@ fn projection_warnings(report: &RecallSelectionReport) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn decide_assembly_intent(request: &RecallAssemblyRequest) -> PromptRecallIntent {
+    if let Some(intent) = request.intent_hint {
+        return intent;
+    }
+    if request.exact_lookup {
+        return PromptRecallIntent::Factual;
+    }
+    let query = request.normalized_query.to_ascii_lowercase();
+    if contains_any(
+        &query,
+        &["原文", "日志", "证据", "archive", "evidence", "trace"],
+    ) {
+        return PromptRecallIntent::Evidence;
+    }
+    if contains_any(
+        &query,
+        &[
+            "流程",
+            "步骤",
+            "怎么",
+            "如何",
+            "how to",
+            "procedure",
+            "runbook",
+        ],
+    ) {
+        return PromptRecallIntent::Procedural;
+    }
+    if request.active_context.active_task.is_some() || structurally_weak_query(&query) {
+        return PromptRecallIntent::Continuity;
+    }
+    PromptRecallIntent::Mixed
+}
+
+fn build_router_decision(
+    request: &RecallAssemblyRequest,
+    intent: PromptRecallIntent,
+    reports: &[RecallPlaneExecutionReport],
+) -> PromptRecallRouterDecision {
+    let signals = reports
+        .iter()
+        .map(|report| {
+            let selected_score = report
+                .recall
+                .selected
+                .iter()
+                .map(|selection| selection.score.total)
+                .max()
+                .unwrap_or_default();
+            let context_bonus = match (intent, report.plane) {
+                (PromptRecallIntent::Continuity, MemoryPlane::ContinuityCapsule)
+                    if request.active_context.active_task.is_some() =>
+                {
+                    24
+                }
+                (PromptRecallIntent::Continuity, MemoryPlane::TaskRecall) => 12,
+                (PromptRecallIntent::Procedural, MemoryPlane::Procedural) => 16,
+                (PromptRecallIntent::Evidence, MemoryPlane::ArchiveEvidence) => 16,
+                _ => 0,
+            };
+            let score = selected_score.saturating_add(context_bonus);
+            let reason = if report.selected_count > 0 {
+                format!(
+                    "selected={};backend={};intent={:?}",
+                    report.selected_count, report.backend, intent
+                )
+            } else {
+                report
+                    .miss_reason
+                    .clone()
+                    .unwrap_or_else(|| "no_signal".to_owned())
+            };
+            PromptRecallRouterSignal {
+                plane: report.plane,
+                score,
+                reason,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut decision = PromptRecallRouterDecision::new(intent, router_reason(request, intent));
+    decision.signals = signals;
+    decision
+}
+
+fn router_reason(request: &RecallAssemblyRequest, intent: PromptRecallIntent) -> String {
+    match intent {
+        PromptRecallIntent::Factual => "exact_or_factual_query".to_owned(),
+        PromptRecallIntent::Procedural => "procedural_query_signal".to_owned(),
+        PromptRecallIntent::Continuity => {
+            if request.active_context.active_task.is_some() {
+                "active_context_or_weak_query".to_owned()
+            } else {
+                "weak_continuation_query".to_owned()
+            }
+        }
+        PromptRecallIntent::Evidence => "evidence_query_signal".to_owned(),
+        PromptRecallIntent::Mixed => "mixed_query_signal".to_owned(),
+    }
+}
+
+fn selected_for_assembly(
+    reports: &[RecallPlaneExecutionReport],
+    intent: PromptRecallIntent,
+    max_blocks: usize,
+) -> Vec<RecallSelection> {
+    let mut selected = reports
+        .iter()
+        .flat_map(|report| report.recall.selected.iter().cloned())
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        assembly_candidate_score(right, intent)
+            .cmp(&assembly_candidate_score(left, intent))
+            .then_with(|| plane_rank(intent, left.plane).cmp(&plane_rank(intent, right.plane)))
+            .then_with(|| left.record_id.cmp(&right.record_id))
+    });
+    selected.truncate(max_blocks);
+    selected
+}
+
+fn rerank_for_assembly(
+    intent: PromptRecallIntent,
+    selected: &[RecallSelection],
+    reports: &[RecallPlaneExecutionReport],
+) -> CrossPlaneRerankReport {
+    let top_planes = reports
+        .iter()
+        .filter(|report| report.selected_count > 0)
+        .map(|report| CrossPlanePlaneSignal {
+            plane: report.plane,
+            score: report
+                .recall
+                .selected
+                .iter()
+                .map(|selection| assembly_candidate_score(selection, intent))
+                .max()
+                .unwrap_or_default(),
+            candidate_count: report.candidate_count,
+            selected_count: report.selected_count,
+            top_reason: report
+                .recall
+                .selected
+                .iter()
+                .max_by_key(|selection| assembly_candidate_score(selection, intent))
+                .map(|selection| selection.reason_fragments.join(";")),
+        })
+        .collect::<Vec<_>>();
+    let top_candidates = selected
+        .iter()
+        .map(|selection| CrossPlaneRerankCandidate {
+            record_id: selection.record_id.clone(),
+            plane: selection.plane,
+            selected: true,
+            original_score: selection.score.total,
+            rerank_score: assembly_candidate_score(selection, intent),
+            score: assembly_candidate_score(selection, intent),
+            source: selection.source.clone(),
+            reason_fragments: {
+                let mut reasons = selection.reason_fragments.clone();
+                reasons.push(format!("assembly_rerank:intent={intent:?}"));
+                reasons
+            },
+        })
+        .collect();
+    CrossPlaneRerankReport {
+        intent,
+        top_planes,
+        top_candidates,
+        skipped_candidates: reports
+            .iter()
+            .flat_map(|report| report.recall.skipped.iter().cloned())
+            .collect(),
+        warnings: reports
+            .iter()
+            .flat_map(|report| report.warnings.iter().cloned())
+            .collect(),
+    }
+}
+
+fn assembly_candidate_score(selection: &RecallSelection, intent: PromptRecallIntent) -> u32 {
+    selection
+        .score
+        .total
+        .saturating_add(plane_intent_score(intent, selection.plane))
+}
+
+fn active_context_text(request: &RecallAssemblyRequest) -> String {
+    let mut lines = Vec::new();
+    if let Some(active_task) = request.active_context.active_task.as_deref() {
+        lines.push(format!("active_task: {active_task}"));
+    }
+    if let Some(summary) = request.active_context.summary.as_deref() {
+        lines.push(format!("summary: {summary}"));
+    }
+    if let Some(recent_grounding) = request.active_context.recent_grounding.as_deref() {
+        lines.push(format!("recent_grounding: {recent_grounding}"));
+    }
+    lines.join("\n")
+}
+
+fn group_for_selection(selection: &RecallSelection) -> PromptContextGroup {
+    match selection.plane {
+        MemoryPlane::SoulGovernance => PromptContextGroup::ConstitutionalStack,
+        MemoryPlane::ContinuityCapsule
+        | MemoryPlane::TaskRecall
+        | MemoryPlane::SubjectProjection => PromptContextGroup::ActiveTaskContext,
+        MemoryPlane::SharedFactual | MemoryPlane::ArchiveEvidence | MemoryPlane::Procedural => {
+            PromptContextGroup::GovernedMemoryEvidence
+        }
+    }
+}
+
+fn group_text_mut(
+    groups: &mut PromptAssemblyGroups,
+    group: PromptContextGroup,
+) -> &mut Option<String> {
+    match group {
+        PromptContextGroup::ConstitutionalStack => &mut groups.constitutional_stack,
+        PromptContextGroup::ActiveTaskContext => &mut groups.active_task_context,
+        PromptContextGroup::GovernedMemoryEvidence => &mut groups.governed_memory_evidence,
+        PromptContextGroup::BackgroundGovernance => &mut groups.background_governance,
+    }
+}
+
+fn push_group_text(target: &mut Option<String>, text: String) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    match target {
+        Some(existing) if !existing.trim().is_empty() => {
+            existing.push_str("\n\n");
+            existing.push_str(text);
+        }
+        Some(existing) => *existing = text.to_owned(),
+        None => *target = Some(text.to_owned()),
+    }
+}
+
+fn project_content_for_context(selection: &RecallSelection, surface: ProjectionSurface) -> String {
+    match (selection.plane, surface) {
+        (MemoryPlane::SubjectProjection, ProjectionSurface::Adapter)
+        | (MemoryPlane::SubjectProjection, ProjectionSurface::OperatorInspection)
+        | (MemoryPlane::SubjectProjection, ProjectionSurface::Replay) => {
+            "subject projection presence: current-turn frame available; raw private material withheld"
+                .to_owned()
+        }
+        (MemoryPlane::SoulGovernance, ProjectionSurface::Adapter)
+        | (MemoryPlane::SoulGovernance, ProjectionSurface::OperatorInspection)
+        | (MemoryPlane::SoulGovernance, ProjectionSurface::Replay) => {
+            "soul governance presence: policy summary available; raw private material withheld"
+                .to_owned()
+        }
+        _ => project_content(selection, surface),
+    }
+}
+
+fn surface_requires_report_first(plane: MemoryPlane, surface: ProjectionSurface) -> bool {
+    matches!(
+        (plane, surface),
+        (MemoryPlane::SoulGovernance, ProjectionSurface::Adapter)
+            | (
+                MemoryPlane::SoulGovernance,
+                ProjectionSurface::OperatorInspection
+            )
+            | (MemoryPlane::SubjectProjection, ProjectionSurface::Adapter)
+            | (
+                MemoryPlane::SubjectProjection,
+                ProjectionSurface::OperatorInspection
+            )
+    )
+}
+
+fn sanitize_projection_text(
+    input: &str,
+    request: &RecallAssemblyRequest,
+    report: &mut ProjectionSanitizerReport,
+) -> String {
+    if input.trim().is_empty() {
+        return String::new();
+    }
+    let mut output = redact_credentials(input, report);
+    let fragments = request
+        .redaction
+        .private_fragments
+        .iter()
+        .chain(request.redaction.identifier_fragments.iter())
+        .collect::<Vec<_>>();
+    report.checked_fragments = report.checked_fragments.saturating_add(fragments.len());
+    for fragment in fragments {
+        let trimmed = fragment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if output.contains(trimmed) {
+            output = output.replace(trimmed, "[redacted:private_echo]");
+            report.redacted_fragments = report.redacted_fragments.saturating_add(1);
+            report.private_echo_redacted = report.private_echo_redacted.saturating_add(1);
+        }
+    }
+    output
+}
+
+fn redact_credentials(input: &str, report: &mut ProjectionSanitizerReport) -> String {
+    let mut redacted = Vec::new();
+    for token in input.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let marker = ["token=", "secret=", "api_key=", "apikey=", "password="]
+            .iter()
+            .find(|marker| lower.contains(**marker));
+        if let Some(marker) = marker {
+            if let Some(start) = lower.find(marker) {
+                let prefix_end = start + marker.len();
+                let mut value = token.to_owned();
+                value.replace_range(prefix_end.., "[redacted:credential]");
+                redacted.push(value);
+                report.redacted_fragments = report.redacted_fragments.saturating_add(1);
+                report.credentials_redacted = report.credentials_redacted.saturating_add(1);
+                continue;
+            }
+        }
+        redacted.push(token.to_owned());
+    }
+    redacted.join(" ")
+}
+
+fn normalize_assembly_groups(
+    groups: &mut PromptAssemblyGroups,
+    budget: &bm_core::ProjectionBudgetProfile,
+) -> PromptAssemblyBudgetReport {
+    let constitutional_stack = cap_group(
+        &mut groups.constitutional_stack,
+        budget.constitutional_bytes,
+    );
+    let active_task = cap_group(&mut groups.active_task_context, budget.active_task_bytes);
+    let governed_memory = cap_group(
+        &mut groups.governed_memory_evidence,
+        budget.governed_memory_bytes,
+    );
+    let background_governance = cap_group(
+        &mut groups.background_governance,
+        budget.background_governance_bytes,
+    );
+    let before_bytes = constitutional_stack
+        .before_bytes
+        .saturating_add(active_task.before_bytes)
+        .saturating_add(governed_memory.before_bytes)
+        .saturating_add(background_governance.before_bytes);
+    let mut after_bytes = constitutional_stack
+        .after_bytes
+        .saturating_add(active_task.after_bytes)
+        .saturating_add(governed_memory.after_bytes)
+        .saturating_add(background_governance.after_bytes);
+    let mut total = PromptAssemblyBudgetSlice {
+        before_bytes,
+        after_bytes,
+        max_bytes: budget.total_bytes,
+        trimmed: before_bytes > budget.total_bytes,
+    };
+    if after_bytes > budget.total_bytes {
+        total.trimmed = true;
+        after_bytes = budget.total_bytes;
+        total.after_bytes = after_bytes;
+    }
+    PromptAssemblyBudgetReport {
+        total,
+        constitutional_stack,
+        active_task,
+        governed_memory,
+        background_governance,
+    }
+}
+
+fn cap_group(target: &mut Option<String>, max_bytes: usize) -> PromptAssemblyBudgetSlice {
+    let before_bytes = target.as_ref().map(|text| text.len()).unwrap_or_default();
+    if let Some(text) = target.as_mut() {
+        let capped = trim_to_budget(text.trim().to_owned(), max_bytes);
+        if capped.is_empty() {
+            *target = None;
+        } else {
+            *text = capped;
+        }
+    }
+    let after_bytes = target.as_ref().map(|text| text.len()).unwrap_or_default();
+    PromptAssemblyBudgetSlice {
+        before_bytes,
+        after_bytes,
+        max_bytes,
+        trimmed: before_bytes > after_bytes,
+    }
+}
+
+fn assembly_warnings(
+    plane_reports: &[RecallPlaneExecutionReport],
+    budget: &PromptAssemblyBudgetReport,
+    sanitizer: &ProjectionSanitizerReport,
+    surface: ProjectionSurface,
+    privacy_filtered_count: usize,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if budget.total.trimmed
+        || budget.constitutional_stack.trimmed
+        || budget.active_task.trimmed
+        || budget.governed_memory.trimmed
+        || budget.background_governance.trimmed
+    {
+        warnings.push(format!(
+            "prompt_assembly:budget_trimmed:surface={:?};before={};after={}",
+            surface, budget.total.before_bytes, budget.total.after_bytes
+        ));
+    }
+    if sanitizer.redacted_fragments > 0 {
+        warnings.push(format!(
+            "prompt_assembly:sanitized:redacted={}",
+            sanitizer.redacted_fragments
+        ));
+    }
+    if privacy_filtered_count > 0 {
+        warnings.push(format!(
+            "prompt_assembly:privacy_filtered:blocks={privacy_filtered_count}"
+        ));
+    }
+    for report in plane_reports {
+        if let Some(reason) = report.miss_reason.as_deref() {
+            warnings.push(format!(
+                "prompt_assembly:plane_miss:{}:{reason}",
+                report.plane.as_str()
+            ));
+        }
+        for warning in &report.warnings {
+            warnings.push(format!(
+                "prompt_assembly:plane_warning:{}:{warning}",
+                report.plane.as_str()
+            ));
+        }
+    }
+    warnings.sort();
+    warnings.dedup();
+    warnings
+}
+
+fn structurally_weak_query(query: &str) -> bool {
+    let trimmed = query.trim();
+    trimmed.is_empty() || trimmed.chars().count() <= 12 || matches!(trimmed, "继续" | "continue")
+}
+
+fn contains_any(query: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| query.contains(needle))
 }
 
 fn trim_to_budget(content: String, budget: usize) -> String {

@@ -91,6 +91,7 @@ pub struct RecallSelection {
     pub canonical: bool,
     pub privacy_filtered: bool,
     pub meta: MemoryRecordMeta,
+    pub reason_fragments: Vec<String>,
 }
 
 impl From<crate::MemoryRecord> for RecallSelection {
@@ -109,6 +110,7 @@ impl From<crate::MemoryRecord> for RecallSelection {
                 MemoryPlane::SubjectProjection | MemoryPlane::SoulGovernance
             ),
             meta: record.meta,
+            reason_fragments: vec!["store_candidate".to_owned()],
         }
     }
 }
@@ -129,6 +131,7 @@ pub struct SkippedRecallCandidate {
     pub record_id: String,
     pub plane: MemoryPlane,
     pub reason: RecallSkipReason,
+    pub reason_fragments: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,20 +140,29 @@ pub struct RecallPlaneReport {
     pub available: usize,
     pub selected: usize,
     pub skipped: usize,
+    pub top_score: Option<u32>,
+    pub top_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CrossPlanePlaneSignal {
     pub plane: MemoryPlane,
     pub score: u32,
+    pub candidate_count: usize,
+    pub selected_count: usize,
+    pub top_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CrossPlaneRerankCandidate {
     pub record_id: String,
     pub plane: MemoryPlane,
+    pub selected: bool,
+    pub original_score: u32,
+    pub rerank_score: u32,
     pub score: u32,
     pub source: SourceRef,
+    pub reason_fragments: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,6 +170,8 @@ pub struct CrossPlaneRerankReport {
     pub intent: PromptRecallIntent,
     pub top_planes: Vec<CrossPlanePlaneSignal>,
     pub top_candidates: Vec<CrossPlaneRerankCandidate>,
+    pub skipped_candidates: Vec<SkippedRecallCandidate>,
+    pub warnings: Vec<String>,
 }
 
 impl CrossPlaneRerankReport {
@@ -166,6 +180,8 @@ impl CrossPlaneRerankReport {
             intent,
             top_planes: Vec::new(),
             top_candidates: Vec::new(),
+            skipped_candidates: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 }

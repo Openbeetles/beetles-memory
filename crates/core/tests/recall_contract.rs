@@ -33,12 +33,17 @@ fn recall_report_explains_selection_skips_rerank_and_warnings() {
         canonical: true,
         privacy_filtered: false,
         meta: MemoryRecordMeta::default_for_plane(MemoryPlane::Procedural),
+        reason_fragments: vec![
+            "intent=Procedural".to_owned(),
+            "plane=Procedural".to_owned(),
+        ],
     };
 
     let skipped = SkippedRecallCandidate {
         record_id: "fact-1".to_owned(),
         plane: MemoryPlane::SharedFactual,
         reason: RecallSkipReason::LowerScore,
+        reason_fragments: vec!["lower_score_than_procedural_candidate".to_owned()],
     };
 
     let report = RecallSelectionReport {
@@ -51,19 +56,41 @@ fn recall_report_explains_selection_skips_rerank_and_warnings() {
             available: 1,
             selected: 1,
             skipped: 0,
+            top_score: Some(86),
+            top_reason: Some("intent=Procedural;plane=Procedural".to_owned()),
         }],
         rerank: CrossPlaneRerankReport {
             intent: PromptRecallIntent::Procedural,
             top_planes: vec![CrossPlanePlaneSignal {
                 plane: MemoryPlane::Procedural,
                 score: 86,
+                candidate_count: 1,
+                selected_count: 1,
+                top_reason: Some("intent=Procedural;plane=Procedural".to_owned()),
             }],
             top_candidates: vec![CrossPlaneRerankCandidate {
                 record_id: "proc-1".to_owned(),
                 plane: MemoryPlane::Procedural,
+                selected: true,
+                original_score: 86,
+                rerank_score: 96,
                 score: 86,
                 source,
+                reason_fragments: vec![
+                    "intent=Procedural".to_owned(),
+                    "plane=Procedural".to_owned(),
+                    "rerank:intent=Procedural".to_owned(),
+                ],
             }],
+            skipped_candidates: vec![SkippedRecallCandidate {
+                record_id: "fact-1".to_owned(),
+                plane: MemoryPlane::SharedFactual,
+                reason: RecallSkipReason::LowerScore,
+                reason_fragments: vec!["lower_score_than_procedural_candidate".to_owned()],
+            }],
+            warnings: vec![
+                "profile_budget_trimmed:profile=DevFull;before=2048;after=1536".to_owned(),
+            ],
         },
         warnings: vec![RecallWarning::ProfileBudgetTrimmed {
             profile: RuntimeProfile::DevFull,
@@ -75,8 +102,18 @@ fn recall_report_explains_selection_skips_rerank_and_warnings() {
     assert_eq!(report.query, query);
     assert_eq!(report.selected.len(), 1);
     assert_eq!(report.skipped[0].reason, RecallSkipReason::LowerScore);
+    assert!(report.skipped[0].reason_fragments[0].contains("lower_score"));
     assert_eq!(report.plane_reports[0].plane, MemoryPlane::Procedural);
+    assert_eq!(report.plane_reports[0].top_score, Some(86));
     assert_eq!(report.rerank.top_planes[0].plane, MemoryPlane::Procedural);
+    assert_eq!(report.rerank.top_planes[0].candidate_count, 1);
+    assert_eq!(report.rerank.top_candidates[0].original_score, 86);
+    assert_eq!(report.rerank.top_candidates[0].rerank_score, 96);
+    assert!(report.rerank.top_candidates[0]
+        .reason_fragments
+        .iter()
+        .any(|reason| reason.contains("rerank")));
+    assert_eq!(report.rerank.skipped_candidates.len(), 1);
     assert_eq!(report.warnings.len(), 1);
 }
 
