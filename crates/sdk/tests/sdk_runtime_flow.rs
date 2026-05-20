@@ -1,19 +1,17 @@
 mod support;
 
-use std::sync::Arc;
-
 use bm_sdk::{
     IngressKind, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryWriteRequest, ProfileId, RuntimeSkillReuseOutcome,
     RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 
-use support::{test_runtime, HostMemoryPlatform, StaticHttpClient, StaticLlmClient};
+use support::{empty_store_platform, test_runtime, StaticHttpClient, StaticLlmClient};
 
 #[test]
 fn runtime_write_recall_project_uses_sdk_entry_only() {
-    let platform = Arc::new(HostMemoryPlatform::default());
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
 
     let write = runtime
         .write(MemoryWriteRequest::Procedural {
@@ -59,7 +57,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
 
 #[test]
 fn runtime_maintain_and_inspect_return_structured_reports() {
-    let platform = Arc::new(HostMemoryPlatform::default());
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
     let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
     let llm = StaticLlmClient::summary_response("Summary: release safety");
     let mut http = StaticHttpClient;

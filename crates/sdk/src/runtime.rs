@@ -11,9 +11,11 @@ use bm_core::memory::{
     PostReplyMemoryMaintenanceInput, PromptMemoryContextParams, PromptParticipationPlan,
     PromptRecallIntent, WorkingRecallInspectionInput,
 };
+use bm_core::platform::Platform;
 use bm_core::skills::{
     is_runtime_skill_name, retrieve_runtime_skill_hits, write_governed_runtime_skills,
 };
+use bm_store::StorePlatform;
 
 use crate::{
     resolve_memory_capabilities, Error, LlmClient, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
@@ -22,7 +24,7 @@ use crate::{
     MemoryMaintenanceRequest, MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryProfile,
     MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
     MemoryReplayReport, MemoryReplayRequest, MemoryRuntimeSystemKind, MemoryWriteReport,
-    MemoryWriteRequest, Platform, PressureLevel, Result,
+    MemoryWriteRequest, PressureLevel, Result,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,7 +111,7 @@ pub struct MemoryRuntimeConfig {
     pub identity: MemoryIdentity,
     pub scope: MemoryScope,
     pub profile: ProfileId,
-    pub platform: Arc<dyn Platform>,
+    pub(crate) platform: Arc<dyn Platform>,
     pub llm: Option<Arc<dyn LlmClient>>,
     pub clock: Arc<dyn MemoryClock>,
     pub capability_policy: MemoryCapabilityPolicy,
@@ -702,8 +704,8 @@ impl MemoryRuntimeBuilder {
         self
     }
 
-    pub fn platform(mut self, platform: Arc<dyn Platform>) -> Self {
-        self.platform = Some(platform);
+    pub fn store_platform(mut self, platform: StorePlatform) -> Self {
+        self.platform = Some(platform.into_arc());
         self
     }
 

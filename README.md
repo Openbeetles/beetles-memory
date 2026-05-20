@@ -18,6 +18,7 @@
 - [dev-docs/code-quality-governance.md](dev-docs/code-quality-governance.md)：完整搬迁后的代码质量治理标准。
 - [dev-docs/code-quality-audit.md](dev-docs/code-quality-audit.md)：代码质量治理第一刀审计报告与收敛台账。
 - [dev-docs/sdk-profile-contract-plan.md](dev-docs/sdk-profile-contract-plan.md)：SDK/Profile 阶段实施真源。
+- [dev-docs/store-backend-schema-plan.md](dev-docs/store-backend-schema-plan.md)：Store Backend + Schema 阶段实施真源。
 - [dev-docs/procedural-memory-and-skill.md](dev-docs/procedural-memory-and-skill.md)：skill / procedural memory 边界。
 - [dev-docs/profile-and-platform-boundary.md](dev-docs/profile-and-platform-boundary.md)：profile 与平台边界。
 - [dev-docs/soul-and-subject-memory-boundary.md](dev-docs/soul-and-subject-memory-boundary.md)：灵魂治理与主体记忆边界。
@@ -47,10 +48,16 @@
 - `crates/core/src/agent`：subject state、soul feedback、active work、context assembly facade。
 - `crates/core/src/runtime`：soul kernel、runtime mode、workflow audit、bounded system inbound scheduling facade。
 - `crates/core/src/platform`：memory operator surface 与通用 store/platform trait。
-- `crates/sdk`、`crates/store`、`crates/replay`、`crates/evolve`：当前提供通用 facade / 内存 store / replay/evolve 出口，不引入某个宿主特权。
+- `crates/sdk`：当前提供 SDK-first `MemoryRuntime` facade，并 re-export `StorePlatform` / `StoreBackendConfig` 作为普通宿主 store opening 入口；普通宿主通过 `MemoryRuntime::builder().store_platform(platform)` 接入，不手写 core store trait，也不通过 SDK facade 操作 store snapshot envelope internals。
+- `crates/store`：当前提供 in-memory、file、sqlite、embedded 四类后端、schema manifest、event log、snapshot envelope、repair report 和跨后端一致性测试。
+- `crates/replay`、`crates/evolve`：当前提供 replay/evolve 出口，不引入某个宿主特权。
 
 当前未实现外部通信 adapter；HTTP、Webhook、WSS、MQTT、MCP、CLI 仍只在文档中固定边界，不能在内核里分叉记忆语义。
 
 当前第一轮代码质量治理已经完成：SDK-only host contract 已补齐，sqlite/index 后端改为显式 `sqlite-index` feature，ESP standalone / embedded SDK profile 不再拉入 `rusqlite`，未使用的 `base64` / `urlencoding` 已移除。
 
 当前验收已经通过 `cargo fmt --all -- --check`、`cargo check --workspace`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/check_profile_matrix.sh`、`cargo test -p bm-core --features sqlite-index`、`cargo clippy -p bm-core --features sqlite-index --all-targets -- -D warnings`，并完成 Beetle 专属 adapter/source kind 与外部通信服务实现的漂移扫描。
+
+Store Backend + Schema 已落地：`bm-store` 已从内存辅助工具推进为 Beetle Memory 自有持久化层，由本项目实现 in-memory、file、sqlite、embedded 后端、schema、event log、snapshot 和 repair report；manifest 强校验 schema/backend/profile/memory_system_kind，snapshot 同时校验 state fingerprint 与 event fingerprint，导入前校验 envelope/manifest/namespace/lineage，embedded 执行 snapshot byte budget 且不静默截断 event lineage。集成方只配置后端与容量，不实现记忆 schema、写入语义或恢复逻辑。本阶段验收脚本为 `bash scripts/check_store_backend_contract.sh`。
+
+当前下一阶段进入 Runtime Lifecycle：在已存在的 store contract 之上收口 runtime open/close、maintenance scheduling、projection lifecycle、operator action 事件和 replay/sandbox 调度边界；不得把通信层或 UI 层提前塞进内核。

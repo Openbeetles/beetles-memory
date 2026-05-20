@@ -9,3 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 bm-core.workspace = true
+bm-store.workspace = true

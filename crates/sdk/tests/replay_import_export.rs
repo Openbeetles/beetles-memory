@@ -1,18 +1,16 @@
 mod support;
 
-use std::sync::Arc;
-
 use bm_sdk::{
     ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest, MemoryReplayRequest,
     ProfileId,
 };
 
-use support::{test_runtime, HostMemoryPlatform};
+use support::{seeded_store_platform, test_runtime};
 
 #[test]
 fn runtime_replay_export_import_go_through_sdk_contract() {
-    let platform = Arc::new(HostMemoryPlatform::seeded());
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = seeded_store_platform(ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
 
     let replay = runtime
         .replay(MemoryReplayRequest {

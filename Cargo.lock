@@ -39,6 +39,7 @@ name = "bm-sdk"
 version = "0.1.0"
 dependencies = [
  "bm-core",
+ "bm-store",
 ]
 
 [[package]]
@@ -46,6 +47,10 @@ name = "bm-store"
 version = "0.1.0"
 dependencies = [
  "bm-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

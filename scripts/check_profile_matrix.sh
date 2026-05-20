@@ -25,6 +25,28 @@ assert_tree_includes() {
   fi
 }
 
+assert_store_tree_excludes() {
+  local feature_set="$1"
+  local needle="$2"
+  local tree
+  tree="$(cargo tree -p bm-store --no-default-features --features "$feature_set")"
+  if grep -q "$needle" <<<"$tree"; then
+    echo "store feature set unexpectedly includes $needle: $feature_set" >&2
+    exit 1
+  fi
+}
+
+assert_store_tree_includes() {
+  local feature_set="$1"
+  local needle="$2"
+  local tree
+  tree="$(cargo tree -p bm-store --no-default-features --features "$feature_set")"
+  if ! grep -q "$needle" <<<"$tree"; then
+    echo "store feature set should include $needle: $feature_set" >&2
+    exit 1
+  fi
+}
+
 assert_feature_set_rejected() {
   local feature_set="$1"
   local expected="$2"
@@ -58,3 +80,5 @@ cargo check -p bm-core --no-default-features --features target-server-linux,role
 cargo test -p bm-core --test profile_capability_catalog --no-default-features --features target-server-linux,role-memory-gateway,sqlite-index
 cargo test -p bm-core --test dependency_feature_contract --no-default-features --features target-server-linux,role-memory-gateway,sqlite-index
 assert_tree_includes "target-server-linux,role-memory-gateway,sqlite-index" "rusqlite"
+assert_store_tree_excludes "embedded-store" "rusqlite"
+assert_store_tree_includes "sqlite-store" "rusqlite"
