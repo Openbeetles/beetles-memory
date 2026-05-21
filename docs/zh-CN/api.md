@@ -50,6 +50,31 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 
 Transport helper crates 会对其声明的 memory operations 使用共享 JSON adapter decoder；subscribe 这类 stream-only operation 仍属于 transport-specific 行为。每种协议的 route/frame/tool/message 表面见 [部署文档](deployment.md)。
 
+## Console API
+
+Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必须暴露的接口。SDK 宿主仍只消费 `bm-sdk` 或 memory adapter surface；宿主自己的配置页、账户页和 UI 由宿主负责。
+
+`bm-entry` 持有 console 状态，`bm-http` 只负责把 `/console/*` 请求路由到 entry console 操作。Console API 不写 memory plane，不实现第二套记忆语义，也不替代 `/memory/*`。
+
+`/console/overview` 的指标来自同一进程内的真实 runtime 状态：系统信息读取当前运行系统、CPU、内存和系统时间；存储占用读取当前 store 路径实际占用，并读取该路径所在系统磁盘当前可用容量；写入、召回、投影指标由 `/memory/*` 操作结果回写。配置台前端不得硬编码这些观测值，只能在后端不可达时使用本地占位数据。
+
+| Route | Method | 用途 |
+| --- | --- | --- |
+| `/console/overview` | `GET` | 返回系统信息、运行形态、观测指标、内核摘要和 session 概览。 |
+| `/console/transports` | `GET` | 返回可配置通信入口。 |
+| `/console/transports/{id}` | `PATCH` | 更新通信入口开关或 endpoint。 |
+| `/console/devices` | `GET` | 返回允许访问设备列表，只包含 app_key 指纹。 |
+| `/console/devices` | `POST` | 添加设备，由 runtime 生成一次性 app_key。 |
+| `/console/devices/{id}` | `PATCH` | 更新设备状态或名称。 |
+| `/console/devices/{id}/rotate-key` | `POST` | 轮换设备 app_key，并仅在响应中返回一次明文。 |
+| `/console/session` | `GET` | 返回已配对 session 的账户和主体摘要。 |
+
+安全边界：
+
+- 列表接口永远不返回 app_key 明文，只返回 `appKeyFingerprint`。
+- 新增和轮换设备时，`appKeyOnce` 只在该次响应中返回。
+- 通信页的 HTTP 开关表示外部 memory HTTP API，不表示配置台自身的 HTTP console 入口。
+
 ## Capability Catalog
 
 每个 runtime 都暴露 `MemoryCapabilityCatalog`。能力可见性由所选 profile、compiled features、runtime policy 和 privacy policy 共同决定。

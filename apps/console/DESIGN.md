@@ -1,4 +1,4 @@
-# 甲壳虫记忆配置台 — UI 设计规范
+# Beetles Memory Console — UI 设计规范
 
 > 版本：1.0.0  
 > 最后更新：2026-05-21  
@@ -11,6 +11,7 @@
 | 原则 | 说明 |
 |------|------|
 | **信息密度优先** | 每像素传达实际状态，不做纯装饰性留白 |
+| **真实数据优先** | 总览卡片、事件、能力摘要必须优先读取 `/console/overview`，只在后端不可达时使用本地占位 |
 | **扁平精确** | 无毛玻璃、无阴影堆叠，边框宽度精确到 1px |
 | **语义即颜色** | 颜色不作品牌装饰，仅用于传达运行状态 |
 | **等宽一致** | 全局使用单一等宽字体族，数字对齐可扫读 |
@@ -213,7 +214,7 @@ border-radius: var(--r)   /* 2px */
 | `.primary-button` | 珊瑚红实色背景，白色文字，28px 高 |
 | `.ghost-button` | `--s1` 背景，`--bd` 边框，`--mu` 文字，hover 加深 |
 | `.row-actions button` | `--s3` 背景，22px 高，微型操作按钮 |
-| `.operator-grid button` | 68px 高竖排图标+文字，hover 切换珊瑚红边框 |
+| `.row-actions button` | 表格行内微型操作按钮，只触发已有后端接口 |
 
 所有按钮高度固定、无文字换行（`white-space: nowrap`），过渡 100ms。
 
@@ -277,7 +278,7 @@ body::after {
 | 断点 | 行为 |
 |------|------|
 | `> 1180px` | 标准双栏布局，sidebar 224px |
-| `≤ 1180px` | sidebar 收窄至 200px；section-grid 单栏；transport/operator grid 2 列 |
+| `≤ 1180px` | sidebar 收窄至 200px；section-grid 单栏；transport grid 2 列 |
 | `≤ 820px` | 完全单栏；sidebar 改为顶部横向导航；device-table 隐藏表头改为卡片式 |
 
 ---
@@ -296,7 +297,7 @@ body::after {
 ```
 src/
   app.css       全局样式 + 组件样式（单文件，按注释块分区）
-  App.svelte    唯一组件（演示阶段），包含所有页面逻辑
+  App.svelte    唯一组件，包含配置台页面逻辑
   main.ts       挂载入口
 ```
 
@@ -311,6 +312,6 @@ src/
 7. 按钮系统
 8. Status Bar
 9. Panel
-10. 各页面组件（overview / event / transport / device / capability / operator / account）
+10. 各页面组件（overview / event / transport / device / account；capability 和 kernel 摘要归入 overview）
 11. 响应式媒体查询
 12. `prefers-reduced-motion`

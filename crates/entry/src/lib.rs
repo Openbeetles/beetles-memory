@@ -2,6 +2,7 @@
 
 mod auth;
 mod config;
+mod console;
 mod error;
 mod idempotency;
 mod response;
@@ -12,6 +13,12 @@ pub use auth::{EntryAuthConfig, EntryAuthDecision};
 pub use config::{
     EntryCapabilityItem, EntryCapabilityView, EntryIdempotencyConfig, EntryIdentity, EntryScope,
     EntryStoreConfig, EntryTransportConfig,
+};
+pub use console::{
+    EntryConsoleCapabilityRow, EntryConsoleDevice, EntryConsoleDeviceCreate,
+    EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleEvent, EntryConsoleKv,
+    EntryConsoleMetric, EntryConsoleOverview, EntryConsoleRuntimeShape, EntryConsoleSession,
+    EntryConsoleState, EntryConsoleSystemInfo, EntryConsoleTransport, EntryConsoleTransportUpdate,
 };
 pub use error::EntryErrorKey;
 pub use idempotency::EntryIdempotencyCache;

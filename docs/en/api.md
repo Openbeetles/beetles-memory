@@ -50,6 +50,31 @@ Generic adapter dispatch supports write, recall, project, inspect, recover, repl
 
 Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/tool/message surface.
 
+## Console API
+
+The Console API is only for standalone deployments that serve the Beetle Memory configuration console. SDK hosts still consume `bm-sdk` or a memory adapter surface; host-owned configuration pages, accounts, and UI remain the host's responsibility.
+
+`bm-entry` owns console state. `bm-http` only routes `/console/*` requests into entry console operations. The Console API does not write memory planes, does not define another memory semantic path, and does not replace `/memory/*`.
+
+`/console/overview` metrics come from real runtime state in the same process: system info reads the active OS, CPU, memory, and system time; storage usage reads the active store path usage and the currently available capacity on that path's system disk; write, recall, and projection metrics are recorded from `/memory/*` operation results. The console frontend must not hard-code observable metrics except as a local fallback when the backend is unreachable.
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/console/overview` | `GET` | System info, runtime shape, observable metrics, kernel summary, and session overview. |
+| `/console/transports` | `GET` | List configurable communication entries. |
+| `/console/transports/{id}` | `PATCH` | Update a communication entry's enabled state or endpoint. |
+| `/console/devices` | `GET` | List allowed devices with app_key fingerprints only. |
+| `/console/devices` | `POST` | Add a device and let the runtime generate a one-time app_key. |
+| `/console/devices/{id}` | `PATCH` | Update device state or label. |
+| `/console/devices/{id}/rotate-key` | `POST` | Rotate a device app_key and return the plaintext once. |
+| `/console/session` | `GET` | Return paired session account and owner summary. |
+
+Security boundaries:
+
+- List endpoints never return plaintext app_keys; they return `appKeyFingerprint`.
+- Device creation and key rotation return `appKeyOnce` only in that response.
+- The HTTP switch in the communication page controls the external memory HTTP API, not the HTTP console entry itself.
+
 ## Capability Catalog
 
 Every runtime exposes a `MemoryCapabilityCatalog`. Visibility is derived from the selected profile, compiled features, runtime policy, and privacy policy.

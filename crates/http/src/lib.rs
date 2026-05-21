@@ -8,7 +8,10 @@ use bm_adapter::{
     AdapterRuntimeServices, AdapterSdkReport, TransportMode,
 };
 #[cfg(feature = "server-std")]
-use bm_entry::{EntryAuthDecision, EntryRuntime, EntryTransportContext};
+use bm_entry::{
+    EntryAuthDecision, EntryConsoleDeviceCreate, EntryConsoleDeviceUpdate,
+    EntryConsoleTransportUpdate, EntryRuntime, EntryTransportContext,
+};
 #[cfg(feature = "server-std")]
 use serde_json::json;
 #[cfg(feature = "server-std")]
@@ -22,6 +25,7 @@ use std::net::TcpListener;
 pub enum HttpMethod {
     Get,
     Post,
+    Patch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +48,13 @@ pub struct RouteSpec {
     pub body: RouteBodyMode,
     pub auth: RouteAuth,
     pub profile_gate_required: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConsoleRouteSpec {
+    pub method: HttpMethod,
+    pub path: &'static str,
+    pub auth: RouteAuth,
 }
 
 const JSON_BODY_MAX_BYTES: usize = 64 * 1024;
@@ -69,6 +80,17 @@ const ROUTES: &[RouteSpec] = &[
     memory_post("/memory/import", AdapterOperation::Import),
 ];
 
+const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
+    console_get("/console/overview"),
+    console_get("/console/transports"),
+    console_patch("/console/transports/{id}"),
+    console_get("/console/devices"),
+    console_post("/console/devices"),
+    console_patch("/console/devices/{id}"),
+    console_post("/console/devices/{id}/rotate-key"),
+    console_get("/console/session"),
+];
+
 const fn memory_post(path: &'static str, operation: AdapterOperation) -> RouteSpec {
     RouteSpec {
         method: HttpMethod::Post,
@@ -85,6 +107,34 @@ const fn memory_post(path: &'static str, operation: AdapterOperation) -> RouteSp
 
 pub const fn route_specs() -> &'static [RouteSpec] {
     ROUTES
+}
+
+const fn console_get(path: &'static str) -> ConsoleRouteSpec {
+    ConsoleRouteSpec {
+        method: HttpMethod::Get,
+        path,
+        auth: RouteAuth::TokenOrLoopback,
+    }
+}
+
+const fn console_post(path: &'static str) -> ConsoleRouteSpec {
+    ConsoleRouteSpec {
+        method: HttpMethod::Post,
+        path,
+        auth: RouteAuth::TokenOrLoopback,
+    }
+}
+
+const fn console_patch(path: &'static str) -> ConsoleRouteSpec {
+    ConsoleRouteSpec {
+        method: HttpMethod::Patch,
+        path,
+        auth: RouteAuth::TokenOrLoopback,
+    }
+}
+
+pub const fn console_route_specs() -> &'static [ConsoleRouteSpec] {
+    CONSOLE_ROUTES
 }
 
 pub const fn invalid_json_error() -> AdapterErrorKey {
@@ -140,6 +190,18 @@ impl HttpRuntimeRequest {
             authenticated: true,
         }
     }
+
+    pub fn patch_json(path: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Patch,
+            path: path.into(),
+            body: body.into(),
+            request_id: "http-req".to_string(),
+            idempotency_key: format!("http-idem-{}", unique_request_suffix()),
+            audit_id: "http-audit".to_string(),
+            authenticated: true,
+        }
+    }
 }
 
 #[cfg(feature = "server-std")]
@@ -163,6 +225,9 @@ pub fn handle_http_request_with_services(
     request: HttpRuntimeRequest,
     services: AdapterRuntimeServices<'_>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
+    if request.path.starts_with("/console/") {
+        return handle_console_request(runtime, request);
+    }
     let route = route_specs()
         .iter()
         .find(|route| route.method == request.method && route.path == request.path)
@@ -248,6 +313,7 @@ fn read_http_runtime_request<S: Read>(stream: &mut S) -> bm_sdk::Result<HttpRunt
     let method = match request_parts.next() {
         Some("GET") => HttpMethod::Get,
         Some("POST") => HttpMethod::Post,
+        Some("PATCH") => HttpMethod::Patch,
         Some(other) => {
             return Err(bm_sdk::Error::config(
                 "http_headers",
@@ -322,6 +388,8 @@ fn write_http_response(
         400 => "Bad Request",
         401 => "Unauthorized",
         409 => "Conflict",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
         413 => "Payload Too Large",
         422 => "Unprocessable Entity",
         _ => "OK",
@@ -351,6 +419,172 @@ fn header_or_default(headers: &BTreeMap<String, String>, name: &str, default: &s
         .get(name)
         .cloned()
         .unwrap_or_else(|| default.to_string())
+}
+
+#[cfg(feature = "server-std")]
+fn handle_console_request(
+    runtime: &EntryRuntime,
+    request: HttpRuntimeRequest,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
+    if !request.authenticated {
+        return Ok(json_response(
+            401,
+            json!({
+                "status": "rejected",
+                "errorKey": "Unauthorized",
+                "reason": "console auth rejected request",
+            }),
+        ));
+    }
+
+    match (request.method, request.path.as_str()) {
+        (HttpMethod::Get, "/console/overview") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "overview": runtime.console_overview(),
+            }),
+        )),
+        (HttpMethod::Get, "/console/transports") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "transports": runtime.console_transports(),
+            }),
+        )),
+        (HttpMethod::Get, "/console/devices") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "devices": runtime.console_devices(),
+            }),
+        )),
+        (HttpMethod::Get, "/console/session") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "session": runtime.console_session(),
+            }),
+        )),
+        (HttpMethod::Post, "/console/devices") => {
+            let payload: EntryConsoleDeviceCreate = parse_console_json(&request.body)?;
+            match runtime.console_add_device(payload) {
+                Ok(report) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "device": report.device,
+                        "appKeyOnce": report.app_key_once,
+                    }),
+                )),
+                Err(reason) => Ok(json_response(
+                    422,
+                    json!({
+                        "status": "rejected",
+                        "errorKey": "RuntimeRejected",
+                        "reason": reason,
+                    }),
+                )),
+            }
+        }
+        (HttpMethod::Patch, path) if path.starts_with("/console/transports/") => {
+            let id = trim_suffix_path(path, "/console/transports/");
+            let payload: EntryConsoleTransportUpdate = parse_console_json(&request.body)?;
+            match runtime.console_update_transport(id, payload) {
+                Some(transport) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "transport": transport,
+                    }),
+                )),
+                None => Ok(not_found("console transport not found")),
+            }
+        }
+        (HttpMethod::Patch, path) if path.starts_with("/console/devices/") => {
+            let device_id = trim_suffix_path(path, "/console/devices/");
+            let payload: EntryConsoleDeviceUpdate = parse_console_json(&request.body)?;
+            match runtime.console_update_device(device_id, payload) {
+                Some(device) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "device": device,
+                    }),
+                )),
+                None => Ok(not_found("console device not found")),
+            }
+        }
+        (HttpMethod::Post, path)
+            if path.starts_with("/console/devices/") && path.ends_with("/rotate-key") =>
+        {
+            let device_id = path
+                .strip_prefix("/console/devices/")
+                .and_then(|value| value.strip_suffix("/rotate-key"))
+                .map(|value| value.trim_matches('/'))
+                .unwrap_or_default();
+            match runtime.console_rotate_device_key(device_id) {
+                Some(report) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "device": report.device,
+                        "appKeyOnce": report.app_key_once,
+                    }),
+                )),
+                None => Ok(not_found("console device not found")),
+            }
+        }
+        _ if is_known_console_path(&request.path) => Ok(json_response(
+            405,
+            json!({
+                "status": "rejected",
+                "errorKey": "UnsupportedOperation",
+                "reason": "console method is not allowed for route",
+            }),
+        )),
+        _ => Ok(not_found("console route not found")),
+    }
+}
+
+#[cfg(feature = "server-std")]
+fn parse_console_json<T: serde::de::DeserializeOwned>(body: &str) -> bm_sdk::Result<T> {
+    serde_json::from_str(body)
+        .map_err(|error| bm_sdk::Error::config("console_json", error.to_string()))
+}
+
+#[cfg(feature = "server-std")]
+fn trim_suffix_path<'a>(path: &'a str, prefix: &str) -> &'a str {
+    path.strip_prefix(prefix).unwrap_or(path).trim_matches('/')
+}
+
+#[cfg(feature = "server-std")]
+fn is_known_console_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/console/overview" | "/console/transports" | "/console/devices" | "/console/session"
+    ) || path.starts_with("/console/transports/")
+        || path.starts_with("/console/devices/")
+}
+
+#[cfg(feature = "server-std")]
+fn not_found(reason: &str) -> HttpRuntimeResponse {
+    json_response(
+        404,
+        json!({
+            "status": "rejected",
+            "errorKey": "NotFound",
+            "reason": reason,
+        }),
+    )
+}
+
+#[cfg(feature = "server-std")]
+fn json_response(status_code: u16, body: serde_json::Value) -> HttpRuntimeResponse {
+    HttpRuntimeResponse {
+        status_code,
+        body: body.to_string(),
+    }
 }
 
 #[cfg(feature = "server-std")]

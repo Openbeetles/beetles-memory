@@ -10,6 +10,11 @@ documentation = "https://docs.rs/bm-http"
 name = "bm_http"
 path = "src/lib.rs"
 
+[[bin]]
+name = "bm-http-console"
+path = "src/bin/bm-http-console.rs"
+required-features = ["server-std"]
+
 [features]
 default = []
 server-std = ["bm-entry"]

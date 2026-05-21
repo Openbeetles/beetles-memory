@@ -54,7 +54,7 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
 
 使用 `bm-http` 的 `server-std` feature 可以启用 standard-library listener/helper surface。
 
-Crate 声明的 routes：
+Crate 声明的 memory routes：
 
 | Route | Method | Operation |
 | --- | --- | --- |
@@ -101,6 +101,37 @@ Standard-library HTTP helper 会读取这些 headers：
   "limit": 4
 }
 ```
+
+## HTTP Console
+
+独立部署形态可以在同一 HTTP listener 上暴露配置台接口。Console routes 使用同一认证边界，但它们不是 memory operation routes；它们管理 entry 进程级配置和配置台观测状态。
+
+本仓库提供正式可执行入口 `bm-http-console`，用于 Mac / Linux / Windows 本地开发验证和非 SDK 独立部署的 HTTP console 进程。它不是 example，也不绕过内核；所有 `/console/*` 与 `/memory/*` 请求都进入同一个 `EntryRuntime`。
+
+```bash
+cargo run -p bm-http --features server-std --bin bm-http-console -- \
+  --addr 127.0.0.1:8718 \
+  --store-path target/bm-http-console-store
+```
+
+配置台前端开发态固定使用 `5176`，并把 `/console/*`、`/memory/*` 代理到 `127.0.0.1:8718`。因此 Mac 实机验证应同时启动正式 HTTP console 进程和前端开发服务器：
+
+```bash
+npm --prefix apps/console run dev
+```
+
+| Route | Method | 说明 |
+| --- | --- | --- |
+| `/console/overview` | `GET` | 系统信息、运行形态、观测指标、能力摘要、内核摘要。 |
+| `/console/transports` | `GET` | 通信入口列表。 |
+| `/console/transports/{id}` | `PATCH` | 更新通信入口。 |
+| `/console/devices` | `GET` | 开放设备列表，仅返回 app_key 指纹。 |
+| `/console/devices` | `POST` | 添加设备并返回一次性 `appKeyOnce`。 |
+| `/console/devices/{id}` | `PATCH` | 更新设备状态。 |
+| `/console/devices/{id}/rotate-key` | `POST` | 轮换设备密钥并返回一次性 `appKeyOnce`。 |
+| `/console/session` | `GET` | 当前已配对 session 摘要。 |
+
+配置台 HTTP 入口不能被通信页的 HTTP 开关关闭。通信页中的 HTTP 开关只控制外部 memory HTTP API 是否对外开放。
 
 ## WebSocket
 

@@ -10,9 +10,11 @@ use bm_sdk::{
 
 use crate::config::{enabled_capability_policy, privacy_policy};
 use crate::{
-    EntryAuthConfig, EntryCapabilityView, EntryIdempotencyCache, EntryIdempotencyConfig,
-    EntryIdentity, EntryResponse, EntryScope, EntryStoreConfig, EntryTransportConfig,
-    EntryTransportContext,
+    EntryAuthConfig, EntryCapabilityView, EntryConsoleDevice, EntryConsoleDeviceCreate,
+    EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleOverview,
+    EntryConsoleSession, EntryConsoleState, EntryConsoleTransport, EntryConsoleTransportUpdate,
+    EntryIdempotencyCache, EntryIdempotencyConfig, EntryIdentity, EntryResponse, EntryScope,
+    EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +35,7 @@ pub struct EntryRuntime {
     runtime: MemoryRuntime,
     capability: EntryCapabilityView,
     idempotency: EntryIdempotencyCache,
+    console: EntryConsoleState,
 }
 
 impl EntryRuntime {
@@ -62,11 +65,13 @@ impl EntryRuntime {
             &config.transports,
         )?;
         let idempotency = EntryIdempotencyCache::new(config.idempotency.max_keys);
+        let console = EntryConsoleState::new(&config);
         Ok(Self {
             config,
             runtime,
             capability,
             idempotency,
+            console,
         })
     }
 
@@ -76,6 +81,52 @@ impl EntryRuntime {
 
     pub fn capability(&self) -> &EntryCapabilityView {
         &self.capability
+    }
+
+    pub fn console_overview(&self) -> EntryConsoleOverview {
+        self.console.overview()
+    }
+
+    pub fn console_transports(&self) -> Vec<EntryConsoleTransport> {
+        self.console.transports()
+    }
+
+    pub fn console_update_transport(
+        &self,
+        id: &str,
+        update: EntryConsoleTransportUpdate,
+    ) -> Option<EntryConsoleTransport> {
+        self.console.update_transport(id, update)
+    }
+
+    pub fn console_devices(&self) -> Vec<EntryConsoleDevice> {
+        self.console.devices()
+    }
+
+    pub fn console_add_device(
+        &self,
+        request: EntryConsoleDeviceCreate,
+    ) -> std::result::Result<EntryConsoleDeviceKeyReport, &'static str> {
+        self.console.add_device(request)
+    }
+
+    pub fn console_update_device(
+        &self,
+        device_id: &str,
+        update: EntryConsoleDeviceUpdate,
+    ) -> Option<EntryConsoleDevice> {
+        self.console.update_device(device_id, update)
+    }
+
+    pub fn console_rotate_device_key(
+        &self,
+        device_id: &str,
+    ) -> Option<EntryConsoleDeviceKeyReport> {
+        self.console.rotate_device_key(device_id)
+    }
+
+    pub fn console_session(&self) -> EntryConsoleSession {
+        self.console.session()
     }
 
     pub fn handle(
@@ -109,6 +160,7 @@ impl EntryRuntime {
             }));
         }
 
+        let operation = command.operation();
         let source = context.source(&self.config.identity, &self.config.scope);
         let auth = context.auth.into_adapter();
         let envelope = AdapterEnvelope {
@@ -122,8 +174,11 @@ impl EntryRuntime {
             audit_id: context.audit_id,
             payload: command,
         };
-        dispatch_adapter_command_with_services(&self.runtime, envelope, services)
-            .map(EntryResponse::from_adapter)
+        let response = dispatch_adapter_command_with_services(&self.runtime, envelope, services)
+            .map(EntryResponse::from_adapter)?;
+        self.console
+            .record_adapter_response(operation, &response.adapter);
+        Ok(response)
     }
 }
 

@@ -1,5 +1,5 @@
 use bm_adapter::{AdapterErrorKey, AdapterOperation, TransportKind};
-use bm_http::{route_specs, HttpMethod, RouteAuth, RouteBodyMode};
+use bm_http::{console_route_specs, route_specs, HttpMethod, RouteAuth, RouteBodyMode};
 
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
@@ -15,6 +15,21 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
     assert!(matches!(capabilities.body, RouteBodyMode::None));
     assert!(matches!(capabilities.auth, RouteAuth::TokenOrLoopback));
     assert!(capabilities.profile_gate_required);
+}
+
+#[test]
+fn console_route_catalog_is_separate_from_memory_operations() {
+    let routes = console_route_specs();
+    assert_eq!(routes.len(), 8);
+    assert!(routes
+        .iter()
+        .any(|route| route.method == HttpMethod::Get && route.path == "/console/overview"));
+    assert!(routes.iter().any(|route| {
+        route.method == HttpMethod::Patch && route.path == "/console/transports/{id}"
+    }));
+    assert!(routes
+        .iter()
+        .all(|route| matches!(route.auth, RouteAuth::TokenOrLoopback)));
 }
 
 #[test]

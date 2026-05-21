@@ -54,7 +54,7 @@ For production, replace `disabled_for_local()` with an auth boundary owned by yo
 
 Enable `bm-http` with `server-std` for the standard-library listener/helper surface.
 
-Routes declared by the crate:
+Memory routes declared by the crate:
 
 | Route | Method | Operation |
 | --- | --- | --- |
@@ -101,6 +101,37 @@ Example recall body:
   "limit": 4
 }
 ```
+
+## HTTP Console
+
+Standalone deployments may expose the configuration console on the same HTTP listener. Console routes use the same authentication boundary, but they are not memory operation routes; they manage entry process configuration and console observability state.
+
+This repository provides the formal `bm-http-console` executable for Mac / Linux / Windows local verification and non-SDK standalone HTTP console deployments. It is not an example entry and it does not bypass the kernel; all `/console/*` and `/memory/*` requests enter the same `EntryRuntime`.
+
+```bash
+cargo run -p bm-http --features server-std --bin bm-http-console -- \
+  --addr 127.0.0.1:8718 \
+  --store-path target/bm-http-console-store
+```
+
+The console frontend dev server uses port `5176` and proxies `/console/*` and `/memory/*` to `127.0.0.1:8718`. Mac local verification should run the formal HTTP console process and the frontend dev server together:
+
+```bash
+npm --prefix apps/console run dev
+```
+
+| Route | Method | Notes |
+| --- | --- | --- |
+| `/console/overview` | `GET` | System info, runtime shape, observable metrics, capability summary, and kernel summary. |
+| `/console/transports` | `GET` | Communication entry list. |
+| `/console/transports/{id}` | `PATCH` | Update a communication entry. |
+| `/console/devices` | `GET` | Allowed device list with app_key fingerprints only. |
+| `/console/devices` | `POST` | Add a device and return one-time `appKeyOnce`. |
+| `/console/devices/{id}` | `PATCH` | Update device state. |
+| `/console/devices/{id}/rotate-key` | `POST` | Rotate a device key and return one-time `appKeyOnce`. |
+| `/console/session` | `GET` | Current paired session summary. |
+
+The HTTP console entry cannot be disabled by the communication page's HTTP switch. That switch only controls whether the external memory HTTP API is exposed.
 
 ## WebSocket
 
