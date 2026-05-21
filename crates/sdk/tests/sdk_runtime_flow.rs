@@ -2,8 +2,8 @@ mod support;
 
 use bm_sdk::{
     IngressKind, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryWriteRequest, ProfileId, RuntimeSkillReuseOutcome,
-    RuntimeSkillWrite, RuntimeSkillWriteSource,
+    MemoryRecallRequest, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 
 use support::{empty_store_platform, test_runtime, StaticHttpClient, StaticLlmClient};
@@ -49,6 +49,8 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
             user_query: "How should I publish?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
         })
         .expect("projection");
 
@@ -76,16 +78,21 @@ fn runtime_maintain_and_inspect_return_structured_reports() {
                 task_learning_selected_ids: Vec::new(),
                 reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
                 reuse_outcome_note: String::new(),
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
         )
         .expect("maintenance");
 
-    assert!(maintenance.report.after_count <= maintenance.report.after_count.saturating_add(1));
+    let maintenance_report = maintenance.report.expect("maintenance report");
+    assert!(maintenance_report.after_count <= maintenance_report.after_count.saturating_add(1));
 
     let inspection = runtime
         .inspect(MemoryInspectionRequest {
             query: "release".to_string(),
             system_max_len: 4096,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
         })
         .expect("inspection");
 

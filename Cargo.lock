@@ -25,6 +25,9 @@ name = "bm-evolve"
 version = "0.1.0"
 dependencies = [
  "bm-core",
+ "bm-sdk",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -32,6 +35,10 @@ name = "bm-replay"
 version = "0.1.0"
 dependencies = [
  "bm-core",
+ "bm-sdk",
+ "bm-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

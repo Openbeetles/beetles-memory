@@ -24,9 +24,12 @@ pub use bm_core::memory::{
 };
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;
+pub use bm_core::platform::MemoryOperatorSurfaceSummary;
 pub use bm_core::runtime::{
-    ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, RuntimeModeSnapshot,
-    SoulKernelRecoveryReport, SoulKernelStatus,
+    ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, RuntimeLifecycleAdmission,
+    RuntimeLifecycleDiagnosisReport, RuntimeLifecycleDisposition, RuntimeLifecycleModeInput,
+    RuntimeLifecycleOperation, RuntimeLifecycleReport, RuntimeLifecycleTrigger,
+    RuntimeModeSnapshot, SoulKernelRecoveryReport, SoulKernelStatus,
 };
 pub use bm_core::skills::{
     CapabilityAtomImportOutcome, CapabilityAtomSyncOutcome, RuntimeSkillGovernanceOutcome,
@@ -42,13 +45,15 @@ pub use bm_store::{
 pub use capability::{
     resolve_memory_capabilities, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
     MemoryIndexedRecallVisibility, MemoryOperationVisibility, MemoryPrivacyPolicy,
+    MemoryRuntimeLifecycleCapability, MemoryValidationCapability,
 };
 pub use ops::{
-    MemoryExportReport, MemoryExportRequest, MemoryImportReport, MemoryImportRequest,
-    MemoryInspectionReport, MemoryInspectionRequest, MemoryMaintenanceReport,
-    MemoryMaintenanceRequest, MemoryProceduralWriteReport, MemoryProjectionReport,
-    MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest, MemoryReplayReport,
-    MemoryReplayRequest, MemoryWriteReport, MemoryWriteRequest,
+    MemoryCloseReport, MemoryCloseRequest, MemoryExportReport, MemoryExportRequest,
+    MemoryImportReport, MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
+    MemoryMaintenanceReport, MemoryMaintenanceRequest, MemoryProceduralWriteReport,
+    MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
+    MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
+    MemoryWriteReport, MemoryWriteRequest, RuntimeOperatorAction, RuntimeOperatorActionReport,
 };
 pub use runtime::{
     MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,

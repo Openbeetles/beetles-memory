@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+replay-harness = []
 sqlite-index = ["dep:rusqlite"]
 thread_panic_catch = []
 target-esp = []
@@ -22,6 +23,11 @@ role-memory-gateway = []
 role-dev-full = []
 profile-esp-standalone-memory = ["target-esp", "role-standalone-memory"]
 profile-esp-embedded-sdk = ["target-esp", "role-embedded-sdk"]
+profile-linux-device-standalone-memory = ["target-linux-device", "role-standalone-memory"]
+profile-desktop-macos-embedded-sdk = ["target-desktop-macos", "role-embedded-sdk"]
+profile-desktop-windows-embedded-sdk = ["target-desktop-windows", "role-embedded-sdk"]
+profile-server-linux-memory-gateway = ["target-server-linux", "role-memory-gateway"]
+profile-server-linux-dev-full = ["target-server-linux", "role-dev-full"]
 
 [dependencies]
 serde.workspace = true

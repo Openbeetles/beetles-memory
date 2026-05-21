@@ -1,5 +1,7 @@
 //! Compile-time feature and profile capability contracts.
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(any(
     all(feature = "target-esp", feature = "target-linux-device"),
     all(feature = "target-esp", feature = "target-desktop-macos"),
@@ -69,7 +71,8 @@ impl RoleFeature {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProfileId {
     EspStandaloneMemory,
     EspEmbeddedSdk,
@@ -123,6 +126,12 @@ pub struct CompiledFeatureReport {
     pub role_dev_full: bool,
     pub profile_esp_standalone_memory: bool,
     pub profile_esp_embedded_sdk: bool,
+    pub profile_linux_device_standalone_memory: bool,
+    pub profile_desktop_macos_embedded_sdk: bool,
+    pub profile_desktop_windows_embedded_sdk: bool,
+    pub profile_server_linux_memory_gateway: bool,
+    pub profile_server_linux_dev_full: bool,
+    pub replay_harness_compiled: bool,
     pub sqlite_index_compiled: bool,
     pub rusqlite_dependency_compiled: bool,
 }
@@ -140,6 +149,16 @@ pub const fn compiled_feature_report() -> CompiledFeatureReport {
         role_dev_full: cfg!(feature = "role-dev-full"),
         profile_esp_standalone_memory: cfg!(feature = "profile-esp-standalone-memory"),
         profile_esp_embedded_sdk: cfg!(feature = "profile-esp-embedded-sdk"),
+        profile_linux_device_standalone_memory: cfg!(
+            feature = "profile-linux-device-standalone-memory"
+        ),
+        profile_desktop_macos_embedded_sdk: cfg!(feature = "profile-desktop-macos-embedded-sdk"),
+        profile_desktop_windows_embedded_sdk: cfg!(
+            feature = "profile-desktop-windows-embedded-sdk"
+        ),
+        profile_server_linux_memory_gateway: cfg!(feature = "profile-server-linux-memory-gateway"),
+        profile_server_linux_dev_full: cfg!(feature = "profile-server-linux-dev-full"),
+        replay_harness_compiled: cfg!(feature = "replay-harness"),
         sqlite_index_compiled: sqlite_index_compiled(),
         rusqlite_dependency_compiled: sqlite_index_compiled(),
     }

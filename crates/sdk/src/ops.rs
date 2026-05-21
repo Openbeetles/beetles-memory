@@ -7,6 +7,10 @@ use crate::{
     RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteOutcome, RuntimeSkillWriteSource,
     WorkingRecallInspection,
 };
+use crate::{
+    RuntimeLifecycleDiagnosisReport, RuntimeLifecycleModeInput, RuntimeLifecycleReport,
+    RuntimeLifecycleTrigger,
+};
 
 #[derive(Clone, Debug)]
 pub enum MemoryWriteRequest {
@@ -25,6 +29,7 @@ pub struct MemoryWriteReport {
     pub changed: usize,
     pub operation: &'static str,
     pub reason: String,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +43,7 @@ pub struct MemoryRecallReport {
     pub query: String,
     pub procedural_hits: Vec<RuntimeSkillHit>,
     pub working: WorkingRecallInspection,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
@@ -45,11 +51,14 @@ pub struct MemoryProjectionRequest {
     pub user_query: String,
     pub system_max_len: usize,
     pub recent_messages_limit: usize,
+    pub pressure: crate::PressureLevel,
+    pub mode_input: RuntimeLifecycleModeInput,
 }
 
 pub struct MemoryProjectionReport {
     pub system_memory_block: String,
     pub context: PromptMemoryContext,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
@@ -63,22 +72,29 @@ pub struct MemoryMaintenanceRequest {
     pub task_learning_selected_ids: Vec<String>,
     pub reuse_outcome: RuntimeSkillReuseOutcome,
     pub reuse_outcome_note: String,
+    pub pressure: crate::PressureLevel,
+    pub mode_input: RuntimeLifecycleModeInput,
 }
 
 pub struct MemoryMaintenanceReport {
-    pub report: PostReplyMemoryMaintenanceOutcome,
+    pub report: Option<PostReplyMemoryMaintenanceOutcome>,
     pub long_term_refresh_enqueued: bool,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
 pub struct MemoryInspectionRequest {
     pub query: String,
     pub system_max_len: usize,
+    pub pressure: crate::PressureLevel,
+    pub mode_input: RuntimeLifecycleModeInput,
 }
 
 pub struct MemoryInspectionReport {
     pub working: WorkingRecallInspection,
     pub capabilities: MemoryCapabilityCatalog,
+    pub operator_action_report: RuntimeOperatorActionReport,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 pub struct MemoryReplayRequest {
@@ -90,6 +106,7 @@ pub struct MemoryReplayRequest {
 pub struct MemoryReplayReport {
     pub chat_id: String,
     pub inspection: IntelligenceReplayInspection,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +117,7 @@ pub struct MemoryExportRequest {
 #[derive(Clone, Debug)]
 pub struct MemoryExportReport {
     pub snapshot: ContinuitySnapshot,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
@@ -112,9 +130,56 @@ pub struct MemoryImportRequest {
 #[derive(Clone, Debug)]
 pub struct MemoryImportReport {
     pub outcome: ContinuitySnapshotImportOutcome,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
 pub struct MemoryProceduralWriteReport {
     pub outcome: RuntimeSkillWriteOutcome,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryRecoverRequest {
+    pub trigger: RuntimeLifecycleTrigger,
+    pub mode_input: RuntimeLifecycleModeInput,
+}
+
+pub struct MemoryRecoverReport {
+    pub report: crate::SoulKernelRecoveryReport,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryCloseRequest {
+    pub reason: String,
+}
+
+pub struct MemoryCloseReport {
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeOperatorAction {
+    InspectMemoryStatus,
+    RecoverSoulKernel,
+    CloseRuntime,
+}
+
+impl RuntimeOperatorAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InspectMemoryStatus => "inspect_memory_status",
+            Self::RecoverSoulKernel => "recover_soul_kernel",
+            Self::CloseRuntime => "close_runtime",
+        }
+    }
+}
+
+pub struct RuntimeOperatorActionReport {
+    pub action: RuntimeOperatorAction,
+    pub accepted: bool,
+    pub lifecycle: RuntimeLifecycleReport,
+    pub surface: crate::MemoryOperatorSurfaceSummary,
+    pub diagnosis: RuntimeLifecycleDiagnosisReport,
+    pub safe_actions_available: Vec<String>,
 }

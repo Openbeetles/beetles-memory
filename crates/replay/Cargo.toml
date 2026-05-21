@@ -7,5 +7,13 @@ edition.workspace = true
 name = "bm_replay"
 path = "src/lib.rs"
 
+[features]
+default = []
+sqlite-store = ["bm-store/sqlite-store"]
+
 [dependencies]
-bm-core.workspace = true
+bm-core = { workspace = true, features = ["replay-harness"] }
+bm-sdk.workspace = true
+bm-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true

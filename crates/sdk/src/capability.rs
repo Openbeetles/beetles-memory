@@ -10,11 +10,14 @@ pub struct MemoryCapabilityPolicy {
     pub write_enabled: bool,
     pub recall_enabled: bool,
     pub projection_enabled: bool,
+    pub recover_enabled: bool,
     pub maintenance_enabled: bool,
     pub inspection_enabled: bool,
     pub replay_enabled: bool,
     pub export_enabled: bool,
     pub import_enabled: bool,
+    pub replay_harness_enabled: bool,
+    pub evolution_sandbox_enabled: bool,
     pub communication_adapter_enabled: bool,
 }
 
@@ -24,11 +27,14 @@ impl MemoryCapabilityPolicy {
             write_enabled: true,
             recall_enabled: true,
             projection_enabled: true,
+            recover_enabled: true,
             maintenance_enabled: true,
             inspection_enabled: true,
             replay_enabled: true,
             export_enabled: true,
             import_enabled: true,
+            replay_harness_enabled: true,
+            evolution_sandbox_enabled: true,
             communication_adapter_enabled: false,
         }
     }
@@ -98,6 +104,58 @@ impl MemoryIndexedRecallVisibility {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryRuntimeLifecycleCapability {
+    pub recover: MemoryOperationVisibility,
+    pub maintain_full: MemoryOperationVisibility,
+    pub maintain_lightweight: MemoryOperationVisibility,
+    pub operator_diagnosis: MemoryOperationVisibility,
+    pub export_snapshot: MemoryOperationVisibility,
+    pub import_snapshot: MemoryOperationVisibility,
+    pub replay_inspection: MemoryOperationVisibility,
+}
+
+impl MemoryRuntimeLifecycleCapability {
+    pub const fn hidden() -> Self {
+        Self {
+            recover: MemoryOperationVisibility::hidden(),
+            maintain_full: MemoryOperationVisibility::hidden(),
+            maintain_lightweight: MemoryOperationVisibility::hidden(),
+            operator_diagnosis: MemoryOperationVisibility::hidden(),
+            export_snapshot: MemoryOperationVisibility::hidden(),
+            import_snapshot: MemoryOperationVisibility::hidden(),
+            replay_inspection: MemoryOperationVisibility::hidden(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryValidationCapability {
+    pub compact_replay_fixture: MemoryOperationVisibility,
+    pub memory_harness: MemoryOperationVisibility,
+    pub full_replay_suite: MemoryOperationVisibility,
+    pub benchmark_gate: MemoryOperationVisibility,
+    pub proposal_preview: MemoryOperationVisibility,
+    pub compact_proposal_sandbox: MemoryOperationVisibility,
+    pub full_proposal_sandbox: MemoryOperationVisibility,
+    pub proposal_submission: MemoryOperationVisibility,
+}
+
+impl MemoryValidationCapability {
+    pub const fn hidden() -> Self {
+        Self {
+            compact_replay_fixture: MemoryOperationVisibility::hidden(),
+            memory_harness: MemoryOperationVisibility::hidden(),
+            full_replay_suite: MemoryOperationVisibility::hidden(),
+            benchmark_gate: MemoryOperationVisibility::hidden(),
+            proposal_preview: MemoryOperationVisibility::hidden(),
+            compact_proposal_sandbox: MemoryOperationVisibility::hidden(),
+            full_proposal_sandbox: MemoryOperationVisibility::hidden(),
+            proposal_submission: MemoryOperationVisibility::hidden(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryCapabilityCatalog {
     pub profile: ProfileId,
     pub target: TargetFeature,
@@ -113,6 +171,8 @@ pub struct MemoryCapabilityCatalog {
     pub import: MemoryOperationVisibility,
     pub communication_adapter: MemoryOperationVisibility,
     pub sqlite_index_recall: MemoryIndexedRecallVisibility,
+    pub lifecycle: MemoryRuntimeLifecycleCapability,
+    pub validation: MemoryValidationCapability,
 }
 
 impl MemoryCapabilityCatalog {
@@ -132,6 +192,8 @@ impl MemoryCapabilityCatalog {
             import: MemoryOperationVisibility::hidden(),
             communication_adapter: MemoryOperationVisibility::hidden(),
             sqlite_index_recall: MemoryIndexedRecallVisibility::hidden(),
+            lifecycle: MemoryRuntimeLifecycleCapability::hidden(),
+            validation: MemoryValidationCapability::hidden(),
         }
     }
 
@@ -198,6 +260,115 @@ impl MemoryCapabilityCatalog {
                 true,
                 true,
             ),
+            lifecycle: MemoryRuntimeLifecycleCapability {
+                recover: visible(
+                    profile_kind.recover_allowed,
+                    true,
+                    policy.recover_enabled,
+                    true,
+                    true,
+                ),
+                maintain_full: visible(
+                    profile_kind.maintenance_full_allowed,
+                    true,
+                    policy.maintenance_enabled,
+                    true,
+                    true,
+                ),
+                maintain_lightweight: visible(
+                    profile_kind.maintenance_lightweight_allowed,
+                    true,
+                    policy.maintenance_enabled,
+                    true,
+                    true,
+                ),
+                operator_diagnosis: visible(
+                    profile_kind.inspection_allowed,
+                    true,
+                    policy.inspection_enabled,
+                    true,
+                    privacy.operator_inspection_allowed,
+                ),
+                export_snapshot: visible(
+                    profile_kind.export_allowed,
+                    true,
+                    policy.export_enabled,
+                    true,
+                    privacy.export_allowed,
+                ),
+                import_snapshot: visible(
+                    profile_kind.import_allowed,
+                    true,
+                    policy.import_enabled,
+                    true,
+                    privacy.import_allowed,
+                ),
+                replay_inspection: visible(
+                    profile_kind.replay_allowed,
+                    true,
+                    policy.replay_enabled,
+                    true,
+                    true,
+                ),
+            },
+            validation: MemoryValidationCapability {
+                compact_replay_fixture: visible(
+                    profile_kind.compact_replay_fixture_allowed,
+                    compiled.replay_harness_compiled,
+                    policy.replay_harness_enabled,
+                    true,
+                    true,
+                ),
+                memory_harness: visible(
+                    profile_kind.memory_harness_allowed,
+                    compiled.replay_harness_compiled,
+                    policy.replay_harness_enabled,
+                    true,
+                    true,
+                ),
+                full_replay_suite: visible(
+                    profile_kind.full_replay_suite_allowed,
+                    compiled.replay_harness_compiled,
+                    policy.replay_harness_enabled,
+                    true,
+                    true,
+                ),
+                benchmark_gate: visible(
+                    profile_kind.benchmark_gate_allowed,
+                    compiled.replay_harness_compiled,
+                    policy.replay_harness_enabled,
+                    true,
+                    true,
+                ),
+                proposal_preview: visible(
+                    profile_kind.proposal_preview_allowed,
+                    true,
+                    policy.evolution_sandbox_enabled,
+                    true,
+                    true,
+                ),
+                compact_proposal_sandbox: visible(
+                    profile_kind.compact_proposal_sandbox_allowed,
+                    true,
+                    policy.evolution_sandbox_enabled,
+                    true,
+                    true,
+                ),
+                full_proposal_sandbox: visible(
+                    profile_kind.full_proposal_sandbox_allowed,
+                    true,
+                    policy.evolution_sandbox_enabled,
+                    true,
+                    true,
+                ),
+                proposal_submission: visible(
+                    profile_kind.proposal_submission_allowed,
+                    true,
+                    policy.evolution_sandbox_enabled,
+                    true,
+                    true,
+                ),
+            },
             sqlite_index_recall: MemoryIndexedRecallVisibility {
                 archive: indexed_visible(
                     entry.indexed_archive_recall_allowed,
@@ -280,46 +451,101 @@ fn indexed_visible(
 
 #[derive(Clone, Copy)]
 struct ProfileOperationDefaults {
+    recover_allowed: bool,
     maintenance_allowed: bool,
+    maintenance_full_allowed: bool,
+    maintenance_lightweight_allowed: bool,
     inspection_allowed: bool,
     replay_allowed: bool,
     export_allowed: bool,
     import_allowed: bool,
+    compact_replay_fixture_allowed: bool,
+    memory_harness_allowed: bool,
+    full_replay_suite_allowed: bool,
+    benchmark_gate_allowed: bool,
+    proposal_preview_allowed: bool,
+    compact_proposal_sandbox_allowed: bool,
+    full_proposal_sandbox_allowed: bool,
+    proposal_submission_allowed: bool,
 }
 
 fn profile_kind(profile: ProfileId) -> ProfileOperationDefaults {
     match profile {
         ProfileId::EspStandaloneMemory | ProfileId::LinuxDeviceStandaloneMemory => {
             ProfileOperationDefaults {
+                recover_allowed: true,
                 maintenance_allowed: true,
+                maintenance_full_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+                maintenance_lightweight_allowed: true,
                 inspection_allowed: true,
                 replay_allowed: false,
                 export_allowed: true,
                 import_allowed: true,
+                compact_replay_fixture_allowed: true,
+                memory_harness_allowed: true,
+                full_replay_suite_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+                benchmark_gate_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+                proposal_preview_allowed: true,
+                compact_proposal_sandbox_allowed: true,
+                full_proposal_sandbox_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+                proposal_submission_allowed: true,
             }
         }
         ProfileId::EspEmbeddedSdk
         | ProfileId::DesktopMacosEmbeddedSdk
         | ProfileId::DesktopWindowsEmbeddedSdk => ProfileOperationDefaults {
+            recover_allowed: false,
             maintenance_allowed: false,
+            maintenance_full_allowed: false,
+            maintenance_lightweight_allowed: false,
             inspection_allowed: true,
             replay_allowed: false,
             export_allowed: false,
             import_allowed: false,
+            compact_replay_fixture_allowed: false,
+            memory_harness_allowed: false,
+            full_replay_suite_allowed: false,
+            benchmark_gate_allowed: false,
+            proposal_preview_allowed: true,
+            compact_proposal_sandbox_allowed: false,
+            full_proposal_sandbox_allowed: false,
+            proposal_submission_allowed: false,
         },
         ProfileId::ServerLinuxMemoryGateway => ProfileOperationDefaults {
+            recover_allowed: true,
             maintenance_allowed: true,
+            maintenance_full_allowed: true,
+            maintenance_lightweight_allowed: true,
             inspection_allowed: true,
             replay_allowed: false,
             export_allowed: true,
             import_allowed: true,
+            compact_replay_fixture_allowed: true,
+            memory_harness_allowed: true,
+            full_replay_suite_allowed: true,
+            benchmark_gate_allowed: true,
+            proposal_preview_allowed: true,
+            compact_proposal_sandbox_allowed: true,
+            full_proposal_sandbox_allowed: true,
+            proposal_submission_allowed: true,
         },
         ProfileId::ServerLinuxDevFull => ProfileOperationDefaults {
+            recover_allowed: true,
             maintenance_allowed: true,
+            maintenance_full_allowed: true,
+            maintenance_lightweight_allowed: true,
             inspection_allowed: true,
             replay_allowed: true,
             export_allowed: true,
             import_allowed: true,
+            compact_replay_fixture_allowed: true,
+            memory_harness_allowed: true,
+            full_replay_suite_allowed: true,
+            benchmark_gate_allowed: true,
+            proposal_preview_allowed: true,
+            compact_proposal_sandbox_allowed: true,
+            full_proposal_sandbox_allowed: true,
+            proposal_submission_allowed: true,
         },
     }
 }

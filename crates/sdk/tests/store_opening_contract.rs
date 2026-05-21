@@ -6,8 +6,9 @@ use bm_core::platform::Platform as _;
 use bm_sdk::{
     ContinuitySnapshotImportMode, IngressKind, MemoryExportRequest, MemoryImportRequest,
     MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryWriteRequest, ProfileId, RuntimeSkillReuseOutcome,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
+    MemoryRecallRequest, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    StorePlatform,
 };
 
 use support::{test_runtime, StaticHttpClient, StaticLlmClient};
@@ -67,6 +68,8 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
             user_query: "How do I open storage?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
         })
         .expect("projection");
     assert!(projection.system_memory_block.len() <= 4096);
@@ -87,15 +90,20 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
                 task_learning_selected_ids: Vec::new(),
                 reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
                 reuse_outcome_note: String::new(),
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
         )
         .expect("maintenance");
-    assert!(maintenance.report.after_count <= maintenance.report.after_count.saturating_add(1));
+    let maintenance_report = maintenance.report.expect("maintenance report");
+    assert!(maintenance_report.after_count <= maintenance_report.after_count.saturating_add(1));
 
     let inspection = runtime
         .inspect(MemoryInspectionRequest {
             query: "store backend".to_string(),
             system_max_len: 4096,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
         })
         .expect("inspection");
     assert_eq!(inspection.working.query, "store backend");

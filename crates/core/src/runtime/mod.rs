@@ -9,6 +9,20 @@ pub use soul_kernel::{
     SoulKernelRecoveryReport, SoulKernelStatus,
 };
 
+pub mod lifecycle;
+pub mod lifecycle_diagnosis;
+pub use lifecycle::{
+    NoopRuntimeLifecycleEventSink, RuntimeLifecycleAdmission, RuntimeLifecycleDisposition,
+    RuntimeLifecycleEffect, RuntimeLifecycleEngine, RuntimeLifecycleEvent,
+    RuntimeLifecycleEventKind, RuntimeLifecycleEventSink, RuntimeLifecycleModeInput,
+    RuntimeLifecycleOperation, RuntimeLifecycleReport, RuntimeLifecycleTrigger,
+    POST_REPLY_LIGHTWEIGHT_AFTER_MS,
+};
+pub use lifecycle_diagnosis::{
+    build_runtime_lifecycle_diagnosis, RuntimeLifecycleDiagnosisReport, RuntimeLifecycleEvidence,
+    RuntimeLifecycleFinding, RuntimeLifecycleRecommendedAction, RuntimeLifecycleRootCause,
+};
+
 pub mod continuity_flush {
     use crate::memory::ContinuitySnapshot;
     use serde::{Deserialize, Serialize};

@@ -19,6 +19,8 @@
 - [dev-docs/code-quality-audit.md](dev-docs/code-quality-audit.md)：代码质量治理第一刀审计报告与收敛台账。
 - [dev-docs/sdk-profile-contract-plan.md](dev-docs/sdk-profile-contract-plan.md)：SDK/Profile 阶段实施真源。
 - [dev-docs/store-backend-schema-plan.md](dev-docs/store-backend-schema-plan.md)：Store Backend + Schema 阶段实施真源。
+- [dev-docs/runtime-lifecycle-plan.md](dev-docs/runtime-lifecycle-plan.md)：Runtime Lifecycle 阶段实施真源。
+- [dev-docs/replay-sandbox-plan.md](dev-docs/replay-sandbox-plan.md)：Replay / Harness / Evolution Sandbox 阶段实施真源。
 - [dev-docs/procedural-memory-and-skill.md](dev-docs/procedural-memory-and-skill.md)：skill / procedural memory 边界。
 - [dev-docs/profile-and-platform-boundary.md](dev-docs/profile-and-platform-boundary.md)：profile 与平台边界。
 - [dev-docs/soul-and-subject-memory-boundary.md](dev-docs/soul-and-subject-memory-boundary.md)：灵魂治理与主体记忆边界。
@@ -50,7 +52,8 @@
 - `crates/core/src/platform`：memory operator surface 与通用 store/platform trait。
 - `crates/sdk`：当前提供 SDK-first `MemoryRuntime` facade，并 re-export `StorePlatform` / `StoreBackendConfig` 作为普通宿主 store opening 入口；普通宿主通过 `MemoryRuntime::builder().store_platform(platform)` 接入，不手写 core store trait，也不通过 SDK facade 操作 store snapshot envelope internals。
 - `crates/store`：当前提供 in-memory、file、sqlite、embedded 四类后端、schema manifest、event log、snapshot envelope、repair report 和跨后端一致性测试。
-- `crates/replay`、`crates/evolve`：当前提供 replay/evolve 出口，不引入某个宿主特权。
+- `crates/replay`：当前提供 fixture schema、SDK-driven runner、cross-store replay、memory harness gate、benchmark gate 和 profile validation capability，不引入某个宿主特权。
+- `crates/evolve`：当前提供 proposal-only evolution sandbox 合同、profile policy 和 SDK write governance commit helper；sandbox 不直接写 store。
 
 当前未实现外部通信 adapter；HTTP、Webhook、WSS、MQTT、MCP、CLI 仍只在文档中固定边界，不能在内核里分叉记忆语义。
 
@@ -60,4 +63,8 @@
 
 Store Backend + Schema 已落地：`bm-store` 已从内存辅助工具推进为 Beetle Memory 自有持久化层，由本项目实现 in-memory、file、sqlite、embedded 后端、schema、event log、snapshot 和 repair report；manifest 强校验 schema/backend/profile/memory_system_kind，snapshot 同时校验 state fingerprint 与 event fingerprint，导入前校验 envelope/manifest/namespace/lineage，embedded 执行 snapshot byte budget 且不静默截断 event lineage。集成方只配置后端与容量，不实现记忆 schema、写入语义或恢复逻辑。本阶段验收脚本为 `bash scripts/check_store_backend_contract.sh`。
 
-当前下一阶段进入 Runtime Lifecycle：在已存在的 store contract 之上收口 runtime open/close、maintenance scheduling、projection lifecycle、operator action 事件和 replay/sandbox 调度边界；不得把通信层或 UI 层提前塞进内核。
+Runtime Lifecycle 已落地：`bm-core::runtime` 已提供 `RuntimeLifecycleEngine`、mode/admission、report、event sink 和 operator diagnosis；`MemoryRuntime` 的 open/close/recover/write/recall/project/maintain/inspect/replay/export/import 都返回 lifecycle report 并写入 `runtime.lifecycle` / `operator.action` event；`StorePlatform` 持久化生命周期事件并保持 snapshot import/export event lineage；capability catalog 已区分 ESP standalone 与 ESP embedded SDK 的 lifecycle 能力。本阶段验收脚本为 `bash scripts/check_runtime_lifecycle_contract.sh`。
+
+Replay / Harness / Evolution Sandbox 已落地：`bm-replay` 已提供 fixture/runner/harness/benchmark gate，`bm-evolve` 已提供 proposal-only sandbox 与 SDK commit helper，validation capability 已区分 ESP standalone、ESP embedded SDK、Linux device、desktop、server profile。本阶段验收脚本为 `bash scripts/check_replay_sandbox_contract.sh`。
+
+当前下一阶段只能进入 Adapter / Communication 真源核对与落地；外部通信 adapter、UI 和协议 server 仍不得提前进入内核或分叉记忆语义。

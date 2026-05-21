@@ -53,6 +53,30 @@ fn compiled_feature_report_names_target_role_and_profile_features() {
         report.profile_esp_embedded_sdk,
         cfg!(feature = "profile-esp-embedded-sdk")
     );
+    assert_eq!(
+        report.profile_linux_device_standalone_memory,
+        cfg!(feature = "profile-linux-device-standalone-memory")
+    );
+    assert_eq!(
+        report.profile_desktop_macos_embedded_sdk,
+        cfg!(feature = "profile-desktop-macos-embedded-sdk")
+    );
+    assert_eq!(
+        report.profile_desktop_windows_embedded_sdk,
+        cfg!(feature = "profile-desktop-windows-embedded-sdk")
+    );
+    assert_eq!(
+        report.profile_server_linux_memory_gateway,
+        cfg!(feature = "profile-server-linux-memory-gateway")
+    );
+    assert_eq!(
+        report.profile_server_linux_dev_full,
+        cfg!(feature = "profile-server-linux-dev-full")
+    );
+    assert_eq!(
+        report.replay_harness_compiled,
+        cfg!(feature = "replay-harness")
+    );
 }
 
 #[test]

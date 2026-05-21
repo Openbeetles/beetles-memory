@@ -54,7 +54,7 @@ pub const ESP_PROMPT_SKILL_MAX_CHARS: usize = 2048;
 pub const ESP_PROMPT_SKILL_CAUTION_MAX_CHARS: usize = 1024;
 const RUNTIME_SKILL_PREFIX: &str = "runtime_skill__";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct RuntimeSkillWrite {
     pub name: String,
     pub topic: String,

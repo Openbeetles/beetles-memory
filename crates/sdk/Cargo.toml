@@ -7,6 +7,12 @@ edition.workspace = true
 name = "bm_sdk"
 path = "src/lib.rs"
 
+[features]
+default = []
+replay-harness = ["bm-core/replay-harness"]
+sqlite-index = ["bm-core/sqlite-index"]
+sqlite-store = ["bm-store/sqlite-store"]
+
 [dependencies]
 bm-core.workspace = true
 bm-store.workspace = true

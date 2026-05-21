@@ -7,6 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bm_core::agent::{ActiveWorkRecord, ActiveWorkStore};
 use bm_core::memory::*;
 use bm_core::platform::{MemorySystemKind, Platform, SkillMetaStore, SkillStorage, StateFs};
+use bm_core::runtime::{
+    RuntimeLifecycleEvent, RuntimeLifecycleEventKind, RuntimeLifecycleEventSink,
+};
 use bm_core::task::{normalize_task_item, TaskItem, TaskQuery, TaskStore};
 use bm_core::task_execution::{
     TaskArtifactRecord, TaskArtifactStore, TaskLearningRecord, TaskLearningStore, TaskRunRecord,
@@ -354,9 +357,52 @@ impl StoreEventLog for StorePlatform {
     }
 }
 
+impl RuntimeLifecycleEventSink for StorePlatform {
+    fn record_lifecycle_event(&self, event: RuntimeLifecycleEvent) -> Result<()> {
+        let event_value = serde_json::to_value(&event)
+            .map_err(|error| Error::config("runtime_lifecycle_event", error.to_string()))?;
+        let content_hash = stable_hash_json(&event_value)?;
+        let kind = match event.kind {
+            RuntimeLifecycleEventKind::RuntimeLifecycle => MemoryStoreEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEventKind::OperatorAction => MemoryStoreEventKind::OperatorAction,
+        };
+        let mut store_event = MemoryStoreEvent::new(
+            event.event_id,
+            kind,
+            StoreEventScope::system(event.operation.as_str()),
+            event.timestamp_unix_secs,
+        )
+        .with_plane("runtime_lifecycle")
+        .with_record_key(event.operation.as_str())
+        .with_content_hash(content_hash);
+        store_event = store_event
+            .with_payload("operation", event.operation.as_str())
+            .with_payload("trigger", event.trigger.as_str())
+            .with_payload("disposition", event.disposition.as_str())
+            .with_payload("effect", event.effect.as_str())
+            .with_payload("profile", event.profile.as_str())
+            .with_payload("mode", event.mode.as_str())
+            .with_payload(
+                "pressure",
+                format!("{:?}", event.pressure).to_ascii_lowercase(),
+            )
+            .with_payload("reason", event.reason)
+            .with_payload("result", event.result)
+            .with_payload("error_stage", event.error_stage.unwrap_or_default());
+        for (key, value) in event.payload {
+            store_event = store_event.with_payload(key, value);
+        }
+        self.engine.append_event(store_event)
+    }
+}
+
 impl Platform for StorePlatform {
     fn memory_system_kind(&self) -> MemorySystemKind {
         self.config.memory_system_kind
+    }
+
+    fn runtime_lifecycle_event_sink(&self) -> Arc<dyn bm_core::runtime::RuntimeLifecycleEventSink> {
+        Arc::new(self.clone())
     }
 
     fn state_fs(&self) -> Arc<dyn StateFs> {

@@ -77,6 +77,10 @@ pub trait Platform: Send + Sync {
         MemorySystemKind::Standalone
     }
 
+    fn runtime_lifecycle_event_sink(&self) -> Arc<dyn crate::runtime::RuntimeLifecycleEventSink> {
+        Arc::new(crate::runtime::NoopRuntimeLifecycleEventSink)
+    }
+
     fn state_fs(&self) -> Arc<dyn StateFs>;
     fn skill_storage(&self) -> Arc<dyn SkillStorage>;
     fn skill_meta_store(&self) -> Arc<dyn SkillMetaStore>;
