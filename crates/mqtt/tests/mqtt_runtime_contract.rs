@@ -1,4 +1,4 @@
-#![cfg(feature = "bridge-rumqttc")]
+#![cfg(feature = "bridge-std")]
 
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,

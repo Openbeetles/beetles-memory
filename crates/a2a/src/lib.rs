@@ -11,7 +11,9 @@ use bm_sdk::MemoryRecallRequest;
 #[cfg(feature = "bridge-http")]
 use serde::Deserialize;
 #[cfg(feature = "bridge-http")]
-use serde_json::json;
+use serde_json::{json, Value};
+#[cfg(feature = "bridge-http")]
+use std::io::{Read, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum A2aPermission {
@@ -133,6 +135,124 @@ impl A2aBridge {
             permissions: vec![A2aPermission::MemoryReport],
         })
     }
+}
+
+#[cfg(feature = "bridge-http")]
+pub fn serve_a2a_http_stream(
+    runtime: &EntryRuntime,
+    bridge: &A2aBridge,
+    stream: &mut (impl Read + Write),
+) -> bm_sdk::Result<()> {
+    let body = read_a2a_http_body(stream)?;
+    let request: A2aHttpRequest = serde_json::from_str(&body)
+        .map_err(|err| bm_sdk::Error::config("a2a_http_json", err.to_string()))?;
+    let response = bridge.handle(
+        runtime,
+        A2aRuntimeMessage::json(request.name, request.payload.to_string()),
+    )?;
+    write_a2a_http_response(stream, response)
+}
+
+#[cfg(feature = "bridge-http")]
+fn read_a2a_http_body(stream: &mut impl Read) -> bm_sdk::Result<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let header_end = loop {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|err| bm_sdk::Error::config("a2a_http_read", err.to_string()))?;
+        if read == 0 {
+            break find_header_end(&buffer)
+                .ok_or_else(|| bm_sdk::Error::config("a2a_http_read", "missing HTTP headers"))?;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(pos) = find_header_end(&buffer) {
+            break pos;
+        }
+        if buffer.len() > 72 * 1024 {
+            return Err(bm_sdk::Error::config(
+                "a2a_http_read",
+                "HTTP request too large",
+            ));
+        }
+    };
+    let header_text = std::str::from_utf8(&buffer[..header_end])
+        .map_err(|err| bm_sdk::Error::config("a2a_http_header", err.to_string()))?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| bm_sdk::Error::config("a2a_http_header", "missing request line"))?;
+    let mut parts = request_line.split_whitespace();
+    if parts.next() != Some("POST") || parts.next() != Some("/a2a/message") {
+        return Err(bm_sdk::Error::config(
+            "a2a_http_route",
+            "unsupported A2A HTTP route",
+        ));
+    }
+    let content_length = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|err| bm_sdk::Error::config("a2a_http_body", err.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    if buffer.len() < body_start + content_length {
+        return Err(bm_sdk::Error::config("a2a_http_body", "truncated body"));
+    }
+    String::from_utf8(buffer[body_start..body_start + content_length].to_vec())
+        .map_err(|err| bm_sdk::Error::config("a2a_http_body", err.to_string()))
+}
+
+#[cfg(feature = "bridge-http")]
+fn write_a2a_http_response(
+    stream: &mut impl Write,
+    response: A2aRuntimeResponse,
+) -> bm_sdk::Result<()> {
+    let body = json!({
+        "kind": response.kind,
+        "payload": response.payload,
+        "permissions": response.permissions.into_iter().map(permission_name).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body.as_bytes()))
+        .and_then(|_| stream.flush())
+        .map_err(|err| bm_sdk::Error::config("a2a_http_write", err.to_string()))
+}
+
+#[cfg(feature = "bridge-http")]
+fn permission_name(permission: A2aPermission) -> &'static str {
+    match permission {
+        A2aPermission::MemoryReport => "MemoryReport",
+        A2aPermission::Executor => "Executor",
+        A2aPermission::Tool => "Tool",
+        A2aPermission::Workflow => "Workflow",
+    }
+}
+
+#[cfg(feature = "bridge-http")]
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+#[cfg(feature = "bridge-http")]
+#[derive(Deserialize)]
+struct A2aHttpRequest {
+    name: String,
+    payload: Value,
 }
 
 #[cfg(feature = "bridge-http")]

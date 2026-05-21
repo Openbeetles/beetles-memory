@@ -38,6 +38,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-mcp \
   -p bm-a2a
 bash scripts/check_platform_compile_gates.sh
+bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_release_surface.sh
 ```
 
@@ -70,5 +71,5 @@ bash scripts/check_cross_target_compile_gates.sh --strict
 ## Drift Red Lines
 
 - public docs、examples、crate API 不能出现来源项目专属 adapter、source kind 或默认宿主绑定。
-- Release Surface 不能扩展成 UI、管理控制台、workflow runner、skill marketplace 或真实网络 listener。
+- Release Surface 不能扩展成 UI、管理控制台、workflow runner、skill marketplace、内置 MQTT broker 或 TLS 证书管理。
 - 独立部署和 SDK 集成必须使用同一套 `MemoryRuntime` / store / adapter contract。

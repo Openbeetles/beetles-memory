@@ -31,14 +31,14 @@ let response = entry.handle(transport_context, adapter_command)?;
 | SDK method | `bm-sdk` | 已落地 |
 | Entry runtime | `bm-entry` | store/runtime/profile/auth/source/idempotency 入口已落地 |
 | CLI | `bm-cli` | command spec、platform capability snapshot 和真实 memory command execution 已落地 |
-| HTTP | `bm-http` | HTTP request runtime shell 已落地 |
-| Webhook | `bm-http` + `bm-entry` | inbound write candidate runtime shell 已落地 |
-| WSS | `bm-wss` | command frame、subscription、budget runtime shell 已落地 |
-| MQTT | `bm-mqtt` | topic consume/publish bridge runtime shell 已落地 |
-| MCP | `bm-mcp` | stdio tool-call runtime shell 已落地 |
-| A2A | `bm-a2a` | peer capability + memory message bridge runtime shell 已落地 |
+| HTTP | `bm-http` | HTTP request runtime shell + std listener backend 已落地 |
+| Webhook | `bm-http` + `bm-entry` | inbound write candidate runtime shell + std listener backend 已落地 |
+| WSS | `bm-wss` | command frame、subscription、budget runtime shell + WebSocket backend 已落地 |
+| MQTT | `bm-mqtt` | topic consume/publish runtime shell + external broker client bridge 已落地 |
+| MCP | `bm-mcp` | tool-call runtime shell + stdio JSON-RPC backend 已落地 |
+| A2A | `bm-a2a` | peer capability + memory message runtime shell + HTTP bridge backend 已落地 |
 
-入口层已经能把各协议请求 decode 成 adapter command 并调用同一个 runtime。后续替换或增强具体 socket/listener/broker 实现时，仍只能沿用这条入口链路。
+部署入口已经能把各协议外部字节流 decode 成 adapter command 并调用同一个 runtime。后续替换或增强 TLS、broker、反向代理或 async runtime 时，仍只能沿用这条入口链路。
 
 ## Security And Privacy
 

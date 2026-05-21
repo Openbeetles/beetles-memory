@@ -6,11 +6,11 @@ Profile 是 Beetle Memory 的裁剪单位。目标平台、运行角色、store 
 | --- | --- | --- | --- | --- | --- | --- |
 | `profile-esp-standalone-memory` | ESP | standalone memory | embedded | compact `bm-entry` + CLI/local frame + WSS/MQTT client | 禁止 | compact validation |
 | `profile-esp-embedded-sdk` | ESP | embedded SDK | embedded | SDK in-process，默认不启用 listener | 禁止 | compact validation |
-| `profile-linux-device-standalone-memory` | Linux device | standalone memory | file / sqlite | `bm-entry` + CLI / loopback HTTP/WSS/MQTT/Webhook runtime shell | 允许 | device validation |
+| `profile-linux-device-standalone-memory` | Linux device | standalone memory | file / sqlite | `bm-entry` + CLI / loopback HTTP/WebSocket/MQTT/Webhook backend | 允许 | device validation |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file / sqlite / in-memory | SDK in-process + local loopback entry | 允许 | host validation |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file / sqlite / in-memory | SDK in-process + local loopback entry | 允许 | host validation |
-| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite / file | `bm-entry` + HTTP/Webhook/WSS/MQTT/MCP/A2A runtime shell | 允许 | gateway validation |
-| `profile-server-linux-dev-full` | Linux server | dev full | sqlite / file / in-memory | 全 entry runtime shell + adapter + CLI inspection | 允许 | full replay suite |
+| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite / file | `bm-entry` + HTTP/Webhook/WebSocket/MQTT/MCP/A2A deployment backend | 允许 | gateway validation |
+| `profile-server-linux-dev-full` | Linux server | dev full | sqlite / file / in-memory | 全 deployment backend + adapter + CLI inspection | 允许 | full replay suite |
 
 ## Compile Rules
 

@@ -11,7 +11,9 @@ use bm_sdk::MemoryRecallRequest;
 #[cfg(feature = "server-stdio")]
 use serde::Deserialize;
 #[cfg(feature = "server-stdio")]
-use serde_json::json;
+use serde_json::{json, Value};
+#[cfg(feature = "server-stdio")]
+use std::io::{BufRead, Write};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpToolSpec {
@@ -123,6 +125,87 @@ impl McpToolServer {
         )?;
         Ok(render_tool_result(response.adapter))
     }
+}
+
+#[cfg(feature = "server-stdio")]
+pub fn serve_mcp_stdio_once<R: BufRead, W: Write>(
+    server: &McpToolServer,
+    runtime: &EntryRuntime,
+    reader: &mut R,
+    writer: &mut W,
+) -> bm_sdk::Result<()> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|err| bm_sdk::Error::config("mcp_stdio_read", err.to_string()))?;
+    if line.trim().is_empty() {
+        return Err(bm_sdk::Error::config(
+            "mcp_stdio_read",
+            "empty JSON-RPC line",
+        ));
+    }
+    let request: Value = serde_json::from_str(&line)
+        .map_err(|err| bm_sdk::Error::config("mcp_stdio_json", err.to_string()))?;
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bm_sdk::Error::config("mcp_stdio_json", "missing method"))?;
+    let result = match method {
+        "tools/list" => json!({
+            "tools": tool_specs()
+                .into_iter()
+                .map(|tool| json!({
+                    "name": tool.name,
+                    "operation": format!("{:?}", tool.operation),
+                    "private_raw_allowed": tool.private_raw_allowed,
+                    "schema_fields": tool.schema_fields,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+        "tools/call" => {
+            let params = request
+                .get("params")
+                .ok_or_else(|| bm_sdk::Error::config("mcp_stdio_json", "missing params"))?;
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bm_sdk::Error::config("mcp_stdio_json", "missing tool name"))?;
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}))
+                .to_string();
+            let tool_result = server.call(runtime, McpToolCall::json(name, arguments))?;
+            let content = serde_json::from_str::<Value>(&tool_result.content)
+                .unwrap_or(Value::String(tool_result.content));
+            json!({
+                "status": tool_result.status,
+                "content": content,
+                "private_raw_allowed": tool_result.private_raw_allowed,
+            })
+        }
+        other => {
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("unsupported MCP method: {other}"),
+                }
+            });
+            writeln!(writer, "{response}")
+                .map_err(|err| bm_sdk::Error::config("mcp_stdio_write", err.to_string()))?;
+            return Ok(());
+        }
+    };
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    });
+    writeln!(writer, "{response}")
+        .map_err(|err| bm_sdk::Error::config("mcp_stdio_write", err.to_string()))
 }
 
 #[cfg(feature = "server-stdio")]

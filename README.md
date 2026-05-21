@@ -25,6 +25,7 @@
 - [dev-docs/platform-compile-gates-plan.md](dev-docs/platform-compile-gates-plan.md)：Platform Compile Gates 阶段验收真源。
 - [dev-docs/release-surface-plan.md](dev-docs/release-surface-plan.md)：Release Surface 阶段实施与验收真源。
 - [dev-docs/entry-runtime-plan.md](dev-docs/entry-runtime-plan.md)：Entry Runtime / 入口运行时阶段实施真源。
+- [dev-docs/deployment-runtime-plan.md](dev-docs/deployment-runtime-plan.md)：Deployment Runtime / 真实部署通信阶段实施真源。
 - [dev-docs/procedural-memory-and-skill.md](dev-docs/procedural-memory-and-skill.md)：skill / procedural memory 边界。
 - [dev-docs/profile-and-platform-boundary.md](dev-docs/profile-and-platform-boundary.md)：profile 与平台边界。
 - [dev-docs/soul-and-subject-memory-boundary.md](dev-docs/soul-and-subject-memory-boundary.md)：灵魂治理与主体记忆边界。
@@ -70,7 +71,7 @@
 - `crates/replay`：当前提供 fixture schema、SDK-driven runner、cross-store replay、memory harness gate、benchmark gate 和 profile validation capability，不引入某个宿主特权。
 - `crates/evolve`：当前提供 proposal-only evolution sandbox 合同、profile policy 和 SDK write governance commit helper；sandbox 不直接写 store。
 
-Adapter / Communication 协议合同层已落地，见 [dev-docs/adapter-communication-plan.md](dev-docs/adapter-communication-plan.md)。`bm-adapter` 是协议无关 command/envelope/policy/report 合同层；`bm-cli`、`bm-http`、`bm-wss`、`bm-mqtt`、`bm-mcp`、`bm-a2a` 只作为 thin adapter 消费 `MemoryRuntime`，不能在内核外分叉记忆语义。当前不引入真实网络 server/listener 依赖。
+Adapter / Communication 协议合同层已落地，见 [dev-docs/adapter-communication-plan.md](dev-docs/adapter-communication-plan.md)。`bm-adapter` 是协议无关 command/envelope/policy/report 合同层；`bm-cli`、`bm-http`、`bm-wss`、`bm-mqtt`、`bm-mcp`、`bm-a2a` 只作为 thin adapter 消费 `MemoryRuntime`，不能在内核外分叉记忆语义。
 
 当前第一轮代码质量治理已经完成：SDK-only host contract 已补齐，sqlite/index 后端改为显式 `sqlite-index` feature，ESP standalone / embedded SDK profile 不再拉入 `rusqlite`，未使用的 `base64` / `urlencoding` 已移除。
 
@@ -86,4 +87,6 @@ Platform Compile Gates 已落地，见 [dev-docs/platform-compile-gates-plan.md]
 
 Release Surface 已落地，见 [dev-docs/release-surface-plan.md](dev-docs/release-surface-plan.md)：公开 API 文档、SDK quickstart、profile matrix、store / replay / adapter / operator guide、六个非来源项目 examples、license/package metadata、publish dry-run 和 `scripts/check_release_surface.sh` 已进入发布面门禁。
 
-Entry Runtime / 入口运行时已按 [dev-docs/entry-runtime-plan.md](dev-docs/entry-runtime-plan.md) 落地为当前主线：`bm-entry` 负责打开 store/runtime、归一化 profile/auth/source/idempotency 并返回 adapter response；`bm-cli` 已执行真实 memory command；`bm-http`、`bm-wss`、`bm-mqtt`、`bm-mcp`、`bm-a2a` 已具备 feature-gated runtime smoke。UI、管理控制台、executor、workflow runner、skill marketplace 和来源项目专属 adapter 仍不进入本阶段。
+Entry Runtime / 入口运行时已按 [dev-docs/entry-runtime-plan.md](dev-docs/entry-runtime-plan.md) 落地为当前主线：`bm-entry` 负责打开 store/runtime、归一化 profile/auth/source/idempotency 并返回 adapter response；`bm-cli` 已执行真实 memory command；`bm-http`、`bm-wss`、`bm-mqtt`、`bm-mcp`、`bm-a2a` 已具备 feature-gated runtime smoke。
+
+Deployment Runtime / 真实部署通信已按 [dev-docs/deployment-runtime-plan.md](dev-docs/deployment-runtime-plan.md) 落地：HTTP/Webhook std listener、WebSocket upgrade/frame backend、MQTT external broker bridge、MCP stdio JSON-RPC 和 A2A HTTP bridge 都进入同一条 `bm-entry -> bm-adapter -> MemoryRuntime` 链路。UI、管理控制台、executor、workflow runner、skill marketplace、内置 MQTT broker、内置 TLS 证书管理和来源项目专属 adapter 仍不进入本阶段。

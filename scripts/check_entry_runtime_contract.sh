@@ -11,9 +11,9 @@ fi
 
 cargo test -p bm-entry
 cargo test -p bm-cli --test cli_contract
-cargo test -p bm-http --features server-axum --test http_runtime_contract
-cargo test -p bm-wss --features server-axum --test wss_runtime_contract
-cargo test -p bm-mqtt --features bridge-rumqttc --test mqtt_runtime_contract
+cargo test -p bm-http --features server-std --test http_runtime_contract
+cargo test -p bm-wss --features server-std --test wss_runtime_contract
+cargo test -p bm-mqtt --features bridge-std --test mqtt_runtime_contract
 cargo test -p bm-mcp --features server-stdio --test mcp_runtime_contract
 cargo test -p bm-a2a --features bridge-http --test a2a_runtime_contract
 

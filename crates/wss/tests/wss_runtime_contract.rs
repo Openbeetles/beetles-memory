@@ -1,4 +1,4 @@
-#![cfg(feature = "server-axum")]
+#![cfg(feature = "server-std")]
 
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,

@@ -8,5 +8,5 @@ publish = false
 
 [dependencies]
 bm-entry = { path = "../../crates/entry", features = ["profile-server-linux-dev-full"] }
-bm-http = { path = "../../crates/http", features = ["profile-server-linux-dev-full", "server-axum"] }
+bm-http = { path = "../../crates/http", features = ["profile-server-linux-dev-full", "server-std"] }
 bm-sdk = { path = "../../crates/sdk", features = ["profile-server-linux-dev-full"] }

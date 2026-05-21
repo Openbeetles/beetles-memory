@@ -12,6 +12,7 @@ required_docs=(
   "docs/adapter-contract.md"
   "docs/operator-inspection.md"
   "docs/release-checklist.md"
+  "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
   "dev-docs/release-surface-plan.md"
 )
@@ -83,6 +84,7 @@ cargo doc --no-deps --no-default-features \
 
 bash scripts/emit_platform_capability_snapshots.sh --check
 bash scripts/check_entry_runtime_contract.sh
+bash scripts/check_deployment_runtime_contract.sh
 
 publish_dry_run() {
   local crate="$1"
@@ -149,7 +151,7 @@ if rg -n "adapter-beetle|source_kind.*beetle|nested_beetle_error|beetle_host|bee
   exit 1
 fi
 
-if rg -n "workflow runner|skill marketplace|管理控制台|真实网络 listener|real network listener" \
+if rg -n "workflow runner|skill marketplace|管理控制台|built-in MQTT broker|内置 MQTT broker|TLS certificate|TLS 证书|TLS termination|TLS 终止" \
   docs examples crates README.md | rg -v "不|不能|不启动|not|Red Lines|Drift"; then
   echo "release surface appears to include out-of-scope runtime surface" >&2
   exit 1

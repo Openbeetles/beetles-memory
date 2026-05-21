@@ -2,16 +2,22 @@
 
 use bm_adapter::{AdapterErrorKey, AdapterOperation, TransportKind};
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 use bm_adapter::{AdapterCommand, AdapterResponse, AdapterSdkReport, TransportMode};
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 use bm_entry::{EntryAuthDecision, EntryRuntime, EntryTransportContext};
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 use bm_sdk::{MemoryRecallRequest, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource};
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 use serde::Deserialize;
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 use serde_json::json;
+#[cfg(feature = "server-std")]
+use std::collections::BTreeMap;
+#[cfg(feature = "server-std")]
+use std::io::{Read, Write};
+#[cfg(feature = "server-std")]
+use std::net::TcpListener;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -115,7 +121,7 @@ pub const fn payload_too_large_error() -> AdapterErrorKey {
     AdapterErrorKey::PayloadTooLarge
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRuntimeRequest {
     pub method: HttpMethod,
@@ -127,7 +133,7 @@ pub struct HttpRuntimeRequest {
     pub authenticated: bool,
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 impl HttpRuntimeRequest {
     pub fn get(path: impl Into<String>) -> Self {
         Self {
@@ -154,14 +160,14 @@ impl HttpRuntimeRequest {
     }
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRuntimeResponse {
     pub status_code: u16,
     pub body: String,
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 pub fn handle_http_request(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
@@ -197,7 +203,166 @@ pub fn handle_http_request(
     Ok(render_http_response(response.adapter))
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
+pub fn serve_http_listener_once(
+    runtime: &EntryRuntime,
+    listener: &TcpListener,
+) -> bm_sdk::Result<()> {
+    let (mut stream, _) = listener
+        .accept()
+        .map_err(|err| bm_sdk::Error::config("http_listener_accept", err.to_string()))?;
+    serve_http_stream(runtime, &mut stream)
+}
+
+#[cfg(feature = "server-std")]
+pub fn serve_http_stream<S: Read + Write>(
+    runtime: &EntryRuntime,
+    stream: &mut S,
+) -> bm_sdk::Result<()> {
+    let request = read_http_runtime_request(stream)?;
+    let response = handle_http_request(runtime, request)?;
+    write_http_response(stream, response)
+}
+
+#[cfg(feature = "server-std")]
+fn read_http_runtime_request<S: Read>(stream: &mut S) -> bm_sdk::Result<HttpRuntimeRequest> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let header_end = loop {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|err| bm_sdk::Error::config("http_read", err.to_string()))?;
+        if read == 0 {
+            break find_header_end(&buffer)
+                .ok_or_else(|| bm_sdk::Error::config("http_read", "missing HTTP headers"))?;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(pos) = find_header_end(&buffer) {
+            break pos;
+        }
+        if buffer.len() > JSON_BODY_MAX_BYTES + 8192 {
+            return Err(bm_sdk::Error::config("http_read", "HTTP request too large"));
+        }
+    };
+
+    let header_bytes = &buffer[..header_end];
+    let header_text = std::str::from_utf8(header_bytes)
+        .map_err(|err| bm_sdk::Error::config("http_headers", err.to_string()))?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| bm_sdk::Error::config("http_headers", "missing request line"))?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = match request_parts.next() {
+        Some("GET") => HttpMethod::Get,
+        Some("POST") => HttpMethod::Post,
+        Some(other) => {
+            return Err(bm_sdk::Error::config(
+                "http_headers",
+                format!("unsupported HTTP method: {other}"),
+            ))
+        }
+        None => return Err(bm_sdk::Error::config("http_headers", "missing method")),
+    };
+    let path = request_parts
+        .next()
+        .ok_or_else(|| bm_sdk::Error::config("http_headers", "missing path"))?
+        .to_string();
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_length > JSON_BODY_MAX_BYTES {
+        return Err(bm_sdk::Error::config(
+            "http_body",
+            "HTTP body exceeds configured budget",
+        ));
+    }
+
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|err| bm_sdk::Error::config("http_body", err.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    if buffer.len() < body_start + content_length {
+        return Err(bm_sdk::Error::config("http_body", "truncated HTTP body"));
+    }
+    let body = String::from_utf8(buffer[body_start..body_start + content_length].to_vec())
+        .map_err(|err| bm_sdk::Error::config("http_body", err.to_string()))?;
+
+    Ok(HttpRuntimeRequest {
+        method,
+        path,
+        body,
+        request_id: header_or_default(&headers, "x-request-id", "http-req"),
+        idempotency_key: header_or_default(&headers, "x-idempotency-key", "http-idem"),
+        audit_id: header_or_default(&headers, "x-audit-id", "http-audit"),
+        authenticated: headers.contains_key("authorization")
+            || headers.contains_key("x-webhook-signature")
+            || headers
+                .get("x-loopback")
+                .is_some_and(|value| value == "true" || value == "1"),
+    })
+}
+
+#[cfg(feature = "server-std")]
+fn write_http_response(
+    stream: &mut impl Write,
+    response: HttpRuntimeResponse,
+) -> bm_sdk::Result<()> {
+    let reason = match response.status_code {
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        _ => "OK",
+    };
+    let body = response.body;
+    let head = format!(
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        response.status_code,
+        reason,
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body.as_bytes()))
+        .and_then(|_| stream.flush())
+        .map_err(|err| bm_sdk::Error::config("http_write", err.to_string()))
+}
+
+#[cfg(feature = "server-std")]
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+#[cfg(feature = "server-std")]
+fn header_or_default(headers: &BTreeMap<String, String>, name: &str, default: &str) -> String {
+    headers
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| default.to_string())
+}
+
+#[cfg(feature = "server-std")]
 fn decode_command(operation: AdapterOperation, body: &str) -> bm_sdk::Result<AdapterCommand> {
     match operation {
         AdapterOperation::Capabilities => Ok(AdapterCommand::Capabilities),
@@ -231,13 +396,13 @@ fn decode_command(operation: AdapterOperation, body: &str) -> bm_sdk::Result<Ada
     }
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &str) -> bm_sdk::Result<T> {
     serde_json::from_str(body)
         .map_err(|err| bm_sdk::Error::config("http_runtime_json", err.to_string()))
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 fn render_http_response(response: AdapterResponse<AdapterSdkReport>) -> HttpRuntimeResponse {
     match response {
         AdapterResponse::Accepted { report, .. } => HttpRuntimeResponse {
@@ -276,7 +441,7 @@ fn render_http_response(response: AdapterResponse<AdapterSdkReport>) -> HttpRunt
     }
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 fn render_report(report: AdapterSdkReport) -> String {
     match report {
         AdapterSdkReport::Capabilities(catalog) => json!({
@@ -309,14 +474,14 @@ fn render_report(report: AdapterSdkReport) -> String {
     }
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 #[derive(Deserialize)]
 struct RecallPayload {
     query: String,
     limit: Option<usize>,
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 #[derive(Deserialize)]
 struct ProceduralWritePayload {
     name: String,
@@ -326,7 +491,7 @@ struct ProceduralWritePayload {
     content: String,
 }
 
-#[cfg(feature = "server-axum")]
+#[cfg(feature = "server-std")]
 fn unique_request_suffix() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
