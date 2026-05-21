@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文
 
+![Beetle Memory 公众号宣传海报](docs/assets/beetles-memory-poster.png)
+
 Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-first 集成入口、自有存储后端、基于 profile 的平台裁剪、回放与迁移工具，以及用于独立部署的轻量协议 adapter。
 
 它不是向量数据库、通用 RAG 框架、聊天历史归档、workflow runner 或工具执行运行时。它负责记忆状态、记忆操作、生命周期报告、profile 能力可见性，以及迁移和回放合同。
@@ -28,6 +30,14 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 - 导出、导入并回放 continuity snapshot。
 - 通过 SDK、CLI、HTTP、WebSocket、MCP 或 A2A adapter shell 进入同一套记忆语义。
 - 面向 ESP、Linux 硬件设备、macOS/Windows SDK 宿主和 Linux server gateway profile 编译。
+
+## 控制台预览
+
+| 运行状态 | 通信方式配置 |
+| --- | --- |
+| ![运行状态](docs/assets/console-runtime-status.png) | ![通信方式配置](docs/assets/console-communication-config.png) |
+| 开放设备列表 | 账户安全 |
+| ![开放设备列表](docs/assets/console-device-list.png) | ![账户安全](docs/assets/console-account-security.png) |
 
 ## 快速开始
 
