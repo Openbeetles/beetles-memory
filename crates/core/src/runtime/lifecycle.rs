@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -526,5 +527,9 @@ fn is_embedded_profile(profile: ProfileId) -> bool {
 
 pub fn next_lifecycle_event_id() -> String {
     let seq = LIFECYCLE_EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("rl{seq:016x}")
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("rl{nanos:032x}_{:08x}_{seq:016x}", std::process::id())
 }

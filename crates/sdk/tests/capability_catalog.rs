@@ -81,12 +81,46 @@ fn server_gateway_can_surface_adapter_permission_without_creating_adapter_code()
     assert!(catalog.adapter.mqtt.visible);
     assert!(catalog.adapter.mcp.visible);
     assert!(catalog.adapter.a2a.visible);
+    assert!(catalog.entry.http_server.visible);
+    assert!(catalog.entry.webhook_receiver.visible);
+    assert!(catalog.entry.wss_server.visible);
+    assert!(catalog.entry.mqtt_bridge.visible);
+    assert!(catalog.entry.mcp_server.visible);
+    assert!(catalog.entry.a2a_bridge.visible);
     assert_eq!(
         catalog.validation.full_replay_suite.visible,
         catalog.validation.full_replay_suite.compiled
     );
     assert!(catalog.validation.full_proposal_sandbox.visible);
     assert!(catalog.validation.proposal_submission.visible);
+}
+
+#[test]
+fn entry_runtime_visibility_distinguishes_esp_deployment_roles() {
+    let mut policy = MemoryCapabilityPolicy::strict_profile();
+    policy.communication_adapter_enabled = true;
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+
+    let standalone = resolve_memory_capabilities(ProfileId::EspStandaloneMemory, &policy, &privacy)
+        .expect("standalone catalog");
+    let embedded = resolve_memory_capabilities(ProfileId::EspEmbeddedSdk, &policy, &privacy)
+        .expect("embedded catalog");
+
+    assert!(standalone.entry.cli.visible);
+    assert!(standalone.entry.wss_client.visible);
+    assert!(standalone.entry.mqtt_client.visible);
+    assert!(!standalone.entry.http_server.visible);
+    assert!(!standalone.entry.webhook_receiver.visible);
+    assert!(!standalone.entry.mcp_server.visible);
+    assert!(!standalone.entry.a2a_bridge.visible);
+
+    assert!(!embedded.entry.cli.visible);
+    assert!(!embedded.entry.wss_client.visible);
+    assert!(!embedded.entry.mqtt_client.visible);
+    assert!(!embedded.entry.http_server.visible);
+    assert!(!embedded.entry.webhook_receiver.visible);
+    assert!(!embedded.entry.mcp_server.visible);
+    assert!(!embedded.entry.a2a_bridge.visible);
 }
 
 #[test]

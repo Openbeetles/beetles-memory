@@ -58,6 +58,19 @@ fn duplicate_event_ids_are_rejected() {
 }
 
 #[test]
+fn file_store_can_reopen_without_runtime_event_id_collision() {
+    let root = std::env::temp_dir().join(format!(
+        "beetle-memory-reopen-event-id-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).unwrap();
+    StorePlatform::open(config.clone()).expect("first open");
+    StorePlatform::open(config).expect("second open must not collide on runtime event id");
+}
+
+#[test]
 fn store_platform_events_use_configured_scope_and_content_hash() {
     let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
         .unwrap()

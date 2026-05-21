@@ -6,6 +6,7 @@ members = [
     "crates/replay",
     "crates/evolve",
     "crates/adapter",
+    "crates/entry",
     "crates/cli",
     "crates/http",
     "crates/wss",

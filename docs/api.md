@@ -11,8 +11,9 @@ Beetle Memory 的公开 API 以 SDK-first 为主线，独立部署通过 runtime
 | `bm-replay` | replay fixture、SDK-driven runner、cross-store replay、harness / benchmark gate | 验证、迁移和回放入口 |
 | `bm-evolve` | proposal-only evolution sandbox、profile policy、SDK commit helper | 记忆演化提案入口，不直接绕过 store 写入 |
 | `bm-adapter` | 协议无关 `AdapterEnvelope`、`AdapterCommand`、`AdapterPolicy`、dispatch | 独立部署的协议合同层 |
-| `bm-cli` | CLI command spec、capability rendering、platform snapshot | 运维检查和 release gate 入口 |
-| `bm-http` / `bm-wss` / `bm-mqtt` / `bm-mcp` / `bm-a2a` | thin adapter crates | 暴露协议合同，不在本阶段启动真实 listener |
+| `bm-entry` | process-level entry runtime、store opening、profile/auth/source/idempotency normalization、adapter response envelope | 独立部署和本地入口的共享地基 |
+| `bm-cli` | CLI command spec、capability rendering、platform snapshot、真实 memory command execution | 运维检查、本地迁移和 release gate 入口 |
+| `bm-http` / `bm-wss` / `bm-mqtt` / `bm-mcp` / `bm-a2a` | thin adapter crates + feature-gated entry runtime shells | HTTP/Webhook、WSS、MQTT、MCP、A2A 入口层，不拥有记忆语义 |
 
 ## SDK Entry
 
@@ -70,4 +71,4 @@ cargo run -p bm-cli --bin bm -- \
 
 协议层必须通过 `bm-adapter` 的 `AdapterEnvelope<AdapterCommand>` 进入 SDK runtime。HTTP、Webhook、WSS、MQTT、MCP、A2A 是 transport shell，不能复制一套记忆写入、召回或投影语义。
 
-本阶段不启动真实网络 server/listener；后续如实现 listener，只能把网络请求转换为 adapter envelope，再调用同一个 `MemoryRuntime`。
+入口运行时阶段已经把 CLI、HTTP/Webhook、WSS、MQTT、MCP 和 A2A 的请求转换为 `bm-entry` / `bm-adapter` 调用。协议 crate 仍然只是入口外壳；socket、broker 或 stdio framing 的具体部署形态可以继续演进，但不得绕过 `MemoryRuntime`。

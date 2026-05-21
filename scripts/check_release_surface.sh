@@ -12,6 +12,7 @@ required_docs=(
   "docs/adapter-contract.md"
   "docs/operator-inspection.md"
   "docs/release-checklist.md"
+  "dev-docs/entry-runtime-plan.md"
   "dev-docs/release-surface-plan.md"
 )
 
@@ -56,6 +57,7 @@ publishable=(
   "bm-replay"
   "bm-evolve"
   "bm-adapter"
+  "bm-entry"
   "bm-cli"
   "bm-http"
   "bm-wss"
@@ -71,6 +73,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-replay \
   -p bm-evolve \
   -p bm-adapter \
+  -p bm-entry \
   -p bm-cli \
   -p bm-http \
   -p bm-wss \
@@ -79,6 +82,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-a2a
 
 bash scripts/emit_platform_capability_snapshots.sh --check
+bash scripts/check_entry_runtime_contract.sh
 
 publish_dry_run() {
   local crate="$1"
@@ -109,11 +113,18 @@ publish_dry_run() {
       extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       ;;
+    bm-entry)
+      extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
+      extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
+      extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
+      extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
+      ;;
     bm-cli|bm-http|bm-wss|bm-mqtt|bm-mcp|bm-a2a)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
       extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
+      extra+=(--config 'patch.crates-io.bm-entry.path="crates/entry"')
       ;;
     *)
       echo "missing publish dry-run patch mapping: $crate" >&2

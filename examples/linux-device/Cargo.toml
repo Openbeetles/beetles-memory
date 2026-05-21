@@ -7,4 +7,6 @@ publish = false
 [workspace]
 
 [dependencies]
+bm-adapter = { path = "../../crates/adapter", features = ["profile-linux-device-standalone-memory"] }
+bm-entry = { path = "../../crates/entry", features = ["profile-linux-device-standalone-memory"] }
 bm-sdk = { path = "../../crates/sdk", features = ["profile-linux-device-standalone-memory"] }

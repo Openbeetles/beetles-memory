@@ -1345,6 +1345,13 @@ fn current_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn current_unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
 #[cfg(feature = "sqlite-store")]
 fn sqlite_engine(
     config: &StoreBackendConfig,
@@ -1365,7 +1372,11 @@ fn sqlite_engine(
 
 fn next_event_id() -> String {
     let sequence = EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("evt_{:016x}_{sequence:016x}", current_unix_secs())
+    format!(
+        "evt_{:032x}_{:08x}_{sequence:016x}",
+        current_unix_nanos(),
+        std::process::id()
+    )
 }
 
 fn stable_hash_json(value: &serde_json::Value) -> Result<String> {

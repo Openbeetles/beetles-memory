@@ -30,6 +30,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-replay \
   -p bm-evolve \
   -p bm-adapter \
+  -p bm-entry \
   -p bm-cli \
   -p bm-http \
   -p bm-wss \
@@ -56,6 +57,7 @@ bash scripts/check_cross_target_compile_gates.sh --strict
 - `bm-replay`
 - `bm-evolve`
 - `bm-adapter`
+- `bm-entry`
 - `bm-cli`
 - `bm-http`
 - `bm-wss`
@@ -63,7 +65,7 @@ bash scripts/check_cross_target_compile_gates.sh --strict
 - `bm-mcp`
 - `bm-a2a`
 
-发布前必须执行 `scripts/check_release_surface.sh` 中的 staged `cargo publish --dry-run --allow-dirty -p <crate>`。内部 crate 尚未进入 registry 时，本地 dry-run 使用 `patch.crates-io` 指向同版本 workspace crate 来模拟发布顺序；正式发布前必须使用干净工作区并按 `bm-core -> bm-store -> bm-sdk -> replay/evolve/adapter -> thin adapter crates` 顺序发布。
+发布前必须执行 `scripts/check_release_surface.sh` 中的 staged `cargo publish --dry-run --allow-dirty -p <crate>`。内部 crate 尚未进入 registry 时，本地 dry-run 使用 `patch.crates-io` 指向同版本 workspace crate 来模拟发布顺序；正式发布前必须使用干净工作区并按 `bm-core -> bm-store -> bm-sdk -> replay/evolve/adapter -> bm-entry -> thin adapter crates` 顺序发布。
 
 ## Drift Red Lines
 

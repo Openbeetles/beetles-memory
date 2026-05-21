@@ -16,16 +16,17 @@ path = "src/main.rs"
 
 [features]
 default = []
-profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
-profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
-profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]
-profile-desktop-macos-embedded-sdk = ["bm-adapter/profile-desktop-macos-embedded-sdk"]
-profile-desktop-windows-embedded-sdk = ["bm-adapter/profile-desktop-windows-embedded-sdk"]
-profile-server-linux-memory-gateway = ["bm-adapter/profile-server-linux-memory-gateway"]
-profile-server-linux-dev-full = ["bm-adapter/profile-server-linux-dev-full"]
+profile-esp-standalone-memory = ["bm-entry/profile-esp-standalone-memory"]
+profile-esp-embedded-sdk = ["bm-entry/profile-esp-embedded-sdk"]
+profile-linux-device-standalone-memory = ["bm-entry/profile-linux-device-standalone-memory"]
+profile-desktop-macos-embedded-sdk = ["bm-entry/profile-desktop-macos-embedded-sdk"]
+profile-desktop-windows-embedded-sdk = ["bm-entry/profile-desktop-windows-embedded-sdk"]
+profile-server-linux-memory-gateway = ["bm-entry/profile-server-linux-memory-gateway"]
+profile-server-linux-dev-full = ["bm-entry/profile-server-linux-dev-full"]
 
 [dependencies]
 bm-adapter.workspace = true
+bm-entry = { version = "0.1.0", path = "../entry" }
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

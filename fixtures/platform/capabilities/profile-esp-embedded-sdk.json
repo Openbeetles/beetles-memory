@@ -90,6 +90,68 @@
       "private_data_allowed": false
     }
   },
+  "entry": {
+    "cli": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "http_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "webhook_receiver": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "webhook_sender": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "wss_client": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "wss_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "mqtt_client": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "mqtt_bridge": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "mcp_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "a2a_bridge": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    }
+  },
   "indexed_recall": {
     "archive": false,
     "continuity_capsule": false,

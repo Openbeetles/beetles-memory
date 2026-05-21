@@ -210,6 +210,37 @@ impl MemoryAdapterCapabilityCatalog {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEntryRuntimeCapabilityCatalog {
+    pub cli: AdapterTransportVisibility,
+    pub http_server: AdapterTransportVisibility,
+    pub webhook_receiver: AdapterTransportVisibility,
+    pub webhook_sender: AdapterTransportVisibility,
+    pub wss_client: AdapterTransportVisibility,
+    pub wss_server: AdapterTransportVisibility,
+    pub mqtt_client: AdapterTransportVisibility,
+    pub mqtt_bridge: AdapterTransportVisibility,
+    pub mcp_server: AdapterTransportVisibility,
+    pub a2a_bridge: AdapterTransportVisibility,
+}
+
+impl MemoryEntryRuntimeCapabilityCatalog {
+    pub const fn hidden() -> Self {
+        Self {
+            cli: AdapterTransportVisibility::hidden(),
+            http_server: AdapterTransportVisibility::hidden(),
+            webhook_receiver: AdapterTransportVisibility::hidden(),
+            webhook_sender: AdapterTransportVisibility::hidden(),
+            wss_client: AdapterTransportVisibility::hidden(),
+            wss_server: AdapterTransportVisibility::hidden(),
+            mqtt_client: AdapterTransportVisibility::hidden(),
+            mqtt_bridge: AdapterTransportVisibility::hidden(),
+            mcp_server: AdapterTransportVisibility::hidden(),
+            a2a_bridge: AdapterTransportVisibility::hidden(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryValidationCapability {
     pub compact_replay_fixture: MemoryOperationVisibility,
     pub memory_harness: MemoryOperationVisibility,
@@ -252,6 +283,7 @@ pub struct MemoryCapabilityCatalog {
     pub import: MemoryOperationVisibility,
     pub communication_adapter: MemoryOperationVisibility,
     pub adapter: MemoryAdapterCapabilityCatalog,
+    pub entry: MemoryEntryRuntimeCapabilityCatalog,
     pub sqlite_index_recall: MemoryIndexedRecallVisibility,
     pub lifecycle: MemoryRuntimeLifecycleCapability,
     pub validation: MemoryValidationCapability,
@@ -274,6 +306,7 @@ impl MemoryCapabilityCatalog {
             import: MemoryOperationVisibility::hidden(),
             communication_adapter: MemoryOperationVisibility::hidden(),
             adapter: MemoryAdapterCapabilityCatalog::hidden(),
+            entry: MemoryEntryRuntimeCapabilityCatalog::hidden(),
             sqlite_index_recall: MemoryIndexedRecallVisibility::hidden(),
             lifecycle: MemoryRuntimeLifecycleCapability::hidden(),
             validation: MemoryValidationCapability::hidden(),
@@ -378,6 +411,58 @@ impl MemoryCapabilityCatalog {
                     entry.adapter.a2a,
                     policy.communication_adapter_enabled && policy.adapter.a2a_enabled,
                     true,
+                ),
+            },
+            entry: MemoryEntryRuntimeCapabilityCatalog {
+                cli: entry_visible(
+                    entry.adapter.cli,
+                    policy.communication_adapter_enabled && policy.adapter.cli_enabled,
+                    EntryMode::Local,
+                ),
+                http_server: entry_visible(
+                    entry.adapter.http,
+                    policy.communication_adapter_enabled && policy.adapter.http_enabled,
+                    EntryMode::Server,
+                ),
+                webhook_receiver: entry_visible(
+                    entry.adapter.webhook,
+                    policy.communication_adapter_enabled && policy.adapter.webhook_enabled,
+                    EntryMode::Server,
+                ),
+                webhook_sender: entry_visible(
+                    entry.adapter.webhook,
+                    policy.communication_adapter_enabled && policy.adapter.webhook_enabled,
+                    EntryMode::Client,
+                ),
+                wss_client: entry_visible(
+                    entry.adapter.wss,
+                    policy.communication_adapter_enabled && policy.adapter.wss_enabled,
+                    EntryMode::Client,
+                ),
+                wss_server: entry_visible(
+                    entry.adapter.wss,
+                    policy.communication_adapter_enabled && policy.adapter.wss_enabled,
+                    EntryMode::Server,
+                ),
+                mqtt_client: entry_visible(
+                    entry.adapter.mqtt,
+                    policy.communication_adapter_enabled && policy.adapter.mqtt_enabled,
+                    EntryMode::Client,
+                ),
+                mqtt_bridge: entry_visible(
+                    entry.adapter.mqtt,
+                    policy.communication_adapter_enabled && policy.adapter.mqtt_enabled,
+                    EntryMode::Server,
+                ),
+                mcp_server: entry_visible(
+                    entry.adapter.mcp,
+                    policy.communication_adapter_enabled && policy.adapter.mcp_enabled,
+                    EntryMode::Server,
+                ),
+                a2a_bridge: entry_visible(
+                    entry.adapter.a2a,
+                    policy.communication_adapter_enabled && policy.adapter.a2a_enabled,
+                    EntryMode::Server,
                 ),
             },
             lifecycle: MemoryRuntimeLifecycleCapability {
@@ -584,6 +669,36 @@ fn adapter_visible(
         server_allowed: profile.server_allowed,
         private_data_allowed: profile.private_data_allowed,
         visible: profile.allowed && compiled && config_enabled,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryMode {
+    Local,
+    Client,
+    Server,
+}
+
+fn entry_visible(
+    profile: bm_core::feature_gate::ProfileAdapterTransportCapability,
+    config_enabled: bool,
+    mode: EntryMode,
+) -> AdapterTransportVisibility {
+    let mode_allowed = match mode {
+        EntryMode::Local => profile.allowed && !profile.client_allowed && !profile.server_allowed,
+        EntryMode::Client => profile.client_allowed,
+        EntryMode::Server => profile.server_allowed,
+    };
+    AdapterTransportVisibility {
+        profile_allowed: profile.allowed && mode_allowed,
+        compiled: true,
+        config_enabled,
+        permission_allowed: true,
+        privacy_allowed: true,
+        client_allowed: matches!(mode, EntryMode::Client) && profile.client_allowed,
+        server_allowed: matches!(mode, EntryMode::Server) && profile.server_allowed,
+        private_data_allowed: profile.private_data_allowed,
+        visible: profile.allowed && mode_allowed && config_enabled,
     }
 }
 

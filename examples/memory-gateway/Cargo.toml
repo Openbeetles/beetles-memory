@@ -8,4 +8,10 @@ publish = false
 
 [dependencies]
 bm-adapter = { path = "../../crates/adapter", features = ["profile-server-linux-memory-gateway"] }
+bm-a2a = { path = "../../crates/a2a", features = ["profile-server-linux-memory-gateway", "bridge-http"] }
+bm-entry = { path = "../../crates/entry", features = ["profile-server-linux-memory-gateway"] }
+bm-http = { path = "../../crates/http", features = ["profile-server-linux-memory-gateway", "server-axum"] }
+bm-mcp = { path = "../../crates/mcp", features = ["profile-server-linux-memory-gateway", "server-stdio"] }
+bm-mqtt = { path = "../../crates/mqtt", features = ["profile-server-linux-memory-gateway", "bridge-rumqttc"] }
 bm-sdk = { path = "../../crates/sdk", features = ["profile-server-linux-memory-gateway"] }
+bm-wss = { path = "../../crates/wss", features = ["profile-server-linux-memory-gateway", "server-axum"] }

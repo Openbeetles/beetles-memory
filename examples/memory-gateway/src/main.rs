@@ -1,72 +1,86 @@
-use bm_adapter::{
-    dispatch_adapter_command, AdapterAuthContext, AdapterCommand, AdapterEnvelope,
-    AdapterOperation, AdapterResponse, AdapterSdkReport, AdapterSource, TransportKind,
-    TransportMode,
+use bm_a2a::{A2aBridge, A2aRuntimeMessage};
+use bm_entry::{
+    EntryAuthConfig, EntryIdentity, EntryIdempotencyConfig, EntryRuntime, EntryRuntimeConfig,
+    EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
-use bm_sdk::{
-    MemoryIdentity, MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest, ProfileId,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
-};
+use bm_http::{handle_http_request, HttpRuntimeRequest};
+use bm_mcp::{McpToolCall, McpToolServer};
+use bm_mqtt::{MqttBridge, MqttInboundMessage};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_wss::{WssRuntimeFrame, WssRuntimeSession};
 
 fn main() -> bm_sdk::Result<()> {
-    let profile = ProfileId::ServerLinuxMemoryGateway;
-    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
-    let runtime = MemoryRuntime::builder()
-        .identity(MemoryIdentity::new("gateway-agent", "owner-default")?)
-        .scope(MemoryScope::new("gateway", "chat-1")?)
-        .profile(profile)
-        .store_platform(store)
-        .build()?;
+    let runtime = runtime()?;
 
-    runtime.write(MemoryWriteRequest::Procedural {
-        writes: vec![RuntimeSkillWrite {
-            name: "gateway_dispatch_guard".to_string(),
-            topic: "gateway".to_string(),
-            title: "Gateway dispatch guard".to_string(),
-            summary: "Memory gateways dispatch transport commands into one SDK runtime.".to_string(),
-            content: "1. decode transport payload\n2. build adapter envelope\n3. dispatch into the SDK runtime"
-                .to_string(),
-            citations: vec!["memory gateway example".to_string()],
-            source_chat_id: Some("chat-1".to_string()),
-            observed_at: 1_800_000_000,
-        }],
-        source: RuntimeSkillWriteSource::Manual,
-    })?;
+    let http = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/memory/profile/capabilities"),
+    )?;
+    assert_eq!(http.status_code, 200);
 
-    let envelope = AdapterEnvelope {
-        request_id: "req-1".to_string(),
-        transport: TransportKind::Http,
-        mode: TransportMode::Server,
-        operation: AdapterOperation::Recall,
-        source: AdapterSource {
-            source_id: "generic-host".to_string(),
-            source_kind: "external_ai_project".to_string(),
+    let mut wss = WssRuntimeSession::new("gateway-wss", bm_wss::WssBudget::server_gateway());
+    let wss_event = wss.handle_frame(
+        &runtime,
+        WssRuntimeFrame::command("command.recall", r#"{"query":"gateway","limit":2}"#),
+    )?;
+    assert_eq!(wss_event.kind, "event.report");
+
+    let mqtt = MqttBridge::new("gateway-mqtt").consume(
+        &runtime,
+        MqttInboundMessage::json(
+            "memory/write_candidate",
+            r#"{
+              "request_id":"gateway-mqtt-req",
+              "idempotency_key":"gateway-mqtt-idem",
+              "audit_id":"gateway-mqtt-audit",
+              "name":"runtime_skill__gateway_entry",
+              "topic":"gateway",
+              "title":"Gateway entry",
+              "summary":"Memory gateway accepts MQTT candidates through EntryRuntime.",
+              "content":"1. Consume gateway topic.\n2. Normalize envelope fields.\n3. Dispatch through EntryRuntime.\n4. Publish memory report."
+            }"#,
+        ),
+    )?;
+    assert_eq!(mqtt.topic, "memory/write_report");
+
+    let mcp = McpToolServer::new("gateway-mcp").call(
+        &runtime,
+        McpToolCall::json("memory_recall", r#"{"query":"gateway","limit":2}"#),
+    )?;
+    assert_eq!(mcp.status, "accepted");
+
+    let a2a = A2aBridge::new("gateway-a2a").handle(
+        &runtime,
+        A2aRuntimeMessage::json("memory_recall_request", r#"{"query":"gateway","limit":2}"#),
+    )?;
+    assert_eq!(a2a.kind, "memory_report");
+
+    println!("memory-gateway entry smoke passed");
+    Ok(())
+}
+
+fn runtime() -> bm_sdk::Result<EntryRuntime> {
+    let mut capability = MemoryCapabilityPolicy::strict_profile();
+    capability.communication_adapter_enabled = true;
+    EntryRuntime::open(EntryRuntimeConfig {
+        profile: ProfileId::ServerLinuxMemoryGateway,
+        identity: EntryIdentity {
             agent_id: "gateway-agent".to_string(),
             owner_id: "owner-default".to_string(),
+        },
+        scope: EntryScope {
             channel: "gateway".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        auth: AdapterAuthContext {
-            authenticated: true,
-            auth_kind: "local-test".to_string(),
-            principal: "operator".to_string(),
+        store: EntryStoreConfig {
+            backend: StoreBackendKind::InMemory,
+            data_path: None,
+            fsync: false,
         },
-        idempotency_key: "idem-1".to_string(),
-        audit_id: "audit-1".to_string(),
-        payload: AdapterCommand::Recall(MemoryRecallRequest {
-            query: "gateway dispatch".to_string(),
-            limit: 4,
-        }),
-    };
-
-    match dispatch_adapter_command(&runtime, envelope)? {
-        AdapterResponse::Accepted {
-            report: AdapterSdkReport::Recall(report),
-            ..
-        } => assert!(!report.procedural_hits.is_empty()),
-        response => panic!("unexpected adapter response: {response:?}"),
-    }
-
-    println!("memory-gateway smoke passed");
-    Ok(())
+        transports: EntryTransportConfig::all_enabled(),
+        auth: EntryAuthConfig::disabled_for_local(),
+        idempotency: EntryIdempotencyConfig { max_keys: 128 },
+        privacy: MemoryPrivacyPolicy::standard_private_boundary(),
+        capability,
+    })
 }

@@ -13,6 +13,8 @@ name = "bm-a2a"
 version = "0.1.0"
 dependencies = [
  "bm-adapter",
+ "bm-entry",
+ "bm-sdk",
  "serde",
  "serde_json",
 ]
@@ -32,6 +34,7 @@ name = "bm-cli"
 version = "0.1.0"
 dependencies = [
  "bm-adapter",
+ "bm-entry",
  "bm-sdk",
  "serde",
  "serde_json",
@@ -44,6 +47,17 @@ dependencies = [
  "indexmap",
  "log",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "bm-entry"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "bm-sdk",
  "serde",
  "serde_json",
  "thiserror",
@@ -64,6 +78,8 @@ name = "bm-http"
 version = "0.1.0"
 dependencies = [
  "bm-adapter",
+ "bm-entry",
+ "bm-sdk",
  "serde",
  "serde_json",
 ]
@@ -73,6 +89,8 @@ name = "bm-mcp"
 version = "0.1.0"
 dependencies = [
  "bm-adapter",
+ "bm-entry",
+ "bm-sdk",
  "serde",
  "serde_json",
 ]
@@ -82,6 +100,7 @@ name = "bm-mqtt"
 version = "0.1.0"
 dependencies = [
  "bm-adapter",
+ "bm-entry",
  "bm-sdk",
  "serde",
  "serde_json",
@@ -124,6 +143,7 @@ name = "bm-wss"
 version = "0.1.0"
 dependencies = [
  "bm-adapter",
+ "bm-entry",
  "bm-sdk",
  "serde",
  "serde_json",

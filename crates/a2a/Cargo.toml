@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+bridge-http = ["bm-entry"]
 profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]
@@ -22,5 +23,7 @@ profile-server-linux-dev-full = ["bm-adapter/profile-server-linux-dev-full"]
 
 [dependencies]
 bm-adapter.workspace = true
+bm-entry = { version = "0.1.0", path = "../entry", optional = true }
+bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

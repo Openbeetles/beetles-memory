@@ -15,20 +15,30 @@ let response = bm_adapter::dispatch_adapter_command(&runtime, envelope)?;
 
 `AdapterEnvelope` 固定 request id、transport、mode、operation、source、auth、idempotency key、audit id 和 payload。`dispatch_adapter_command` 会拒绝 operation / payload 不一致的请求。
 
+独立部署入口统一由 `bm-entry` 打开 store/runtime 并生成 envelope：
+
+```rust
+use bm_entry::{EntryRuntime, EntryRuntimeConfig};
+
+let entry = EntryRuntime::open(config)?;
+let response = entry.handle(transport_context, adapter_command)?;
+```
+
 ## Transports
 
 | Transport | Crate | 当前阶段 |
 | --- | --- | --- |
 | SDK method | `bm-sdk` | 已落地 |
-| CLI | `bm-cli` | command spec 和 platform capability snapshot 已落地 |
-| HTTP | `bm-http` | 合同层已落地 |
-| Webhook | `bm-adapter` + HTTP shell | 合同层已落地 |
-| WSS | `bm-wss` | 合同层已落地 |
-| MQTT | `bm-mqtt` | 合同层已落地 |
-| MCP | `bm-mcp` | 合同层已落地 |
-| A2A | `bm-a2a` | 合同层已落地 |
+| Entry runtime | `bm-entry` | store/runtime/profile/auth/source/idempotency 入口已落地 |
+| CLI | `bm-cli` | command spec、platform capability snapshot 和真实 memory command execution 已落地 |
+| HTTP | `bm-http` | HTTP request runtime shell 已落地 |
+| Webhook | `bm-http` + `bm-entry` | inbound write candidate runtime shell 已落地 |
+| WSS | `bm-wss` | command frame、subscription、budget runtime shell 已落地 |
+| MQTT | `bm-mqtt` | topic consume/publish bridge runtime shell 已落地 |
+| MCP | `bm-mcp` | stdio tool-call runtime shell 已落地 |
+| A2A | `bm-a2a` | peer capability + memory message bridge runtime shell 已落地 |
 
-本阶段不启动真实网络 listener。后续 listener 只能把网络消息 decode 成 adapter envelope，再调用同一个 runtime。
+入口层已经能把各协议请求 decode 成 adapter command 并调用同一个 runtime。后续替换或增强具体 socket/listener/broker 实现时，仍只能沿用这条入口链路。
 
 ## Security And Privacy
 

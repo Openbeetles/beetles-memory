@@ -46,15 +46,15 @@ pub use bm_store::{
 pub use capability::{
     resolve_memory_capabilities, AdapterTransportVisibility, MemoryAdapterCapabilityCatalog,
     MemoryAdapterCapabilityPolicy, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
-    MemoryIndexedRecallVisibility, MemoryOperationVisibility, MemoryPrivacyPolicy,
-    MemoryRuntimeLifecycleCapability, MemoryValidationCapability,
+    MemoryEntryRuntimeCapabilityCatalog, MemoryIndexedRecallVisibility, MemoryOperationVisibility,
+    MemoryPrivacyPolicy, MemoryRuntimeLifecycleCapability, MemoryValidationCapability,
 };
 pub use capability_snapshot::{
     platform_capability_snapshot, platform_capability_snapshot_file_name,
     platform_profile_feature_id, PlatformAdapterSnapshot, PlatformAdapterTransportSnapshot,
-    PlatformCapabilitySnapshot, PlatformCompiledFeatureSnapshot, PlatformIndexedRecallSnapshot,
-    PlatformLifecycleSnapshot, PlatformMemoryOperationSnapshot, PlatformValidationSnapshot,
-    PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA,
+    PlatformCapabilitySnapshot, PlatformCompiledFeatureSnapshot, PlatformEntryRuntimeSnapshot,
+    PlatformIndexedRecallSnapshot, PlatformLifecycleSnapshot, PlatformMemoryOperationSnapshot,
+    PlatformValidationSnapshot, PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA,
 };
 pub use ops::{
     MemoryCloseReport, MemoryCloseRequest, MemoryExportReport, MemoryExportRequest,
