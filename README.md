@@ -2,6 +2,8 @@
 
 English | [中文](README.zh-CN.md)
 
+![Beetle Memory poster](docs/assets/beetles-memory-poster-en.png)
+
 Beetle Memory is a Rust memory runtime for agent systems. It provides an SDK-first integration path, owned storage backends, profile-based platform trimming, replay and migration tools, and thin protocol adapters for standalone deployment.
 
 The project is not a vector database, a generic RAG framework, a chat-history dump, a workflow runner, or a tool execution runtime. Its job is to own memory state, memory operations, lifecycle reports, profile capability visibility, and migration/replay contracts.
@@ -28,6 +30,14 @@ The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-
 - Export, import, and replay continuity snapshots.
 - Run through SDK, CLI, HTTP, WebSocket, MCP, or A2A adapter shells without duplicating memory semantics.
 - Compile for ESP, Linux hardware devices, macOS/Windows SDK hosts, and Linux server gateway profiles.
+
+## Console Preview
+
+| Runtime Status | Communication Setup |
+| --- | --- |
+| ![Runtime Status](docs/assets/console-en-runtime-status.png) | ![Communication Setup](docs/assets/console-en-communication-setup.png) |
+| Allowed Devices | Account Security |
+| ![Allowed Devices](docs/assets/console-en-allowed-devices.png) | ![Account Security](docs/assets/console-en-account-security.png) |
 
 ## Quick Start
 
