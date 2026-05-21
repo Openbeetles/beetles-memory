@@ -5,3 +5,8 @@
 /examples/*/target/
 /memory/
 /target/
+/apps/console/node_modules/
+/apps/console/dist/
+/apps/console/*.tsbuildinfo
+/apps/console/vite.config.js
+/apps/console/vite.config.d.ts
