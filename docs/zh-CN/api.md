@@ -25,6 +25,8 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Project | `MemoryRuntime::project` | 生成受长度限制的模型上下文 memory block。 |
 | Maintain | `MemoryRuntime::maintain` | 在显式配置 LLM client 后执行 post-reply memory maintenance。 |
 | Inspect | `MemoryRuntime::inspect` | 返回 recall/operator/lifecycle inspection 数据。 |
+| Skill List / Detail | `MemoryRuntime::list_skills` / `MemoryRuntime::get_skill` | 列出和查看 procedural memory / skill record，不执行 skill。 |
+| Skill Mutation | `MemoryRuntime::upsert_skill` / `MemoryRuntime::set_skill_enabled` / `MemoryRuntime::delete_skill` | 新建、导入、编辑、启停、删除 skill，写入必须经过 procedural memory governance。 |
 | Replay | `MemoryRuntime::replay` | 检查某个 chat 的 turn ledger 历史。 |
 | Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | 在 scope 间迁移 continuity snapshot。 |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | 控制 runtime lifecycle 并产生 lifecycle report。 |
@@ -40,6 +42,11 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | `MemoryRecallRequest` | `query`, `limit` | 返回 procedural hits 和 working recall inspection 数据。 |
 | `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input` | 返回受 `system_max_len` 限制的 `system_memory_block`。 |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | 返回 capability、lifecycle、operator inspection 数据。 |
+| `MemorySkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | 返回 `MemorySkillListReport`，含 total、active、disabled、runtime_learned、user_provided 和 skill 摘要。 |
+| `MemorySkillDetailRequest` | `name` | 返回 `MemorySkillDetailReport`，含 summary/procedure/citations/lineage/strategy diffs/raw content。 |
+| `MemorySkillUpsertRequest` | `title`, `topic`, `summary`, `procedure` | 新建、导入或编辑 skill；`name` 可选，缺省时由 topic 归一化生成。 |
+| `MemorySkillSetEnabledRequest` | `name`, `enabled` | 只改变 skill 启用状态，不改内容。 |
+| `MemorySkillDeleteRequest` | `name` | 从 skill storage 删除该 procedural memory，不建立配置台墓碑。 |
 | `MemoryReplayRequest` | `chat_id`, `limit` | 只做 inspection 的 replay surface。 |
 | `MemoryExportRequest` | `chat_id` | 导出 continuity snapshot。 |
 | `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode 是 `BootstrapImport` 或 `FullRestore`。 |
@@ -61,6 +68,12 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 | Route | Method | 用途 |
 | --- | --- | --- |
 | `/console/overview` | `GET` | 返回系统信息、运行形态、观测指标、内核摘要和 session 概览。 |
+| `/console/skills` | `GET` | 返回 Skill 记忆列表和统计。 |
+| `/console/skills/{name}` | `GET` | 返回单条 Skill 详情。 |
+| `/console/skills` | `POST` | 新建或导入 Skill，最终进入 `MemoryRuntime::upsert_skill`。 |
+| `/console/skills/{name}` | `PATCH` | 编辑 Skill，最终进入 `MemoryRuntime::upsert_skill`。 |
+| `/console/skills/{name}/enabled` | `PATCH` | 启用或停用 Skill。 |
+| `/console/skills/{name}` | `DELETE` | 删除 Skill 记忆。 |
 | `/console/transports` | `GET` | 返回可配置通信入口。 |
 | `/console/transports/{id}` | `PATCH` | 更新通信入口开关或 endpoint。 |
 | `/console/devices` | `GET` | 返回允许访问设备列表，只包含 app_key 指纹。 |
@@ -74,6 +87,7 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 - 列表接口永远不返回 app_key 明文，只返回 `appKeyFingerprint`。
 - 新增和轮换设备时，`appKeyOnce` 只在该次响应中返回。
 - 通信页的 HTTP 开关表示外部 memory HTTP API，不表示配置台自身的 HTTP console 入口。
+- Skill 管理页管理 procedural memory，不执行 skill，不提供 marketplace、executor 或 workflow runner。
 
 ## Capability Catalog
 

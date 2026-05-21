@@ -3,31 +3,51 @@
     Activity,
     AlertTriangle,
     BarChart3,
+    BookOpen,
     CheckCircle2,
     Circle,
     Cpu,
     Database,
+    FileText,
     Globe2,
     KeyRound,
     LockKeyhole,
     MemoryStick,
     Moon,
+    Pencil,
     Plus,
     Power,
     RefreshCw,
+    Search,
     Server,
     ShieldCheck,
     Smartphone,
     Sun,
+    Trash2,
+    Upload,
   } from "lucide-svelte";
   import { onMount } from "svelte";
   import type { Component } from "svelte";
 
-  type PageId = "overview" | "transports" | "devices" | "account";
-  type StatusKind = "ready" | "allowed" | "limited" | "draft" | "locked" | "blocked" | "disabled";
+  type PageId = "overview" | "skills" | "transports" | "devices" | "account";
+  type StatusKind =
+    | "ready"
+    | "allowed"
+    | "limited"
+    | "draft"
+    | "locked"
+    | "blocked"
+    | "disabled"
+    | "active"
+    | "stale"
+    | "low_value"
+    | "retired";
   type Lang = "zh-CN" | "en";
   type Theme = "light" | "dark";
   type TransportId = "http" | "wss" | "mcp" | "a2a";
+  type SkillOrigin = "user_provided" | "runtime_learned";
+  type SkillKind = "runtime_skill" | "manual_document";
+  type SkillModal = "create" | "import" | "edit" | "delete" | null;
 
   type Page = { id: PageId; label: string; count?: string; eyebrow: string; title: string };
   type Transport = {
@@ -86,6 +106,55 @@
     desc: string;
     progress: number | null;
   };
+  type ConsoleApiSkillSummary = {
+    name: string;
+    kind: SkillKind;
+    origin: SkillOrigin;
+    title: string;
+    topic: string;
+    status: StatusKind;
+    enabled: boolean;
+    qualityScore: number | null;
+    useCount: number;
+    validatedSuccessCount: number;
+    mismatchCount: number;
+    revisionPending: boolean;
+    updatedAt: number;
+    lastUsedAt: number | null;
+  };
+  type ConsoleApiSkillList = {
+    total: number;
+    active: number;
+    disabled: number;
+    runtimeLearned: number;
+    userProvided: number;
+    skills: ConsoleApiSkillSummary[];
+  };
+  type ConsoleApiSkillDetail = {
+    summary: ConsoleApiSkillSummary;
+    summaryText: string;
+    procedureText: string;
+    rawContent: string;
+    citations: string[];
+    sourceChatId: string | null;
+    lineage: string[];
+    strategyDiffs: string[];
+    lastOutcomeNote: string;
+  };
+  type ConsoleApiSkillMutation = {
+    accepted: boolean;
+    changed: boolean;
+    name: string;
+    operation: string;
+    reason: string;
+  };
+  type SkillForm = {
+    title: string;
+    topic: string;
+    summary: string;
+    procedure: string;
+    citations: string;
+  };
   type ConsoleApiOverview = {
     runtimeShape: ConsoleApiRuntimeShape;
     systemInfo: ConsoleApiSystemInfo;
@@ -113,6 +182,10 @@
     locked: AlertTriangle,
     blocked: AlertTriangle,
     disabled: AlertTriangle,
+    active: CheckCircle2,
+    stale: Circle,
+    low_value: AlertTriangle,
+    retired: AlertTriangle,
   };
 
   const isTheme = (value: string | null): value is Theme => value === "light" || value === "dark";
@@ -171,11 +244,18 @@
         rotate: "轮换",
         enable: "启用",
         disable: "停用",
+        edit: "编辑",
+        delete: "删除",
+        save: "保存",
+        cancel: "取消",
+        createSkill: "新建 Skill",
+        importSkill: "导入 Skill",
         toggleTransport: (name: string) => `切换 ${name}`,
       },
       language: { zh: "中文", en: "English" },
       pages: [
         { id: "overview", label: "总览", eyebrow: "观测总览", title: "运行状态" },
+        { id: "skills", label: "Skill 记忆", eyebrow: "程序性记忆", title: "Skill 管理" },
         { id: "transports", label: "通信方式", count: "5", eyebrow: "通信入口", title: "通信方式配置" },
         { id: "devices", label: "开放设备", count: "4", eyebrow: "访问控制", title: "开放设备列表" },
         { id: "account", label: "账户安全", eyebrow: "账户安全", title: "账户" },
@@ -188,6 +268,10 @@
         locked: "未启用",
         blocked: "禁止",
         disabled: "停用",
+        active: "启用",
+        stale: "待复核",
+        low_value: "低价值",
+        retired: "已退役",
       } satisfies Record<StatusKind, string>,
       runtimeShape: {
         name: "Linux 设备独立部署",
@@ -224,6 +308,43 @@
         ],
       },
       transportsPanel: { label: "通信入口", title: "通信方式与必要配置" },
+      skillsPanel: {
+        label: "程序性记忆",
+        title: "Skill 记忆管理",
+        search: "搜索名称、主题、摘要、过程",
+        all: "全部",
+        active: "启用",
+        disabled: "停用",
+        retired: "已退役",
+        userProvided: "用户提供",
+        runtimeLearned: "运行时沉淀",
+        total: "总数",
+        quality: "质量分",
+        uses: "使用次数",
+        successes: "成功次数",
+        mismatches: "不匹配次数",
+        revisionPending: "修订中",
+        citations: "引用",
+        lineage: "演化谱系",
+        strategyDiffs: "策略变更",
+        empty: "暂无 Skill 记忆",
+        emptyDetail: "选择一个 Skill 查看详情",
+        name: "名称",
+        titleLabel: "标题",
+        topic: "主题",
+        summary: "摘要",
+        procedure: "过程",
+        citationsInput: "引用，一行一个",
+        file: "读取本地文本",
+        deleteTitle: "删除 Skill",
+        deleteDesc: "删除后会从记忆存储移除，不保留配置台墓碑。",
+        modalTitle: {
+          create: "新建 Skill",
+          import: "导入 Skill",
+          edit: "编辑 Skill",
+          delete: "删除 Skill",
+        },
+      },
       transports: {
         http: {
           name: "HTTP 接口",
@@ -282,7 +403,7 @@
           { label: "生命周期", value: "运行时已打开" },
         ],
       },
-      statusbar: { brand: "Beetles Memory", transports: "传输", devices: "设备" },
+      statusbar: { brand: "Beetles Memory", skills: "Skill", transports: "传输", devices: "设备" },
       addDevice: {
         btn: "添加设备",
         title: "添加新设备",
@@ -321,11 +442,18 @@
         rotate: "Rotate",
         enable: "Enable",
         disable: "Disable",
+        edit: "Edit",
+        delete: "Delete",
+        save: "Save",
+        cancel: "Cancel",
+        createSkill: "New Skill",
+        importSkill: "Import Skill",
         toggleTransport: (name: string) => `Toggle ${name}`,
       },
       language: { zh: "中文", en: "English" },
       pages: [
         { id: "overview", label: "Overview", eyebrow: "Observability", title: "Runtime Status" },
+        { id: "skills", label: "Skill Memory", eyebrow: "Procedural Memory", title: "Skill Management" },
         { id: "transports", label: "Communication", count: "5", eyebrow: "Entry Points", title: "Communication Setup" },
         { id: "devices", label: "Devices", count: "4", eyebrow: "Access Control", title: "Allowed Devices" },
         { id: "account", label: "Account", eyebrow: "Account Security", title: "Account" },
@@ -338,6 +466,10 @@
         locked: "Locked",
         blocked: "Blocked",
         disabled: "Disabled",
+        active: "Active",
+        stale: "Stale",
+        low_value: "Low Value",
+        retired: "Retired",
       } satisfies Record<StatusKind, string>,
       runtimeShape: {
         name: "Linux Device Standalone",
@@ -375,6 +507,43 @@
         ],
       },
       transportsPanel: { label: "Entry Points", title: "Communication Methods & Required Settings" },
+      skillsPanel: {
+        label: "Procedural Memory",
+        title: "Skill Memory Management",
+        search: "Search name, topic, summary, procedure",
+        all: "All",
+        active: "Active",
+        disabled: "Disabled",
+        retired: "Retired",
+        userProvided: "User Provided",
+        runtimeLearned: "Runtime Learned",
+        total: "Total",
+        quality: "Quality",
+        uses: "Uses",
+        successes: "Successes",
+        mismatches: "Mismatches",
+        revisionPending: "Revision Pending",
+        citations: "Citations",
+        lineage: "Lineage",
+        strategyDiffs: "Strategy Diffs",
+        empty: "No Skill Memory yet",
+        emptyDetail: "Select a skill to inspect details",
+        name: "Name",
+        titleLabel: "Title",
+        topic: "Topic",
+        summary: "Summary",
+        procedure: "Procedure",
+        citationsInput: "Citations, one per line",
+        file: "Read local text",
+        deleteTitle: "Delete Skill",
+        deleteDesc: "Deletion removes the memory record from storage without a console tombstone.",
+        modalTitle: {
+          create: "New Skill",
+          import: "Import Skill",
+          edit: "Edit Skill",
+          delete: "Delete Skill",
+        },
+      },
       transports: {
         http: {
           name: "HTTP API",
@@ -433,7 +602,7 @@
           { label: "Lifecycle", value: "Runtime opened" },
         ],
       },
-      statusbar: { brand: "Beetles Memory", transports: "Transports", devices: "Devices" },
+      statusbar: { brand: "Beetles Memory", skills: "Skills", transports: "Transports", devices: "Devices" },
       addDevice: {
         btn: "Add Device",
         title: "Add New Device",
@@ -466,13 +635,27 @@
   let transports: Transport[] = $state([]);
 
   let devices: Device[] = $state([]);
+  let skillReport: ConsoleApiSkillList | null = $state(null);
+  let skills: ConsoleApiSkillSummary[] = $state([]);
+  let selectedSkillName: string | null = $state(null);
+  let selectedSkill: ConsoleApiSkillDetail | null = $state(null);
+  let skillModal: SkillModal = $state(null);
+  let skillForm: SkillForm = $state({ title: "", topic: "", summary: "", procedure: "", citations: "" });
+  let skillError = $state("");
+  let skillSearch = $state("");
+  let skillStatusFilter: "all" | "active" | "disabled" | "retired" = $state("all");
+  let skillOriginFilter: "all" | SkillOrigin = $state("all");
 
   const t = $derived(copy[lang]);
   const runtimeShape = $derived(displayRuntimeShape(overviewData?.runtimeShape, t.runtimeShape, lang));
   const systemInfo = $derived(displaySystemInfo(overviewData?.systemInfo, lang));
   const enabledTransportCount = $derived(transports.filter((transport) => transport.enabled).length);
   const activeDeviceCount = $derived(devices.filter((device) => device.status !== "disabled").length);
+  const skillCount = $derived(skillReport?.total ?? skills.length);
+  const selectedSkillSummary = $derived(skills.find((skill) => skill.name === selectedSkillName) ?? selectedSkill?.summary ?? null);
+  const filteredSkills = $derived(filterSkills(skills, skillSearch, skillStatusFilter, skillOriginFilter));
   const pages = $derived(t.pages.map((page) => {
+    if (page.id === "skills") return { ...page, count: String(skillCount) };
     if (page.id === "transports") return { ...page, count: String(transports.length) };
     if (page.id === "devices") return { ...page, count: String(devices.length) };
     return page;
@@ -660,6 +843,15 @@
     }
     if (text.startsWith("Device ") && text.endsWith(" added")) return text.replace("Device ", "设备 ").replace(" added", " 已添加");
     if (text.startsWith("Device ") && text.endsWith(" updated")) return text.replace("Device ", "设备 ").replace(" updated", " 已更新");
+    if (text.startsWith("Skill ")) {
+      return text
+        .replace("Skill ", "Skill ")
+        .replace(" imported", " 已导入")
+        .replace(" updated", " 已更新")
+        .replace(" disabled", " 已停用")
+        .replace(" enabled", " 已启用")
+        .replace(" deleted", " 已删除");
+    }
     if (text.startsWith("Memory write accepted")) return text.replace("Memory write accepted, changed", "记忆写入已接受，变更");
     if (text.startsWith("Recall served for")) return text.replace("Recall served for", "召回已执行：").replace(" with ", "，命中 ").replace(" hits", " 条");
     if (text.startsWith("Projection served")) return text.replace("Projection served,", "投影已生成，");
@@ -791,21 +983,208 @@
     status: device.status,
   });
 
+  function filterSkills(
+    source: ConsoleApiSkillSummary[],
+    search: string,
+    statusFilter: "all" | "active" | "disabled" | "retired",
+    originFilter: "all" | SkillOrigin,
+  ): ConsoleApiSkillSummary[] {
+    const needle = search.trim().toLowerCase();
+    return source.filter((skill) => {
+      if (originFilter !== "all" && skill.origin !== originFilter) return false;
+      if (statusFilter === "active" && (!skill.enabled || skill.status === "retired")) return false;
+      if (statusFilter === "disabled" && skill.enabled) return false;
+      if (statusFilter === "retired" && skill.status !== "retired") return false;
+      if (!needle) return true;
+      return [skill.name, skill.title, skill.topic, skill.status, skill.origin]
+        .some((value) => value.toLowerCase().includes(needle));
+    });
+  }
+
+  function skillOriginLabel(origin: SkillOrigin): string {
+    if (origin === "user_provided") return t.skillsPanel.userProvided;
+    return t.skillsPanel.runtimeLearned;
+  }
+
+  function skillKindLabel(kind: SkillKind): string {
+    if (kind === "runtime_skill") return "Runtime Skill";
+    return lang === "zh-CN" ? "手工文档" : "Manual Document";
+  }
+
+  function skillQuality(skill: ConsoleApiSkillSummary): string {
+    return skill.qualityScore === null ? "-" : `${skill.qualityScore}`;
+  }
+
+  function parseCitations(value: string): string[] {
+    return value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  function citationsText(citations: string[]): string {
+    return citations.join("\n");
+  }
+
+  function resetSkillForm() {
+    skillForm = { title: "", topic: "", summary: "", procedure: "", citations: "" };
+    skillError = "";
+  }
+
+  function openSkillCreate() {
+    resetSkillForm();
+    skillModal = "create";
+  }
+
+  function openSkillImport() {
+    resetSkillForm();
+    skillModal = "import";
+  }
+
+  function openSkillEdit() {
+    if (!selectedSkill) return;
+    skillForm = {
+      title: selectedSkill.summary.title,
+      topic: selectedSkill.summary.topic,
+      summary: selectedSkill.summaryText,
+      procedure: selectedSkill.procedureText,
+      citations: citationsText(selectedSkill.citations),
+    };
+    skillError = "";
+    skillModal = "edit";
+  }
+
+  function openSkillDelete() {
+    if (!selectedSkillSummary) return;
+    skillError = "";
+    skillModal = "delete";
+  }
+
+  function closeSkillModal() {
+    skillModal = null;
+    skillError = "";
+  }
+
+  async function selectSkill(name: string) {
+    selectedSkillName = name;
+    if (!backendConnected) return;
+    try {
+      const response = await apiJson<{ skill: ConsoleApiSkillDetail }>(`/console/skills/${encodeURIComponent(name)}`);
+      selectedSkill = response.skill;
+    } catch {
+      selectedSkill = null;
+      backendConnected = false;
+    }
+  }
+
+  async function submitSkillForm(e: SubmitEvent) {
+    e.preventDefault();
+    if (!backendConnected) {
+      skillError = t.labels.backendOffline;
+      return;
+    }
+    const title = skillForm.title.trim();
+    const topic = skillForm.topic.trim();
+    const summary = skillForm.summary.trim();
+    const procedure = skillForm.procedure.trim();
+    if (!title || !topic || !summary || !procedure) {
+      skillError = lang === "zh-CN" ? "标题、主题、摘要和过程都不能为空" : "Title, topic, summary, and procedure are required";
+      return;
+    }
+    const name = skillModal === "edit" ? selectedSkill?.summary.name : undefined;
+    try {
+      const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>(
+        name ? `/console/skills/${encodeURIComponent(name)}` : "/console/skills",
+        {
+          method: name ? "PATCH" : "POST",
+          body: JSON.stringify({
+            title,
+            topic,
+            summary,
+            procedure,
+            citations: parseCitations(skillForm.citations),
+          }),
+        },
+      );
+      closeSkillModal();
+      await loadConsoleData();
+      await selectSkill(response.mutation.name);
+    } catch (error) {
+      skillError = error instanceof Error ? error.message : String(error);
+      backendConnected = false;
+    }
+  }
+
+  async function toggleSkillEnabled(skill: ConsoleApiSkillSummary) {
+    if (!backendConnected) return;
+    try {
+      await apiJson<{ mutation: ConsoleApiSkillMutation }>(`/console/skills/${encodeURIComponent(skill.name)}/enabled`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !skill.enabled }),
+      });
+      await loadConsoleData();
+      if (selectedSkillName === skill.name) await selectSkill(skill.name);
+    } catch {
+      backendConnected = false;
+    }
+  }
+
+  async function deleteSelectedSkill() {
+    if (!selectedSkillSummary || !backendConnected) return;
+    try {
+      await apiJson<{ mutation: ConsoleApiSkillMutation }>(`/console/skills/${encodeURIComponent(selectedSkillSummary.name)}`, {
+        method: "DELETE",
+      });
+      closeSkillModal();
+      selectedSkillName = null;
+      selectedSkill = null;
+      await loadConsoleData();
+    } catch (error) {
+      skillError = error instanceof Error ? error.message : String(error);
+      backendConnected = false;
+    }
+  }
+
+  async function readSkillFile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    skillForm = {
+      ...skillForm,
+      title: skillForm.title || file.name.replace(/\.[^.]+$/, ""),
+      procedure: text,
+      summary: skillForm.summary || text.trim().split(/\r?\n/).find(Boolean)?.slice(0, 180) || "",
+    };
+    input.value = "";
+  }
+
   async function loadConsoleData() {
     try {
-      const [overviewResponse, transportResponse, deviceResponse, sessionResponse] = await Promise.all([
+      const [overviewResponse, skillResponse, transportResponse, deviceResponse, sessionResponse] = await Promise.all([
         apiJson<{ overview: ConsoleApiOverview }>("/console/overview"),
+        apiJson<{ skills: ConsoleApiSkillList }>("/console/skills"),
         apiJson<{ transports: ConsoleApiTransport[] }>("/console/transports"),
         apiJson<{ devices: ConsoleApiDevice[] }>("/console/devices"),
         apiJson<{ session: ConsoleApiSession }>("/console/session"),
       ]);
       overviewData = overviewResponse.overview;
+      skillReport = skillResponse.skills;
+      skills = skillResponse.skills.skills;
+      if (selectedSkillName && !skills.some((skill) => skill.name === selectedSkillName)) {
+        selectedSkillName = null;
+        selectedSkill = null;
+      }
       transports = transportResponse.transports.map(fromApiTransport);
       devices = deviceResponse.devices.map(fromApiDevice);
       sessionData = sessionResponse.session;
       backendConnected = true;
     } catch {
       overviewData = null;
+      skillReport = null;
+      skills = [];
+      selectedSkillName = null;
+      selectedSkill = null;
       transports = [];
       devices = [];
       sessionData = null;
@@ -1048,6 +1427,148 @@
             {@render kvStack(kernelRows)}
           </article>
         </section>
+      {:else if activePage === "skills"}
+        <section class="skill-layout">
+          <article class="panel skill-list-panel">
+            <div class="panel-title">
+              <div>
+                <p class="panel-label">{t.skillsPanel.label}</p>
+                <h3>{t.skillsPanel.title}</h3>
+              </div>
+              <div class="panel-title-actions">
+                <button class="ghost-button" type="button" onclick={openSkillImport}>
+                  <Upload size={13} /> {t.actions.importSkill}
+                </button>
+                <button class="primary-button" type="button" onclick={openSkillCreate}>
+                  <Plus size={13} /> {t.actions.createSkill}
+                </button>
+              </div>
+            </div>
+
+            <div class="skill-stats">
+              <div><span>{t.skillsPanel.total}</span><strong>{skillReport?.total ?? 0}</strong></div>
+              <div><span>{t.skillsPanel.active}</span><strong>{skillReport?.active ?? 0}</strong></div>
+              <div><span>{t.skillsPanel.disabled}</span><strong>{skillReport?.disabled ?? 0}</strong></div>
+              <div><span>{t.skillsPanel.runtimeLearned}</span><strong>{skillReport?.runtimeLearned ?? 0}</strong></div>
+              <div><span>{t.skillsPanel.userProvided}</span><strong>{skillReport?.userProvided ?? 0}</strong></div>
+            </div>
+
+            <div class="skill-toolbar">
+              <label class="skill-search">
+                <span><Search size={13} /> {t.skillsPanel.search}</span>
+                <input bind:value={skillSearch} placeholder={t.skillsPanel.search} />
+              </label>
+              <div class="skill-filters">
+                <select bind:value={skillStatusFilter}>
+                  <option value="all">{t.skillsPanel.all}</option>
+                  <option value="active">{t.skillsPanel.active}</option>
+                  <option value="disabled">{t.skillsPanel.disabled}</option>
+                  <option value="retired">{t.skillsPanel.retired}</option>
+                </select>
+                <select bind:value={skillOriginFilter}>
+                  <option value="all">{t.skillsPanel.all}</option>
+                  <option value="user_provided">{t.skillsPanel.userProvided}</option>
+                  <option value="runtime_learned">{t.skillsPanel.runtimeLearned}</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="skill-list">
+              {#if filteredSkills.length === 0}
+                <div class="skill-empty">{t.skillsPanel.empty}</div>
+              {:else}
+                {#each filteredSkills as skill}
+                  <button
+                    class:active={selectedSkillName === skill.name}
+                    class="skill-row"
+                    type="button"
+                    onclick={() => selectSkill(skill.name)}
+                  >
+                    <span class="skill-row-main">
+                      <strong>{skill.title}</strong>
+                      <small>{skill.topic} · {skill.name}</small>
+                    </span>
+                    <span class="skill-row-meta">
+                      <span class={`badge ${skill.enabled ? skill.status : "disabled"}`}>{skill.enabled ? statusLabel(skill.status) : statusLabel("disabled")}</span>
+                      <span>{skillOriginLabel(skill.origin)}</span>
+                      <span>{t.skillsPanel.quality}: {skillQuality(skill)}</span>
+                      <span>{t.skillsPanel.uses}: {skill.useCount}</span>
+                    </span>
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          </article>
+
+          <article class="panel skill-detail-panel">
+            {#if selectedSkill && selectedSkillSummary}
+              <div class="panel-title">
+                <div>
+                  <p class="panel-label">{skillOriginLabel(selectedSkillSummary.origin)} · {skillKindLabel(selectedSkillSummary.kind)}</p>
+                  <h3>{selectedSkillSummary.title}</h3>
+                </div>
+                <div class="panel-title-actions">
+                  <button class="ghost-button" type="button" onclick={() => toggleSkillEnabled(selectedSkillSummary)} disabled={!backendConnected}>
+                    {selectedSkillSummary.enabled ? t.actions.disable : t.actions.enable}
+                  </button>
+                  <button class="ghost-button" type="button" onclick={openSkillEdit}><Pencil size={13} /> {t.actions.edit}</button>
+                  <button class="ghost-button danger-button" type="button" onclick={openSkillDelete}><Trash2 size={13} /> {t.actions.delete}</button>
+                </div>
+              </div>
+
+              <div class="skill-meta-grid">
+                <div><span>{t.skillsPanel.name}</span><strong>{selectedSkillSummary.name}</strong></div>
+                <div><span>{t.skillsPanel.topic}</span><strong>{selectedSkillSummary.topic}</strong></div>
+                <div><span>{t.skillsPanel.quality}</span><strong>{skillQuality(selectedSkillSummary)}</strong></div>
+                <div><span>{t.skillsPanel.uses}</span><strong>{selectedSkillSummary.useCount}</strong></div>
+                <div><span>{t.skillsPanel.successes}</span><strong>{selectedSkillSummary.validatedSuccessCount}</strong></div>
+                <div><span>{t.skillsPanel.mismatches}</span><strong>{selectedSkillSummary.mismatchCount}</strong></div>
+                <div><span>{t.skillsPanel.revisionPending}</span><strong>{selectedSkillSummary.revisionPending ? "YES" : "NO"}</strong></div>
+                <div><span>{t.labels.status}</span><strong>{selectedSkillSummary.enabled ? statusLabel(selectedSkillSummary.status) : statusLabel("disabled")}</strong></div>
+              </div>
+
+              <div class="skill-detail">
+                <section>
+                  <h4>{t.skillsPanel.summary}</h4>
+                  <p>{selectedSkill.summaryText}</p>
+                </section>
+                <section>
+                  <h4>{t.skillsPanel.procedure}</h4>
+                  <pre>{selectedSkill.procedureText}</pre>
+                </section>
+                <section>
+                  <h4>{t.skillsPanel.citations}</h4>
+                  {#if selectedSkill.citations.length === 0}
+                    <p>-</p>
+                  {:else}
+                    <div class="chips">{#each selectedSkill.citations as citation}<span>{citation}</span>{/each}</div>
+                  {/if}
+                </section>
+                <section>
+                  <h4>{t.skillsPanel.lineage}</h4>
+                  {#if selectedSkill.lineage.length === 0}
+                    <p>-</p>
+                  {:else}
+                    <ul>{#each selectedSkill.lineage as item}<li>{item}</li>{/each}</ul>
+                  {/if}
+                </section>
+                <section>
+                  <h4>{t.skillsPanel.strategyDiffs}</h4>
+                  {#if selectedSkill.strategyDiffs.length === 0}
+                    <p>-</p>
+                  {:else}
+                    <ul>{#each selectedSkill.strategyDiffs as item}<li>{item}</li>{/each}</ul>
+                  {/if}
+                </section>
+              </div>
+            {:else}
+              <div class="skill-empty detail-empty">
+                <BookOpen size={28} />
+                <span>{t.skillsPanel.emptyDetail}</span>
+              </div>
+            {/if}
+          </article>
+        </section>
       {:else if activePage === "account"}
         <section class="panel account-panel">
           {@render panelHeader(t.account.panel, t.account.title, KeyRound)}
@@ -1138,6 +1659,8 @@
     <span class="sb-sep">│</span>
     <span class="sb-item">{backendStatusLabel}</span>
     <div class="sb-right">
+      <span class="sb-item">{t.statusbar.skills}: {skillCount}</span>
+      <span class="sb-sep">│</span>
       <span class="sb-item">{t.statusbar.transports}: {enabledTransportCount}/{transports.length}</span>
       <span class="sb-sep">│</span>
       <span class="sb-item">{t.statusbar.devices}: {activeDeviceCount}/{devices.length}</span>
@@ -1145,6 +1668,76 @@
       <span class:ok={backendConnected} class="sb-item">● {backendConnected ? t.labels.online : t.labels.offline}</span>
     </div>
   </div>
+
+  {#if skillModal && skillModal !== "delete"}
+    <button class="modal-backdrop" type="button" onclick={closeSkillModal} aria-label={t.addDevice.closeLabel}></button>
+    <div class="modal skill-editor-modal" role="dialog" aria-modal="true" aria-labelledby="skill-editor-title">
+      <div class="modal-header">
+        <h3 id="skill-editor-title">
+          {#if skillModal === "import"}<Upload size={14} />{:else if skillModal === "edit"}<Pencil size={14} />{:else}<Plus size={14} />{/if}
+          {t.skillsPanel.modalTitle[skillModal]}
+        </h3>
+        <button class="modal-close" type="button" onclick={closeSkillModal} aria-label={t.addDevice.closeLabel}>✕</button>
+      </div>
+      <form class="modal-body" onsubmit={submitSkillForm}>
+        <div class="skill-form-grid">
+          <label>
+            <span>{t.skillsPanel.titleLabel}</span>
+            <input bind:value={skillForm.title} required autocomplete="off" />
+          </label>
+          <label>
+            <span>{t.skillsPanel.topic}</span>
+            <input bind:value={skillForm.topic} required autocomplete="off" />
+          </label>
+        </div>
+        <label>
+          <span>{t.skillsPanel.summary}</span>
+          <textarea bind:value={skillForm.summary} rows="3" required></textarea>
+        </label>
+        <label>
+          <span>{t.skillsPanel.procedure}</span>
+          <textarea bind:value={skillForm.procedure} rows="8" required></textarea>
+        </label>
+        {#if skillModal === "import"}
+          <label class="file-reader">
+            <span>{t.skillsPanel.file}</span>
+            <input type="file" accept=".md,.txt,text/plain,text/markdown" onchange={readSkillFile} />
+          </label>
+        {/if}
+        <label>
+          <span>{t.skillsPanel.citationsInput}</span>
+          <textarea bind:value={skillForm.citations} rows="3"></textarea>
+        </label>
+        {#if skillError}<p class="modal-error">{skillError}</p>{/if}
+        <div class="modal-footer">
+          <button class="ghost-button" type="button" onclick={closeSkillModal}>{t.actions.cancel}</button>
+          <button class="primary-button" type="submit"><FileText size={13} /> {t.actions.save}</button>
+        </div>
+      </form>
+    </div>
+  {/if}
+
+  {#if skillModal === "delete" && selectedSkillSummary}
+    <button class="modal-backdrop" type="button" onclick={closeSkillModal} aria-label={t.addDevice.closeLabel}></button>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title">
+      <div class="modal-header">
+        <h3 id="skill-delete-title"><Trash2 size={14} /> {t.skillsPanel.deleteTitle}</h3>
+        <button class="modal-close" type="button" onclick={closeSkillModal} aria-label={t.addDevice.closeLabel}>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="issued-key-meta">
+          <span>{t.skillsPanel.deleteDesc}</span>
+          <strong>{selectedSkillSummary.title}</strong>
+          <small>{selectedSkillSummary.name}</small>
+        </div>
+        {#if skillError}<p class="modal-error">{skillError}</p>{/if}
+        <div class="modal-footer">
+          <button class="ghost-button" type="button" onclick={closeSkillModal}>{t.actions.cancel}</button>
+          <button class="primary-button danger-primary" type="button" onclick={deleteSelectedSkill}>{t.actions.delete}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if addDeviceOpen}
     <button class="modal-backdrop" type="button" onclick={closeModal} aria-label={t.addDevice.closeLabel}></button>

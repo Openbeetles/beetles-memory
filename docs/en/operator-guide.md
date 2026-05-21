@@ -19,6 +19,20 @@ assert!(report.capabilities.inspection.visible);
 
 `MemoryInspectionReport` includes working recall inspection, capability catalog data, operator action report, and lifecycle report.
 
+## Skill Memory Management
+
+Standalone consoles and CLI operators may manage Skill Memory, but they manage procedural memory records, not executors, marketplaces, or workflow runners.
+
+SDK entry points:
+
+- `MemoryRuntime::list_skills`
+- `MemoryRuntime::get_skill`
+- `MemoryRuntime::upsert_skill`
+- `MemoryRuntime::set_skill_enabled`
+- `MemoryRuntime::delete_skill`
+
+Every mutation enters `MemoryRuntime`, then core skill governance and the configured store backend. The HTTP console only routes `/console/skills*`; the CLI only calls the entry facade. Neither path reads or writes skill files directly.
+
 ## Recover
 
 ```rust

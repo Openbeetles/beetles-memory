@@ -20,10 +20,16 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
 #[test]
 fn console_route_catalog_is_separate_from_memory_operations() {
     let routes = console_route_specs();
-    assert_eq!(routes.len(), 8);
+    assert_eq!(routes.len(), 14);
     assert!(routes
         .iter()
         .any(|route| route.method == HttpMethod::Get && route.path == "/console/overview"));
+    assert!(routes
+        .iter()
+        .any(|route| route.method == HttpMethod::Get && route.path == "/console/skills"));
+    assert!(routes.iter().any(|route| {
+        route.method == HttpMethod::Delete && route.path == "/console/skills/{name}"
+    }));
     assert!(routes.iter().any(|route| {
         route.method == HttpMethod::Patch && route.path == "/console/transports/{id}"
     }));

@@ -19,6 +19,20 @@ assert!(report.capabilities.inspection.visible);
 
 `MemoryInspectionReport` 包含 working recall inspection、capability catalog data、operator action report 和 lifecycle report。
 
+## Skill 记忆管理
+
+独立部署配置台和 CLI 可以管理 Skill 记忆，但它们管理的是 procedural memory record，不是执行器、插件市场或 workflow runner。
+
+SDK 侧入口：
+
+- `MemoryRuntime::list_skills`
+- `MemoryRuntime::get_skill`
+- `MemoryRuntime::upsert_skill`
+- `MemoryRuntime::set_skill_enabled`
+- `MemoryRuntime::delete_skill`
+
+所有 mutation 都进入 `MemoryRuntime`，再进入 core skill governance 和 store backend。HTTP console 只路由 `/console/skills*`，CLI 只调用 entry facade；两者都不能直接读写 skill 文件。
+
 ## Recover
 
 ```rust

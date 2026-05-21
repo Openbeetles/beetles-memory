@@ -32,6 +32,12 @@ Commands:
 | `replay` | Inspect turn replay for a chat. |
 | `export` | Export a continuity snapshot. |
 | `import` | Import a continuity snapshot. |
+| `skill-list` | List Skill Memory records. |
+| `skill-show` | Inspect one Skill Memory record. |
+| `skill-import` | Import or create a Skill Memory record. |
+| `skill-edit` | Edit an existing Skill Memory record. |
+| `skill-enable` / `skill-disable` | Enable or disable Skill Memory. |
+| `skill-delete` | Delete Skill Memory. |
 | `close` | Close the runtime and emit lifecycle report. |
 
 Common options:
@@ -49,6 +55,32 @@ Common options:
 | `--query <text>` | empty |
 | `--limit <n>` | `8` |
 | `--max-len <n>` | `4096` |
+
+## Skill Memory Management
+
+These commands manage procedural memory records only. They do not execute skills or install plugins.
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory skill-import \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --chat chat-1 \
+  --title "Release guard" \
+  --topic release \
+  --summary "Verify release artifacts before publishing." \
+  --content "1. run gates
+2. inspect artifacts
+3. dry run publish"
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory skill-list \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --query release
+```
 
 ## Write And Recall With A File Store
 

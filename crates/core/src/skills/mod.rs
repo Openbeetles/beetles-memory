@@ -24,19 +24,20 @@ pub use prompt_cache::SkillPromptCache;
 pub use runtime::{
     build_runtime_skill_doctrine_snapshot, build_runtime_skill_genome_snapshot,
     build_runtime_skill_operator_summary, build_runtime_skill_recall_block, govern_runtime_skills,
-    is_runtime_skill_name, record_runtime_skill_outcomes, retrieve_runtime_skill_hits,
-    touch_runtime_skill_hits, upsert_runtime_skill, write_governed_runtime_skills,
-    RuntimeSkillDoctrineClauseRecord, RuntimeSkillDoctrineSnapshot, RuntimeSkillGenomeDisposition,
-    RuntimeSkillGenomeLineageRecord, RuntimeSkillGenomeNode, RuntimeSkillGenomeSnapshot,
-    RuntimeSkillGovernanceOutcome, RuntimeSkillHit, RuntimeSkillOperatorRecord,
-    RuntimeSkillOperatorSummary, RuntimeSkillRecallScoreBreakdown, RuntimeSkillRecord,
-    RuntimeSkillReuseOutcome, RuntimeSkillStatus, RuntimeSkillStrategyDiff,
-    RuntimeSkillStrategyDiffKind, RuntimeSkillWriteAction, RuntimeSkillWriteItemReport,
-    RuntimeSkillWriteOutcome, RuntimeSkillWriteReason, RuntimeSkillWriteSource,
+    is_runtime_skill_name, list_runtime_skill_records, record_runtime_skill_outcomes,
+    retrieve_runtime_skill_hits, touch_runtime_skill_hits, upsert_runtime_skill,
+    write_governed_runtime_skills, RuntimeSkillDoctrineClauseRecord, RuntimeSkillDoctrineSnapshot,
+    RuntimeSkillGenomeDisposition, RuntimeSkillGenomeLineageRecord, RuntimeSkillGenomeNode,
+    RuntimeSkillGenomeSnapshot, RuntimeSkillGovernanceOutcome, RuntimeSkillHit,
+    RuntimeSkillOperatorRecord, RuntimeSkillOperatorSummary, RuntimeSkillOrigin,
+    RuntimeSkillRecallScoreBreakdown, RuntimeSkillRecord, RuntimeSkillReuseOutcome,
+    RuntimeSkillStatus, RuntimeSkillStrategyDiff, RuntimeSkillStrategyDiffKind,
+    RuntimeSkillWriteAction, RuntimeSkillWriteItemReport, RuntimeSkillWriteOutcome,
+    RuntimeSkillWriteReason, RuntimeSkillWriteSource,
 };
 pub(crate) use runtime::{
-    list_runtime_skill_records, retrieve_runtime_skill_hits_with_backend,
-    runtime_skill_doctrine_event_at, runtime_skill_genome_event_at,
+    retrieve_runtime_skill_hits_with_backend, runtime_skill_doctrine_event_at,
+    runtime_skill_genome_event_at,
 };
 
 fn is_skill_name_valid(name: &str) -> bool {

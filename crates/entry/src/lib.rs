@@ -18,6 +18,8 @@ pub use console::{
     EntryConsoleCapabilityRow, EntryConsoleDevice, EntryConsoleDeviceCreate,
     EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleEvent, EntryConsoleKv,
     EntryConsoleMetric, EntryConsoleOverview, EntryConsoleRuntimeShape, EntryConsoleSession,
+    EntryConsoleSkillDetail, EntryConsoleSkillList, EntryConsoleSkillMutation,
+    EntryConsoleSkillSetEnabled, EntryConsoleSkillSummary, EntryConsoleSkillUpsert,
     EntryConsoleState, EntryConsoleSystemInfo, EntryConsoleTransport, EntryConsoleTransportUpdate,
 };
 pub use error::EntryErrorKey;

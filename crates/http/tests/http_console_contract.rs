@@ -4,7 +4,7 @@ use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
-use bm_http::{handle_http_request, HttpRuntimeRequest};
+use bm_http::{handle_http_request, HttpMethod, HttpRuntimeRequest};
 use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
 use serde_json::Value;
 
@@ -193,4 +193,86 @@ fn console_overview_reflects_real_memory_operations() {
         .any(|event| event["text"]
             .as_str()
             .is_some_and(|text| text.contains("Memory write accepted"))));
+}
+
+#[test]
+fn http_parser_accepts_delete_for_console_skill_routes() {
+    let runtime = runtime();
+    let response = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest {
+            method: HttpMethod::Delete,
+            path: "/console/skills/runtime_skill__missing".to_string(),
+            body: String::new(),
+            request_id: "http-delete-req".to_string(),
+            idempotency_key: "http-delete-idem".to_string(),
+            audit_id: "http-delete-audit".to_string(),
+            authenticated: true,
+        },
+    )
+    .expect("delete");
+    assert_eq!(response.status_code, 404);
+}
+
+#[test]
+fn console_http_skill_routes_support_crud_without_store_shortcut() {
+    let runtime = runtime();
+
+    let created = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/skills",
+            r#"{"title":"Release guard","topic":"release","summary":"Check artifacts before publishing.","procedure":"1. run gates\n2. inspect artifacts\n3. dry run publish","citations":["http-test"]}"#,
+        ),
+    )
+    .expect("create");
+    assert_eq!(created.status_code, 200, "{}", created.body);
+
+    let list =
+        handle_http_request(&runtime, HttpRuntimeRequest::get("/console/skills")).expect("list");
+    assert_eq!(list.status_code, 200);
+    assert!(list.body.contains("Release guard"));
+    assert!(list.body.contains("user_provided"));
+
+    let detail = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/console/skills/runtime_skill__release"),
+    )
+    .expect("detail");
+    assert_eq!(detail.status_code, 200, "{}", detail.body);
+    assert!(detail.body.contains("run gates"));
+
+    let edited = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::patch_json(
+            "/console/skills/runtime_skill__release",
+            r#"{"title":"Release guard","topic":"release","summary":"Check artifacts and changelog before publishing.","procedure":"1. run gates\n2. inspect artifacts\n3. inspect changelog","citations":["http-test-edit"]}"#,
+        ),
+    )
+    .expect("edit");
+    assert_eq!(edited.status_code, 200, "{}", edited.body);
+
+    let disabled = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::patch_json(
+            "/console/skills/runtime_skill__release/enabled",
+            r#"{"enabled":false}"#,
+        ),
+    )
+    .expect("disable");
+    assert_eq!(disabled.status_code, 200, "{}", disabled.body);
+
+    let deleted = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::delete("/console/skills/runtime_skill__release"),
+    )
+    .expect("delete");
+    assert_eq!(deleted.status_code, 200, "{}", deleted.body);
+
+    let detail_after_delete = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/console/skills/runtime_skill__release"),
+    )
+    .expect("detail after delete");
+    assert_eq!(detail_after_delete.status_code, 404);
 }

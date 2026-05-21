@@ -10,7 +10,8 @@ use bm_adapter::{
 #[cfg(feature = "server-std")]
 use bm_entry::{
     EntryAuthDecision, EntryConsoleDeviceCreate, EntryConsoleDeviceUpdate,
-    EntryConsoleTransportUpdate, EntryRuntime, EntryTransportContext,
+    EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert, EntryConsoleTransportUpdate,
+    EntryRuntime, EntryTransportContext,
 };
 #[cfg(feature = "server-std")]
 use serde_json::json;
@@ -26,6 +27,7 @@ pub enum HttpMethod {
     Get,
     Post,
     Patch,
+    Delete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +84,12 @@ const ROUTES: &[RouteSpec] = &[
 
 const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_get("/console/overview"),
+    console_get("/console/skills"),
+    console_get("/console/skills/{name}"),
+    console_post("/console/skills"),
+    console_patch("/console/skills/{name}"),
+    console_patch("/console/skills/{name}/enabled"),
+    console_delete("/console/skills/{name}"),
     console_get("/console/transports"),
     console_patch("/console/transports/{id}"),
     console_get("/console/devices"),
@@ -128,6 +136,14 @@ const fn console_post(path: &'static str) -> ConsoleRouteSpec {
 const fn console_patch(path: &'static str) -> ConsoleRouteSpec {
     ConsoleRouteSpec {
         method: HttpMethod::Patch,
+        path,
+        auth: RouteAuth::TokenOrLoopback,
+    }
+}
+
+const fn console_delete(path: &'static str) -> ConsoleRouteSpec {
+    ConsoleRouteSpec {
+        method: HttpMethod::Delete,
         path,
         auth: RouteAuth::TokenOrLoopback,
     }
@@ -196,6 +212,18 @@ impl HttpRuntimeRequest {
             method: HttpMethod::Patch,
             path: path.into(),
             body: body.into(),
+            request_id: "http-req".to_string(),
+            idempotency_key: format!("http-idem-{}", unique_request_suffix()),
+            audit_id: "http-audit".to_string(),
+            authenticated: true,
+        }
+    }
+
+    pub fn delete(path: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Delete,
+            path: path.into(),
+            body: String::new(),
             request_id: "http-req".to_string(),
             idempotency_key: format!("http-idem-{}", unique_request_suffix()),
             audit_id: "http-audit".to_string(),
@@ -314,6 +342,7 @@ fn read_http_runtime_request<S: Read>(stream: &mut S) -> bm_sdk::Result<HttpRunt
         Some("GET") => HttpMethod::Get,
         Some("POST") => HttpMethod::Post,
         Some("PATCH") => HttpMethod::Patch,
+        Some("DELETE") => HttpMethod::Delete,
         Some(other) => {
             return Err(bm_sdk::Error::config(
                 "http_headers",
@@ -437,7 +466,8 @@ fn handle_console_request(
         ));
     }
 
-    match (request.method, request.path.as_str()) {
+    let (route_path, query_string) = split_query_path(&request.path);
+    match (request.method, route_path) {
         (HttpMethod::Get, "/console/overview") => Ok(json_response(
             200,
             json!({
@@ -466,6 +496,98 @@ fn handle_console_request(
                 "session": runtime.console_session(),
             }),
         )),
+        (HttpMethod::Get, "/console/skills") => {
+            let skills = runtime.console_skills(query_param(query_string, "query"))?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "skills": skills,
+                }),
+            ))
+        }
+        (HttpMethod::Get, path) if path.starts_with("/console/skills/") => {
+            let name = trim_suffix_path(path, "/console/skills/");
+            if name.is_empty() {
+                return Ok(not_found("console skill not found"));
+            }
+            match runtime.console_skill_detail(name)? {
+                Some(skill) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "skill": skill,
+                    }),
+                )),
+                None => Ok(not_found("console skill not found")),
+            }
+        }
+        (HttpMethod::Post, "/console/skills") => {
+            let payload: EntryConsoleSkillUpsert = parse_console_json(&request.body)?;
+            let mutation = runtime.console_upsert_skill(payload)?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "mutation": mutation,
+                }),
+            ))
+        }
+        (HttpMethod::Patch, path)
+            if path.starts_with("/console/skills/") && path.ends_with("/enabled") =>
+        {
+            let name = path
+                .strip_prefix("/console/skills/")
+                .and_then(|value| value.strip_suffix("/enabled"))
+                .map(|value| value.trim_matches('/'))
+                .unwrap_or_default();
+            if name.is_empty() {
+                return Ok(not_found("console skill not found"));
+            }
+            let payload: EntryConsoleSkillSetEnabled = parse_console_json(&request.body)?;
+            match runtime.console_set_skill_enabled(name, payload)? {
+                Some(mutation) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "mutation": mutation,
+                    }),
+                )),
+                None => Ok(not_found("console skill not found")),
+            }
+        }
+        (HttpMethod::Patch, path) if path.starts_with("/console/skills/") => {
+            let name = trim_suffix_path(path, "/console/skills/");
+            if name.is_empty() {
+                return Ok(not_found("console skill not found"));
+            }
+            let mut payload: EntryConsoleSkillUpsert = parse_console_json(&request.body)?;
+            payload.name = Some(name.to_string());
+            let mutation = runtime.console_upsert_skill(payload)?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "mutation": mutation,
+                }),
+            ))
+        }
+        (HttpMethod::Delete, path) if path.starts_with("/console/skills/") => {
+            let name = trim_suffix_path(path, "/console/skills/");
+            if name.is_empty() {
+                return Ok(not_found("console skill not found"));
+            }
+            match runtime.console_delete_skill(name)? {
+                Some(mutation) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "mutation": mutation,
+                    }),
+                )),
+                None => Ok(not_found("console skill not found")),
+            }
+        }
         (HttpMethod::Post, "/console/devices") => {
             let payload: EntryConsoleDeviceCreate = parse_console_json(&request.body)?;
             match runtime.console_add_device(payload) {
@@ -535,7 +657,7 @@ fn handle_console_request(
                 None => Ok(not_found("console device not found")),
             }
         }
-        _ if is_known_console_path(&request.path) => Ok(json_response(
+        _ if is_known_console_path(route_path) => Ok(json_response(
             405,
             json!({
                 "status": "rejected",
@@ -559,11 +681,32 @@ fn trim_suffix_path<'a>(path: &'a str, prefix: &str) -> &'a str {
 }
 
 #[cfg(feature = "server-std")]
+fn split_query_path(path: &str) -> (&str, Option<&str>) {
+    path.split_once('?')
+        .map(|(route, query)| (route, Some(query)))
+        .unwrap_or((path, None))
+}
+
+#[cfg(feature = "server-std")]
+fn query_param(query_string: Option<&str>, key: &str) -> Option<String> {
+    let query_string = query_string?;
+    query_string.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (name == key && !value.trim().is_empty()).then(|| value.replace('+', " "))
+    })
+}
+
+#[cfg(feature = "server-std")]
 fn is_known_console_path(path: &str) -> bool {
     matches!(
         path,
-        "/console/overview" | "/console/transports" | "/console/devices" | "/console/session"
-    ) || path.starts_with("/console/transports/")
+        "/console/overview"
+            | "/console/skills"
+            | "/console/transports"
+            | "/console/devices"
+            | "/console/session"
+    ) || path.starts_with("/console/skills/")
+        || path.starts_with("/console/transports/")
         || path.starts_with("/console/devices/")
 }
 

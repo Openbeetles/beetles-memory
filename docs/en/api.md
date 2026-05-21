@@ -25,6 +25,8 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Project | `MemoryRuntime::project` | Build a bounded memory block for model context. |
 | Maintain | `MemoryRuntime::maintain` | Run explicit post-reply memory maintenance when an LLM client is configured. |
 | Inspect | `MemoryRuntime::inspect` | Return recall/operator/lifecycle inspection data. |
+| Skill List / Detail | `MemoryRuntime::list_skills` / `MemoryRuntime::get_skill` | List and inspect procedural memory / skill records without executing them. |
+| Skill Mutation | `MemoryRuntime::upsert_skill` / `MemoryRuntime::set_skill_enabled` / `MemoryRuntime::delete_skill` | Create, import, edit, enable, disable, or delete skills through procedural memory governance. |
 | Replay | `MemoryRuntime::replay` | Inspect turn ledger history for a chat. |
 | Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | Move continuity snapshots between scopes. |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
@@ -40,6 +42,11 @@ The most common SDK request types are:
 | `MemoryRecallRequest` | `query`, `limit` | Returns procedural hits plus working recall inspection data. |
 | `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input` | Returns `system_memory_block` bounded by `system_max_len`. |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, and operator inspection data. |
+| `MemorySkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | Returns `MemorySkillListReport` with total, active, disabled, runtime_learned, user_provided, and skill summaries. |
+| `MemorySkillDetailRequest` | `name` | Returns `MemorySkillDetailReport` with summary/procedure/citations/lineage/strategy diffs/raw content. |
+| `MemorySkillUpsertRequest` | `title`, `topic`, `summary`, `procedure` | Creates, imports, or edits a skill; `name` is optional and defaults from the normalized topic. |
+| `MemorySkillSetEnabledRequest` | `name`, `enabled` | Changes only the enabled state; it does not rewrite skill content. |
+| `MemorySkillDeleteRequest` | `name` | Deletes the procedural memory from skill storage without adding a console tombstone. |
 | `MemoryReplayRequest` | `chat_id`, `limit` | Inspection-only replay surface. |
 | `MemoryExportRequest` | `chat_id` | Exports a continuity snapshot. |
 | `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode is `BootstrapImport` or `FullRestore`. |
@@ -61,6 +68,12 @@ The Console API is only for standalone deployments that serve the Beetle Memory 
 | Route | Method | Purpose |
 | --- | --- | --- |
 | `/console/overview` | `GET` | System info, runtime shape, observable metrics, kernel summary, and session overview. |
+| `/console/skills` | `GET` | Skill Memory list and summary counts. |
+| `/console/skills/{name}` | `GET` | Single Skill Memory detail. |
+| `/console/skills` | `POST` | Create or import a skill through `MemoryRuntime::upsert_skill`. |
+| `/console/skills/{name}` | `PATCH` | Edit a skill through `MemoryRuntime::upsert_skill`. |
+| `/console/skills/{name}/enabled` | `PATCH` | Enable or disable a skill. |
+| `/console/skills/{name}` | `DELETE` | Delete a Skill Memory record. |
 | `/console/transports` | `GET` | List configurable communication entries. |
 | `/console/transports/{id}` | `PATCH` | Update a communication entry's enabled state or endpoint. |
 | `/console/devices` | `GET` | List allowed devices with app_key fingerprints only. |
@@ -74,6 +87,7 @@ Security boundaries:
 - List endpoints never return plaintext app_keys; they return `appKeyFingerprint`.
 - Device creation and key rotation return `appKeyOnce` only in that response.
 - The HTTP switch in the communication page controls the external memory HTTP API, not the HTTP console entry itself.
+- The Skill Memory page manages procedural memory. It does not execute skills and does not provide a marketplace, executor, or workflow runner.
 
 ## Capability Catalog
 

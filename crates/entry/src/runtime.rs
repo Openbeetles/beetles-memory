@@ -4,17 +4,20 @@ use bm_adapter::{
 };
 use bm_sdk::{
     resolve_memory_capabilities, Error, MemoryCapabilityPolicy, MemoryIdentity,
-    MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, NoopMemoryAuditSink, ProfileId, Result,
-    StoreBackendConfig, StoreBackendKind, StorePlatform,
+    MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemorySkillDeleteRequest,
+    MemorySkillDetailRequest, MemorySkillListRequest, MemorySkillSetEnabledRequest,
+    MemorySkillUpsertRequest, NoopMemoryAuditSink, ProfileId, Result, StoreBackendConfig,
+    StoreBackendKind, StorePlatform,
 };
 
 use crate::config::{enabled_capability_policy, privacy_policy};
 use crate::{
     EntryAuthConfig, EntryCapabilityView, EntryConsoleDevice, EntryConsoleDeviceCreate,
     EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleOverview,
-    EntryConsoleSession, EntryConsoleState, EntryConsoleTransport, EntryConsoleTransportUpdate,
-    EntryIdempotencyCache, EntryIdempotencyConfig, EntryIdentity, EntryResponse, EntryScope,
-    EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryConsoleSession, EntryConsoleSkillDetail, EntryConsoleSkillList, EntryConsoleSkillMutation,
+    EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert, EntryConsoleState, EntryConsoleTransport,
+    EntryConsoleTransportUpdate, EntryIdempotencyCache, EntryIdempotencyConfig, EntryIdentity,
+    EntryResponse, EntryScope, EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +132,105 @@ impl EntryRuntime {
         self.console.session()
     }
 
+    pub fn console_skills(&self, query: Option<String>) -> Result<EntryConsoleSkillList> {
+        self.runtime
+            .list_skills(MemorySkillListRequest {
+                query,
+                include_disabled: true,
+                include_retired: true,
+                limit: 512,
+            })
+            .map(Into::into)
+    }
+
+    pub fn console_skill_detail(&self, name: &str) -> Result<Option<EntryConsoleSkillDetail>> {
+        match self.runtime.get_skill(MemorySkillDetailRequest {
+            name: name.to_string(),
+        }) {
+            Ok(report) => Ok(Some(report.into())),
+            Err(error) if error.stage() == "skill_detail" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn console_upsert_skill(
+        &self,
+        payload: EntryConsoleSkillUpsert,
+    ) -> Result<EntryConsoleSkillMutation> {
+        let existed = payload
+            .name
+            .as_deref()
+            .and_then(|name| self.console_skill_detail(name).ok().flatten())
+            .is_some();
+        let report = self.runtime.upsert_skill(MemorySkillUpsertRequest {
+            name: payload.name,
+            title: payload.title,
+            topic: payload.topic,
+            summary: payload.summary,
+            procedure: payload.procedure,
+            citations: payload.citations,
+            source_chat_id: payload
+                .source_chat_id
+                .or_else(|| Some(self.config.scope.chat_id.clone())),
+            observed_at: current_unix_secs(),
+        })?;
+        let mutation: EntryConsoleSkillMutation = report.into();
+        if mutation.accepted {
+            self.console.record_skill_mutation(
+                &mutation.name,
+                if existed { "updated" } else { "imported" },
+            );
+        }
+        Ok(mutation)
+    }
+
+    pub fn console_set_skill_enabled(
+        &self,
+        name: &str,
+        payload: EntryConsoleSkillSetEnabled,
+    ) -> Result<Option<EntryConsoleSkillMutation>> {
+        match self
+            .runtime
+            .set_skill_enabled(MemorySkillSetEnabledRequest {
+                name: name.to_string(),
+                enabled: payload.enabled,
+            }) {
+            Ok(report) => {
+                let mutation: EntryConsoleSkillMutation = report.into();
+                if mutation.accepted {
+                    self.console.record_skill_mutation(
+                        &mutation.name,
+                        if payload.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                    );
+                }
+                Ok(Some(mutation))
+            }
+            Err(error) if error.stage() == "skill_set_enabled" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn console_delete_skill(&self, name: &str) -> Result<Option<EntryConsoleSkillMutation>> {
+        match self.runtime.delete_skill(MemorySkillDeleteRequest {
+            name: name.to_string(),
+        }) {
+            Ok(report) => {
+                let mutation: EntryConsoleSkillMutation = report.into();
+                if mutation.accepted {
+                    self.console
+                        .record_skill_mutation(&mutation.name, "deleted");
+                }
+                Ok(Some(mutation))
+            }
+            Err(error) if error.stage() == "skill_delete" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn handle(
         &self,
         context: EntryTransportContext,
@@ -180,6 +282,13 @@ impl EntryRuntime {
             .record_adapter_response(operation, &response.adapter);
         Ok(response)
     }
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn entry_capability_view(

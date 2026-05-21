@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_entry::{
-    EntryAuthConfig, EntryAuthDecision, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
-    EntryRuntimeConfig, EntryScope, EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryAuthConfig, EntryAuthDecision, EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert,
+    EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig, EntryScope,
+    EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
     platform_capability_snapshot, platform_capability_snapshot_file_name,
@@ -63,6 +64,42 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         name: "write-procedural",
         usage: "bm memory write-procedural --name <name> --content <content>",
+        operation: AdapterOperation::Write,
+    },
+    CommandSpec {
+        name: "skill-list",
+        usage: "bm memory skill-list --query <query>",
+        operation: AdapterOperation::Inspect,
+    },
+    CommandSpec {
+        name: "skill-show",
+        usage: "bm memory skill-show --name <name>",
+        operation: AdapterOperation::Inspect,
+    },
+    CommandSpec {
+        name: "skill-import",
+        usage: "bm memory skill-import --title <title> --topic <topic> --content <content>",
+        operation: AdapterOperation::Write,
+    },
+    CommandSpec {
+        name: "skill-edit",
+        usage:
+            "bm memory skill-edit --name <name> --title <title> --topic <topic> --content <content>",
+        operation: AdapterOperation::Write,
+    },
+    CommandSpec {
+        name: "skill-enable",
+        usage: "bm memory skill-enable --name <name>",
+        operation: AdapterOperation::Write,
+    },
+    CommandSpec {
+        name: "skill-disable",
+        usage: "bm memory skill-disable --name <name>",
+        operation: AdapterOperation::Write,
+    },
+    CommandSpec {
+        name: "skill-delete",
+        usage: "bm memory skill-delete --name <name>",
         operation: AdapterOperation::Write,
     },
     CommandSpec {
@@ -182,11 +219,114 @@ fn run_memory_cli(args: &[String]) -> Result<String, String> {
     let options = CliOptions::parse(rest)?;
     let entry = EntryRuntime::open(options.entry_config()).map_err(|err| err.to_string())?;
     let operation = command_operation(command)?;
+    if is_skill_command(command) {
+        return run_skill_cli(&entry, command, &options);
+    }
     let adapter_command = options.adapter_command(command)?;
     let response = entry
         .handle(options.transport_context(operation), adapter_command)
         .map_err(|err| err.to_string())?;
     render_entry_response(response.adapter, options.output_path.as_deref())
+}
+
+fn is_skill_command(command: &str) -> bool {
+    matches!(
+        command,
+        "skill-list"
+            | "skill-show"
+            | "skill-import"
+            | "skill-edit"
+            | "skill-enable"
+            | "skill-disable"
+            | "skill-delete"
+    )
+}
+
+fn run_skill_cli(
+    entry: &EntryRuntime,
+    command: &str,
+    options: &CliOptions,
+) -> Result<String, String> {
+    let value = match command {
+        "skill-list" => {
+            let report = entry
+                .console_skills(non_empty_string(&options.query))
+                .map_err(|err| err.to_string())?;
+            json!({
+                "status": "accepted",
+                "skills": report,
+            })
+        }
+        "skill-show" => {
+            let name = required_value(&options.name, "--name")?;
+            let Some(skill) = entry
+                .console_skill_detail(name)
+                .map_err(|err| err.to_string())?
+            else {
+                return Err(format!("skill not found: {name}"));
+            };
+            json!({
+                "status": "accepted",
+                "skill": skill,
+            })
+        }
+        "skill-import" | "skill-edit" => {
+            let content = options.skill_content()?;
+            let payload = EntryConsoleSkillUpsert {
+                name: if command == "skill-edit" {
+                    Some(required_value(&options.name, "--name")?.to_string())
+                } else {
+                    non_empty_string(&options.name)
+                },
+                title: required_value(&options.title, "--title")?.to_string(),
+                topic: required_value(&options.topic, "--topic")?.to_string(),
+                summary: required_value(&options.summary, "--summary")?.to_string(),
+                procedure: content,
+                citations: vec!["bm-cli".to_string()],
+                source_chat_id: Some(options.chat.clone()),
+            };
+            let mutation = entry
+                .console_upsert_skill(payload)
+                .map_err(|err| err.to_string())?;
+            json!({
+                "status": "accepted",
+                "mutation": mutation,
+            })
+        }
+        "skill-enable" | "skill-disable" => {
+            let name = required_value(&options.name, "--name")?;
+            let Some(mutation) = entry
+                .console_set_skill_enabled(
+                    name,
+                    EntryConsoleSkillSetEnabled {
+                        enabled: command == "skill-enable",
+                    },
+                )
+                .map_err(|err| err.to_string())?
+            else {
+                return Err(format!("skill not found: {name}"));
+            };
+            json!({
+                "status": "accepted",
+                "mutation": mutation,
+            })
+        }
+        "skill-delete" => {
+            let name = required_value(&options.name, "--name")?;
+            let Some(mutation) = entry
+                .console_delete_skill(name)
+                .map_err(|err| err.to_string())?
+            else {
+                return Err(format!("skill not found: {name}"));
+            };
+            json!({
+                "status": "accepted",
+                "mutation": mutation,
+            })
+        }
+        other => return Err(format!("unsupported memory command: {other}")),
+    };
+    serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
 }
 
 fn command_operation(command: &str) -> Result<AdapterOperation, String> {
@@ -408,6 +548,16 @@ impl CliOptions {
             other => Err(format!("unsupported memory command: {other}")),
         }
     }
+
+    fn skill_content(&self) -> Result<String, String> {
+        if !self.content.trim().is_empty() {
+            return Ok(self.content.clone());
+        }
+        let path = self.input_path.as_ref().ok_or_else(|| {
+            "skill content requires --content <content> or --input <path>".to_string()
+        })?;
+        std::fs::read_to_string(path).map_err(|err| format!("failed to read skill content: {err}"))
+    }
 }
 
 fn next_value<'a>(args: &'a [String], index: &mut usize, key: &str) -> Result<&'a str, String> {
@@ -416,6 +566,19 @@ fn next_value<'a>(args: &'a [String], index: &mut usize, key: &str) -> Result<&'
         .ok_or_else(|| format!("{key} requires a value"))?;
     *index += 1;
     Ok(value)
+}
+
+fn required_value<'a>(value: &'a str, name: &str) -> Result<&'a str, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{name} is required"));
+    }
+    Ok(trimmed)
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn render_entry_response(

@@ -15,6 +15,13 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
             "export",
             "import",
             "write-procedural",
+            "skill-list",
+            "skill-show",
+            "skill-import",
+            "skill-edit",
+            "skill-enable",
+            "skill-disable",
+            "skill-delete",
             "close",
         ]
     );
@@ -31,6 +38,124 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
     assert!(!dependencies.contains("bm-core"));
     assert!(!dependencies.contains("bm-store"));
     assert!(dependencies.contains("bm-adapter"));
+}
+
+#[test]
+fn memory_cli_skill_management_uses_entry_runtime_facade() {
+    let root = unique_temp_dir("bm-cli-skill-management");
+    let store = root.to_string_lossy().to_string();
+
+    let imported = run_cli(
+        [
+            "memory",
+            "skill-import",
+            "--profile",
+            "profile-server-linux-dev-full",
+            "--store-file",
+            &store,
+            "--agent",
+            "cli-skill-agent",
+            "--owner",
+            "owner-default",
+            "--channel",
+            "local",
+            "--chat",
+            "chat-1",
+            "--title",
+            "Release guard",
+            "--topic",
+            "release",
+            "--summary",
+            "Check release artifacts before publishing.",
+            "--content",
+            "1. run gates\n2. inspect artifacts\n3. dry run publish",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect("skill import");
+    let imported_json: serde_json::Value = serde_json::from_str(&imported).expect("import json");
+    assert_eq!(imported_json["status"], "accepted");
+    assert_eq!(imported_json["mutation"]["accepted"], true);
+
+    let list = run_cli(
+        [
+            "memory",
+            "skill-list",
+            "--profile",
+            "profile-server-linux-dev-full",
+            "--store-file",
+            &store,
+            "--agent",
+            "cli-skill-agent",
+            "--owner",
+            "owner-default",
+            "--channel",
+            "local",
+            "--chat",
+            "chat-1",
+            "--query",
+            "release",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect("skill list");
+    let list_json: serde_json::Value = serde_json::from_str(&list).expect("list json");
+    assert_eq!(list_json["skills"]["total"], 1);
+    assert_eq!(list_json["skills"]["skills"][0]["origin"], "user_provided");
+
+    let disabled = run_cli(
+        [
+            "memory",
+            "skill-disable",
+            "--profile",
+            "profile-server-linux-dev-full",
+            "--store-file",
+            &store,
+            "--agent",
+            "cli-skill-agent",
+            "--owner",
+            "owner-default",
+            "--channel",
+            "local",
+            "--chat",
+            "chat-1",
+            "--name",
+            "runtime_skill__release",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect("skill disable");
+    let disabled_json: serde_json::Value = serde_json::from_str(&disabled).expect("disable json");
+    assert_eq!(disabled_json["mutation"]["accepted"], true);
+
+    let deleted = run_cli(
+        [
+            "memory",
+            "skill-delete",
+            "--profile",
+            "profile-server-linux-dev-full",
+            "--store-file",
+            &store,
+            "--agent",
+            "cli-skill-agent",
+            "--owner",
+            "owner-default",
+            "--channel",
+            "local",
+            "--chat",
+            "chat-1",
+            "--name",
+            "runtime_skill__release",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect("skill delete");
+    let deleted_json: serde_json::Value = serde_json::from_str(&deleted).expect("delete json");
+    assert_eq!(deleted_json["mutation"]["accepted"], true);
 }
 
 #[test]

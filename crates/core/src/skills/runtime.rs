@@ -85,7 +85,7 @@ pub enum RuntimeSkillStatus {
 }
 
 impl RuntimeSkillStatus {
-    fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::Stale => "stale",
@@ -100,6 +100,30 @@ impl RuntimeSkillStatus {
             "low_value" | "low-value" | "low value" => Self::LowValue,
             "retired" => Self::Retired,
             _ => Self::Active,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSkillOrigin {
+    #[default]
+    RuntimeLearned,
+    UserProvided,
+}
+
+impl RuntimeSkillOrigin {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RuntimeLearned => "runtime_learned",
+            Self::UserProvided => "user_provided",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "user_provided" | "user-provided" | "user provided" | "manual" => Self::UserProvided,
+            _ => Self::RuntimeLearned,
         }
     }
 }
@@ -220,6 +244,15 @@ impl RuntimeSkillWriteSource {
             Self::ProgrammableReasoning => "programmable_reasoning",
         }
     }
+
+    pub const fn origin(self) -> RuntimeSkillOrigin {
+        match self {
+            Self::Manual => RuntimeSkillOrigin::UserProvided,
+            Self::Extraction | Self::TaskLearning | Self::ProgrammableReasoning => {
+                RuntimeSkillOrigin::RuntimeLearned
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -273,6 +306,7 @@ pub struct RuntimeSkillWriteOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillRecord {
     pub name: String,
+    pub origin: RuntimeSkillOrigin,
     pub title: String,
     pub topic: String,
     pub summary: String,
@@ -363,6 +397,7 @@ pub struct RuntimeSkillHit {
 #[derive(Clone, Debug)]
 struct RuntimeSkillUpsertInput {
     name: String,
+    origin: RuntimeSkillOrigin,
     title: String,
     topic: String,
     summary: String,
@@ -775,7 +810,7 @@ pub fn write_governed_runtime_skills(
         let topic = write.topic.trim().to_string();
         let (reason, detail) = match inspect_runtime_skill_write_shape(write) {
             Ok(()) => {
-                let changed = upsert_runtime_skill_inner(storage, write, false)?;
+                let changed = upsert_runtime_skill_inner(storage, write, source.origin(), false)?;
                 outcome.accepted = outcome.accepted.saturating_add(1);
                 outcome.changed = outcome.changed.saturating_add(usize::from(changed));
                 outcome.reports.push(RuntimeSkillWriteItemReport {
@@ -963,12 +998,13 @@ pub fn upsert_runtime_skill(
     storage: &dyn SkillStorage,
     write: &RuntimeSkillWrite,
 ) -> crate::error::Result<bool> {
-    upsert_runtime_skill_inner(storage, write, true)
+    upsert_runtime_skill_inner(storage, write, RuntimeSkillOrigin::RuntimeLearned, true)
 }
 
 fn upsert_runtime_skill_inner(
     storage: &dyn SkillStorage,
     write: &RuntimeSkillWrite,
+    origin: RuntimeSkillOrigin,
     sync_atoms: bool,
 ) -> crate::error::Result<bool> {
     let mut input = RuntimeSkillUpsertInput {
@@ -982,6 +1018,7 @@ fn upsert_runtime_skill_inner(
         } else {
             write.title.trim().to_string()
         },
+        origin,
         topic: write.topic.trim().to_string(),
         summary: write.summary.trim().to_string(),
         procedure: write.content.trim().to_string(),
@@ -1040,7 +1077,7 @@ fn upsert_runtime_skill_inner(
     Ok(true)
 }
 
-pub(crate) fn list_runtime_skill_records(storage: &dyn SkillStorage) -> Vec<RuntimeSkillRecord> {
+pub fn list_runtime_skill_records(storage: &dyn SkillStorage) -> Vec<RuntimeSkillRecord> {
     let mut out = Vec::new();
     for name in crate::skills::list_skill_names(storage) {
         if !is_runtime_skill_name(&name) {
@@ -1132,6 +1169,7 @@ fn build_runtime_skill_index_signature(
         record.procedure.hash(&mut hasher);
         record.citations.hash(&mut hasher);
         record.source_chat_id.hash(&mut hasher);
+        record.origin.label().hash(&mut hasher);
         record.observed_at.hash(&mut hasher);
         record.updated_at.hash(&mut hasher);
         record.last_used_at.hash(&mut hasher);
@@ -1656,6 +1694,10 @@ fn parse_runtime_skill_record(name: &str, content: &str) -> Option<RuntimeSkillR
         .or_else(|| meta.get("source_chat"))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let origin = meta
+        .get("origin")
+        .map(|value| RuntimeSkillOrigin::parse(value))
+        .unwrap_or_default();
     let observed_at = meta
         .get("observed at")
         .or_else(|| meta.get("observed_at"))
@@ -1687,6 +1729,7 @@ fn parse_runtime_skill_record(name: &str, content: &str) -> Option<RuntimeSkillR
         .unwrap_or_else(|| {
             compute_runtime_skill_quality(&RuntimeSkillRecord {
                 name: name.to_string(),
+                origin,
                 title: title.clone(),
                 topic: topic.clone(),
                 summary: summary.clone(),
@@ -1755,6 +1798,7 @@ fn parse_runtime_skill_record(name: &str, content: &str) -> Option<RuntimeSkillR
     component_topics.dedup();
     Some(RuntimeSkillRecord {
         name: name.to_string(),
+        origin,
         title,
         topic,
         summary,
@@ -1849,6 +1893,7 @@ fn merge_runtime_skill_record(
 ) -> RuntimeSkillRecord {
     let RuntimeSkillUpsertInput {
         name,
+        origin,
         title,
         topic,
         summary,
@@ -1872,6 +1917,7 @@ fn merge_runtime_skill_record(
     }
     let mut record = RuntimeSkillRecord {
         name,
+        origin,
         title,
         topic: topic.clone(),
         summary,
@@ -2047,6 +2093,9 @@ fn render_runtime_skill_record(record: &RuntimeSkillRecord) -> String {
     out.push_str(record.title.trim());
     out.push_str("\n\n");
     out.push_str("Type: procedural_runtime_skill\n");
+    out.push_str("Origin: ");
+    out.push_str(record.origin.label());
+    out.push('\n');
     out.push_str("Topic: ");
     out.push_str(record.topic.trim());
     out.push('\n');
@@ -2401,6 +2450,7 @@ fn find_canonical_runtime_skill_name(
 ) -> Option<String> {
     let probe = RuntimeSkillRecord {
         name: input.name.clone(),
+        origin: input.origin,
         title: input.title.clone(),
         topic: input.topic.clone(),
         summary: input.summary.clone(),
@@ -2782,6 +2832,7 @@ mod tests {
     ) -> RuntimeSkillRecord {
         RuntimeSkillRecord {
             name: name.to_string(),
+            origin: RuntimeSkillOrigin::RuntimeLearned,
             title: title.to_string(),
             topic: topic.to_string(),
             summary: summary.to_string(),
@@ -2994,6 +3045,30 @@ mod tests {
             .unwrap()
             .iter()
             .any(|name| name == "runtime_skill__release_patch_flow"));
+    }
+
+    #[test]
+    fn runtime_skill_record_persists_user_provided_origin() {
+        let storage = StubSkillStorage::default();
+        let outcome = write_governed_runtime_skills(
+            &storage,
+            &[RuntimeSkillWrite {
+                name: "runtime_skill__release_guard".to_string(),
+                topic: "release".to_string(),
+                title: "Release guard".to_string(),
+                summary: "Check release artifacts before publishing.".to_string(),
+                content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
+                citations: vec!["test".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            RuntimeSkillWriteSource::Manual,
+        )
+        .expect("write");
+
+        assert_eq!(outcome.accepted, 1);
+        let records = list_runtime_skill_records(&storage);
+        assert_eq!(records[0].origin, RuntimeSkillOrigin::UserProvided);
     }
 
     #[test]

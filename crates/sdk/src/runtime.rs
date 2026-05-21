@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,7 +20,11 @@ use bm_core::runtime::{
     RuntimeLifecycleOperation, RuntimeLifecycleReport, RuntimeLifecycleTrigger,
 };
 use bm_core::skills::{
-    is_runtime_skill_name, retrieve_runtime_skill_hits, write_governed_runtime_skills,
+    delete_skill as delete_skill_record, get_disabled_skills, get_skill_content, get_skills_order,
+    is_runtime_skill_name, list_runtime_skill_records, list_skill_names,
+    retrieve_runtime_skill_hits, set_skill_enabled as set_skill_enabled_record, set_skills_order,
+    write_governed_runtime_skills, RuntimeSkillOrigin as CoreRuntimeSkillOrigin,
+    RuntimeSkillRecord, RuntimeSkillStatus,
 };
 use bm_store::StorePlatform;
 
@@ -30,8 +35,12 @@ use crate::{
     MemoryMaintenanceReport, MemoryMaintenanceRequest, MemoryOperationVisibility,
     MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionReport, MemoryProjectionRequest,
     MemoryRecallReport, MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest,
-    MemoryReplayReport, MemoryReplayRequest, MemoryRuntimeSystemKind, MemoryWriteReport,
+    MemoryReplayReport, MemoryReplayRequest, MemoryRuntimeSystemKind, MemorySkillDeleteRequest,
+    MemorySkillDetailReport, MemorySkillDetailRequest, MemorySkillKind, MemorySkillListReport,
+    MemorySkillListRequest, MemorySkillMutationReport, MemorySkillOrigin,
+    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest, MemoryWriteReport,
     MemoryWriteRequest, PressureLevel, Result, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,6 +218,288 @@ impl MemoryRuntime {
         };
         self.audit("write", true, &report.reason);
         Ok(report)
+    }
+
+    pub fn list_skills(&self, request: MemorySkillListRequest) -> Result<MemorySkillListReport> {
+        self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
+        let platform = self.config.platform.as_ref();
+        let storage = platform.skill_storage();
+        let meta_store = platform.skill_meta_store();
+        let disabled: HashSet<String> = get_disabled_skills(meta_store.as_ref())
+            .into_iter()
+            .collect();
+        let runtime_records = list_runtime_skill_records(storage.as_ref());
+        let runtime_names: HashSet<String> = runtime_records
+            .iter()
+            .map(|record| record.name.clone())
+            .collect();
+        let mut rows = Vec::new();
+        let query = request
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase);
+
+        for record in runtime_records {
+            let enabled = !disabled.contains(&record.name);
+            let summary = runtime_skill_summary(&record, enabled);
+            if !request.include_disabled && !summary.enabled {
+                continue;
+            }
+            if !request.include_retired && matches!(record.status, RuntimeSkillStatus::Retired) {
+                continue;
+            }
+            if !skill_matches_query(
+                &summary,
+                Some(&record.summary),
+                Some(&record.procedure),
+                query.as_deref(),
+            ) {
+                continue;
+            }
+            rows.push(summary);
+        }
+
+        for name in list_skill_names(storage.as_ref()) {
+            if runtime_names.contains(&name) || is_runtime_skill_name(&name) {
+                continue;
+            }
+            let Some(content) = get_skill_content(storage.as_ref(), &name) else {
+                continue;
+            };
+            let enabled = !disabled.contains(&name);
+            let summary = manual_skill_summary(&name, &content, enabled);
+            if !request.include_disabled && !summary.enabled {
+                continue;
+            }
+            if !skill_matches_query(&summary, Some(&content), None, query.as_deref()) {
+                continue;
+            }
+            rows.push(summary);
+        }
+
+        rows.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        let total = rows.len();
+        let active = rows.iter().filter(|skill| skill.enabled).count();
+        let disabled_count = rows.iter().filter(|skill| !skill.enabled).count();
+        let runtime_learned = rows
+            .iter()
+            .filter(|skill| skill.origin == MemorySkillOrigin::RuntimeLearned)
+            .count();
+        let user_provided = rows
+            .iter()
+            .filter(|skill| skill.origin == MemorySkillOrigin::UserProvided)
+            .count();
+        let skills = if request.limit == 0 {
+            Vec::new()
+        } else {
+            rows.into_iter().take(request.limit).collect()
+        };
+        self.audit("inspect.skills", true, "skill_list_completed");
+        Ok(MemorySkillListReport {
+            total,
+            active,
+            disabled: disabled_count,
+            runtime_learned,
+            user_provided,
+            skills,
+        })
+    }
+
+    pub fn get_skill(&self, request: MemorySkillDetailRequest) -> Result<MemorySkillDetailReport> {
+        self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
+        let name = checked_skill_name(&request.name, "skill_detail")?;
+        let platform = self.config.platform.as_ref();
+        let storage = platform.skill_storage();
+        if !list_skill_names(storage.as_ref())
+            .iter()
+            .any(|value| value == name)
+        {
+            self.audit("inspect.skills", false, "skill_not_found");
+            return Err(Error::config("skill_detail", "skill not found"));
+        }
+        let raw_content = get_skill_content(storage.as_ref(), name)
+            .ok_or_else(|| Error::config("skill_detail", "skill not found"))?;
+        let meta_store = platform.skill_meta_store();
+        let disabled: HashSet<String> = get_disabled_skills(meta_store.as_ref())
+            .into_iter()
+            .collect();
+        if let Some(record) = list_runtime_skill_records(storage.as_ref())
+            .into_iter()
+            .find(|record| record.name == name)
+        {
+            let summary = runtime_skill_summary(&record, !disabled.contains(name));
+            let lineage = render_runtime_skill_lineage(&record);
+            let strategy_diffs = render_runtime_skill_strategy_diffs(&record);
+            self.audit("inspect.skills", true, "skill_detail_completed");
+            return Ok(MemorySkillDetailReport {
+                summary,
+                summary_text: record.summary,
+                procedure_text: record.procedure,
+                raw_content,
+                citations: record.citations,
+                lineage,
+                strategy_diffs,
+                source_chat_id: record.source_chat_id,
+                last_outcome_note: record.last_outcome_note,
+            });
+        }
+
+        let summary = manual_skill_summary(name, &raw_content, !disabled.contains(name));
+        self.audit("inspect.skills", true, "skill_detail_completed");
+        Ok(MemorySkillDetailReport {
+            summary,
+            summary_text: summarize_manual_skill(&raw_content),
+            procedure_text: raw_content.clone(),
+            raw_content,
+            citations: Vec::new(),
+            source_chat_id: None,
+            lineage: Vec::new(),
+            strategy_diffs: Vec::new(),
+            last_outcome_note: String::new(),
+        })
+    }
+
+    pub fn upsert_skill(
+        &self,
+        request: MemorySkillUpsertRequest,
+    ) -> Result<MemorySkillMutationReport> {
+        self.ensure_visible("write.skills", self.capabilities.write)?;
+        let title = checked_non_empty(&request.title, "skill_upsert", "title must not be empty")?;
+        let topic = checked_non_empty(&request.topic, "skill_upsert", "topic must not be empty")?;
+        let summary = checked_non_empty(
+            &request.summary,
+            "skill_upsert",
+            "summary must not be empty",
+        )?;
+        let procedure = checked_non_empty(
+            &request.procedure,
+            "skill_upsert",
+            "procedure must not be empty",
+        )?;
+        let name = request
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| sdk_runtime_skill_name(topic));
+        let write = RuntimeSkillWrite {
+            name,
+            title: title.to_string(),
+            topic: topic.to_string(),
+            summary: summary.to_string(),
+            content: procedure.to_string(),
+            citations: request.citations,
+            source_chat_id: request.source_chat_id,
+            observed_at: request.observed_at,
+        };
+        let normalized = normalize_runtime_skill_write_names(vec![write])
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::config("skill_upsert", "skill write missing"))?;
+        let stored_name = normalized.name.clone();
+        let storage = self.config.platform.skill_storage();
+        let outcome = write_governed_runtime_skills(
+            storage.as_ref(),
+            &[normalized],
+            RuntimeSkillWriteSource::Manual,
+        )?;
+        let accepted = outcome.accepted > 0;
+        let reason = format!(
+            "submitted={}, accepted={}, rejected={}",
+            outcome.submitted, outcome.accepted, outcome.rejected
+        );
+        self.audit("write.skills", accepted, &reason);
+        Ok(MemorySkillMutationReport {
+            accepted,
+            changed: outcome.changed > 0,
+            name: stored_name,
+            operation: "skill.upsert",
+            reason,
+        })
+    }
+
+    pub fn set_skill_enabled(
+        &self,
+        request: MemorySkillSetEnabledRequest,
+    ) -> Result<MemorySkillMutationReport> {
+        self.ensure_visible("write.skills", self.capabilities.write)?;
+        let name = checked_skill_name(&request.name, "skill_set_enabled")?;
+        let platform = self.config.platform.as_ref();
+        let storage = platform.skill_storage();
+        if !list_skill_names(storage.as_ref())
+            .iter()
+            .any(|value| value == name)
+        {
+            self.audit("write.skills", false, "skill_not_found");
+            return Err(Error::config("skill_set_enabled", "skill not found"));
+        }
+        let meta_store = platform.skill_meta_store();
+        let was_disabled = get_disabled_skills(meta_store.as_ref())
+            .into_iter()
+            .any(|value| value == name);
+        set_skill_enabled_record(meta_store.as_ref(), name, request.enabled)?;
+        let changed = was_disabled == request.enabled;
+        let operation = if request.enabled {
+            "skill.enable"
+        } else {
+            "skill.disable"
+        };
+        let reason = if changed {
+            "skill_enabled_state_changed"
+        } else {
+            "skill_enabled_state_unchanged"
+        };
+        self.audit("write.skills", true, reason);
+        Ok(MemorySkillMutationReport {
+            accepted: true,
+            changed,
+            name: name.to_string(),
+            operation,
+            reason: reason.to_string(),
+        })
+    }
+
+    pub fn delete_skill(
+        &self,
+        request: MemorySkillDeleteRequest,
+    ) -> Result<MemorySkillMutationReport> {
+        self.ensure_visible("write.skills", self.capabilities.write)?;
+        let name = checked_skill_name(&request.name, "skill_delete")?;
+        let platform = self.config.platform.as_ref();
+        let storage = platform.skill_storage();
+        if !list_skill_names(storage.as_ref())
+            .iter()
+            .any(|value| value == name)
+        {
+            self.audit("write.skills", false, "skill_not_found");
+            return Err(Error::config("skill_delete", "skill not found"));
+        }
+        delete_skill_record(storage.as_ref(), name)?;
+        let meta_store = platform.skill_meta_store();
+        set_skill_enabled_record(meta_store.as_ref(), name, true)?;
+        let mut order = get_skills_order(meta_store.as_ref());
+        let before_len = order.len();
+        order.retain(|value| value != name);
+        if before_len != order.len() {
+            set_skills_order(meta_store.as_ref(), &order)?;
+        }
+        self.audit("write.skills", true, "skill_deleted");
+        Ok(MemorySkillMutationReport {
+            accepted: true,
+            changed: true,
+            name: name.to_string(),
+            operation: "skill.delete",
+            reason: "skill_deleted".to_string(),
+        })
     }
 
     pub fn recall(&self, request: MemoryRecallRequest) -> Result<MemoryRecallReport> {
@@ -909,6 +1200,147 @@ fn truncate_to_char_boundary(value: &str, max_len: usize) -> String {
         end -= 1;
     }
     value[..end].to_string()
+}
+
+fn checked_non_empty<'a>(value: &'a str, stage: &'static str, message: &str) -> Result<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Error::config(stage, message));
+    }
+    Ok(trimmed)
+}
+
+fn checked_skill_name<'a>(value: &'a str, stage: &'static str) -> Result<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+    {
+        return Err(Error::config(stage, "skill name empty or contains .. / \\"));
+    }
+    Ok(trimmed)
+}
+
+fn runtime_skill_summary(record: &RuntimeSkillRecord, enabled: bool) -> MemorySkillSummary {
+    MemorySkillSummary {
+        name: record.name.clone(),
+        kind: MemorySkillKind::RuntimeSkill,
+        origin: sdk_skill_origin(record.origin),
+        title: record.title.clone(),
+        topic: record.topic.clone(),
+        status: record.status.label().to_string(),
+        enabled,
+        quality_score: Some(record.quality_score),
+        use_count: record.use_count,
+        validated_success_count: record.validated_success_count,
+        mismatch_count: record.mismatch_count,
+        revision_pending: record.revision_pending,
+        updated_at: record.updated_at,
+        last_used_at: record.last_used_at,
+    }
+}
+
+fn manual_skill_summary(name: &str, content: &str, enabled: bool) -> MemorySkillSummary {
+    MemorySkillSummary {
+        name: name.to_string(),
+        kind: MemorySkillKind::ManualDocument,
+        origin: MemorySkillOrigin::UserProvided,
+        title: manual_skill_title(name, content),
+        topic: name.to_string(),
+        status: if enabled { "active" } else { "disabled" }.to_string(),
+        enabled,
+        quality_score: None,
+        use_count: 0,
+        validated_success_count: 0,
+        mismatch_count: 0,
+        revision_pending: false,
+        updated_at: 0,
+        last_used_at: None,
+    }
+}
+
+fn sdk_skill_origin(origin: CoreRuntimeSkillOrigin) -> MemorySkillOrigin {
+    match origin {
+        CoreRuntimeSkillOrigin::RuntimeLearned => MemorySkillOrigin::RuntimeLearned,
+        CoreRuntimeSkillOrigin::UserProvided => MemorySkillOrigin::UserProvided,
+    }
+}
+
+fn manual_skill_title(name: &str, content: &str) -> String {
+    content
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix('#').map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn summarize_manual_skill(content: &str) -> String {
+    let text = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_to_char_boundary(text.trim(), 240)
+}
+
+fn skill_matches_query(
+    summary: &MemorySkillSummary,
+    summary_text: Option<&str>,
+    procedure_text: Option<&str>,
+    query: Option<&str>,
+) -> bool {
+    let Some(query) = query else {
+        return true;
+    };
+    let mut haystack = String::new();
+    haystack.push_str(&summary.name);
+    haystack.push('\n');
+    haystack.push_str(&summary.title);
+    haystack.push('\n');
+    haystack.push_str(&summary.topic);
+    if let Some(value) = summary_text {
+        haystack.push('\n');
+        haystack.push_str(value);
+    }
+    if let Some(value) = procedure_text {
+        haystack.push('\n');
+        haystack.push_str(value);
+    }
+    haystack.to_ascii_lowercase().contains(query)
+}
+
+fn render_runtime_skill_lineage(record: &RuntimeSkillRecord) -> Vec<String> {
+    record
+        .genome_lineage
+        .iter()
+        .map(|node| {
+            format!(
+                "{} | {:?} | {} | {}",
+                node.node_id, node.disposition, node.recorded_at, node.summary
+            )
+        })
+        .collect()
+}
+
+fn render_runtime_skill_strategy_diffs(record: &RuntimeSkillRecord) -> Vec<String> {
+    record
+        .strategy_diffs
+        .iter()
+        .map(|diff| {
+            format!(
+                "{} -> {} | {:?} | {} | {}",
+                diff.from_node_id,
+                diff.to_node_id,
+                diff.change_kind,
+                diff.recorded_at,
+                diff.summary
+            )
+        })
+        .collect()
 }
 
 fn normalize_runtime_skill_write_names(

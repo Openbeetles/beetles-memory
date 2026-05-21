@@ -37,8 +37,8 @@ pub use bm_core::runtime::{
 };
 pub use bm_core::skills::{
     CapabilityAtomImportOutcome, CapabilityAtomSyncOutcome, RuntimeSkillGovernanceOutcome,
-    RuntimeSkillHit, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteOutcome,
-    RuntimeSkillWriteSource,
+    RuntimeSkillHit, RuntimeSkillOrigin, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    RuntimeSkillWriteOutcome, RuntimeSkillWriteSource,
 };
 pub use bm_core::task::{TaskItem, TaskPriority, TaskQuery, TaskStatus};
 pub use bm_core::{Error, Result};
@@ -65,7 +65,10 @@ pub use ops::{
     MemoryMaintenanceReport, MemoryMaintenanceRequest, MemoryProceduralWriteReport,
     MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
     MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
-    MemoryWriteReport, MemoryWriteRequest, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    MemorySkillDeleteRequest, MemorySkillDetailReport, MemorySkillDetailRequest, MemorySkillKind,
+    MemorySkillListReport, MemorySkillListRequest, MemorySkillMutationReport, MemorySkillOrigin,
+    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest, MemoryWriteReport,
+    MemoryWriteRequest, RuntimeOperatorAction, RuntimeOperatorActionReport,
 };
 pub use runtime::{
     MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,

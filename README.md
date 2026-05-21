@@ -33,6 +33,8 @@ The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-
 
 ## Console Preview
 
+Standalone deployments include an HTTP console with Overview, Skill Memory, Communication, Devices, and Account pages. Skill Memory manages procedural memory records through the same `MemoryRuntime` governance path; it does not execute skills or install tools.
+
 | Runtime Status | Communication Setup |
 | --- | --- |
 | ![Runtime Status](docs/assets/console-en-runtime-status.png) | ![Communication Setup](docs/assets/console-en-communication-setup.png) |

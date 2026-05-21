@@ -12,6 +12,104 @@ use crate::{
     RuntimeLifecycleTrigger,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemorySkillOrigin {
+    UserProvided,
+    RuntimeLearned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemorySkillKind {
+    RuntimeSkill,
+    ManualDocument,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillListRequest {
+    pub query: Option<String>,
+    pub include_disabled: bool,
+    pub include_retired: bool,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillSummary {
+    pub name: String,
+    pub kind: MemorySkillKind,
+    pub origin: MemorySkillOrigin,
+    pub title: String,
+    pub topic: String,
+    pub status: String,
+    pub enabled: bool,
+    pub quality_score: Option<u8>,
+    pub use_count: u32,
+    pub validated_success_count: u32,
+    pub mismatch_count: u32,
+    pub revision_pending: bool,
+    pub updated_at: u64,
+    pub last_used_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillListReport {
+    pub total: usize,
+    pub active: usize,
+    pub disabled: usize,
+    pub runtime_learned: usize,
+    pub user_provided: usize,
+    pub skills: Vec<MemorySkillSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillDetailRequest {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillDetailReport {
+    pub summary: MemorySkillSummary,
+    pub summary_text: String,
+    pub procedure_text: String,
+    pub raw_content: String,
+    pub citations: Vec<String>,
+    pub source_chat_id: Option<String>,
+    pub lineage: Vec<String>,
+    pub strategy_diffs: Vec<String>,
+    pub last_outcome_note: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillUpsertRequest {
+    pub name: Option<String>,
+    pub title: String,
+    pub topic: String,
+    pub summary: String,
+    pub procedure: String,
+    pub citations: Vec<String>,
+    pub source_chat_id: Option<String>,
+    pub observed_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillMutationReport {
+    pub accepted: bool,
+    pub changed: bool,
+    pub name: String,
+    pub operation: &'static str,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillSetEnabledRequest {
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySkillDeleteRequest {
+    pub name: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum MemoryWriteRequest {
     Procedural {

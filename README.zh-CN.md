@@ -33,6 +33,8 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 
 ## 控制台预览
 
+独立部署形态提供 HTTP 配置台，页面包含总览、Skill 记忆、通信方式、开放设备和账户安全。Skill 记忆页通过同一套 `MemoryRuntime` governance 管理 procedural memory record，不执行 skill，也不安装工具。
+
 | 运行状态 | 通信方式配置 |
 | --- | --- |
 | ![运行状态](docs/assets/console-runtime-status.png) | ![通信方式配置](docs/assets/console-communication-config.png) |

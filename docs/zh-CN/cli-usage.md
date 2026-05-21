@@ -32,6 +32,12 @@ Commands：
 | `replay` | 检查某个 chat 的 turn replay。 |
 | `export` | 导出 continuity snapshot。 |
 | `import` | 导入 continuity snapshot。 |
+| `skill-list` | 列出 Skill 记忆。 |
+| `skill-show` | 查看单条 Skill 记忆详情。 |
+| `skill-import` | 导入或新建 Skill 记忆。 |
+| `skill-edit` | 编辑已有 Skill 记忆。 |
+| `skill-enable` / `skill-disable` | 启用或停用 Skill 记忆。 |
+| `skill-delete` | 删除 Skill 记忆。 |
 | `close` | 关闭 runtime 并发出 lifecycle report。 |
 
 常用 options：
@@ -49,6 +55,32 @@ Commands：
 | `--query <text>` | empty |
 | `--limit <n>` | `8` |
 | `--max-len <n>` | `4096` |
+
+## Skill 记忆管理
+
+这些命令只管理 procedural memory record，不执行 skill，也不提供插件安装器。
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory skill-import \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --chat chat-1 \
+  --title "Release guard" \
+  --topic release \
+  --summary "Verify release artifacts before publishing." \
+  --content "1. run gates
+2. inspect artifacts
+3. dry run publish"
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory skill-list \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --query release
+```
 
 ## 用 File Store 写入并召回
 

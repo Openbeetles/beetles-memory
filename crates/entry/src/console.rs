@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
-use bm_sdk::StoreBackendKind;
+use bm_sdk::{
+    MemorySkillDetailReport, MemorySkillKind, MemorySkillListReport, MemorySkillMutationReport,
+    MemorySkillOrigin, MemorySkillSummary, StoreBackendKind,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{EntryRuntimeConfig, EntryTransportConfig};
@@ -105,6 +108,80 @@ pub struct EntryConsoleSession {
 pub struct EntryConsoleDeviceKeyReport {
     pub device: EntryConsoleDevice,
     pub app_key_once: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleSkillSummary {
+    pub name: String,
+    pub kind: String,
+    pub origin: String,
+    pub title: String,
+    pub topic: String,
+    pub status: String,
+    pub enabled: bool,
+    pub quality_score: Option<u8>,
+    pub use_count: u32,
+    pub validated_success_count: u32,
+    pub mismatch_count: u32,
+    pub revision_pending: bool,
+    pub updated_at: u64,
+    pub last_used_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleSkillList {
+    pub total: usize,
+    pub active: usize,
+    pub disabled: usize,
+    pub runtime_learned: usize,
+    pub user_provided: usize,
+    pub skills: Vec<EntryConsoleSkillSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleSkillDetail {
+    pub summary: EntryConsoleSkillSummary,
+    pub summary_text: String,
+    pub procedure_text: String,
+    pub raw_content: String,
+    pub citations: Vec<String>,
+    pub source_chat_id: Option<String>,
+    pub lineage: Vec<String>,
+    pub strategy_diffs: Vec<String>,
+    pub last_outcome_note: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleSkillUpsert {
+    pub name: Option<String>,
+    pub title: String,
+    pub topic: String,
+    pub summary: String,
+    pub procedure: String,
+    #[serde(default)]
+    pub citations: Vec<String>,
+    #[serde(default)]
+    pub source_chat_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleSkillSetEnabled {
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleSkillMutation {
+    pub accepted: bool,
+    pub changed: bool,
+    pub name: String,
+    pub operation: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -424,6 +501,19 @@ impl EntryConsoleState {
             .clone()
     }
 
+    pub fn record_skill_mutation(&self, name: &str, action: &str) {
+        let mut inner = self.inner.lock().expect("console state lock");
+        push_event(
+            &mut inner,
+            format!("Skill {} {}", name, action),
+            if action == "deleted" {
+                "limited"
+            } else {
+                "ready"
+            },
+        );
+    }
+
     pub fn record_adapter_response(
         &self,
         operation: AdapterOperation,
@@ -477,6 +567,82 @@ impl EntryConsoleState {
             }
             _ => {}
         }
+    }
+}
+
+impl From<MemorySkillListReport> for EntryConsoleSkillList {
+    fn from(report: MemorySkillListReport) -> Self {
+        Self {
+            total: report.total,
+            active: report.active,
+            disabled: report.disabled,
+            runtime_learned: report.runtime_learned,
+            user_provided: report.user_provided,
+            skills: report.skills.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<MemorySkillDetailReport> for EntryConsoleSkillDetail {
+    fn from(report: MemorySkillDetailReport) -> Self {
+        Self {
+            summary: report.summary.into(),
+            summary_text: report.summary_text,
+            procedure_text: report.procedure_text,
+            raw_content: report.raw_content,
+            citations: report.citations,
+            source_chat_id: report.source_chat_id,
+            lineage: report.lineage,
+            strategy_diffs: report.strategy_diffs,
+            last_outcome_note: report.last_outcome_note,
+        }
+    }
+}
+
+impl From<MemorySkillSummary> for EntryConsoleSkillSummary {
+    fn from(summary: MemorySkillSummary) -> Self {
+        Self {
+            name: summary.name,
+            kind: skill_kind_label(summary.kind).to_string(),
+            origin: skill_origin_label(summary.origin).to_string(),
+            title: summary.title,
+            topic: summary.topic,
+            status: summary.status,
+            enabled: summary.enabled,
+            quality_score: summary.quality_score,
+            use_count: summary.use_count,
+            validated_success_count: summary.validated_success_count,
+            mismatch_count: summary.mismatch_count,
+            revision_pending: summary.revision_pending,
+            updated_at: summary.updated_at,
+            last_used_at: summary.last_used_at,
+        }
+    }
+}
+
+impl From<MemorySkillMutationReport> for EntryConsoleSkillMutation {
+    fn from(report: MemorySkillMutationReport) -> Self {
+        Self {
+            accepted: report.accepted,
+            changed: report.changed,
+            name: report.name,
+            operation: report.operation.to_string(),
+            reason: report.reason,
+        }
+    }
+}
+
+fn skill_origin_label(origin: MemorySkillOrigin) -> &'static str {
+    match origin {
+        MemorySkillOrigin::UserProvided => "user_provided",
+        MemorySkillOrigin::RuntimeLearned => "runtime_learned",
+    }
+}
+
+fn skill_kind_label(kind: MemorySkillKind) -> &'static str {
+    match kind {
+        MemorySkillKind::RuntimeSkill => "runtime_skill",
+        MemorySkillKind::ManualDocument => "manual_document",
     }
 }
 
