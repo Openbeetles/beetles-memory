@@ -1,6 +1,6 @@
-# Operator And Inspection Guide
+# Operator Guide
 
-Operator surface 用于运行状态解释、恢复、关闭和发布前检查。它不是管理控制台，也不引入 UI。
+Operator-facing APIs explain runtime state, safe recovery actions, lifecycle reports, and capability visibility. They do not provide a UI or a separate management plane.
 
 ## Inspect
 
@@ -17,7 +17,7 @@ let report = runtime.inspect(MemoryInspectionRequest {
 assert!(report.capabilities.inspection.visible);
 ```
 
-`MemoryInspectionReport` 包含 working recall inspection、capability catalog、operator action report 和 lifecycle report。
+`MemoryInspectionReport` includes working recall inspection, capability catalog data, operator action report, and lifecycle report.
 
 ## Recover
 
@@ -30,7 +30,7 @@ let recovered = runtime.recover(MemoryRecoverRequest {
 })?;
 ```
 
-Recover 只恢复 soul kernel / lifecycle 可恢复状态，不重写 store schema，也不跳过 repair report。
+Recover acts on recoverable runtime/lifecycle state. It does not skip store repair reports or rewrite the persistence schema.
 
 ## Close
 
@@ -42,9 +42,9 @@ let closed = runtime.close(MemoryCloseRequest {
 })?;
 ```
 
-Close 会写 lifecycle event。独立部署时上层 supervisor 可以根据 lifecycle report 决定是否退出进程。
+Close emits a lifecycle event. A process supervisor can decide whether to exit based on the returned report.
 
-## CLI Snapshot
+## CLI Inspection
 
 ```bash
 cargo run -p bm-cli --bin bm -- \
@@ -52,4 +52,10 @@ cargo run -p bm-cli --bin bm -- \
   --profile profile-esp-standalone-memory
 ```
 
-这个命令用于检查 profile 编译能力和 release fixture 是否一致。
+Memory commands also go through `bm-entry`:
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory capabilities \
+  --profile profile-server-linux-dev-full
+```

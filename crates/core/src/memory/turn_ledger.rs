@@ -1213,7 +1213,7 @@ mod tests {
     #[test]
     fn build_turn_ledger_start_keeps_compact_user_preview() {
         let mut msg = crate::bus::PcMsg::new_inbound(
-            "qq_channel",
+            "chat_channel",
             "chat-1",
             "  这是一个很长的输入\n\n需要被压成预览  ",
             false,
@@ -1223,11 +1223,11 @@ mod tests {
         msg.source_transport = crate::bus::MessageTransport::Wss;
         msg.platform_message_id = "msg-1".to_string();
         msg.platform_event_id = "evt-1".to_string();
-        msg.inbound_dedup_key = "qq_message:msg-1".to_string();
+        msg.inbound_dedup_key = "channel_message:msg-1".to_string();
 
         let ledger = build_turn_ledger_start(&msg, 123);
         assert_eq!(ledger.req_id, "req-1");
-        assert_eq!(ledger.channel, "qq_channel");
+        assert_eq!(ledger.channel, "chat_channel");
         assert_eq!(ledger.status, TurnLedgerStatus::Running);
         assert_eq!(ledger.user_preview, "这是一个很长的输入\n\n需要被压成预览");
         assert_eq!(ledger.started_at_ms, 123);
@@ -1235,7 +1235,7 @@ mod tests {
         assert_eq!(ledger.source_transport, crate::bus::MessageTransport::Wss);
         assert_eq!(ledger.platform_message_id, "msg-1");
         assert_eq!(ledger.platform_event_id, "evt-1");
-        assert_eq!(ledger.inbound_dedup_key, "qq_message:msg-1");
+        assert_eq!(ledger.inbound_dedup_key, "channel_message:msg-1");
     }
 
     #[test]

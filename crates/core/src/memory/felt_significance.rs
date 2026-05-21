@@ -548,7 +548,7 @@ mod tests {
             }),
             Some(&SubjectShell {
                 inhabited_shell_summary: "board subject inhabits current memory".into(),
-                relationship_position: "qq_channel:chat-humanization".into(),
+                relationship_position: "chat_channel:chat-humanization".into(),
                 ..SubjectShell::default()
             }),
             Some(&WorldSense {
@@ -586,9 +586,9 @@ mod tests {
                 ..FeltSignificance::default()
             }),
             Some(&SubjectShell {
-                inhabited_shell_summary: "board subject in qq_channel:raw-chat-42".into(),
-                relationship_position: "qq_channel:raw-chat-42".into(),
-                situated_now: "channel=qq_channel chat_id=raw-chat-42 relationship_scope=rel:qq_channel:raw-chat-42".into(),
+                inhabited_shell_summary: "board subject in chat_channel:raw-chat-42".into(),
+                relationship_position: "chat_channel:raw-chat-42".into(),
+                situated_now: "channel=chat_channel chat_id=raw-chat-42 relationship_scope=rel:chat_channel:raw-chat-42".into(),
                 ..SubjectShell::default()
             }),
             None,

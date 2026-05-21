@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use bm_adapter::{
-    dispatch_adapter_command, AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
-    AdapterOperation, AdapterResponse, AdapterSdkReport, AdapterSource, TransportKind,
-    TransportMode,
+    decode_json_adapter_command, dispatch_adapter_command, dispatch_adapter_command_with_services,
+    AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
+    AdapterJsonCommandOptions, AdapterOperation, AdapterResponse, AdapterRuntimeServices,
+    AdapterSdkReport, AdapterSource, TransportKind, TransportMode,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, NoopMemoryAuditSink, ProfileId, StoreBackendConfig, StorePlatform,
+    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
+    MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryRuntime, MemoryScope, Message,
+    NoopMemoryAuditSink, ProfileId, ResponseBody, StopReason, StoreBackendConfig, StorePlatform,
+    ToolChoicePolicy, ToolSpec,
 };
 
 struct FixedClock;
@@ -110,6 +113,117 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
             assert_eq!(error_key, AdapterErrorKey::OperationMismatch);
         }
         other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
+fn json_decoder_covers_adapter_memory_operations() {
+    let options =
+        AdapterJsonCommandOptions::new("test-adapter").with_default_source_chat_id("chat-1");
+    let cases = [
+        (
+            AdapterOperation::Write,
+            r#"{"name":"runtime_skill__adapter_write","topic":"adapter","title":"Adapter write","summary":"Adapter write summary","content":"1. Decode write payload.\n2. Dispatch common adapter command."}"#,
+        ),
+        (AdapterOperation::Recall, r#"{"query":"release","limit":2}"#),
+        (
+            AdapterOperation::Project,
+            r#"{"query":"release","max_len":1024,"recent_messages_limit":2}"#,
+        ),
+        (
+            AdapterOperation::Maintain,
+            r#"{"user_content":"remember release guard","reply_content":"I will verify artifacts.","tool_calls":0}"#,
+        ),
+        (
+            AdapterOperation::Inspect,
+            r#"{"query":"release","max_len":1024}"#,
+        ),
+        (AdapterOperation::Recover, r#"{}"#),
+        (
+            AdapterOperation::Replay,
+            r#"{"chat_id":"chat-1","limit":2}"#,
+        ),
+        (AdapterOperation::Export, r#"{"chat_id":"chat-1"}"#),
+        (
+            AdapterOperation::Import,
+            r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,
+        ),
+        (AdapterOperation::Close, r#"{"reason":"operator close"}"#),
+    ];
+
+    for (operation, body) in cases {
+        let command =
+            decode_json_adapter_command(operation, body, &options).expect("decode command");
+        assert_eq!(command.operation(), operation);
+    }
+}
+
+#[test]
+fn maintain_dispatch_uses_injected_runtime_services() {
+    let runtime = runtime();
+    let mut http = StaticHttpClient;
+    let llm = StaticLlmClient;
+    let command = decode_json_adapter_command(
+        AdapterOperation::Maintain,
+        r#"{"user_content":"remember the release process","reply_content":"I will verify artifacts first."}"#,
+        &AdapterJsonCommandOptions::new("test-adapter"),
+    )
+    .expect("maintain command");
+
+    let response = dispatch_adapter_command_with_services(
+        &runtime,
+        envelope(AdapterOperation::Maintain, command),
+        AdapterRuntimeServices {
+            http: Some(&mut http),
+            llm: Some(&llm),
+        },
+    )
+    .expect("dispatch");
+
+    match response {
+        AdapterResponse::Accepted {
+            report: AdapterSdkReport::Maintain(report),
+            ..
+        } => {
+            assert!(report.report.is_some());
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+struct StaticHttpClient;
+
+impl LlmHttpClient for StaticHttpClient {
+    fn do_post(
+        &mut self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _body: &[u8],
+    ) -> bm_sdk::Result<(u16, ResponseBody)> {
+        Ok((200, ResponseBody::Heap(Vec::new())))
+    }
+}
+
+struct StaticLlmClient;
+
+impl LlmClient for StaticLlmClient {
+    fn model_compat(&self) -> LlmModelCompat {
+        LlmModelCompat::default()
+    }
+
+    fn chat(
+        &self,
+        _http: &mut dyn LlmHttpClient,
+        _system: &str,
+        _messages: &[Message],
+        _tools: Option<&[ToolSpec]>,
+        _tool_choice: ToolChoicePolicy,
+    ) -> bm_sdk::Result<LlmResponse> {
+        Ok(LlmResponse {
+            content: "Summary: release safety".to_string(),
+            stop_reason: StopReason::EndTurn,
+            tool_calls: None,
+        })
     }
 }
 

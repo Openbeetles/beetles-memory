@@ -1462,7 +1462,7 @@ mod tests {
                 &SelfContinuity {
                     current_self_state: "still here".to_string(),
                     last_user_chat_id: "chat-a".to_string(),
-                    last_user_channel: "telegram".to_string(),
+                    last_user_channel: "chat_channel".to_string(),
                     updated_at: 90,
                     ..SelfContinuity::default()
                 },
@@ -1640,7 +1640,7 @@ mod tests {
                 &SelfContinuity {
                     current_self_state: "still here".to_string(),
                     last_user_chat_id: "chat-a".to_string(),
-                    last_user_channel: "telegram".to_string(),
+                    last_user_channel: "chat_channel".to_string(),
                     updated_at: 90,
                     ..SelfContinuity::default()
                 },

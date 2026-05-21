@@ -274,7 +274,7 @@ mod tests {
     fn build_context_messages_does_not_mutate_important_marker() {
         let session = EmptySessionStore;
         let important = CountingImportantStore::default();
-        let msg = PcMsg::new("telegram", "chat", "hello").expect("message");
+        let msg = PcMsg::new("chat_channel", "chat", "hello").expect("message");
 
         let messages = build_context_messages(&session, &important, &msg, 3, 128, None, None);
 
@@ -303,7 +303,7 @@ mod tests {
             ],
         };
         let important = CountingImportantStore::default();
-        let msg = PcMsg::new("telegram", "chat", "new question").expect("message");
+        let msg = PcMsg::new("chat_channel", "chat", "new question").expect("message");
 
         let messages = build_context_messages(&session, &important, &msg, 3, 80, None, None);
         let joined = messages

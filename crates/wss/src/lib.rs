@@ -3,11 +3,12 @@
 use bm_adapter::AdapterOperation;
 
 #[cfg(any(feature = "server-std", feature = "client-compact"))]
-use bm_adapter::{AdapterCommand, AdapterResponse, AdapterSdkReport, TransportKind, TransportMode};
+use bm_adapter::{
+    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterResponse, AdapterSdkReport,
+    TransportKind, TransportMode,
+};
 #[cfg(any(feature = "server-std", feature = "client-compact"))]
 use bm_entry::{EntryAuthDecision, EntryRuntime, EntryTransportContext};
-#[cfg(any(feature = "server-std", feature = "client-compact"))]
-use bm_sdk::MemoryRecallRequest;
 #[cfg(any(feature = "server-std", feature = "client-compact"))]
 use serde::Deserialize;
 #[cfg(any(feature = "server-std", feature = "client-compact"))]
@@ -111,7 +112,11 @@ impl WssRuntimeSession {
             .find(|spec| spec.name == frame.kind)
             .and_then(|spec| spec.inbound_operation)
             .ok_or_else(|| bm_sdk::Error::config("wss_runtime", "unsupported frame kind"))?;
-        let command = decode_command(operation, &frame.payload)?;
+        let command = decode_json_adapter_command(
+            operation,
+            &frame.payload,
+            &AdapterJsonCommandOptions::new("bm-wss").with_default_source_chat_id("chat-1"),
+        )?;
         let response = runtime.handle(
             EntryTransportContext {
                 request_id: format!("wss-{}-{operation:?}", self.session_id),
@@ -418,25 +423,6 @@ fn sha1_digest(bytes: &[u8]) -> [u8; 20] {
 }
 
 #[cfg(any(feature = "server-std", feature = "client-compact"))]
-fn decode_command(operation: AdapterOperation, payload: &str) -> bm_sdk::Result<AdapterCommand> {
-    match operation {
-        AdapterOperation::Capabilities => Ok(AdapterCommand::Capabilities),
-        AdapterOperation::Recall => {
-            let payload: RecallPayload = serde_json::from_str(payload)
-                .map_err(|err| bm_sdk::Error::config("wss_runtime_json", err.to_string()))?;
-            Ok(AdapterCommand::Recall(MemoryRecallRequest {
-                query: payload.query,
-                limit: payload.limit.unwrap_or(8),
-            }))
-        }
-        other => Err(bm_sdk::Error::config(
-            "wss_runtime",
-            format!("unsupported WSS runtime operation: {other:?}"),
-        )),
-    }
-}
-
-#[cfg(any(feature = "server-std", feature = "client-compact"))]
 fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
     match response {
         AdapterResponse::Accepted { report, .. } => match report {
@@ -476,13 +462,6 @@ fn error_event(reason: &str) -> WssRuntimeEvent {
         .to_string(),
         private_raw_allowed: false,
     }
-}
-
-#[cfg(any(feature = "server-std", feature = "client-compact"))]
-#[derive(Deserialize)]
-struct RecallPayload {
-    query: String,
-    limit: Option<usize>,
 }
 
 const fn stream(name: &'static str) -> WssMessageSpec {

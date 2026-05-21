@@ -11,7 +11,7 @@ fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxMemoryGateway,
+        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "mcp-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -48,4 +48,33 @@ fn mcp_tool_call_dispatches_through_entry_runtime_without_private_raw() {
     assert_eq!(result.status, "accepted");
     assert!(!result.private_raw_allowed);
     assert!(result.content.contains("\"query\""));
+}
+
+#[test]
+fn mcp_tool_server_decodes_declared_memory_tools() {
+    let runtime = runtime();
+    let server = McpToolServer::new("mcp-server-ops");
+    let calls = [
+        ("memory_capabilities", r#"{}"#),
+        ("memory_project", r#"{"query":"release","max_len":1024}"#),
+        ("memory_inspect", r#"{"query":"release"}"#),
+        ("memory_replay", r#"{"chat_id":"chat-1","limit":2}"#),
+        (
+            "memory_write_candidate",
+            r#"{"name":"runtime_skill__mcp_write","topic":"mcp","title":"MCP write","summary":"MCP write summary","content":"1. Decode MCP tool payload.\n2. Dispatch through EntryRuntime."}"#,
+        ),
+        ("memory_export", r#"{"chat_id":"chat-1"}"#),
+        (
+            "memory_import",
+            r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,
+        ),
+    ];
+
+    for (name, args) in calls {
+        let result = server
+            .call(&runtime, McpToolCall::json(name, args))
+            .unwrap_or_else(|err| panic!("{name} failed: {err}"));
+        assert_eq!(result.status, "accepted", "{name}: {}", result.content);
+        assert!(!result.private_raw_allowed);
+    }
 }

@@ -1,0 +1,66 @@
+# 发布清单
+
+此清单面向 maintainer release candidate。
+
+## 文档
+
+- 根 README 链接英文和中文文档。
+- `docs/README.md` 链接 `docs/en/README.md` 和 `docs/zh-CN/README.md`。
+- 英文和中文文档覆盖同一组主题：架构、集成、部署、CLI、API、Profile、存储、Adapter、回放、运维、发布。
+
+## Metadata
+
+- Workspace license 是 `Apache-2.0`。
+- 根目录存在 `LICENSE`。
+- 可发布 crates 有 package description。
+- Workspace crate dependencies 同时包含 `version` 和 `path`。
+
+## 验证
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo doc --no-deps --no-default-features \
+  -p bm-core \
+  -p bm-store \
+  -p bm-sdk \
+  -p bm-replay \
+  -p bm-evolve \
+  -p bm-adapter \
+  -p bm-entry \
+  -p bm-cli \
+  -p bm-http \
+  -p bm-wss \
+  -p bm-mqtt \
+  -p bm-mcp \
+  -p bm-a2a
+bash scripts/check_platform_compile_gates.sh
+bash scripts/check_deployment_runtime_contract.sh
+bash scripts/check_release_surface.sh
+```
+
+具备目标工具链的 release 环境还应运行：
+
+```bash
+bash scripts/check_cross_target_compile_gates.sh --strict
+```
+
+## Publish Order
+
+```text
+bm-core
+bm-store
+bm-sdk
+bm-replay / bm-evolve / bm-adapter
+bm-entry
+bm-cli / bm-http / bm-wss / bm-mqtt / bm-mcp / bm-a2a
+```
+
+通过 `scripts/check_release_surface.sh` 运行 staged `cargo publish --dry-run --allow-dirty -p <crate>`。正式发布使用干净工作区。
+
+## 范围检查
+
+- README、examples 和 crates 描述的是宿主无关的 memory runtime。
+- Adapter crates 保持 memory write、recall、projection 和 store 语义由 `MemoryRuntime` 承担。
+- Standalone deployment 覆盖 memory runtime 入口。Workflow runner、UI console、broker、reverse proxy 和 certificate management 由宿主部署提供。

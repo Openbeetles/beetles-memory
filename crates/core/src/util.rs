@@ -1032,11 +1032,11 @@ pub fn is_private_url(url: &str) -> bool {
 // | Thread(s)                             | Constant               | ESP   | Linux |
 // |---------------------------------------|------------------------|-------|-------|
 // | http_config_worker_*                  | DEFAULT_GUARD_STACK_SIZE (spawn_guarded) | 8 KB | 96 KB |
-// | qq_ws, feishu_ws                      | STACK_CHANNEL_WS       | 9 KB  | 96 KB |
+// | external_channel_ws                   | STACK_CHANNEL_WS       | 9 KB  | 96 KB |
 // | agent_loop                            | STACK_AGENT_LOOP       | 40 KB | 96 KB |
 // | os_outbound                           | STACK_OS_OUTBOUND      | 20 KB | 96 KB |
-// | tg_sender, qq_sender, fs/dt/wc_sender | STACK_CHANNEL_SENDER   | 8 KB  | 96 KB |
-// | tg_poll                               | STACK_CHANNEL_SENDER   | 8 KB  | 96 KB |
+// | external_channel_sender               | STACK_CHANNEL_SENDER   | 8 KB  | 96 KB |
+// | external_channel_poll                 | STACK_CHANNEL_SENDER   | 8 KB  | 96 KB |
 // | runtime_bootstrap                     | STACK_ESP_RUNTIME_BOOT | 32 KB | n/a   | ← ESP-only: moves Rust-heavy storage/registry/audio startup off IDF main_task
 // | agent guard (bg_timer)                | n/a                    | 0 KB  | n/a   | ← ESP-only: supervised by bg_timer, no dedicated long-lived stack
 // | display                               | STACK_DISPLAY          | 8 KB  | 8 KB  | ← no TLS; recover 4KB internal SRAM while keeping a safer floor above the old 6 KB budget
@@ -1077,9 +1077,9 @@ pub const STACK_ESP_RUNTIME_BOOT: usize = 32 * 1024;
 #[cfg(not(any(target_arch = "xtensa", target_arch = "riscv32")))]
 pub const STACK_ESP_RUNTIME_BOOT: usize = 32 * 1024;
 
-/// `qq_ws` / `feishu_ws`：外部消息通道的常驻 WSS 握手 + 帧处理。
-/// 2026-05-03 S3 QQ 发布前复测显示，10KB 预算下 `qq_ws` high-water 仍保留
-/// 约 4.0KB，而单轮 QQ 回复 + write-back drain 后 `heap_largest_internal=27648`，
+/// 外部消息通道的常驻 WSS 握手 + 帧处理。
+/// 2026-05-03 ESP S3 live gateway 复测显示，10KB 预算下 channel WSS high-water 仍保留
+/// 约 4.0KB，而单轮外部回复 + write-back drain 后 `heap_largest_internal=27648`，
 /// 距离 TLS fragmentation Healthy headroom 只差 1KB。这里继续只收常驻
 /// channel WSS 到 9KB，保留约 3KB WSS 余量，同时把最后 1KB continuous
 /// internal block 还给低内存交互提示与下一轮 outbound TLS。
@@ -1098,12 +1098,12 @@ pub const STACK_VOICE_REALTIME_CONNECT: usize = LINUX_RUSTLS_THREAD_STACK;
 
 /// ESP `agent_loop` 栈预算。
 ///
-/// 2026-04-24 实机符号化显示，QQ 入站首条真实消息在
+/// 2026-04-24 实机符号化显示，外部入站首条真实消息在
 /// `execute_turn -> prompt_context -> turn-ledger storage read` 路径上已把
-/// 40KB 预算推到危险边缘；2026-04-25 首条 QQ 回复完成后又触发 pthread
+/// 40KB 预算推到危险边缘；2026-04-25 首条外部回复完成后又触发 pthread
 /// stack overflow，说明未 boxed 的回复收尾/ledger 结算峰值不能压在 48KB 内。
-/// 当前生产路径已把 heavy turn state 改为 boxed handoff；2026-05-03 S3
-/// QQ 实机完整首轮消息后 `agent_loop` high-water 仍保留约 32KB，实际栈使用
+/// 当前生产路径已把 heavy turn state 改为 boxed handoff；2026-05-03 ESP S3
+/// 外部通道完整首轮消息后 `agent_loop` high-water 仍保留约 32KB，实际栈使用
 /// 约 32KB。2026-05-19 S3 启动实机进一步显示，旧 48KB 常驻预算会让
 /// `os_outbound_supervisor_spawn` 后 `heap_largest_internal` 固定在 26624，
 /// 在第一条 LLM turn 前已经低于 TLS floor。当前 40KB 预算保留约 8KB
@@ -1118,8 +1118,7 @@ pub const STACK_AGENT_LOOP: usize = ESP_AGENT_LOOP_STACK_BUDGET;
 #[cfg(not(any(target_arch = "xtensa", target_arch = "riscv32")))]
 pub const STACK_AGENT_LOOP: usize = LINUX_RUSTLS_THREAD_STACK;
 
-/// `tg_sender` / `qq_sender` / `fs_sender` / `dt_sender` / `wc_sender` / `tg_poll`：
-/// 各通道出站 HTTPS 与入站轮询。ESP 8KB；Linux 96KB。
+/// 外部通道 sender / poller：各通道出站 HTTPS 与入站轮询。ESP 8KB；Linux 96KB。
 #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
 pub const STACK_CHANNEL_SENDER: usize = 8192;
 #[cfg(not(any(target_arch = "xtensa", target_arch = "riscv32")))]
@@ -1128,10 +1127,10 @@ pub const STACK_CHANNEL_SENDER: usize = LINUX_RUSTLS_THREAD_STACK;
 /// `os_outbound`：ESP 单 active-channel 出站 worker，合并 dispatch 与 HTTP sender。
 ///
 /// 该 worker 少掉的是常驻线程数与二级队列边界，不是 sender 深调用栈本身。
-/// QQ/Feishu/Telegram active driver 会在同一栈上执行 admission、capability projection、
+/// external active driver 会在同一栈上执行 admission、capability projection、
 /// token/cache、payload render 与 HTTP POST。2026-05-03 S3 发布前实机复测显示，
-/// 16KB 在首条 QQ 私聊真实回复入站后仍触发 FreeRTOS `pthread` stack overflow；
-/// 但完成 active HTTP release、LLM admission 与 write-back 收口后，QQ39 的
+/// 16KB 在首条外部私聊真实回复入站后仍触发 FreeRTOS `pthread` stack overflow；
+/// 但完成 active HTTP release、LLM admission 与 write-back 收口后，通道实测的
 /// thread high-water 摘要中 `os_outbound` 已不在 High/Critical 前三，说明
 /// 24KB 预算下的余量高于 `wifi_worker` 约 56% 的 free margin。当前收为
 /// 20KB，仍明显高于旧 16KB failure point，同时返还 4KB steady internal
@@ -1245,7 +1244,7 @@ pub const STACK_CLI_REPL: usize = 8 * 1024;
 ///
 /// 该线程启动并守住 config HTTPD lifecycle；真实 HTTPD callback 栈由
 /// `ESP_HTTPD_CALLBACK_STACK` 管，deep route worker 由 route catalog 管。
-/// 2026-05-03 S3 4KB 实机启动能进入 QQ WSS，但第一个 heartbeat 已出现
+/// 2026-05-03 S3 4KB 实机启动能进入外部 WSS，但第一个 heartbeat 已出现
 /// `low_margin=1`，因此 wrapper 不能继续低于 6KB。
 pub const STACK_CONFIG_PLANE_WATCH: usize = 6 * 1024;
 
@@ -1511,10 +1510,10 @@ mod scrub_credentials_tests {
 
     #[test]
     fn redact_sensitive_config_text_masks_multiple_secret_fields() {
-        let input = r#"{"tg_token":"123456:live-secret","feishu_app_secret":"fs-secret","enabled":"telegram"}"#;
+        let input = r#"{"channel_token":"123456:live-secret","channel_app_secret":"fs-secret","enabled":"chat_channel"}"#;
         let s = redact_sensitive_config_text(input);
         assert!(s.contains("[REDACTED]"));
-        assert!(s.contains(r#""enabled":"telegram""#));
+        assert!(s.contains(r#""enabled":"chat_channel""#));
         assert!(!s.contains("123456:live-secret"));
         assert!(!s.contains("fs-secret"));
     }

@@ -2343,7 +2343,7 @@ mod tests {
             run: TaskRun {
                 run_id: run_id.to_string(),
                 kind: TaskRunKind::TaskExecution,
-                source_channel: "telegram".to_string(),
+                source_channel: "chat_channel".to_string(),
                 source_chat_id: "chat-1".to_string(),
                 user_request: "Finish the migration".to_string(),
                 title: "Migration task".to_string(),
@@ -2392,7 +2392,7 @@ mod tests {
     ) -> TaskLearningRecord {
         TaskLearningRecord {
             learning_id: learning_id.to_string(),
-            source_channel: "telegram".to_string(),
+            source_channel: "chat_channel".to_string(),
             source_chat_id: "chat-1".to_string(),
             run_id: run_id.to_string(),
             step_id: "s01".to_string(),
@@ -2467,7 +2467,7 @@ mod tests {
         let bundle = build_task_recall_bundle(
             &active_run,
             &store,
-            "telegram",
+            "chat_channel",
             "chat-1",
             "Need the release fix path",
             520,
@@ -2515,8 +2515,12 @@ mod tests {
             ),
         ]);
 
-        let inspection =
-            inspect_task_learning(&store, "telegram", "chat-1", "Need the release fix path");
+        let inspection = inspect_task_learning(
+            &store,
+            "chat_channel",
+            "chat-1",
+            "Need the release fix path",
+        );
 
         let expected_backend = if cfg!(feature = "sqlite-index") {
             "task_learning_sqlite_fts_hybrid"
@@ -2570,7 +2574,7 @@ mod tests {
 
         let hits = retrieve_task_learning_hits(
             &store,
-            "telegram",
+            "chat_channel",
             "chat-1",
             Some("tr_active"),
             "apply_release_patch",
@@ -2675,7 +2679,7 @@ mod tests {
                 memory_store: &memory_store,
             },
             TaskLearningMaintenanceInput {
-                channel: "telegram",
+                channel: "chat_channel",
                 chat_id: "chat-1",
                 now_secs,
             },
@@ -2815,7 +2819,7 @@ mod tests {
                 memory_store: &memory_store,
             },
             TaskLearningMaintenanceInput {
-                channel: "telegram",
+                channel: "chat_channel",
                 chat_id: "chat-1",
                 now_secs,
             },
@@ -2964,7 +2968,7 @@ mod tests {
             &FailingArtifactStore,
             &FailingLedgerStore,
             &FailingLearningStore,
-            "qq_channel",
+            "chat_channel",
             "chat-1",
             Some("tr_workspace"),
         );

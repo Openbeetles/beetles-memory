@@ -157,7 +157,7 @@ mod tests {
     fn sample_active_work_record() -> ActiveWorkRecord {
         ActiveWorkRecord {
             kind: ActiveWorkKind::TaskExecution,
-            title: "配置 QQ 邮箱".to_string(),
+            title: "配置企业邮箱".to_string(),
             status: ForegroundWorkStatus::Running,
             continuity_open: true,
             blocks_background_llm: true,
@@ -178,7 +178,7 @@ mod tests {
         )
         .expect("work continuity");
 
-        assert_eq!(record.focus, "配置 QQ 邮箱");
+        assert_eq!(record.focus, "配置企业邮箱");
         assert_eq!(record.status, "active");
         assert_eq!(record.progress_summary, "已创建账户草案");
         assert!(record.blocker.is_empty());

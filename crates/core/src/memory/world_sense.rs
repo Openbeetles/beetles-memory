@@ -904,7 +904,7 @@ mod tests {
                 wifi_connected: true,
                 audio_recording: false,
                 audio_playing: false,
-                source_channel: "qq_channel".to_string(),
+                source_channel: "chat_channel".to_string(),
                 open_tasks: 2,
                 in_progress_tasks: 1,
                 due_tasks: 1,
@@ -918,7 +918,7 @@ mod tests {
         )
         .expect("snapshot block");
         assert!(block.contains("## World Snapshot"));
-        assert!(block.contains("qq_channel"));
+        assert!(block.contains("chat_channel"));
         assert!(block.contains("Task/reminder field:"));
         assert!(block.contains("interaction_mode=live_exchange"));
     }
@@ -964,7 +964,7 @@ mod tests {
             wifi_connected: true,
             audio_recording: false,
             audio_playing: false,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             open_tasks: 0,
             in_progress_tasks: 0,
             due_tasks: 0,

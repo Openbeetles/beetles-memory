@@ -61,3 +61,39 @@ fn mqtt_bridge_consumes_write_candidate_and_publishes_report() {
     assert!(outgoing.payload.contains("\"status\""));
     assert!(!outgoing.private_raw_allowed);
 }
+
+#[test]
+fn mqtt_bridge_decodes_declared_runtime_topics() {
+    let runtime = runtime();
+    let bridge = MqttBridge::new("bridge-ops");
+    let messages = [
+        (
+            "memory/profile_capability",
+            r#"{"request_id":"mqtt-req-cap","idempotency_key":"mqtt-idem-cap","audit_id":"mqtt-audit-cap"}"#,
+        ),
+        (
+            "memory/projection_hint",
+            r#"{"request_id":"mqtt-req-project","idempotency_key":"mqtt-idem-project","audit_id":"mqtt-audit-project","query":"release","max_len":1024}"#,
+        ),
+        (
+            "memory/health",
+            r#"{"request_id":"mqtt-req-inspect","idempotency_key":"mqtt-idem-inspect","audit_id":"mqtt-audit-inspect","query":"release","max_len":1024}"#,
+        ),
+        (
+            "memory/lifecycle",
+            r#"{"request_id":"mqtt-req-life","idempotency_key":"mqtt-idem-life","audit_id":"mqtt-audit-life","query":"release","max_len":1024}"#,
+        ),
+    ];
+
+    for (topic, payload) in messages {
+        let outgoing = bridge
+            .consume(&runtime, MqttInboundMessage::json(topic, payload))
+            .unwrap_or_else(|err| panic!("{topic} failed: {err}"));
+        assert!(
+            outgoing.payload.contains("\"status\""),
+            "{topic}: {}",
+            outgoing.payload
+        );
+        assert!(!outgoing.private_raw_allowed);
+    }
+}

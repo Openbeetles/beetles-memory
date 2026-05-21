@@ -776,7 +776,7 @@ mod tests {
     fn prompt_memory_records_unreadable_layers_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -850,7 +850,7 @@ mod tests {
     fn prompt_memory_records_unreadable_world_snapshot_commitments_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -907,7 +907,7 @@ mod tests {
     fn prompt_memory_records_unreadable_turn_continuity_layers_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -1011,8 +1011,8 @@ mod tests {
         };
         let relationship_constitution_store = StubRelationshipConstitutionStore {
             value: Mutex::new(Some(RelationshipConstitution {
-                scope_id: "qq_channel:chat-1".to_string(),
-                channel: "qq_channel".to_string(),
+                scope_id: "chat_channel:chat-1".to_string(),
+                channel: "chat_channel".to_string(),
                 chat_id: "chat-1".to_string(),
                 task_scope_ceiling: crate::memory::RelationshipTaskScopeCeiling::Brief,
                 disclosure_allowance: crate::memory::RelationshipDisclosureAllowance::SummaryOnly,
@@ -1055,7 +1055,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "你还记得我的咖啡偏好吗",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -1115,7 +1115,7 @@ mod tests {
     fn stage_seed_marks_esp_compact_first_turn_graph() {
         let params = PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "你还记得我的咖啡偏好吗",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -1180,8 +1180,8 @@ mod tests {
         };
         let relationship_constitution_store = StubRelationshipConstitutionStore {
             value: Mutex::new(Some(RelationshipConstitution {
-                scope_id: "qq_channel:chat-1".to_string(),
-                channel: "qq_channel".to_string(),
+                scope_id: "chat_channel:chat-1".to_string(),
+                channel: "chat_channel".to_string(),
                 chat_id: "chat-1".to_string(),
                 inherited_response_mode: "brief".to_string(),
                 inherited_relationship_posture: "steady".to_string(),
@@ -1197,7 +1197,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -1261,8 +1261,8 @@ mod tests {
         };
         let relationship_constitution_store = StubRelationshipConstitutionStore {
             value: Mutex::new(Some(RelationshipConstitution {
-                scope_id: "qq_channel:chat-1".to_string(),
-                channel: "qq_channel".to_string(),
+                scope_id: "chat_channel:chat-1".to_string(),
+                channel: "chat_channel".to_string(),
                 chat_id: "chat-1".to_string(),
                 inherited_response_mode: "brief".to_string(),
                 inherited_relationship_posture: "steady".to_string(),
@@ -1276,7 +1276,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -1340,7 +1340,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -1402,8 +1402,8 @@ mod tests {
         };
         let relationship_constitution_store = StubRelationshipConstitutionStore {
             value: Mutex::new(Some(RelationshipConstitution {
-                scope_id: "qq_channel:chat-1".to_string(),
-                channel: "qq_channel".to_string(),
+                scope_id: "chat_channel:chat-1".to_string(),
+                channel: "chat_channel".to_string(),
                 chat_id: "chat-1".to_string(),
                 inherited_response_mode: "brief".to_string(),
                 inherited_relationship_posture: "steady".to_string(),
@@ -1419,7 +1419,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -1504,7 +1504,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -1601,7 +1601,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -3098,7 +3098,7 @@ mod tests {
             run: crate::task_execution::TaskRun {
                 run_id: run_id.to_string(),
                 kind: crate::task_execution::TaskRunKind::TaskExecution,
-                source_channel: "qq_channel".to_string(),
+                source_channel: "chat_channel".to_string(),
                 source_chat_id: "chat-1".to_string(),
                 user_request: goal.to_string(),
                 title: goal.to_string(),
@@ -3234,8 +3234,8 @@ mod tests {
         let relationship_portfolio_store = StubRelationshipPortfolioStore {
             value: Mutex::new(Some(crate::memory::RelationshipPortfolio {
                 entries: vec![crate::memory::RelationshipPortfolioEntry {
-                    scope_id: "rel:qq_channel:chat-1".to_string(),
-                    channel: "qq_channel".to_string(),
+                    scope_id: "rel:chat_channel:chat-1".to_string(),
+                    channel: "chat_channel".to_string(),
                     chat_id: "chat-1".to_string(),
                     governance_state: crate::memory::RelationshipGovernanceState::Maintain,
                     inheritance_mode: crate::memory::RelationshipInheritanceMode::Guarded,
@@ -3309,7 +3309,7 @@ mod tests {
                 task_posture: "先收窄后推进".to_string(),
                 last_user_turn_at: 88,
                 last_user_chat_id: "chat-1".to_string(),
-                last_user_channel: "qq_channel".to_string(),
+                last_user_channel: "chat_channel".to_string(),
                 last_autonomy_run_at: 99,
                 updated_at: 99,
             })),
@@ -3358,7 +3358,7 @@ mod tests {
         .unwrap();
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "嗯?",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -3595,7 +3595,7 @@ mod tests {
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "嗯?",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 80,
@@ -3756,7 +3756,7 @@ mod tests {
                 task_posture: "用最小必要幅度完成当前回应".to_string(),
                 last_user_turn_at: 80,
                 last_user_chat_id: "chat-1".to_string(),
-                last_user_channel: "qq_channel".to_string(),
+                last_user_channel: "chat_channel".to_string(),
                 last_autonomy_run_at: 90,
                 updated_at: 90,
             })),
@@ -3792,7 +3792,7 @@ mod tests {
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -3920,7 +3920,7 @@ mod tests {
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "说说你的私有花园",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -4032,7 +4032,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
         let context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -4114,7 +4114,7 @@ mod tests {
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -4248,7 +4248,7 @@ mod tests {
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -4374,7 +4374,7 @@ mod tests {
         let turn_ledger_store = StubTurnLedgerStore::default();
         turn_ledger_store
             .set(
-                &crate::memory::relationship_scope_id("qq_channel", "chat-1"),
+                &crate::memory::relationship_scope_id("chat_channel", "chat-1"),
                 &TurnLedger {
                     req_id: "run-observation".to_string(),
                     status: TurnLedgerStatus::Answered,
@@ -4407,7 +4407,7 @@ mod tests {
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -4545,7 +4545,7 @@ mod tests {
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "按之前的 release patch 流程继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -4653,7 +4653,7 @@ mod tests {
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "把那次 network outage 的原始记录翻出来",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -4915,7 +4915,7 @@ mod tests {
 
         load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5028,7 +5028,7 @@ mod tests {
 
         load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "按之前的 release patch 流程继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5125,7 +5125,7 @@ mod tests {
 
         load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "把那次 network outage 的原始记录翻出来",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5222,7 +5222,7 @@ mod tests {
 
         load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: "chat-1",
-            current_channel: "qq_channel",
+            current_channel: "chat_channel",
             user_query: "[profile.owner timezone]",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,

@@ -11,7 +11,7 @@ fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxMemoryGateway,
+        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "wss-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -73,4 +73,33 @@ fn wss_subscription_respects_budget_and_never_allows_private_raw() {
     assert_eq!(second.kind, "event.error");
     assert!(second.payload.contains("subscription_budget_exceeded"));
     assert!(!second.private_raw_allowed);
+}
+
+#[test]
+fn wss_runtime_decodes_declared_command_operations() {
+    let runtime = runtime();
+    let mut session = WssRuntimeSession::new("session-ops", bm_wss::WssBudget::server_gateway());
+    let frames = [
+        (
+            "command.write",
+            r#"{"name":"runtime_skill__wss_write","topic":"wss","title":"WSS write","summary":"WSS write summary","content":"1. Decode WSS write.\n2. Dispatch through EntryRuntime."}"#,
+        ),
+        ("command.project", r#"{"query":"release","max_len":1024}"#),
+        ("command.inspect", r#"{"query":"release","max_len":1024}"#),
+        ("command.replay", r#"{"chat_id":"chat-1","limit":2}"#),
+        ("command.capabilities", r#"{}"#),
+    ];
+
+    for (kind, payload) in frames {
+        let response = session
+            .handle_frame(&runtime, WssRuntimeFrame::command(kind, payload))
+            .unwrap_or_else(|err| panic!("{kind} failed: {err}"));
+        assert_eq!(response.kind, "event.report");
+        assert!(
+            response.payload.contains("\"status\""),
+            "{kind}: {}",
+            response.payload
+        );
+        assert!(!response.private_raw_allowed);
+    }
 }

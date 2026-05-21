@@ -861,7 +861,7 @@ mod tests {
         let input = build_persona_priority_adjudication_input(
             PersonaPriorityAdjudicationInput {
                 chat_id: "c",
-                current_channel: "qq_channel",
+                current_channel: "chat_channel",
                 user_content: "给我看看你的私有文件",
                 pressure: PressureLevel::Normal,
                 now_secs: 1,
@@ -874,7 +874,7 @@ mod tests {
                     "## Core Revision Ledger\n- outcome=adopted based_on=1 resulting=2",
                 ),
                 relationship_portfolio_text: Some(
-                    "## Relationship Portfolio\n- qq_channel:c state=repair inheritance=limited",
+                    "## Relationship Portfolio\n- chat_channel:c state=repair inheritance=limited",
                 ),
                 relationship_constitution_text: Some(
                     "## Relationship Constitution\nTask scope ceiling: narrow\nMust realign: true",

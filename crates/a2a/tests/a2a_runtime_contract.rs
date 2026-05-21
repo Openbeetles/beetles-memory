@@ -67,3 +67,43 @@ fn a2a_bridge_dispatches_memory_request_without_executor_permissions() {
     }));
     assert!(response.payload.contains("\"status\""));
 }
+
+#[test]
+fn a2a_bridge_decodes_declared_memory_operation_messages() {
+    let runtime = runtime();
+    let bridge = A2aBridge::new("bridge-ops");
+    let messages = [
+        (
+            "memory_write_candidate",
+            r#"{"name":"runtime_skill__a2a_write","topic":"a2a","title":"A2A write","summary":"A2A write summary","content":"1. Decode A2A write.\n2. Dispatch through EntryRuntime."}"#,
+        ),
+        (
+            "memory_projection_request",
+            r#"{"query":"release","max_len":1024}"#,
+        ),
+        (
+            "memory_migration_chunk",
+            r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,
+        ),
+    ];
+
+    for (name, payload) in messages {
+        let response = bridge
+            .handle(&runtime, A2aRuntimeMessage::json(name, payload))
+            .unwrap_or_else(|err| panic!("{name} failed: {err}"));
+        assert_eq!(response.kind, "memory_report");
+        assert!(
+            response.payload.contains("\"status\""),
+            "{name}: {}",
+            response.payload
+        );
+        assert!(!response.permissions.iter().any(|permission| {
+            matches!(
+                permission,
+                bm_a2a::A2aPermission::Executor
+                    | bm_a2a::A2aPermission::Tool
+                    | bm_a2a::A2aPermission::Workflow
+            )
+        }));
+    }
+}

@@ -2999,7 +2999,7 @@ mod tests {
             run: TaskRun {
                 run_id: run_id.to_string(),
                 kind: TaskRunKind::TaskExecution,
-                source_channel: "qq_channel".to_string(),
+                source_channel: "chat_channel".to_string(),
                 source_chat_id: "chat-1".to_string(),
                 user_request: "Summarize the fix path".to_string(),
                 title: "release fix".to_string(),
@@ -3034,7 +3034,7 @@ mod tests {
     ) -> TaskLearningRecord {
         TaskLearningRecord {
             learning_id: learning_id.to_string(),
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             source_chat_id: "chat-1".to_string(),
             run_id: run_id.to_string(),
             step_id: "s1".to_string(),
@@ -3094,9 +3094,9 @@ mod tests {
             mental_privacy_state: None,
             recent_persona_evidence: None,
             sandbox_probe_text: None,
-            active_relationship_scope_id: "rel:qq_channel:chat-1".to_string(),
-            active_relationship_channel: "qq_channel".to_string(),
-            prior_user_channel: "qq_channel".to_string(),
+            active_relationship_scope_id: "rel:chat_channel:chat-1".to_string(),
+            active_relationship_channel: "chat_channel".to_string(),
+            prior_user_channel: "chat_channel".to_string(),
             world_snapshot: crate::memory::WorldSnapshot {
                 weekday: "Thu".to_string(),
                 hour: 10,
@@ -3117,7 +3117,7 @@ mod tests {
                 wifi_connected: true,
                 audio_recording: false,
                 audio_playing: false,
-                source_channel: "qq_channel".to_string(),
+                source_channel: "chat_channel".to_string(),
                 open_tasks: 0,
                 in_progress_tasks: 0,
                 due_tasks: 0,
@@ -3153,7 +3153,7 @@ mod tests {
     fn post_reply_loaded_runtime_skip_reuses_scheduler_gate() {
         let mut state = sample_loaded_self_runtime_state();
         state.self_continuity = Some(crate::memory::SelfContinuity {
-            last_user_channel: "qq_channel".to_string(),
+            last_user_channel: "chat_channel".to_string(),
             last_autonomy_run_at: 980,
             ..crate::memory::SelfContinuity::default()
         });
@@ -3164,7 +3164,7 @@ mod tests {
         });
         let payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "hi".to_string(),
             reply_content: "hello".to_string(),
             tool_calls: 0,
@@ -3243,7 +3243,7 @@ mod tests {
             &skill_storage,
             &memory_store,
             authority,
-            "qq_channel",
+            "chat_channel",
             "chat-1",
             now_secs,
         )
@@ -3264,7 +3264,7 @@ mod tests {
         let task_run_store = StubTaskRunStore::new(Vec::new());
         let payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "继续把 continuity capsule 收口".to_string(),
             reply_content: "这轮先落 self_runtime continuity".to_string(),
             tool_calls: 0,
@@ -3363,7 +3363,7 @@ mod tests {
             task_posture: "Resume continuity capsule productionization".to_string(),
             last_user_turn_at: 1_900,
             last_user_chat_id: "chat-1".to_string(),
-            last_user_channel: "qq_channel".to_string(),
+            last_user_channel: "chat_channel".to_string(),
             last_autonomy_run_at: 0,
             updated_at: 1_900,
         });
@@ -3876,7 +3876,7 @@ mod tests {
     fn unrelated_post_reply_decision_does_not_refresh_felt_significance() {
         let payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
             reply_content: "reply turn".to_string(),
             tool_calls: 0,
@@ -3901,7 +3901,7 @@ mod tests {
     fn factual_or_operational_only_post_reply_does_not_refresh_felt_significance() {
         let payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
             reply_content: "reply turn".to_string(),
             tool_calls: 0,
@@ -4010,7 +4010,7 @@ mod tests {
     fn meaningful_existing_or_persona_evidence_allows_post_reply_felt_significance_refresh() {
         let payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
             reply_content: "reply turn".to_string(),
             tool_calls: 0,
@@ -4076,7 +4076,7 @@ mod tests {
 
         let post_reply_payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
             reply_content: "reply turn".to_string(),
             tool_calls: 2,
@@ -4114,7 +4114,7 @@ mod tests {
     fn embedded_self_model_gate_allows_promotable_post_reply_and_operator_request() {
         let post_reply_payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
             reply_content: "reply turn".to_string(),
             tool_calls: 0,
@@ -4175,7 +4175,7 @@ mod tests {
     fn upward_distillation_post_reply_runs_inner_conflict_gate_first() {
         let payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
-            source_channel: "qq_channel".to_string(),
+            source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
             reply_content: "reply turn".to_string(),
             tool_calls: 0,
@@ -4208,7 +4208,7 @@ mod tests {
     #[test]
     fn post_reply_enqueue_runs_for_missing_core_or_runtime_signal() {
         let continuity = crate::memory::SelfContinuity {
-            last_user_channel: "qq_channel".to_string(),
+            last_user_channel: "chat_channel".to_string(),
             last_autonomy_run_at: 900,
             ..crate::memory::SelfContinuity::default()
         };
@@ -4222,7 +4222,7 @@ mod tests {
             Some(&continuity),
             Some(&strategy),
             false,
-            "qq_channel",
+            "chat_channel",
             0,
             false,
             1_000,
@@ -4232,7 +4232,7 @@ mod tests {
             Some(&continuity),
             Some(&strategy),
             true,
-            "qq_channel",
+            "chat_channel",
             1,
             false,
             1_000,
@@ -4242,7 +4242,7 @@ mod tests {
             Some(&continuity),
             Some(&strategy),
             true,
-            "feishu_channel",
+            "work_channel",
             0,
             false,
             1_000,
@@ -4253,7 +4253,7 @@ mod tests {
     #[test]
     fn post_reply_enqueue_skips_when_runtime_is_fresh_and_untriggered() {
         let continuity = crate::memory::SelfContinuity {
-            last_user_channel: "qq_channel".to_string(),
+            last_user_channel: "chat_channel".to_string(),
             last_autonomy_run_at: 950,
             ..crate::memory::SelfContinuity::default()
         };
@@ -4267,7 +4267,7 @@ mod tests {
             Some(&continuity),
             Some(&strategy),
             true,
-            "qq_channel",
+            "chat_channel",
             0,
             false,
             1_000,

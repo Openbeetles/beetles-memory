@@ -503,7 +503,7 @@ mod tests {
             run: TaskRun {
                 run_id: "run_net".to_string(),
                 kind: TaskRunKind::TaskExecution,
-                source_channel: "telegram".to_string(),
+                source_channel: "chat_channel".to_string(),
                 source_chat_id: "chat-a".to_string(),
                 user_request: "fix network setup".to_string(),
                 title: "Fix network setup".to_string(),
@@ -615,7 +615,7 @@ mod tests {
         task_learning_store
             .upsert(&TaskLearningRecord {
                 learning_id: "learning_network_setup".to_string(),
-                source_channel: "telegram".to_string(),
+                source_channel: "chat_channel".to_string(),
                 source_chat_id: "chat-a".to_string(),
                 run_id: "run_net".to_string(),
                 step_id: "step_1".to_string(),
@@ -676,7 +676,7 @@ mod tests {
         let task_report = inspect_task_recall(
             Some(&run),
             &task_learning_store,
-            "telegram",
+            "chat_channel",
             "chat-a",
             "network setup",
             None,

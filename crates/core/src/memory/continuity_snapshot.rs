@@ -1606,7 +1606,7 @@ mod tests {
                 entries: vec![CoreRevisionRecord {
                     based_on_revision: 0,
                     resulting_revision: 1,
-                    relationship_scope_id: "rel:qq_channel:chat-1".to_string(),
+                    relationship_scope_id: "rel:chat_channel:chat-1".to_string(),
                     source_layers: vec!["self_model".to_string()],
                     outcome: CoreRevisionOutcome::Adopted,
                     evidence_summary: vec!["bootstrap".to_string()],
@@ -1637,13 +1637,13 @@ mod tests {
                 task_posture: String::new(),
                 last_user_turn_at: 11,
                 last_user_chat_id: "chat-1".to_string(),
-                last_user_channel: "qq_channel".to_string(),
+                last_user_channel: "chat_channel".to_string(),
                 last_autonomy_run_at: 0,
                 updated_at: 11,
             }),
             relationship_constitution: Some(RelationshipConstitution {
-                scope_id: "rel:qq_channel:chat-1".to_string(),
-                channel: "qq_channel".to_string(),
+                scope_id: "rel:chat_channel:chat-1".to_string(),
+                channel: "chat_channel".to_string(),
                 chat_id: "chat-1".to_string(),
                 board_revision: 1,
                 governance_state: crate::memory::RelationshipGovernanceState::Maintain,
@@ -1654,8 +1654,8 @@ mod tests {
             }),
             relationship_portfolio: Some(RelationshipPortfolio {
                 entries: vec![crate::memory::RelationshipPortfolioEntry {
-                    scope_id: "rel:qq_channel:chat-1".to_string(),
-                    channel: "qq_channel".to_string(),
+                    scope_id: "rel:chat_channel:chat-1".to_string(),
+                    channel: "chat_channel".to_string(),
                     chat_id: "chat-1".to_string(),
                     governance_state: crate::memory::RelationshipGovernanceState::Maintain,
                     inheritance_mode: crate::memory::RelationshipInheritanceMode::Guarded,
@@ -1824,7 +1824,7 @@ mod tests {
                     task_posture: String::new(),
                     last_user_turn_at: 990,
                     last_user_chat_id: "chat-recent".to_string(),
-                    last_user_channel: "qq_channel".to_string(),
+                    last_user_channel: "chat_channel".to_string(),
                     last_autonomy_run_at: 995,
                     updated_at: 995,
                 },
@@ -1837,8 +1837,8 @@ mod tests {
                 board_subject_scope_id().to_string(),
                 RelationshipTopology {
                     entries: vec![crate::memory::RelationshipTopologyEntry {
-                        scope_id: "rel:qq_channel:chat-recent".to_string(),
-                        channel: "qq_channel".to_string(),
+                        scope_id: "rel:chat_channel:chat-recent".to_string(),
+                        channel: "chat_channel".to_string(),
                         chat_id: "chat-recent".to_string(),
                         last_user_turn_at: 995,
                         last_persona_turn_at: 995,
@@ -1853,8 +1853,8 @@ mod tests {
         let portfolio_store = StubRelationshipPortfolioStore {
             value: Some(RelationshipPortfolio {
                 entries: vec![crate::memory::RelationshipPortfolioEntry {
-                    scope_id: "rel:qq_channel:chat-recent".to_string(),
-                    channel: "qq_channel".to_string(),
+                    scope_id: "rel:chat_channel:chat-recent".to_string(),
+                    channel: "chat_channel".to_string(),
                     chat_id: "chat-recent".to_string(),
                     governance_state: crate::memory::RelationshipGovernanceState::Maintain,
                     inheritance_mode: crate::memory::RelationshipInheritanceMode::Guarded,

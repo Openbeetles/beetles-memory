@@ -3,11 +3,12 @@
 use bm_adapter::AdapterOperation;
 
 #[cfg(feature = "bridge-std")]
-use bm_adapter::{AdapterCommand, AdapterResponse, AdapterSdkReport, TransportKind, TransportMode};
+use bm_adapter::{
+    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterResponse, AdapterSdkReport,
+    TransportKind, TransportMode,
+};
 #[cfg(feature = "bridge-std")]
 use bm_entry::{EntryAuthDecision, EntryRuntime, EntryTransportContext};
-#[cfg(feature = "bridge-std")]
-use bm_sdk::{MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource};
 #[cfg(feature = "bridge-std")]
 use serde::Deserialize;
 #[cfg(feature = "bridge-std")]
@@ -108,7 +109,11 @@ impl MqttBridge {
             .find(|spec| spec.topic == message.topic)
             .copied()
             .ok_or_else(|| bm_sdk::Error::config("mqtt_bridge", "unsupported topic"))?;
-        let command = decode_command(spec.operation, &message.payload)?;
+        let command = decode_json_adapter_command(
+            spec.operation,
+            &message.payload,
+            &AdapterJsonCommandOptions::new("bm-mqtt").with_default_source_chat_id("chat-1"),
+        )?;
         let envelope: MqttEnvelopePayload = serde_json::from_str(&message.payload)
             .map_err(|err| bm_sdk::Error::config("mqtt_bridge_json", err.to_string()))?;
         let response = runtime.handle(
@@ -313,34 +318,6 @@ fn encode_remaining_len(mut len: usize, out: &mut Vec<u8>) {
 }
 
 #[cfg(feature = "bridge-std")]
-fn decode_command(operation: AdapterOperation, payload: &str) -> bm_sdk::Result<AdapterCommand> {
-    match operation {
-        AdapterOperation::Write => {
-            let payload: WriteCandidatePayload = serde_json::from_str(payload)
-                .map_err(|err| bm_sdk::Error::config("mqtt_bridge_json", err.to_string()))?;
-            Ok(AdapterCommand::Write(MemoryWriteRequest::Procedural {
-                writes: vec![RuntimeSkillWrite {
-                    name: payload.name,
-                    topic: payload.topic,
-                    title: payload.title,
-                    summary: payload.summary,
-                    content: payload.content,
-                    citations: vec!["bm-mqtt".to_string()],
-                    source_chat_id: Some("chat-1".to_string()),
-                    observed_at: 1_800_000_000,
-                }],
-                source: RuntimeSkillWriteSource::Manual,
-            }))
-        }
-        AdapterOperation::Capabilities => Ok(AdapterCommand::Capabilities),
-        other => Err(bm_sdk::Error::config(
-            "mqtt_bridge",
-            format!("unsupported MQTT bridge operation: {other:?}"),
-        )),
-    }
-}
-
-#[cfg(feature = "bridge-std")]
 fn publish_topic(operation: AdapterOperation) -> &'static str {
     match operation {
         AdapterOperation::Write => "memory/write_report",
@@ -385,14 +362,4 @@ struct MqttEnvelopePayload {
     request_id: String,
     idempotency_key: String,
     audit_id: String,
-}
-
-#[cfg(feature = "bridge-std")]
-#[derive(Deserialize)]
-struct WriteCandidatePayload {
-    name: String,
-    topic: String,
-    title: String,
-    summary: String,
-    content: String,
 }

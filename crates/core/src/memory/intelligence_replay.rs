@@ -266,7 +266,7 @@ mod tests {
     ) -> TurnLedger {
         TurnLedger {
             req_id: req_id.to_string(),
-            channel: "telegram".to_string(),
+            channel: "chat_channel".to_string(),
             ingress: IngressKind::User,
             status: TurnLedgerStatus::Answered,
             subject_state: response_mode.map(|mode| TurnSubjectStateLedger {

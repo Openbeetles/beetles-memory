@@ -44,15 +44,20 @@ fn redact_identifier_token(token: &str) -> String {
             value.replace_range(prefix_end..suffix_start, replacement);
         }
     }
-    if value.contains(':')
-        && (value.contains("qq_channel")
-            || value.contains("telegram")
-            || value.contains("tg")
-            || value.contains("feishu"))
-    {
+    if looks_like_channel_scoped_identifier(&value) {
         return "[redacted:relationship_scope]".to_string();
     }
     value
+}
+
+fn looks_like_channel_scoped_identifier(value: &str) -> bool {
+    let Some((prefix, _)) = value.split_once(':') else {
+        return false;
+    };
+    value.starts_with("rel:")
+        || prefix == "channel"
+        || prefix.ends_with("_channel")
+        || prefix.ends_with("-channel")
 }
 
 fn private_echo_fragments(source: &str) -> Vec<String> {

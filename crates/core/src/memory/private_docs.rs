@@ -1041,7 +1041,7 @@ mod tests {
                 task_posture: "优先收束，再在边界内推进任务".to_string(),
                 last_user_turn_at: 10,
                 last_user_chat_id: "chat-1".to_string(),
-                last_user_channel: "qq_channel".to_string(),
+                last_user_channel: "chat_channel".to_string(),
                 last_autonomy_run_at: 20,
                 updated_at: 2,
             }),
@@ -1235,7 +1235,7 @@ mod tests {
             PrivateDocWorkspaceRefreshInput {
                 chat_id: "c1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续把私有空间做起来",
                 reply_content: "这轮会接 inner journal 和 private plan",
                 pressure: PressureLevel::Normal,

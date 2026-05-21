@@ -1215,7 +1215,7 @@ mod tests {
         let continuity = SelfContinuity {
             last_user_turn_at: now_secs - 30,
             last_user_chat_id: "chat-a".to_string(),
-            last_user_channel: "qq_channel".to_string(),
+            last_user_channel: "chat_channel".to_string(),
             last_autonomy_run_at: now_secs - 10,
             updated_at: now_secs - 10,
             ..SelfContinuity::default()
@@ -1270,7 +1270,7 @@ mod tests {
         let continuity = SelfContinuity {
             last_user_turn_at: now_secs - 600,
             last_user_chat_id: "chat-a".to_string(),
-            last_user_channel: "qq_channel".to_string(),
+            last_user_channel: "chat_channel".to_string(),
             last_autonomy_run_at: now_secs - 600,
             updated_at: now_secs - 10,
             ..SelfContinuity::default()
@@ -1330,7 +1330,7 @@ mod tests {
             &StubSelfAuthoredCoreStore,
             MemoryProfile::Standard,
             "chat-a",
-            "qq_channel",
+            "chat_channel",
             "user",
             "reply",
             0,
@@ -1339,7 +1339,7 @@ mod tests {
 
         assert!(scheduled);
         let key = DetachedWorkKey::new(
-            "qq_channel",
+            "chat_channel",
             "chat-a",
             DetachedJobKind::SelfRuntimePostReply,
         );
@@ -1374,7 +1374,7 @@ mod tests {
             &StubSelfAuthoredCoreStore,
             MemoryProfile::Embedded,
             "chat-a",
-            "qq_channel",
+            "chat_channel",
             "user",
             "reply",
             0,
@@ -1383,7 +1383,7 @@ mod tests {
 
         assert!(scheduled);
         let key = DetachedWorkKey::new(
-            "qq_channel",
+            "chat_channel",
             "chat-a",
             DetachedJobKind::SelfRuntimePostReply,
         );
@@ -1409,7 +1409,7 @@ mod tests {
         let detached_work_store = MemoryDetachedWorkStore::default();
         let now_secs = current_unix_secs();
         let continuity = SelfContinuity {
-            last_user_channel: "qq_channel".to_string(),
+            last_user_channel: "chat_channel".to_string(),
             last_autonomy_run_at: now_secs.saturating_sub(10),
             ..SelfContinuity::default()
         };
@@ -1430,7 +1430,7 @@ mod tests {
             &PresentSelfAuthoredCoreStore,
             MemoryProfile::Embedded,
             "chat-a",
-            "qq_channel",
+            "chat_channel",
             "user",
             "reply",
             0,
@@ -1439,7 +1439,7 @@ mod tests {
 
         assert!(!scheduled);
         let key = DetachedWorkKey::new(
-            "qq_channel",
+            "chat_channel",
             "chat-a",
             DetachedJobKind::SelfRuntimePostReply,
         );
@@ -1465,13 +1465,16 @@ mod tests {
             &system_inbound_tx,
             &detached_work_store,
             "chat-a",
-            "qq_channel",
+            "chat_channel",
             MemoryProfile::Embedded,
         );
 
         assert!(scheduled);
-        let key =
-            DetachedWorkKey::new("qq_channel", "chat-a", DetachedJobKind::SelfRuntimeIdleTick);
+        let key = DetachedWorkKey::new(
+            "chat_channel",
+            "chat-a",
+            DetachedJobKind::SelfRuntimeIdleTick,
+        );
         assert!(
             detached_work_store.get(&key).expect("load").is_none(),
             "embedded idle self-runtime should not write detached-work storage state on bg_timer"
@@ -1494,7 +1497,7 @@ mod tests {
         let detached_work_store = MemoryDetachedWorkStore::default();
         let active_work_store = StubActiveWorkStore::with_value(crate::agent::ActiveWorkRecord {
             kind: crate::agent::ActiveWorkKind::InteractiveAction,
-            title: "配置 QQ 邮箱账户".to_string(),
+            title: "配置企业邮箱账户".to_string(),
             status: crate::agent::ForegroundWorkStatus::AwaitingUser,
             continuity_open: true,
             blocks_background_llm: true,
@@ -1515,7 +1518,7 @@ mod tests {
             &StubSelfAuthoredCoreStore,
             MemoryProfile::Standard,
             "chat-a",
-            "qq_channel",
+            "chat_channel",
             "继续",
             "请先提供 SMTP 授权码。",
             0,
@@ -1524,7 +1527,7 @@ mod tests {
 
         assert!(!scheduled);
         let key = DetachedWorkKey::new(
-            "qq_channel",
+            "chat_channel",
             "chat-a",
             DetachedJobKind::SelfRuntimePostReply,
         );
@@ -1553,7 +1556,7 @@ mod tests {
             &StubSelfAuthoredCoreStore,
             MemoryProfile::Standard,
             "chat-a",
-            "qq_channel",
+            "chat_channel",
             "继续",
             "请先提供 SMTP 授权码。",
             0,
@@ -1562,7 +1565,7 @@ mod tests {
 
         assert!(scheduled);
         let key = DetachedWorkKey::new(
-            "qq_channel",
+            "chat_channel",
             "chat-a",
             DetachedJobKind::SelfRuntimePostReply,
         );
@@ -1592,7 +1595,7 @@ mod tests {
             "chat-a",
             SelfRuntimeJobPayload {
                 trigger: SelfRuntimeTrigger::IdleTick,
-                source_channel: "qq_channel".to_string(),
+                source_channel: "chat_channel".to_string(),
                 user_content: String::new(),
                 reply_content: String::new(),
                 tool_calls: 0,
@@ -1602,8 +1605,11 @@ mod tests {
         );
 
         assert!(enqueued);
-        let key =
-            DetachedWorkKey::new("qq_channel", "chat-a", DetachedJobKind::SelfRuntimeIdleTick);
+        let key = DetachedWorkKey::new(
+            "chat_channel",
+            "chat-a",
+            DetachedJobKind::SelfRuntimeIdleTick,
+        );
         let stored = detached_work_store
             .get(&key)
             .expect("load detached work")

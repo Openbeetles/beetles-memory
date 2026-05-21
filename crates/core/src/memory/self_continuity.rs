@@ -754,7 +754,7 @@ mod tests {
                 task_posture: "先收窄，再在边界内完成任务".to_string(),
                 last_user_turn_at: 12,
                 last_user_chat_id: "chat-1".to_string(),
-                last_user_channel: "qq_channel".to_string(),
+                last_user_channel: "chat_channel".to_string(),
                 last_autonomy_run_at: 15,
                 updated_at: 15,
             },
@@ -768,6 +768,6 @@ mod tests {
         assert!(block.contains("last_user_relation=active"));
         assert!(block.contains("last_user_channel_kind=known"));
         assert!(!block.contains("chat-1"));
-        assert!(!block.contains("qq_channel"));
+        assert!(!block.contains("chat_channel"));
     }
 }

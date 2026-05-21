@@ -1,0 +1,73 @@
+# API Surface
+
+The SDK API is the primary entry point. Host projects should enter through `bm-sdk` or through `bm-entry` plus a protocol adapter. They should not implement their own memory schema, store envelope, replay format, or adapter dispatch rules.
+
+## Crates
+
+| Crate | Responsibility |
+| --- | --- |
+| `bm-core` | Memory planes, recall, projection, lifecycle, feature contracts, and core error model. |
+| `bm-store` | In-memory, file, sqlite, and embedded backends; schema manifest; event log; snapshots; repair reports. |
+| `bm-sdk` | `MemoryRuntime` facade, request/report types, capability catalog, profile snapshots, and store opening re-exports. |
+| `bm-replay` | Fixture runner, cross-store replay, harness gate, and benchmark gate. |
+| `bm-evolve` | Proposal-only evolution sandbox and SDK write helper. |
+| `bm-adapter` | Protocol-independent envelope, command, policy, dispatch, and response contracts. |
+| `bm-entry` | Process-level runtime opening, profile/auth/source/idempotency normalization, and adapter response envelope. |
+| `bm-cli` | CLI commands, capability rendering, platform snapshots, and memory command execution. |
+| `bm-http`, `bm-wss`, `bm-mqtt`, `bm-mcp`, `bm-a2a` | Thin transport shells that consume `bm-entry` or `bm-adapter` and do not own memory semantics. |
+
+## Runtime Operations
+
+| Operation | SDK method | Purpose |
+| --- | --- | --- |
+| Write | `MemoryRuntime::write` | Store procedural memory or long-term extraction results. |
+| Recall | `MemoryRuntime::recall` | Retrieve memory hits for a query. |
+| Project | `MemoryRuntime::project` | Build a bounded memory block for model context. |
+| Maintain | `MemoryRuntime::maintain` | Run explicit post-reply memory maintenance when an LLM client is configured. |
+| Inspect | `MemoryRuntime::inspect` | Return recall/operator/lifecycle inspection data. |
+| Replay | `MemoryRuntime::replay` | Inspect turn ledger history for a chat. |
+| Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | Move continuity snapshots between scopes. |
+| Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
+
+## Request Shapes
+
+The most common SDK request types are:
+
+| Request type | Required fields | Notes |
+| --- | --- | --- |
+| `MemoryWriteRequest::Procedural` | `writes`, `source` | Each `RuntimeSkillWrite` includes `name`, `topic`, `title`, `summary`, `content`, `citations`, `source_chat_id`, and `observed_at`. |
+| `MemoryWriteRequest::LongTermExtraction` | `extraction` | Use when an extraction pipeline has produced a validated long-term memory extraction. |
+| `MemoryRecallRequest` | `query`, `limit` | Returns procedural hits plus working recall inspection data. |
+| `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input` | Returns `system_memory_block` bounded by `system_max_len`. |
+| `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, and operator inspection data. |
+| `MemoryReplayRequest` | `chat_id`, `limit` | Inspection-only replay surface. |
+| `MemoryExportRequest` | `chat_id` | Exports a continuity snapshot. |
+| `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode is `BootstrapImport` or `FullRestore`. |
+| `MemoryRecoverRequest` | `trigger`, `mode_input` | Runs recoverable lifecycle recovery. |
+| `MemoryCloseRequest` | `reason` | Emits a close lifecycle report. |
+
+Generic adapter dispatch supports write, recall, project, inspect, recover, replay, export, import, capabilities, and close. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
+
+Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/topic/tool/message surface.
+
+## Capability Catalog
+
+Every runtime exposes a `MemoryCapabilityCatalog`. Visibility is derived from the selected profile, compiled features, runtime policy, and privacy policy.
+
+```rust
+let capabilities = runtime.capabilities();
+assert!(capabilities.write.visible);
+assert!(capabilities.recall.visible);
+```
+
+Use the CLI to render a stable platform snapshot:
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  platform capability-snapshot \
+  --profile profile-server-linux-memory-gateway
+```
+
+## Boundary
+
+External code may choose a profile, open a supported store backend, call SDK operations, and consume reports. External code must not bypass `MemoryRuntime` to write memory state or implement a parallel adapter/store path with different semantics.

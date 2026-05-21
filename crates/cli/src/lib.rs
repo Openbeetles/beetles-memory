@@ -480,6 +480,11 @@ fn render_sdk_report(
             "system_memory_block": report.system_memory_block,
             "lifecycle": report.lifecycle_report.result_summary,
         }),
+        AdapterSdkReport::Maintain(report) => json!({
+            "status": "accepted",
+            "long_term_refresh_enqueued": report.long_term_refresh_enqueued,
+            "lifecycle": report.lifecycle_report.result_summary,
+        }),
         AdapterSdkReport::Inspect(report) => json!({
             "status": "accepted",
             "safe_actions_available": report.operator_action_report.safe_actions_available,
@@ -524,10 +529,6 @@ fn render_sdk_report(
             "status": "accepted",
             "action": format!("{:?}", report.report.action),
             "lifecycle": report.lifecycle_report.result_summary,
-        }),
-        AdapterSdkReport::MaintainUnsupported(reason) => json!({
-            "status": "rejected",
-            "reason": reason,
         }),
     };
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())

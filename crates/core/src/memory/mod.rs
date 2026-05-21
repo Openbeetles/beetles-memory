@@ -1108,7 +1108,7 @@ mod tests {
     fn reminder(id: &str) -> ReminderItem {
         ReminderItem {
             id: id.to_string(),
-            channel: "qq_channel".to_string(),
+            channel: "chat_channel".to_string(),
             chat_id: "chat-1".to_string(),
             at_unix_secs: 1,
             context: format!("reminder-{id}"),
@@ -1120,7 +1120,7 @@ mod tests {
     fn remind_tick_runs_cleanup_then_injects_message() {
         let store = StubRemindAtStore::new(vec![ReminderItem {
             id: "rem-1".to_string(),
-            channel: "qq_channel".to_string(),
+            channel: "chat_channel".to_string(),
             chat_id: "chat-1".to_string(),
             at_unix_secs: 1,
             context: "喝水".to_string(),

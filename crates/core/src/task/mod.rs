@@ -469,7 +469,7 @@ mod tests {
     fn due_task(id: &str) -> TaskItem {
         TaskItem {
             id: id.to_string(),
-            channel: "qq_channel".to_string(),
+            channel: "chat_channel".to_string(),
             chat_id: "chat-1".to_string(),
             title: format!("task-{id}"),
             due_at_unix_secs: 1,

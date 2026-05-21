@@ -1664,7 +1664,7 @@ mod tests {
             ExecutionStateRefreshInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续收 execution state",
                 reply_content: "我先把 store 接好",
                 pressure: PressureLevel::Normal,
@@ -1717,7 +1717,7 @@ mod tests {
             ExecutionStateRefreshInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "帮我把 execution state 这轮收掉",
                 reply_content: "我已经把 task continuation 逻辑删掉并切到 execution state。",
                 pressure: PressureLevel::Normal,
@@ -1777,7 +1777,7 @@ mod tests {
             ExecutionStateRefreshInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "好了",
                 reply_content: "这轮结束。",
                 pressure: PressureLevel::Normal,
@@ -1835,7 +1835,7 @@ mod tests {
             ExecutionStateRefreshInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续",
                 reply_content: "好。",
                 pressure: PressureLevel::Normal,
@@ -1859,8 +1859,8 @@ mod tests {
             ProvisionalExecutionStateInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
-                user_content: "帮我配置 QQ 邮箱账户",
+                channel: "chat_channel",
+                user_content: "帮我配置企业邮箱账户",
                 reply_content: "我先检查当前邮件状态，然后继续配置。",
                 reply_requests_input: false,
                 tool_calls: 1,
@@ -1889,7 +1889,7 @@ mod tests {
 
         assert!(seeded);
         let stored = execution_store.get("chat-1").unwrap().unwrap();
-        assert_eq!(stored.goal, "帮我配置 QQ 邮箱账户");
+        assert_eq!(stored.goal, "帮我配置企业邮箱账户");
         assert_eq!(
             stored.next_action,
             "deliver current primary answer before more tool work"
@@ -1904,7 +1904,7 @@ mod tests {
                 "chat-1".to_string(),
                 ExecutionState {
                     status: ExecutionStatus::Active,
-                    goal: "配置 QQ 邮箱账户".to_string(),
+                    goal: "配置企业邮箱账户".to_string(),
                     next_action: "补认证信息并继续配置".to_string(),
                     updated_at: 11,
                     ..ExecutionState::default()
@@ -1917,7 +1917,7 @@ mod tests {
             ProvisionalExecutionStateInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "好",
                 reply_content: "继续处理中。",
                 reply_requests_input: false,
@@ -1930,7 +1930,7 @@ mod tests {
 
         assert!(!seeded);
         let stored = execution_store.get("chat-1").unwrap().unwrap();
-        assert_eq!(stored.goal, "配置 QQ 邮箱账户");
+        assert_eq!(stored.goal, "配置企业邮箱账户");
         assert_eq!(stored.next_action, "补认证信息并继续配置");
     }
 
@@ -1941,7 +1941,7 @@ mod tests {
                 "chat-1".to_string(),
                 ExecutionState {
                     status: ExecutionStatus::Active,
-                    goal: "配置 QQ 邮箱账户".to_string(),
+                    goal: "配置企业邮箱账户".to_string(),
                     progress: "已经确认 IMAP/SMTP 入口".to_string(),
                     next_action: "继续补账户凭据".to_string(),
                     updated_at: 11,
@@ -1955,9 +1955,9 @@ mod tests {
             ProvisionalExecutionStateInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续",
-                reply_content: "请先提供 QQ 邮箱的授权码，我才能继续配置。",
+                reply_content: "请先提供企业邮箱的授权码，我才能继续配置。",
                 reply_requests_input: true,
                 tool_calls: 0,
                 now_secs: 12,
@@ -1969,11 +1969,11 @@ mod tests {
         assert!(seeded);
         let stored = execution_store.get("chat-1").unwrap().unwrap();
         assert_eq!(stored.status, ExecutionStatus::Blocked);
-        assert_eq!(stored.goal, "配置 QQ 邮箱账户");
-        assert_eq!(stored.blocker, "请先提供 QQ 邮箱的授权码，我才能继续配置。");
+        assert_eq!(stored.goal, "配置企业邮箱账户");
+        assert_eq!(stored.blocker, "请先提供企业邮箱的授权码，我才能继续配置。");
         assert_eq!(
             stored.next_action,
-            "请先提供 QQ 邮箱的授权码，我才能继续配置。"
+            "请先提供企业邮箱的授权码，我才能继续配置。"
         );
     }
 
@@ -2069,7 +2069,7 @@ mod tests {
         let turn_ledger_store = StubTurnLedgerStore::default();
         turn_ledger_store
             .set(
-                &relationship_scope_id("qq_channel", "chat-1"),
+                &relationship_scope_id("chat_channel", "chat-1"),
                 &TurnLedger {
                     req_id: "run-execution".to_string(),
                     observation: Some(TurnObservationLedger {
@@ -2115,7 +2115,7 @@ mod tests {
             ExecutionStateRefreshInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续收口当前这一轮",
                 reply_content: "我先基于上轮执行结果继续收敛。",
                 pressure: PressureLevel::Normal,

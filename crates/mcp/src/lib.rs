@@ -3,13 +3,12 @@
 use bm_adapter::AdapterOperation;
 
 #[cfg(feature = "server-stdio")]
-use bm_adapter::{AdapterCommand, AdapterResponse, AdapterSdkReport, TransportKind, TransportMode};
+use bm_adapter::{
+    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterResponse, AdapterSdkReport,
+    TransportKind, TransportMode,
+};
 #[cfg(feature = "server-stdio")]
 use bm_entry::{EntryAuthDecision, EntryRuntime, EntryTransportContext};
-#[cfg(feature = "server-stdio")]
-use bm_sdk::MemoryRecallRequest;
-#[cfg(feature = "server-stdio")]
-use serde::Deserialize;
 #[cfg(feature = "server-stdio")]
 use serde_json::{json, Value};
 #[cfg(feature = "server-stdio")]
@@ -108,7 +107,11 @@ impl McpToolServer {
             .into_iter()
             .find(|spec| spec.name == call.name)
             .ok_or_else(|| bm_sdk::Error::config("mcp_runtime", "unsupported tool"))?;
-        let command = decode_command(spec.operation, &call.arguments)?;
+        let command = decode_json_adapter_command(
+            spec.operation,
+            &call.arguments,
+            &AdapterJsonCommandOptions::new("bm-mcp").with_default_source_chat_id("chat-1"),
+        )?;
         let response = runtime.handle(
             EntryTransportContext {
                 request_id: format!("mcp-{}-{}", self.server_id, spec.name),
@@ -209,25 +212,6 @@ pub fn serve_mcp_stdio_once<R: BufRead, W: Write>(
 }
 
 #[cfg(feature = "server-stdio")]
-fn decode_command(operation: AdapterOperation, args: &str) -> bm_sdk::Result<AdapterCommand> {
-    match operation {
-        AdapterOperation::Capabilities => Ok(AdapterCommand::Capabilities),
-        AdapterOperation::Recall => {
-            let args: RecallArgs = serde_json::from_str(args)
-                .map_err(|err| bm_sdk::Error::config("mcp_runtime_json", err.to_string()))?;
-            Ok(AdapterCommand::Recall(MemoryRecallRequest {
-                query: args.query,
-                limit: args.limit.unwrap_or(8),
-            }))
-        }
-        other => Err(bm_sdk::Error::config(
-            "mcp_runtime",
-            format!("unsupported MCP runtime operation: {other:?}"),
-        )),
-    }
-}
-
-#[cfg(feature = "server-stdio")]
 fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolResult {
     match response {
         AdapterResponse::Accepted { report, .. } => {
@@ -269,11 +253,4 @@ fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolRes
             private_raw_allowed: false,
         },
     }
-}
-
-#[cfg(feature = "server-stdio")]
-#[derive(Deserialize)]
-struct RecallArgs {
-    query: String,
-    limit: Option<usize>,
 }

@@ -1,9 +1,10 @@
 use bm_sdk::{
     MemoryCapabilityCatalog, MemoryCloseReport, MemoryCloseRequest, MemoryExportReport,
     MemoryExportRequest, MemoryImportReport, MemoryImportRequest, MemoryInspectionReport,
-    MemoryInspectionRequest, MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport,
-    MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport,
-    MemoryReplayRequest, MemoryWriteReport, MemoryWriteRequest,
+    MemoryInspectionRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
+    MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
+    MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
+    MemoryWriteReport, MemoryWriteRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -118,7 +119,7 @@ pub enum AdapterCommand {
     Write(MemoryWriteRequest),
     Recall(MemoryRecallRequest),
     Project(MemoryProjectionRequest),
-    Maintain(MemoryMaintenancePlaceholder),
+    Maintain(MemoryMaintenanceRequest),
     Inspect(MemoryInspectionRequest),
     Recover(MemoryRecoverRequest),
     Replay(MemoryReplayRequest),
@@ -134,11 +135,6 @@ impl std::fmt::Debug for AdapterCommand {
             .field(&self.operation())
             .finish()
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemoryMaintenancePlaceholder {
-    pub reason: String,
 }
 
 impl AdapterCommand {
@@ -163,7 +159,7 @@ pub enum AdapterSdkReport {
     Write(Box<MemoryWriteReport>),
     Recall(Box<MemoryRecallReport>),
     Project(Box<MemoryProjectionReport>),
-    MaintainUnsupported(String),
+    Maintain(Box<MemoryMaintenanceReport>),
     Inspect(Box<MemoryInspectionReport>),
     Recover(Box<MemoryRecoverReport>),
     Replay(Box<MemoryReplayReport>),
@@ -179,7 +175,7 @@ impl std::fmt::Debug for AdapterSdkReport {
             Self::Write(_) => "Write",
             Self::Recall(_) => "Recall",
             Self::Project(_) => "Project",
-            Self::MaintainUnsupported(_) => "MaintainUnsupported",
+            Self::Maintain(_) => "Maintain",
             Self::Inspect(_) => "Inspect",
             Self::Recover(_) => "Recover",
             Self::Replay(_) => "Replay",

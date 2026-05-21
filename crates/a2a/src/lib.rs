@@ -3,11 +3,12 @@
 use bm_adapter::AdapterOperation;
 
 #[cfg(feature = "bridge-http")]
-use bm_adapter::{AdapterCommand, AdapterResponse, AdapterSdkReport, TransportKind, TransportMode};
+use bm_adapter::{
+    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterResponse, AdapterSdkReport,
+    TransportKind, TransportMode,
+};
 #[cfg(feature = "bridge-http")]
 use bm_entry::{EntryAuthDecision, EntryRuntime, EntryTransportContext};
-#[cfg(feature = "bridge-http")]
-use bm_sdk::MemoryRecallRequest;
 #[cfg(feature = "bridge-http")]
 use serde::Deserialize;
 #[cfg(feature = "bridge-http")]
@@ -114,7 +115,11 @@ impl A2aBridge {
         let operation = spec.operation.ok_or_else(|| {
             bm_sdk::Error::config("a2a_bridge", "message has no memory operation")
         })?;
-        let command = decode_command(operation, &message.payload)?;
+        let command = decode_json_adapter_command(
+            operation,
+            &message.payload,
+            &AdapterJsonCommandOptions::new("bm-a2a").with_default_source_chat_id("chat-1"),
+        )?;
         let response = runtime.handle(
             EntryTransportContext {
                 request_id: format!("a2a-{}-{}", self.bridge_id, spec.name),
@@ -256,24 +261,6 @@ struct A2aHttpRequest {
 }
 
 #[cfg(feature = "bridge-http")]
-fn decode_command(operation: AdapterOperation, payload: &str) -> bm_sdk::Result<AdapterCommand> {
-    match operation {
-        AdapterOperation::Recall => {
-            let payload: RecallPayload = serde_json::from_str(payload)
-                .map_err(|err| bm_sdk::Error::config("a2a_bridge_json", err.to_string()))?;
-            Ok(AdapterCommand::Recall(MemoryRecallRequest {
-                query: payload.query,
-                limit: payload.limit.unwrap_or(8),
-            }))
-        }
-        other => Err(bm_sdk::Error::config(
-            "a2a_bridge",
-            format!("unsupported A2A bridge operation: {other:?}"),
-        )),
-    }
-}
-
-#[cfg(feature = "bridge-http")]
 fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
     match response {
         AdapterResponse::Accepted { report, .. } => match report {
@@ -295,11 +282,4 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
             idempotency_key, ..
         } => json!({"status":"duplicated","idempotency_key":idempotency_key}).to_string(),
     }
-}
-
-#[cfg(feature = "bridge-http")]
-#[derive(Deserialize)]
-struct RecallPayload {
-    query: String,
-    limit: Option<usize>,
 }

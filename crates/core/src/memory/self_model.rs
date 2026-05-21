@@ -1248,7 +1248,7 @@ mod tests {
             SelfModelRefreshInput {
                 chat_id: "c1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续把自我模型和事实层分开",
                 reply_content: "这轮会接上 self-model store 和 prompt",
                 pressure: PressureLevel::Normal,

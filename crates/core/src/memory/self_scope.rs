@@ -58,8 +58,8 @@ mod tests {
     #[test]
     fn relationship_scope_id_encodes_channel_and_chat() {
         assert_eq!(
-            relationship_scope_id("qq/channel", "user:1"),
-            "rel:qq_2fchannel:user_3a1"
+            relationship_scope_id("chat/channel", "user:1"),
+            "rel:chat_2fchannel:user_3a1"
         );
     }
 

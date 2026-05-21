@@ -1207,7 +1207,7 @@ mod tests {
             PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "我们在做长期记忆链路收口",
                 reply_content: "这轮会继续拆 coordinator",
                 pressure: PressureLevel::Normal,
@@ -1283,7 +1283,7 @@ mod tests {
             PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续",
                 reply_content: "好，继续。",
                 pressure: PressureLevel::Normal,
@@ -1366,7 +1366,7 @@ mod tests {
             PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续",
                 reply_content: "好",
                 pressure: PressureLevel::Normal,
@@ -1452,7 +1452,7 @@ mod tests {
             PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续把 post-reply memory maintenance 收紧",
                 reply_content: "这轮会合并 session summary 和 execution state 的重复读取",
                 pressure: PressureLevel::Normal,
@@ -1515,7 +1515,7 @@ mod tests {
                 run: crate::task_execution::TaskRun {
                     run_id: "run-1".to_string(),
                     kind: crate::task_execution::TaskRunKind::TaskExecution,
-                    source_channel: "qq_channel".to_string(),
+                    source_channel: "chat_channel".to_string(),
                     source_chat_id: "chat-1".to_string(),
                     user_request: "继续把 continuity capsule 接到维护链".to_string(),
                     title: "Continuity capsule maintenance".to_string(),
@@ -1572,7 +1572,7 @@ mod tests {
         let task_learning_store = StubTaskLearningStore {
             records: vec![crate::task_execution::TaskLearningRecord {
                 learning_id: "run-1_s01_l01".to_string(),
-                source_channel: "qq_channel".to_string(),
+                source_channel: "chat_channel".to_string(),
                 source_chat_id: "chat-1".to_string(),
                 run_id: "run-1".to_string(),
                 step_id: "s01".to_string(),
@@ -1618,7 +1618,7 @@ mod tests {
             PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续把 continuity capsule 接到维护链",
                 reply_content: "我会把 task run、execution state、inspection 串起来",
                 pressure: PressureLevel::Normal,
@@ -1680,7 +1680,7 @@ mod tests {
                 run: crate::task_execution::TaskRun {
                     run_id: "run-unsettled".to_string(),
                     kind: crate::task_execution::TaskRunKind::TaskExecution,
-                    source_channel: "qq_channel".to_string(),
+                    source_channel: "chat_channel".to_string(),
                     source_chat_id: "chat-1".to_string(),
                     user_request: "继续收口 continuity capsule".to_string(),
                     title: "Continuity capsule productionization".to_string(),
@@ -1746,7 +1746,7 @@ mod tests {
             &PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续把 continuity capsule 收口",
                 reply_content: "我会优先落 shared builder，再补 recall",
                 pressure: PressureLevel::Normal,
@@ -1803,7 +1803,7 @@ mod tests {
                 run: crate::task_execution::TaskRun {
                     run_id: "run-failed".to_string(),
                     kind: crate::task_execution::TaskRunKind::TaskExecution,
-                    source_channel: "qq_channel".to_string(),
+                    source_channel: "chat_channel".to_string(),
                     source_chat_id: "chat-1".to_string(),
                     user_request: "继续把 continuity capsule 收口".to_string(),
                     title: "Continuity capsule productionization".to_string(),
@@ -1861,7 +1861,7 @@ mod tests {
             &PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续把 continuity capsule 收口",
                 reply_content: "这轮先修 active work continuity",
                 pressure: PressureLevel::Normal,
@@ -1893,7 +1893,7 @@ mod tests {
                     run: crate::task_execution::TaskRun {
                         run_id: "run-unsettled".to_string(),
                         kind: crate::task_execution::TaskRunKind::TaskExecution,
-                        source_channel: "qq_channel".to_string(),
+                        source_channel: "chat_channel".to_string(),
                         source_chat_id: "chat-1".to_string(),
                         user_request: "继续收口 continuity capsule".to_string(),
                         title: "Continuity capsule productionization".to_string(),
@@ -1935,7 +1935,7 @@ mod tests {
                     run: crate::task_execution::TaskRun {
                         run_id: "run-settled".to_string(),
                         kind: crate::task_execution::TaskRunKind::TaskExecution,
-                        source_channel: "qq_channel".to_string(),
+                        source_channel: "chat_channel".to_string(),
                         source_chat_id: "chat-1".to_string(),
                         user_request: "继续收口 continuity capsule".to_string(),
                         title: "Continuity capsule productionization".to_string(),
@@ -1995,7 +1995,7 @@ mod tests {
             &PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续把 continuity capsule 收口",
                 reply_content: "这轮会优先复用已 settled 的 run 合同",
                 pressure: PressureLevel::Normal,
@@ -2041,7 +2041,7 @@ mod tests {
             run: crate::task_execution::TaskRun {
                 run_id: "run-2".to_string(),
                 kind: crate::task_execution::TaskRunKind::TaskExecution,
-                source_channel: "qq_channel".to_string(),
+                source_channel: "chat_channel".to_string(),
                 source_chat_id: "chat-1".to_string(),
                 user_request: "继续收口写入治理".to_string(),
                 title: "Memory write governance".to_string(),
@@ -2083,13 +2083,13 @@ mod tests {
             run: Some(&run),
             active_work: None,
             chat_id: "chat-1",
-            channel: "qq_channel",
+            channel: "chat_channel",
             now_secs: 30,
             artifacts: &[],
             learning_records: &[
                 crate::task_execution::TaskLearningRecord {
                     learning_id: "tl-runtime".to_string(),
-                    source_channel: "qq_channel".to_string(),
+                    source_channel: "chat_channel".to_string(),
                     source_chat_id: "chat-1".to_string(),
                     run_id: "run-2".to_string(),
                     step_id: "s01".to_string(),
@@ -2115,7 +2115,7 @@ mod tests {
                 },
                 crate::task_execution::TaskLearningRecord {
                     learning_id: "tl-archive".to_string(),
-                    source_channel: "qq_channel".to_string(),
+                    source_channel: "chat_channel".to_string(),
                     source_chat_id: "chat-1".to_string(),
                     run_id: "run-2".to_string(),
                     step_id: "s01".to_string(),
@@ -2199,7 +2199,7 @@ mod tests {
             PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "把稳定内容收到内核里，剩下的继续整理",
                 reply_content: "这轮会把已经稳定的草稿上提，然后清掉重复 garden 文档",
                 pressure: PressureLevel::Normal,
@@ -2286,7 +2286,7 @@ mod tests {
             PostReplyMemoryMaintenanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "帮我根据网页内容继续整理",
                 reply_content: "我已经读了外部资料并整理要点",
                 pressure: PressureLevel::Normal,
@@ -2374,7 +2374,7 @@ mod tests {
                 PostReplyMemoryMaintenanceInput {
                     chat_id: "chat-1",
                     ingress: IngressKind::User,
-                    channel: "qq_channel",
+                    channel: "chat_channel",
                     user_content: "继续按 release patch flow 做",
                     reply_content: "我会按之前验证过的流程继续",
                     pressure: PressureLevel::Normal,

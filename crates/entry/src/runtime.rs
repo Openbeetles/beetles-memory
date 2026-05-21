@@ -1,5 +1,6 @@
 use bm_adapter::{
-    dispatch_adapter_command, AdapterCommand, AdapterEnvelope, AdapterErrorKey, AdapterResponse,
+    dispatch_adapter_command_with_services, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
+    AdapterResponse, AdapterRuntimeServices,
 };
 use bm_sdk::{
     resolve_memory_capabilities, Error, MemoryCapabilityPolicy, MemoryIdentity,
@@ -82,6 +83,15 @@ impl EntryRuntime {
         context: EntryTransportContext,
         command: AdapterCommand,
     ) -> Result<EntryResponse> {
+        self.handle_with_services(context, command, AdapterRuntimeServices::none())
+    }
+
+    pub fn handle_with_services(
+        &self,
+        context: EntryTransportContext,
+        command: AdapterCommand,
+        services: AdapterRuntimeServices<'_>,
+    ) -> Result<EntryResponse> {
         if self.config.auth.require_auth && !context.auth.authenticated {
             return Ok(EntryResponse::from_adapter(AdapterResponse::Rejected {
                 request_id: context.request_id,
@@ -112,7 +122,8 @@ impl EntryRuntime {
             audit_id: context.audit_id,
             payload: command,
         };
-        dispatch_adapter_command(&self.runtime, envelope).map(EntryResponse::from_adapter)
+        dispatch_adapter_command_with_services(&self.runtime, envelope, services)
+            .map(EntryResponse::from_adapter)
     }
 }
 

@@ -1057,7 +1057,7 @@ mod tests {
             PrivateGardenGovernanceInput {
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续整理你的内部空间",
                 reply_content: "我会把零散草稿收束掉",
                 pressure: PressureLevel::Normal,

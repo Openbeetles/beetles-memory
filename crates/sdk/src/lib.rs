@@ -7,7 +7,10 @@ mod runtime;
 
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ForegroundWorkStatus};
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
-pub use bm_core::llm::{LlmClient, LlmHttpClient};
+pub use bm_core::llm::{
+    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, StopReason, ToolChoicePolicy,
+    ToolSpec,
+};
 pub use bm_core::memory::{
     apply_long_term_memory_extraction, build_long_term_memory_extraction_input,
     inspect_archive_recall, inspect_continuity_capsule_recall, inspect_memory_hygiene,
@@ -25,7 +28,7 @@ pub use bm_core::memory::{
 };
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;
-pub use bm_core::platform::MemoryOperatorSurfaceSummary;
+pub use bm_core::platform::{MemoryOperatorSurfaceSummary, ResponseBody};
 pub use bm_core::runtime::{
     ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, RuntimeLifecycleAdmission,
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleDisposition, RuntimeLifecycleModeInput,

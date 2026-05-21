@@ -483,7 +483,7 @@ mod tests {
                 continuity_bridge: "continue the current engineering stage".into(),
                 last_user_turn_at: 1_000,
                 last_user_chat_id: "raw-chat-42".into(),
-                last_user_channel: "qq_channel".into(),
+                last_user_channel: "chat_channel".into(),
                 last_autonomy_run_at: 1_200,
                 ..SelfContinuity::default()
             }),
@@ -494,7 +494,7 @@ mod tests {
         assert!(input.contains("last_user_relation=active"));
         assert!(input.contains("last_user_channel_kind=known"));
         assert!(!input.contains("raw-chat-42"));
-        assert!(!input.contains("last_user_channel=qq_channel"));
+        assert!(!input.contains("last_user_channel=chat_channel"));
     }
 
     #[test]

@@ -1774,7 +1774,7 @@ mod tests {
     fn substantive_turn_input(after_count: usize) -> LongTermMemoryExtractionTurnInput<'static> {
         LongTermMemoryExtractionTurnInput {
             ingress: IngressKind::User,
-            channel: "qq_channel",
+            channel: "chat_channel",
             user_content: "我们现在的重点是把长期记忆提取调度改成 shared policy。",
             reply_content: "明白，这轮我会先审查调用链，然后把提取调度、脏标记和冷却状态统一收口。",
             after_count,
@@ -1867,7 +1867,7 @@ mod tests {
         let decision = evaluate_long_term_memory_extraction_turn(
             LongTermMemoryExtractionTurnInput {
                 ingress: IngressKind::User,
-                channel: "qq_channel",
+                channel: "chat_channel",
                 user_content: "继续",
                 reply_content: "好，继续。",
                 after_count: 8,

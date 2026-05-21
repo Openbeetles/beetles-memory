@@ -3,13 +3,12 @@
 use bm_adapter::{AdapterErrorKey, AdapterOperation, TransportKind};
 
 #[cfg(feature = "server-std")]
-use bm_adapter::{AdapterCommand, AdapterResponse, AdapterSdkReport, TransportMode};
+use bm_adapter::{
+    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterResponse,
+    AdapterRuntimeServices, AdapterSdkReport, TransportMode,
+};
 #[cfg(feature = "server-std")]
 use bm_entry::{EntryAuthDecision, EntryRuntime, EntryTransportContext};
-#[cfg(feature = "server-std")]
-use bm_sdk::{MemoryRecallRequest, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource};
-#[cfg(feature = "server-std")]
-use serde::Deserialize;
 #[cfg(feature = "server-std")]
 use serde_json::json;
 #[cfg(feature = "server-std")]
@@ -172,13 +171,26 @@ pub fn handle_http_request(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
+    handle_http_request_with_services(runtime, request, AdapterRuntimeServices::none())
+}
+
+#[cfg(feature = "server-std")]
+pub fn handle_http_request_with_services(
+    runtime: &EntryRuntime,
+    request: HttpRuntimeRequest,
+    services: AdapterRuntimeServices<'_>,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
     let route = route_specs()
         .iter()
         .find(|route| route.method == request.method && route.path == request.path)
         .copied()
         .ok_or_else(|| bm_sdk::Error::config("http_runtime", "unknown route"))?;
-    let command = decode_command(route.operation, &request.body)?;
-    let response = runtime.handle(
+    let command = decode_json_adapter_command(
+        route.operation,
+        &request.body,
+        &AdapterJsonCommandOptions::new("bm-http").with_default_source_chat_id("chat-1"),
+    )?;
+    let response = runtime.handle_with_services(
         EntryTransportContext {
             request_id: request.request_id,
             transport: route.transport,
@@ -199,6 +211,7 @@ pub fn handle_http_request(
             },
         },
         command,
+        services,
     )?;
     Ok(render_http_response(response.adapter))
 }
@@ -363,46 +376,6 @@ fn header_or_default(headers: &BTreeMap<String, String>, name: &str, default: &s
 }
 
 #[cfg(feature = "server-std")]
-fn decode_command(operation: AdapterOperation, body: &str) -> bm_sdk::Result<AdapterCommand> {
-    match operation {
-        AdapterOperation::Capabilities => Ok(AdapterCommand::Capabilities),
-        AdapterOperation::Recall => {
-            let payload: RecallPayload = parse_json(body)?;
-            Ok(AdapterCommand::Recall(MemoryRecallRequest {
-                query: payload.query,
-                limit: payload.limit.unwrap_or(8),
-            }))
-        }
-        AdapterOperation::Write => {
-            let payload: ProceduralWritePayload = parse_json(body)?;
-            Ok(AdapterCommand::Write(MemoryWriteRequest::Procedural {
-                writes: vec![RuntimeSkillWrite {
-                    name: payload.name,
-                    topic: payload.topic,
-                    title: payload.title,
-                    summary: payload.summary,
-                    content: payload.content,
-                    citations: vec!["bm-http".to_string()],
-                    source_chat_id: Some("chat-1".to_string()),
-                    observed_at: 1_800_000_000,
-                }],
-                source: RuntimeSkillWriteSource::Manual,
-            }))
-        }
-        other => Err(bm_sdk::Error::config(
-            "http_runtime",
-            format!("unsupported HTTP runtime operation: {other:?}"),
-        )),
-    }
-}
-
-#[cfg(feature = "server-std")]
-fn parse_json<T: for<'de> Deserialize<'de>>(body: &str) -> bm_sdk::Result<T> {
-    serde_json::from_str(body)
-        .map_err(|err| bm_sdk::Error::config("http_runtime_json", err.to_string()))
-}
-
-#[cfg(feature = "server-std")]
 fn render_http_response(response: AdapterResponse<AdapterSdkReport>) -> HttpRuntimeResponse {
     match response {
         AdapterResponse::Accepted { report, .. } => HttpRuntimeResponse {
@@ -472,23 +445,6 @@ fn render_report(report: AdapterSdkReport) -> String {
         })
         .to_string(),
     }
-}
-
-#[cfg(feature = "server-std")]
-#[derive(Deserialize)]
-struct RecallPayload {
-    query: String,
-    limit: Option<usize>,
-}
-
-#[cfg(feature = "server-std")]
-#[derive(Deserialize)]
-struct ProceduralWritePayload {
-    name: String,
-    topic: String,
-    title: String,
-    summary: String,
-    content: String,
 }
 
 #[cfg(feature = "server-std")]

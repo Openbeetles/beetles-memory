@@ -1,9 +1,17 @@
 mod support;
 
+use std::sync::Arc;
+
+use bm_core::memory::{
+    board_subject_scope_id, private_garden_scope_id, PrivateDocEntry, PrivateDocWorkspace,
+};
+use bm_core::platform::Platform as _;
 use bm_sdk::{
-    IngressKind, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    IngressKind, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
+    MemoryMaintenanceRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRuntime, MemoryScope, MemoryWriteRequest, NoopMemoryAuditSink, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
 };
 
 use support::{empty_store_platform, test_runtime, StaticHttpClient, StaticLlmClient};
@@ -101,4 +109,79 @@ fn runtime_maintain_and_inspect_return_structured_reports() {
         inspection.capabilities.profile,
         ProfileId::ServerLinuxDevFull
     );
+}
+
+#[test]
+fn runtime_projection_includes_private_planes_when_policy_allows_it() {
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    platform
+        .private_doc_store()
+        .set(
+            board_subject_scope_id(),
+            &PrivateDocWorkspace {
+                inner_journal: Some(PrivateDocEntry {
+                    content: "private workspace release note".to_string(),
+                    updated_at: 1_800_000_000,
+                    revision: 1,
+                }),
+                ..PrivateDocWorkspace::default()
+            },
+        )
+        .expect("private workspace seed");
+    platform
+        .private_garden_store()
+        .write(
+            private_garden_scope_id(),
+            "diary/release.md",
+            "private garden release note",
+            1_800_000_000,
+        )
+        .expect("private garden seed");
+
+    let mut privacy = MemoryPrivacyPolicy::standard_private_boundary();
+    privacy.private_plane_projection_allowed = true;
+    let runtime = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+        .profile(ProfileId::ServerLinuxDevFull)
+        .store_platform(platform)
+        .clock(Arc::new(TestClock))
+        .capability_policy(bm_sdk::MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(privacy)
+        .audit_sink(Arc::new(NoopMemoryAuditSink) as Arc<dyn MemoryAuditSink>)
+        .build()
+        .expect("runtime");
+
+    let projection = runtime
+        .project(MemoryProjectionRequest {
+            user_query: "release".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+
+    assert!(
+        projection
+            .system_memory_block
+            .contains("private workspace release note"),
+        "{}",
+        projection.system_memory_block
+    );
+    assert!(
+        projection
+            .system_memory_block
+            .contains("private garden release note"),
+        "{}",
+        projection.system_memory_block
+    );
+}
+
+struct TestClock;
+
+impl MemoryClock for TestClock {
+    fn now_secs(&self) -> u64 {
+        1_800_000_000
+    }
 }

@@ -279,6 +279,27 @@ impl MemoryRuntime {
             RuntimeLifecycleTrigger::SdkCall,
             self.mode_input_for_request(request.mode_input, request.pressure),
         );
+        let context = self.load_projection_context(&request, &lifecycle);
+        let system_memory_block = render_sdk_projection_block(&context, request.system_max_len);
+        self.audit("project", true, "projection_completed");
+        Ok(MemoryProjectionReport {
+            system_memory_block,
+            context,
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RefreshProjection,
+                false,
+                "projection_completed",
+            )?,
+        })
+    }
+
+    fn load_projection_context(
+        &self,
+        request: &MemoryProjectionRequest,
+        lifecycle: &RuntimeLifecycleReport,
+    ) -> crate::PromptMemoryContext {
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
         let memory_store = platform.memory_store();
@@ -312,7 +333,7 @@ impl MemoryRuntime {
         let skill_storage = platform.skill_storage();
         let continuity_capsule_store = platform.continuity_capsule_store();
         let memory_system_kind = self.memory_profile().memory_system_kind();
-        let context = load_prompt_memory_context(PromptMemoryContextParams {
+        load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: &self.config.scope.chat_id,
             current_channel: &self.config.scope.channel,
             user_query: &request.user_query,
@@ -358,19 +379,6 @@ impl MemoryRuntime {
             turn_ledger_store: turn_ledger_store.as_ref(),
             skill_storage: skill_storage.as_ref(),
             continuity_capsule_store: continuity_capsule_store.as_ref(),
-        });
-        let system_memory_block = render_sdk_projection_block(&context, request.system_max_len);
-        self.audit("project", true, "projection_completed");
-        Ok(MemoryProjectionReport {
-            system_memory_block,
-            context,
-            lifecycle_report: self.finish_lifecycle_success(
-                lifecycle,
-                RuntimeLifecycleEventKind::RuntimeLifecycle,
-                RuntimeLifecycleEffect::RefreshProjection,
-                false,
-                "projection_completed",
-            )?,
         })
     }
 
@@ -842,43 +850,44 @@ impl MemoryRuntime {
 
 fn render_sdk_projection_block(context: &crate::PromptMemoryContext, max_len: usize) -> String {
     let mut parts = Vec::new();
-    push_projection_part(&mut parts, context.summary_text.as_deref());
-    push_projection_part(&mut parts, context.message_summary_text.as_deref());
-    push_projection_part(
-        &mut parts,
-        context.personality_governance_gate_text.as_deref(),
-    );
-    push_projection_part(&mut parts, context.self_authored_core_text.as_deref());
-    push_projection_part(
-        &mut parts,
-        context.relationship_constitution_text.as_deref(),
-    );
-    push_projection_part(&mut parts, context.persona_priority_text.as_deref());
-    push_projection_part(&mut parts, context.long_term_memory_text.as_deref());
-    push_projection_part(&mut parts, context.continuity_capsule_text.as_deref());
-    push_projection_part(&mut parts, context.archive_evidence_text.as_deref());
-    push_projection_part(&mut parts, context.runtime_skill_text.as_deref());
-    push_projection_part(&mut parts, context.recent_turn_observation_text.as_deref());
-    push_projection_part(&mut parts, context.work_continuity_text.as_deref());
-    push_projection_part(&mut parts, context.execution_state_text.as_deref());
-    push_projection_part(&mut parts, context.task_workspace_text.as_deref());
-    push_projection_part(&mut parts, context.task_recall_text.as_deref());
-    push_projection_part(&mut parts, context.world_snapshot_text.as_deref());
-    push_projection_part(&mut parts, context.world_sense_text.as_deref());
-    push_projection_part(&mut parts, context.self_state_text.as_deref());
-    push_projection_part(&mut parts, context.relationship_portfolio_text.as_deref());
-    push_projection_part(&mut parts, context.self_model_text.as_deref());
-    push_projection_part(&mut parts, context.autonomy_strategy_text.as_deref());
-    push_projection_part(&mut parts, context.outer_voice_text.as_deref());
-    push_projection_part(&mut parts, context.inner_life_text.as_deref());
-    push_projection_part(&mut parts, context.self_continuity_text.as_deref());
-    push_projection_part(&mut parts, context.mental_privacy_text.as_deref());
-    push_projection_part(
-        &mut parts,
-        context.mental_privacy_adjudication_text.as_deref(),
-    );
+    for value in sdk_projection_text_parts(context) {
+        push_projection_part(&mut parts, value);
+    }
     let joined = parts.join("\n\n");
     truncate_to_char_boundary(&joined, max_len)
+}
+
+fn sdk_projection_text_parts(context: &crate::PromptMemoryContext) -> [Option<&str>; 28] {
+    [
+        context.summary_text.as_deref(),
+        context.message_summary_text.as_deref(),
+        context.personality_governance_gate_text.as_deref(),
+        context.self_authored_core_text.as_deref(),
+        context.relationship_constitution_text.as_deref(),
+        context.persona_priority_text.as_deref(),
+        context.long_term_memory_text.as_deref(),
+        context.continuity_capsule_text.as_deref(),
+        context.archive_evidence_text.as_deref(),
+        context.runtime_skill_text.as_deref(),
+        context.recent_turn_observation_text.as_deref(),
+        context.work_continuity_text.as_deref(),
+        context.execution_state_text.as_deref(),
+        context.task_workspace_text.as_deref(),
+        context.task_recall_text.as_deref(),
+        context.world_snapshot_text.as_deref(),
+        context.world_sense_text.as_deref(),
+        context.self_state_text.as_deref(),
+        context.relationship_portfolio_text.as_deref(),
+        context.self_model_text.as_deref(),
+        context.autonomy_strategy_text.as_deref(),
+        context.outer_voice_text.as_deref(),
+        context.inner_life_text.as_deref(),
+        context.self_continuity_text.as_deref(),
+        context.private_workspace_text.as_deref(),
+        context.private_garden_text.as_deref(),
+        context.mental_privacy_text.as_deref(),
+        context.mental_privacy_adjudication_text.as_deref(),
+    ]
 }
 
 fn push_projection_part(parts: &mut Vec<String>, value: Option<&str>) {

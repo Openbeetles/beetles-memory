@@ -375,8 +375,8 @@ mod tests {
             now_secs: 42,
             platform: "Linux",
             device_identity: "beetle-linux-dev",
-            relationship_scope: "qq_channel:chat-grounded",
-            channel: "qq_channel",
+            relationship_scope: "chat_channel:chat-grounded",
+            channel: "chat_channel",
             chat_id: "chat-grounded",
             pressure: PressureLevel::Normal,
             self_authored_core: Some(&SelfAuthoredCore {
@@ -423,8 +423,8 @@ mod tests {
             now_secs: 42,
             platform: "Linux",
             device_identity: "beetle-linux-dev",
-            relationship_scope: "telegram:chat-world",
-            channel: "telegram",
+            relationship_scope: "chat_channel:chat-world",
+            channel: "chat_channel",
             chat_id: "chat-world",
             pressure: PressureLevel::Normal,
             self_authored_core: Some(&SelfAuthoredCore {
@@ -449,7 +449,7 @@ mod tests {
         assert!(shell.situated_now.contains("platform=Linux"));
         assert!(shell.situated_now.contains("device=beetle-linux-dev"));
         assert!(shell.situated_now.contains("relation=active"));
-        assert!(shell.situated_now.contains("channel=telegram"));
+        assert!(shell.situated_now.contains("channel=chat_channel"));
         assert!(!shell.situated_now.contains("chat-world"));
         assert!(shell.relationship_position.contains("active_relationship"));
         assert!(!shell.relationship_position.contains("chat-world"));
@@ -467,8 +467,8 @@ mod tests {
             now_secs: 42,
             platform: "Linux",
             device_identity: "",
-            relationship_scope: "telegram:chat-complete",
-            channel: "telegram",
+            relationship_scope: "chat_channel:chat-complete",
+            channel: "chat_channel",
             chat_id: "chat-complete",
             pressure: PressureLevel::Normal,
             self_authored_core: Some(&SelfAuthoredCore {
@@ -502,8 +502,8 @@ mod tests {
             now_secs: 42,
             platform: "Linux",
             device_identity: "",
-            relationship_scope: "telegram:chat-platform",
-            channel: "telegram",
+            relationship_scope: "chat_channel:chat-platform",
+            channel: "chat_channel",
             chat_id: "chat-platform",
             pressure: PressureLevel::Normal,
             self_authored_core: Some(&SelfAuthoredCore {
