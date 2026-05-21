@@ -10,7 +10,7 @@
   type PageId = "overview" | "transports" | "devices" | "capability" | "operator" | "account";
   type StatusKind = "ready" | "allowed" | "limited" | "draft" | "locked" | "blocked" | "disabled";
 
-  type Page = { id: PageId; label: string; count?: string; eyebrow: string; title: string; desc: string };
+  type Page = { id: PageId; label: string; count?: string; eyebrow: string; title: string };
   type Transport   = { id: string; name: string; detail: string; enabled: boolean; status: string; endpoint: string; fields: string[] };
   type Device      = { deviceId: string; label: string; appKey: string; scopes: string; status: StatusKind; lastSeen: string };
   type KVRow       = { label: string; value: string };
@@ -19,12 +19,12 @@
 
   /* ── pages (navItems + pageTitles 合并) ── */
   const pages: Page[] = [
-    { id: "overview",   label: "总览",     eyebrow: "观测总览", title: "运行状态",     desc: "展示当前记忆实例的运行形态、存储占用、写入、召回、设备访问和上下文预算。" },
-    { id: "transports", label: "通信方式", count: "7", eyebrow: "通信入口", title: "通信方式配置", desc: "开启或关闭当前运行形态允许的通信方式，并填写每种协议所需参数。" },
-    { id: "devices",    label: "开放设备", count: "4", eyebrow: "访问控制", title: "开放设备列表", desc: "管理允许访问当前记忆实例的设备。app_key 只显示指纹，不展示原文。" },
-    { id: "capability", label: "能力预览", eyebrow: "能力报告", title: "能力预览",     desc: "所有可见能力来自配置结构、当前运行形态、能力报告与运行报告，不在前端写死矩阵。" },
-    { id: "operator",   label: "运维动作", eyebrow: "安全运维", title: "运维动作",     desc: "这里只展示会返回结构化报告的安全动作，不直接读写存储原始内容。" },
-    { id: "account",    label: "账户安全", eyebrow: "账户安全", title: "运维账户",     desc: "配置台已经通过配对门禁。这里仅管理当前运维账户状态、密码轮换和会话安全。" },
+    { id: "overview",   label: "总览",     eyebrow: "观测总览", title: "运行状态"     },
+    { id: "transports", label: "通信方式", count: "5", eyebrow: "通信入口", title: "通信方式配置" },
+    { id: "devices",    label: "开放设备", count: "4", eyebrow: "访问控制", title: "开放设备列表" },
+    { id: "capability", label: "能力预览", eyebrow: "能力报告", title: "能力预览"     },
+    { id: "operator",   label: "运维动作", eyebrow: "安全运维", title: "运维动作"     },
+    { id: "account",    label: "账户安全", eyebrow: "账户安全", title: "运维账户"     },
   ];
 
   /* ── 状态元数据表（statusIcon + statusLabel 合并） ── */
@@ -82,8 +82,6 @@
   let transports: Transport[] = $state([
     { id: "http",    name: "HTTP 接口",      detail: "配置页、写入、召回和运维报告入口",   enabled: true,  status: "ready",  endpoint: "0.0.0.0:8718",            fields: ["鉴权：必须", "限流：120/分钟", "模式：本地"] },
     { id: "wss",     name: "WebSocket 订阅", detail: "长连接订阅运行事件与召回流",         enabled: true,  status: "draft",  endpoint: "/memory/events",           fields: ["鉴权：必须", "订阅上限：8"] },
-    { id: "mqtt",    name: "MQTT 桥接",      detail: "连接外部消息代理，不内置消息代理",   enabled: false, status: "locked", endpoint: "mqtts://broker.local",     fields: ["主题：beetle-memory/+", "凭证：已设置"] },
-    { id: "webhook", name: "Webhook 回调",   detail: "写入候选和运维事件的签名回调",       enabled: true,  status: "ready",  endpoint: "https://hook.local/memory", fields: ["签名密钥：已设置", "重试：3 次"] },
     { id: "mcp",     name: "MCP 标准输入输出", detail: "本地工具进程入口，消费同一套运行时", enabled: false, status: "draft",  endpoint: "stdio",                    fields: ["工具：召回、投影、检查"] },
     { id: "a2a",     name: "A2A HTTP",       detail: "智能体到智能体的记忆桥接",           enabled: false, status: "draft",  endpoint: "http://127.0.0.1:8720/a2a", fields: ["鉴权：必须", "桥接：薄适配"] },
     { id: "cli",     name: "本地命令行",     detail: "本地检查、恢复、导入导出预检",       enabled: true,  status: "ready",  endpoint: "local-only",               fields: ["私域原文：禁止", "运维鉴权：必须"] },
@@ -218,8 +216,6 @@
     </header>
 
     <div class="page-shell">
-      <p class="page-desc">{currentPage.desc}</p>
-
       <!-- ── 总览 ── -->
       {#if activePage === "overview"}
         <section class="overview-grid">

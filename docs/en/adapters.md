@@ -56,13 +56,12 @@ let entry = EntryRuntime::open(EntryRuntimeConfig {
 | Transport | Crate | Current interface |
 | --- | --- | --- |
 | CLI | `bm-cli` | Local memory commands and platform capability snapshots. |
-| HTTP/Webhook | `bm-http` | Request decoding, runtime shell, and standard-library listener backend. |
+| HTTP | `bm-http` | Request decoding, runtime shell, and standard-library listener backend. |
 | WebSocket | `bm-wss` | Command frames, subscriptions, budgets, and WebSocket backend. |
-| MQTT | `bm-mqtt` | Topic consume/publish bridge for an external broker. |
 | MCP | `bm-mcp` | Stdio JSON-RPC tool-call bridge. |
 | A2A | `bm-a2a` | HTTP bridge for peer memory messages. |
 
-Transport helpers use the shared JSON adapter decoder for declared memory operations. Treat `AdapterCommand` as the shared semantic contract, and treat each transport crate's route/frame/topic/tool/message catalog as the executable protocol surface for that crate.
+Transport helpers use the shared JSON adapter decoder for declared memory operations. Treat `AdapterCommand` as the shared semantic contract, and treat each transport crate's route/frame/tool/message catalog as the executable protocol surface for that crate.
 
 ## Security Boundary
 

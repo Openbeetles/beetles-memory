@@ -62,29 +62,6 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
 }
 
 #[test]
-fn webhook_write_candidate_uses_same_entry_runtime_dispatch() {
-    let runtime = runtime();
-    let response = handle_http_request(
-        &runtime,
-        HttpRuntimeRequest::post_json(
-            "/webhook/write-candidate",
-            r#"{
-              "name":"runtime_skill__http_webhook_entry",
-              "topic":"http-webhook",
-              "title":"HTTP webhook entry",
-              "summary":"Webhook writes procedural memory through the common entry runtime.",
-              "content":"1. Verify webhook auth and payload budget.\n2. Normalize source metadata.\n3. Dispatch the write candidate through EntryRuntime.\n4. Return only the adapter report."
-            }"#,
-        ),
-    )
-    .expect("webhook write");
-
-    assert_eq!(response.status_code, 200);
-    assert!(response.body.contains("\"operation\""));
-    assert!(response.body.contains("write.procedural"));
-}
-
-#[test]
 fn http_runtime_decodes_declared_memory_routes_through_entry_runtime() {
     let runtime = runtime();
     let routes = [

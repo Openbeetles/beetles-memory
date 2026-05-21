@@ -28,12 +28,8 @@ pub struct EntryStoreConfig {
 pub struct EntryTransportConfig {
     pub cli: bool,
     pub http_server: bool,
-    pub webhook_receiver: bool,
-    pub webhook_sender: bool,
     pub wss_client: bool,
     pub wss_server: bool,
-    pub mqtt_client: bool,
-    pub mqtt_bridge: bool,
     pub mcp_server: bool,
     pub a2a_bridge: bool,
 }
@@ -43,12 +39,8 @@ impl EntryTransportConfig {
         Self {
             cli: false,
             http_server: false,
-            webhook_receiver: false,
-            webhook_sender: false,
             wss_client: false,
             wss_server: false,
-            mqtt_client: false,
-            mqtt_bridge: false,
             mcp_server: false,
             a2a_bridge: false,
         }
@@ -58,12 +50,8 @@ impl EntryTransportConfig {
         Self {
             cli: true,
             http_server: true,
-            webhook_receiver: true,
-            webhook_sender: true,
             wss_client: true,
             wss_server: true,
-            mqtt_client: true,
-            mqtt_bridge: true,
             mcp_server: true,
             a2a_bridge: true,
         }
@@ -124,12 +112,8 @@ pub struct EntryCapabilityView {
     pub profile: ProfileId,
     pub cli: EntryCapabilityItem,
     pub http_server: EntryCapabilityItem,
-    pub webhook_receiver: EntryCapabilityItem,
-    pub webhook_sender: EntryCapabilityItem,
     pub wss_client: EntryCapabilityItem,
     pub wss_server: EntryCapabilityItem,
-    pub mqtt_client: EntryCapabilityItem,
-    pub mqtt_bridge: EntryCapabilityItem,
     pub mcp_server: EntryCapabilityItem,
     pub a2a_bridge: EntryCapabilityItem,
 }
@@ -148,16 +132,6 @@ impl EntryCapabilityView {
                 transports.http_server,
                 true,
             ),
-            webhook_receiver: EntryCapabilityItem::from_adapter(
-                catalog.adapter.webhook,
-                transports.webhook_receiver,
-                true,
-            ),
-            webhook_sender: EntryCapabilityItem::from_adapter(
-                catalog.adapter.webhook,
-                transports.webhook_sender,
-                false,
-            ),
             wss_client: EntryCapabilityItem::from_adapter(
                 catalog.adapter.wss,
                 transports.wss_client,
@@ -166,16 +140,6 @@ impl EntryCapabilityView {
             wss_server: EntryCapabilityItem::from_adapter(
                 catalog.adapter.wss,
                 transports.wss_server,
-                true,
-            ),
-            mqtt_client: EntryCapabilityItem::from_adapter(
-                catalog.adapter.mqtt,
-                transports.mqtt_client,
-                false,
-            ),
-            mqtt_bridge: EntryCapabilityItem::from_adapter(
-                catalog.adapter.mqtt,
-                transports.mqtt_bridge,
                 true,
             ),
             mcp_server: EntryCapabilityItem::from_adapter(

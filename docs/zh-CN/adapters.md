@@ -2,7 +2,7 @@
 
 Adapter 把外部协议输入转换为同一套 SDK runtime 操作。它们是 transport shell，不是第二套 memory runtime。
 
-协议级 route、frame、topic、tool 和 bridge message 见 [部署文档](deployment.md)。本文定义共享 adapter contract。
+协议级 route、frame、tool 和 bridge message 见 [部署文档](deployment.md)。本文定义共享 adapter contract。
 
 ## 统一链路
 
@@ -56,13 +56,12 @@ let entry = EntryRuntime::open(EntryRuntimeConfig {
 | Transport | Crate | 当前接口 |
 | --- | --- | --- |
 | CLI | `bm-cli` | 本地 memory commands 和 platform capability snapshots。 |
-| HTTP/Webhook | `bm-http` | Request decoding、runtime shell 和 standard-library listener backend。 |
+| HTTP | `bm-http` | Request decoding、runtime shell 和 standard-library listener backend。 |
 | WebSocket | `bm-wss` | Command frames、subscriptions、budgets 和 WebSocket backend。 |
-| MQTT | `bm-mqtt` | 面向 external broker 的 topic consume/publish bridge。 |
 | MCP | `bm-mcp` | Stdio JSON-RPC tool-call bridge。 |
 | A2A | `bm-a2a` | 面向 peer memory messages 的 HTTP bridge。 |
 
-Transport helpers 会对声明的 memory operations 使用共享 JSON adapter decoder。`AdapterCommand` 是共享语义合同，每个 transport crate 的 route/frame/topic/tool/message catalog 是该 crate 当前可执行的协议表面。
+Transport helpers 会对声明的 memory operations 使用共享 JSON adapter decoder。`AdapterCommand` 是共享语义合同，每个 transport crate 的 route/frame/tool/message catalog 是该 crate 当前可执行的协议表面。
 
 ## 安全边界
 

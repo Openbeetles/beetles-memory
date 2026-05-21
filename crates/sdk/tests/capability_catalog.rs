@@ -24,8 +24,6 @@ fn esp_standalone_and_embedded_sdk_have_distinct_visible_catalogs() {
     assert!(!standalone.adapter.cli.visible);
     assert!(standalone.adapter.wss.client_allowed);
     assert!(!standalone.adapter.wss.server_allowed);
-    assert!(standalone.adapter.mqtt.client_allowed);
-    assert!(!standalone.adapter.mqtt.server_allowed);
     assert_eq!(
         standalone.validation.compact_replay_fixture.visible,
         standalone.validation.compact_replay_fixture.compiled
@@ -52,7 +50,6 @@ fn esp_standalone_and_embedded_sdk_have_distinct_visible_catalogs() {
     assert!(!embedded.communication_adapter.visible);
     assert!(!embedded.adapter.cli.profile_allowed);
     assert!(!embedded.adapter.wss.profile_allowed);
-    assert!(!embedded.adapter.mqtt.profile_allowed);
     assert!(!embedded.validation.compact_replay_fixture.visible);
     assert!(embedded.validation.proposal_preview.visible);
     assert!(!embedded.validation.compact_proposal_sandbox.visible);
@@ -74,17 +71,11 @@ fn server_gateway_can_surface_adapter_permission_without_creating_adapter_code()
     assert!(catalog.communication_adapter.visible);
     assert!(catalog.adapter.http.visible);
     assert!(catalog.adapter.http.server_allowed);
-    assert!(catalog.adapter.webhook.visible);
-    assert!(catalog.adapter.webhook.client_allowed);
-    assert!(catalog.adapter.webhook.server_allowed);
     assert!(catalog.adapter.wss.visible);
-    assert!(catalog.adapter.mqtt.visible);
     assert!(catalog.adapter.mcp.visible);
     assert!(catalog.adapter.a2a.visible);
     assert!(catalog.entry.http_server.visible);
-    assert!(catalog.entry.webhook_receiver.visible);
     assert!(catalog.entry.wss_server.visible);
-    assert!(catalog.entry.mqtt_bridge.visible);
     assert!(catalog.entry.mcp_server.visible);
     assert!(catalog.entry.a2a_bridge.visible);
     assert_eq!(
@@ -108,17 +99,13 @@ fn entry_runtime_visibility_distinguishes_esp_deployment_roles() {
 
     assert!(standalone.entry.cli.visible);
     assert!(standalone.entry.wss_client.visible);
-    assert!(standalone.entry.mqtt_client.visible);
     assert!(!standalone.entry.http_server.visible);
-    assert!(!standalone.entry.webhook_receiver.visible);
     assert!(!standalone.entry.mcp_server.visible);
     assert!(!standalone.entry.a2a_bridge.visible);
 
     assert!(!embedded.entry.cli.visible);
     assert!(!embedded.entry.wss_client.visible);
-    assert!(!embedded.entry.mqtt_client.visible);
     assert!(!embedded.entry.http_server.visible);
-    assert!(!embedded.entry.webhook_receiver.visible);
     assert!(!embedded.entry.mcp_server.visible);
     assert!(!embedded.entry.a2a_bridge.visible);
 }

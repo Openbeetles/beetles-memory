@@ -59,19 +59,7 @@
       "server_allowed": true,
       "private_data_allowed": false
     },
-    "webhook": {
-      "visible": false,
-      "client_allowed": true,
-      "server_allowed": true,
-      "private_data_allowed": false
-    },
     "wss": {
-      "visible": false,
-      "client_allowed": true,
-      "server_allowed": true,
-      "private_data_allowed": false
-    },
-    "mqtt": {
       "visible": false,
       "client_allowed": true,
       "server_allowed": true,
@@ -103,18 +91,6 @@
       "server_allowed": true,
       "private_data_allowed": false
     },
-    "webhook_receiver": {
-      "visible": false,
-      "client_allowed": false,
-      "server_allowed": true,
-      "private_data_allowed": false
-    },
-    "webhook_sender": {
-      "visible": false,
-      "client_allowed": true,
-      "server_allowed": false,
-      "private_data_allowed": false
-    },
     "wss_client": {
       "visible": false,
       "client_allowed": true,
@@ -122,18 +98,6 @@
       "private_data_allowed": false
     },
     "wss_server": {
-      "visible": false,
-      "client_allowed": false,
-      "server_allowed": true,
-      "private_data_allowed": false
-    },
-    "mqtt_client": {
-      "visible": false,
-      "client_allowed": true,
-      "server_allowed": false,
-      "private_data_allowed": false
-    },
-    "mqtt_bridge": {
       "visible": false,
       "client_allowed": false,
       "server_allowed": true,

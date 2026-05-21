@@ -4,7 +4,7 @@ use bm_http::{route_specs, HttpMethod, RouteAuth, RouteBodyMode};
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
     let routes = route_specs();
-    assert_eq!(routes.len(), 12);
+    assert_eq!(routes.len(), 10);
     let capabilities = routes
         .iter()
         .find(|route| route.path == "/memory/profile/capabilities")
@@ -15,16 +15,6 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
     assert!(matches!(capabilities.body, RouteBodyMode::None));
     assert!(matches!(capabilities.auth, RouteAuth::TokenOrLoopback));
     assert!(capabilities.profile_gate_required);
-
-    let webhook = routes
-        .iter()
-        .find(|route| route.path == "/webhook/write-candidate")
-        .expect("webhook route");
-    assert_eq!(webhook.method, HttpMethod::Post);
-    assert_eq!(webhook.operation, AdapterOperation::Write);
-    assert_eq!(webhook.transport, TransportKind::Webhook);
-    assert!(matches!(webhook.auth, RouteAuth::WebhookSignature));
-    assert!(matches!(webhook.body, RouteBodyMode::Json { max_bytes } if max_bytes <= 64 * 1024));
 }
 
 #[test]

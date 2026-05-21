@@ -96,17 +96,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bm-mqtt"
-version = "0.1.0"
-dependencies = [
- "bm-adapter",
- "bm-entry",
- "bm-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "bm-replay"
 version = "0.1.0"
 dependencies = [

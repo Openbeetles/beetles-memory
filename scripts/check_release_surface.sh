@@ -4,14 +4,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 required_docs=(
-  "docs/api.md"
-  "docs/sdk-quickstart.md"
-  "docs/profile-matrix.md"
-  "docs/store-backends.md"
-  "docs/replay-migration.md"
-  "docs/adapter-contract.md"
-  "docs/operator-inspection.md"
-  "docs/release-checklist.md"
+  "docs/README.md"
+  "docs/en/api.md"
+  "docs/en/getting-started.md"
+  "docs/en/profiles.md"
+  "docs/en/store-backends.md"
+  "docs/en/replay-and-migration.md"
+  "docs/en/adapters.md"
+  "docs/en/operator-guide.md"
+  "docs/en/release-checklist.md"
+  "docs/zh-CN/api.md"
+  "docs/zh-CN/getting-started.md"
+  "docs/zh-CN/profiles.md"
+  "docs/zh-CN/store-backends.md"
+  "docs/zh-CN/replay-and-migration.md"
+  "docs/zh-CN/adapters.md"
+  "docs/zh-CN/operator-guide.md"
+  "docs/zh-CN/release-checklist.md"
   "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
   "dev-docs/release-surface-plan.md"
@@ -44,7 +53,6 @@ examples=(
   "examples/linux-device/Cargo.toml"
   "examples/esp-standalone-memory/Cargo.toml"
   "examples/esp-embedded-sdk/Cargo.toml"
-  "examples/memory-gateway/Cargo.toml"
 )
 
 for manifest in "${examples[@]}"; do
@@ -62,7 +70,6 @@ publishable=(
   "bm-cli"
   "bm-http"
   "bm-wss"
-  "bm-mqtt"
   "bm-mcp"
   "bm-a2a"
 )
@@ -78,7 +85,6 @@ cargo doc --no-deps --no-default-features \
   -p bm-cli \
   -p bm-http \
   -p bm-wss \
-  -p bm-mqtt \
   -p bm-mcp \
   -p bm-a2a
 
@@ -121,7 +127,7 @@ publish_dry_run() {
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
       ;;
-    bm-cli|bm-http|bm-wss|bm-mqtt|bm-mcp|bm-a2a)
+    bm-cli|bm-http|bm-wss|bm-mcp|bm-a2a)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
       extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
@@ -151,7 +157,7 @@ if rg -n "adapter-beetle|source_kind.*beetle|nested_beetle_error|beetle_host|bee
   exit 1
 fi
 
-if rg -n "workflow runner|skill marketplace|管理控制台|built-in MQTT broker|内置 MQTT broker|TLS certificate|TLS 证书|TLS termination|TLS 终止" \
+if rg -n "workflow runner|skill marketplace|管理控制台|TLS certificate|TLS 证书|TLS termination|TLS 终止" \
   docs examples crates README.md | rg -v "不|不能|不启动|not|Red Lines|Drift"; then
   echo "release surface appears to include out-of-scope runtime surface" >&2
   exit 1

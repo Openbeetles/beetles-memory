@@ -11,7 +11,7 @@ Profile 把目标平台和运行角色绑定在一起。它控制 feature select
 | `profile-linux-device-standalone-memory` | Linux device | standalone memory | file 或 sqlite | 本地/device entry surface |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface |
-| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file | HTTP/Webhook、WebSocket、MQTT、MCP、A2A gateway surface |
+| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file | HTTP、WebSocket、MCP、A2A gateway surface |
 | `profile-server-linux-dev-full` | Linux server | development full profile | sqlite、file 或 in-memory | 完整 adapter 和 replay validation surface |
 
 ## 命名

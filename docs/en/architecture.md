@@ -1,13 +1,13 @@
 # Architecture
 
-Beetle Memory has one memory runtime and multiple entry surfaces. The SDK, CLI, HTTP, WebSocket, MQTT, MCP, and A2A paths all converge on `MemoryRuntime`; protocol crates must not implement their own memory semantics.
+Beetle Memory has one memory runtime and multiple entry surfaces. The SDK, CLI, HTTP, WebSocket, MCP, and A2A paths all converge on `MemoryRuntime`; protocol crates must not implement their own memory semantics.
 
 The workspace crates are peers. The core dependency direction is:
 
 ```text
 bm-core <- bm-store <- bm-sdk
 bm-sdk <- bm-adapter <- bm-entry
-bm-entry <- bm-cli / bm-http / bm-wss / bm-mqtt / bm-mcp / bm-a2a
+bm-entry <- bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
 `bm-entry` depends on both `bm-sdk` and `bm-adapter`: it opens the SDK runtime and then dispatches adapter envelopes into that runtime.
@@ -31,7 +31,7 @@ Host application or deployment process
 | Replay/evolution | `bm-replay`, `bm-evolve` | Fixture replay, cross-store validation, harness gates, benchmark gates, proposal-only evolution sandbox. |
 | Entry runtime | `bm-entry` | Process-level opening of store/runtime plus identity, scope, auth, transport, and idempotency normalization. |
 | Adapter contract | `bm-adapter` | Transport-independent envelope, command, operation, dispatch, and response model. |
-| Transport shells | `bm-cli`, `bm-http`, `bm-wss`, `bm-mqtt`, `bm-mcp`, `bm-a2a` | Decode transport input, build adapter commands, call `EntryRuntime`, and render protocol output. |
+| Transport shells | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` | Decode transport input, build adapter commands, call `EntryRuntime`, and render protocol output. |
 
 ## Main Call Chains
 
@@ -61,7 +61,7 @@ transport request
 
 | Operation | Runtime method | Typical caller |
 | --- | --- | --- |
-| Write | `MemoryRuntime::write` | SDK host, CLI, HTTP write candidate, MQTT write candidate |
+| Write | `MemoryRuntime::write` | SDK host, CLI, HTTP write candidate |
 | Recall | `MemoryRuntime::recall` | SDK host, CLI, HTTP, WebSocket, MCP, A2A |
 | Project | `MemoryRuntime::project` | SDK host or CLI when assembling model context |
 | Maintain | `MemoryRuntime::maintain` | SDK host with explicit LLM client injection |
@@ -92,4 +92,4 @@ Profiles are not labels; they are compile/runtime contracts:
 
 ## Deployment Boundary
 
-Beetle Memory provides the memory runtime, SDK, store, entry runtime, and adapter shells. UI consoles, workflow runners, tool executors, skill marketplaces, built-in MQTT brokers, reverse proxies, TLS certificate managers, and application-specific adapters are supplied by the host system; memory state still flows through `MemoryRuntime`.
+Beetle Memory provides the memory runtime, SDK, store, entry runtime, and adapter shells. Product-specific surfaces and deployment infrastructure are supplied by the host system; memory state still flows through `MemoryRuntime`.

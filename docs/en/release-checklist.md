@@ -33,7 +33,6 @@ cargo doc --no-deps --no-default-features \
   -p bm-cli \
   -p bm-http \
   -p bm-wss \
-  -p bm-mqtt \
   -p bm-mcp \
   -p bm-a2a
 bash scripts/check_platform_compile_gates.sh
@@ -55,7 +54,7 @@ bm-store
 bm-sdk
 bm-replay / bm-evolve / bm-adapter
 bm-entry
-bm-cli / bm-http / bm-wss / bm-mqtt / bm-mcp / bm-a2a
+bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
 Run staged `cargo publish --dry-run --allow-dirty -p <crate>` through `scripts/check_release_surface.sh`. Use a clean workspace for the final publish.
@@ -64,4 +63,4 @@ Run staged `cargo publish --dry-run --allow-dirty -p <crate>` through `scripts/c
 
 - README, examples, and crates describe a host-neutral memory runtime.
 - Adapter crates keep memory write, recall, projection, and store semantics inside `MemoryRuntime`.
-- Standalone deployment covers memory runtime entry points. Workflow runners, UI consoles, brokers, reverse proxies, and certificate management are supplied by the host deployment.
+- Standalone deployment covers memory runtime entry points. Product-specific surfaces and deployment infrastructure are supplied by the host deployment.

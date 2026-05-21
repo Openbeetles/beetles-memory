@@ -14,7 +14,7 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | `bm-adapter` | Protocol-independent envelope, command, policy, dispatch, and response contracts. |
 | `bm-entry` | Process-level runtime opening, profile/auth/source/idempotency normalization, and adapter response envelope. |
 | `bm-cli` | CLI commands, capability rendering, platform snapshots, and memory command execution. |
-| `bm-http`, `bm-wss`, `bm-mqtt`, `bm-mcp`, `bm-a2a` | Thin transport shells that consume `bm-entry` or `bm-adapter` and do not own memory semantics. |
+| `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` | Thin transport shells that consume `bm-entry` or `bm-adapter` and do not own memory semantics. |
 
 ## Runtime Operations
 
@@ -48,7 +48,7 @@ The most common SDK request types are:
 
 Generic adapter dispatch supports write, recall, project, inspect, recover, replay, export, import, capabilities, and close. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
 
-Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/topic/tool/message surface.
+Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/tool/message surface.
 
 ## Capability Catalog
 

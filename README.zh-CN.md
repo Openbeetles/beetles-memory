@@ -14,9 +14,9 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 | 存储 | `bm-store` |
 | 回放与提案沙箱 | `bm-replay`, `bm-evolve` |
 | 协议合同与入口运行时 | `bm-adapter`, `bm-entry` |
-| Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mqtt`, `bm-mcp`, `bm-a2a` |
+| Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-当前 Cargo workspace 的发布面版本为 `0.1.0`。仓库包含 `examples/` 下的六个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
+当前 Cargo workspace 的发布面版本为 `0.1.0`。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
 
 ## 能力范围
 
@@ -26,7 +26,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 - 生成受长度限制的模型上下文 memory block。
 - 检查运行状态、生命周期报告和 operator-safe recovery action。
 - 导出、导入并回放 continuity snapshot。
-- 通过 SDK、CLI、HTTP/Webhook、WebSocket、MQTT、MCP 或 A2A adapter shell 进入同一套记忆语义。
+- 通过 SDK、CLI、HTTP、WebSocket、MCP 或 A2A adapter shell 进入同一套记忆语义。
 - 面向 ESP、Linux 硬件设备、macOS/Windows SDK 宿主和 Linux server gateway profile 编译。
 
 ## 快速开始

@@ -1,4 +1,4 @@
-//! HTTP and Webhook adapter contracts for Beetle Memory.
+//! HTTP adapter contracts for Beetle Memory.
 
 use bm_adapter::{AdapterErrorKey, AdapterOperation, TransportKind};
 
@@ -33,7 +33,6 @@ pub enum RouteBodyMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteAuth {
     TokenOrLoopback,
-    WebhookSignature,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,8 +67,6 @@ const ROUTES: &[RouteSpec] = &[
     memory_post("/memory/replay", AdapterOperation::Replay),
     memory_post("/memory/export", AdapterOperation::Export),
     memory_post("/memory/import", AdapterOperation::Import),
-    webhook_post("/webhook/write-candidate", AdapterOperation::Write),
-    webhook_post("/webhook/report", AdapterOperation::Inspect),
 ];
 
 const fn memory_post(path: &'static str, operation: AdapterOperation) -> RouteSpec {
@@ -82,20 +79,6 @@ const fn memory_post(path: &'static str, operation: AdapterOperation) -> RouteSp
             max_bytes: JSON_BODY_MAX_BYTES,
         },
         auth: RouteAuth::TokenOrLoopback,
-        profile_gate_required: true,
-    }
-}
-
-const fn webhook_post(path: &'static str, operation: AdapterOperation) -> RouteSpec {
-    RouteSpec {
-        method: HttpMethod::Post,
-        path,
-        transport: TransportKind::Webhook,
-        operation,
-        body: RouteBodyMode::Json {
-            max_bytes: JSON_BODY_MAX_BYTES,
-        },
-        auth: RouteAuth::WebhookSignature,
         profile_gate_required: true,
     }
 }
@@ -197,11 +180,7 @@ pub fn handle_http_request_with_services(
             mode: TransportMode::Server,
             operation: route.operation,
             source_id: "http-runtime".to_string(),
-            source_kind: match route.transport {
-                TransportKind::Webhook => "webhook_inbound",
-                _ => "http_client",
-            }
-            .to_string(),
+            source_kind: "http_client".to_string(),
             idempotency_key: request.idempotency_key,
             audit_id: request.audit_id,
             auth: if request.authenticated {
@@ -326,7 +305,6 @@ fn read_http_runtime_request<S: Read>(stream: &mut S) -> bm_sdk::Result<HttpRunt
         idempotency_key: header_or_default(&headers, "x-idempotency-key", "http-idem"),
         audit_id: header_or_default(&headers, "x-audit-id", "http-audit"),
         authenticated: headers.contains_key("authorization")
-            || headers.contains_key("x-webhook-signature")
             || headers
                 .get("x-loopback")
                 .is_some_and(|value| value == "true" || value == "1"),
@@ -422,7 +400,6 @@ fn render_report(report: AdapterSdkReport) -> String {
             "profile": catalog.profile.as_str(),
             "entry": {
                 "http_server": catalog.entry.http_server.visible,
-                "webhook_receiver": catalog.entry.webhook_receiver.visible,
             }
         })
         .to_string(),

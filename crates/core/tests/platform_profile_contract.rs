@@ -38,9 +38,7 @@ fn esp_standalone_and_embedded_sdk_keep_distinct_runtime_roles() {
     assert!(standalone.communication_adapter_allowed);
     assert!(!embedded.communication_adapter_allowed);
     assert!(standalone.adapter.wss.client_allowed);
-    assert!(standalone.adapter.mqtt.client_allowed);
     assert!(!embedded.adapter.wss.allowed);
-    assert!(!embedded.adapter.mqtt.allowed);
     assert!(!standalone.sqlite_index_allowed);
     assert!(!embedded.sqlite_index_allowed);
 }

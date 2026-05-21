@@ -14,7 +14,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | `bm-adapter` | 协议无关 envelope、command、policy、dispatch 和 response 合同。 |
 | `bm-entry` | 进程级 runtime opening、profile/auth/source/idempotency 归一化和 adapter response envelope。 |
 | `bm-cli` | CLI 命令、capability rendering、platform snapshot 和 memory command execution。 |
-| `bm-http`, `bm-wss`, `bm-mqtt`, `bm-mcp`, `bm-a2a` | 消费 `bm-entry` 或 `bm-adapter` 的轻量 transport shell，不拥有记忆语义。 |
+| `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` | 消费 `bm-entry` 或 `bm-adapter` 的轻量 transport shell，不拥有记忆语义。 |
 
 ## Runtime 操作
 
@@ -48,7 +48,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 
 通用 adapter dispatch 支持 write、recall、project、inspect、recover、replay、export、import、capabilities、close。Maintain 只在调用方通过 `AdapterRuntimeServices` 显式提供 LLM/HTTP services 时执行；未注入 services 的 dispatch 会返回结构化拒绝。
 
-Transport helper crates 会对其声明的 memory operations 使用共享 JSON adapter decoder；subscribe 这类 stream-only operation 仍属于 transport-specific 行为。每种协议的 route/frame/topic/tool/message 表面见 [部署文档](deployment.md)。
+Transport helper crates 会对其声明的 memory operations 使用共享 JSON adapter decoder；subscribe 这类 stream-only operation 仍属于 transport-specific 行为。每种协议的 route/frame/tool/message 表面见 [部署文档](deployment.md)。
 
 ## Capability Catalog
 

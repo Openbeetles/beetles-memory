@@ -16,9 +16,7 @@ pub enum TransportKind {
     Sdk,
     Cli,
     Http,
-    Webhook,
     Wss,
-    Mqtt,
     Mcp,
     A2a,
 }

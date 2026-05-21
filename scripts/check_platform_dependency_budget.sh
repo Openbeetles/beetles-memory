@@ -76,7 +76,7 @@ while IFS=$'\t' read -r profile package features forbidden_needles required_need
     fail "$profile sqlite-store budget must compile rusqlite"
   fi
 
-  if [[ "$server_listener_allowed" == "false" ]] && grep -Eq "tokio|hyper|axum|warp|tungstenite|rumqttc" <<<"$tree"; then
+  if [[ "$server_listener_allowed" == "false" ]] && grep -Eq "tokio|hyper|axum|warp|tungstenite" <<<"$tree"; then
     echo "$tree" >&2
     fail "$profile must not compile server/listener dependencies"
   fi
@@ -87,7 +87,6 @@ adapter_manifests=(
   crates/cli/Cargo.toml
   crates/http/Cargo.toml
   crates/wss/Cargo.toml
-  crates/mqtt/Cargo.toml
   crates/mcp/Cargo.toml
   crates/a2a/Cargo.toml
 )
@@ -104,13 +103,12 @@ done
 protocol_manifests=(
   crates/http/Cargo.toml
   crates/wss/Cargo.toml
-  crates/mqtt/Cargo.toml
   crates/mcp/Cargo.toml
   crates/a2a/Cargo.toml
 )
 
 for manifest in "${protocol_manifests[@]}"; do
-  if rg -n '^(tokio|hyper|axum|warp|tungstenite|rumqttc)[[:space:]]*=' "$manifest" >/tmp/bm-protocol-listener-dep.$$; then
+  if rg -n '^(tokio|hyper|axum|warp|tungstenite)[[:space:]]*=' "$manifest" >/tmp/bm-protocol-listener-dep.$$; then
     cat /tmp/bm-protocol-listener-dep.$$ >&2
     rm -f /tmp/bm-protocol-listener-dep.$$
     fail "$manifest must not introduce real server/listener dependencies in the contract layer"

@@ -65,7 +65,6 @@ pub enum MessageTransport {
     #[default]
     Unknown,
     Wss,
-    Webhook,
     Poll,
     Internal,
 }
@@ -75,7 +74,6 @@ impl MessageTransport {
         match self {
             Self::Unknown => "unknown",
             Self::Wss => "wss",
-            Self::Webhook => "webhook",
             Self::Poll => "poll",
             Self::Internal => "internal",
         }

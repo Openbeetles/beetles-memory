@@ -7,8 +7,8 @@ Use `bm-entry` when Beetle Memory runs as a standalone process or protocol-facin
 | Shape | Profile | Entry surface |
 | --- | --- | --- |
 | Local CLI/operator process | `profile-server-linux-dev-full` or host profile | `bm-cli` |
-| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP/Webhook, WebSocket, MQTT, MCP, A2A |
-| Linux hardware device | `profile-linux-device-standalone-memory` | local CLI, loopback HTTP/WebSocket, MQTT bridge if enabled |
+| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP, WebSocket, MCP, A2A |
+| Linux hardware device | `profile-linux-device-standalone-memory` | local CLI, loopback HTTP/WebSocket |
 | ESP standalone memory | `profile-esp-standalone-memory` | compact local/client surfaces with embedded store |
 
 ## Build An Entry Runtime
@@ -48,9 +48,9 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
 })?;
 ```
 
-For production, replace `disabled_for_local()` with an auth boundary owned by your process. The current crate exposes the config boundary; your deployment should enforce token, mTLS, gateway, or broker authentication before requests are marked authenticated.
+For production, replace `disabled_for_local()` with an auth boundary owned by your process. The current crate exposes the config boundary; your deployment should enforce token, mTLS, or gateway authentication before requests are marked authenticated.
 
-## HTTP And Webhook
+## HTTP
 
 Enable `bm-http` with `server-std` for the standard-library listener/helper surface.
 
@@ -68,8 +68,6 @@ Routes declared by the crate:
 | `/memory/replay` | `POST` | replay contract |
 | `/memory/export` | `POST` | export contract |
 | `/memory/import` | `POST` | import contract |
-| `/webhook/write-candidate` | `POST` | write candidate |
-| `/webhook/report` | `POST` | inspect/report contract |
 
 The `server-std` decoder uses the shared JSON adapter decoder for write, recall, project, maintain, inspect, recover, replay, export, import, capabilities, and close. `Subscribe` is a stream operation, not an HTTP memory command. `Maintain` needs `handle_http_request_with_services` with injected LLM/HTTP services; `handle_http_request` uses no injected services and returns a structured rejection for maintain.
 
@@ -81,7 +79,6 @@ Headers consumed by the standard-library HTTP helper:
 | `x-idempotency-key` | Idempotency key for mutation requests. |
 | `x-audit-id` | Audit id carried into adapter events. |
 | `authorization` | Marks the request authenticated. |
-| `x-webhook-signature` | Marks webhook requests authenticated. |
 | `x-loopback: true` or `x-loopback: 1` | Marks local loopback requests authenticated. |
 
 Example write body:
@@ -135,39 +132,6 @@ Example recall frame:
   "payload": "{\"query\":\"gateway\",\"limit\":2}"
 }
 ```
-
-## MQTT
-
-Enable `bm-mqtt` with `bridge-std`.
-
-Current bridge topics:
-
-| Topic | Direction | Operation |
-| --- | --- | --- |
-| `memory/write_candidate` | inbound | write procedural memory |
-| `memory/write_report` | outbound | write report |
-| `memory/profile_capability` | outbound | capabilities |
-| `memory/projection_hint` | inbound/outbound contract | project |
-| `memory/health` | inbound/outbound contract | inspection/health |
-| `memory/lifecycle` | outbound | lifecycle |
-
-Inbound write payloads must include request envelope fields:
-
-```json
-{
-  "request_id": "mqtt-req-1",
-  "source": "device-1",
-  "idempotency_key": "mqtt-idem-1",
-  "audit_id": "mqtt-audit-1",
-  "name": "runtime_skill__gateway_entry",
-  "topic": "gateway",
-  "title": "Gateway entry",
-  "summary": "Memory gateway accepts MQTT candidates through EntryRuntime.",
-  "content": "Consume gateway topic, normalize envelope fields, dispatch through EntryRuntime."
-}
-```
-
-The bridge uses the shared JSON adapter decoder for the operation attached to each topic. The crate provides a bridge for an external broker. It does not implement a broker.
 
 ## MCP
 

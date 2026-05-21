@@ -23,9 +23,7 @@ fn esp_standalone_has_compact_entry_but_no_server_listener() {
 
     assert!(view.cli.visible);
     assert!(view.wss_client.visible);
-    assert!(view.mqtt_client.visible);
     assert!(!view.http_server.visible);
-    assert!(!view.webhook_receiver.visible);
     assert!(!view.mcp_server.visible);
     assert!(!view.a2a_bridge.visible);
 }
@@ -42,9 +40,7 @@ fn esp_embedded_sdk_hides_listener_entry_by_default() {
 
     assert!(!view.cli.visible);
     assert!(!view.http_server.visible);
-    assert!(!view.webhook_receiver.visible);
     assert!(!view.wss_server.visible);
-    assert!(!view.mqtt_bridge.visible);
     assert!(!view.mcp_server.visible);
     assert!(!view.a2a_bridge.visible);
 }
@@ -61,9 +57,7 @@ fn linux_server_gateway_exposes_full_server_entry_set() {
 
     assert!(view.cli.visible);
     assert!(view.http_server.visible);
-    assert!(view.webhook_receiver.visible);
     assert!(view.wss_server.visible);
-    assert!(view.mqtt_bridge.visible);
     assert!(view.mcp_server.visible);
     assert!(view.a2a_bridge.visible);
 }

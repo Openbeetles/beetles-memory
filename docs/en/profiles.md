@@ -11,7 +11,7 @@ Profiles bind a target platform to a runtime role. They control feature selectio
 | `profile-linux-device-standalone-memory` | Linux device | standalone memory | file or sqlite | local/device entry surface |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
-| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file | HTTP/Webhook, WebSocket, MQTT, MCP, and A2A gateway surfaces |
+| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file | HTTP, WebSocket, MCP, and A2A gateway surfaces |
 | `profile-server-linux-dev-full` | Linux server | development full profile | sqlite, file, or in-memory | full adapter and replay validation surface |
 
 ## Naming

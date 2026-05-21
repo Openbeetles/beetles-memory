@@ -173,9 +173,7 @@ impl ProfileAdapterTransportCapability {
 pub struct ProfileAdapterCapabilityCatalog {
     pub cli: ProfileAdapterTransportCapability,
     pub http: ProfileAdapterTransportCapability,
-    pub webhook: ProfileAdapterTransportCapability,
     pub wss: ProfileAdapterTransportCapability,
-    pub mqtt: ProfileAdapterTransportCapability,
     pub mcp: ProfileAdapterTransportCapability,
     pub a2a: ProfileAdapterTransportCapability,
 }
@@ -256,9 +254,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(false),
             http: ProfileAdapterTransportCapability::forbidden(),
-            webhook: ProfileAdapterTransportCapability::forbidden(),
             wss: ProfileAdapterTransportCapability::client(false),
-            mqtt: ProfileAdapterTransportCapability::client(false),
             mcp: ProfileAdapterTransportCapability::forbidden(),
             a2a: ProfileAdapterTransportCapability::forbidden(),
         },
@@ -279,9 +275,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::forbidden(),
             http: ProfileAdapterTransportCapability::forbidden(),
-            webhook: ProfileAdapterTransportCapability::forbidden(),
             wss: ProfileAdapterTransportCapability::forbidden(),
-            mqtt: ProfileAdapterTransportCapability::forbidden(),
             mcp: ProfileAdapterTransportCapability::forbidden(),
             a2a: ProfileAdapterTransportCapability::forbidden(),
         },
@@ -302,9 +296,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(false),
             http: ProfileAdapterTransportCapability::server(false),
-            webhook: ProfileAdapterTransportCapability::bidirectional(false),
             wss: ProfileAdapterTransportCapability::bidirectional(false),
-            mqtt: ProfileAdapterTransportCapability::bidirectional(false),
             mcp: ProfileAdapterTransportCapability::forbidden(),
             a2a: ProfileAdapterTransportCapability::forbidden(),
         },
@@ -325,9 +317,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
-            webhook: ProfileAdapterTransportCapability::client(false),
             wss: ProfileAdapterTransportCapability::bidirectional(true),
-            mqtt: ProfileAdapterTransportCapability::client(false),
             mcp: ProfileAdapterTransportCapability::bidirectional(true),
             a2a: ProfileAdapterTransportCapability::forbidden(),
         },
@@ -348,9 +338,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
-            webhook: ProfileAdapterTransportCapability::client(false),
             wss: ProfileAdapterTransportCapability::bidirectional(true),
-            mqtt: ProfileAdapterTransportCapability::client(false),
             mcp: ProfileAdapterTransportCapability::bidirectional(true),
             a2a: ProfileAdapterTransportCapability::forbidden(),
         },
@@ -371,9 +359,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
-            webhook: ProfileAdapterTransportCapability::bidirectional(false),
             wss: ProfileAdapterTransportCapability::bidirectional(false),
-            mqtt: ProfileAdapterTransportCapability::bidirectional(false),
             mcp: ProfileAdapterTransportCapability::server(false),
             a2a: ProfileAdapterTransportCapability::bidirectional(false),
         },
@@ -394,9 +380,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
-            webhook: ProfileAdapterTransportCapability::bidirectional(false),
             wss: ProfileAdapterTransportCapability::bidirectional(false),
-            mqtt: ProfileAdapterTransportCapability::bidirectional(false),
             mcp: ProfileAdapterTransportCapability::server(false),
             a2a: ProfileAdapterTransportCapability::bidirectional(false),
         },

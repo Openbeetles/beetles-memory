@@ -46,9 +46,7 @@ impl MemoryCapabilityPolicy {
 pub struct MemoryAdapterCapabilityPolicy {
     pub cli_enabled: bool,
     pub http_enabled: bool,
-    pub webhook_enabled: bool,
     pub wss_enabled: bool,
-    pub mqtt_enabled: bool,
     pub mcp_enabled: bool,
     pub a2a_enabled: bool,
 }
@@ -58,9 +56,7 @@ impl MemoryAdapterCapabilityPolicy {
         Self {
             cli_enabled: true,
             http_enabled: true,
-            webhook_enabled: true,
             wss_enabled: true,
-            mqtt_enabled: true,
             mcp_enabled: true,
             a2a_enabled: true,
         }
@@ -188,9 +184,7 @@ impl AdapterTransportVisibility {
 pub struct MemoryAdapterCapabilityCatalog {
     pub cli: AdapterTransportVisibility,
     pub http: AdapterTransportVisibility,
-    pub webhook: AdapterTransportVisibility,
     pub wss: AdapterTransportVisibility,
-    pub mqtt: AdapterTransportVisibility,
     pub mcp: AdapterTransportVisibility,
     pub a2a: AdapterTransportVisibility,
 }
@@ -200,9 +194,7 @@ impl MemoryAdapterCapabilityCatalog {
         Self {
             cli: AdapterTransportVisibility::hidden(),
             http: AdapterTransportVisibility::hidden(),
-            webhook: AdapterTransportVisibility::hidden(),
             wss: AdapterTransportVisibility::hidden(),
-            mqtt: AdapterTransportVisibility::hidden(),
             mcp: AdapterTransportVisibility::hidden(),
             a2a: AdapterTransportVisibility::hidden(),
         }
@@ -213,12 +205,8 @@ impl MemoryAdapterCapabilityCatalog {
 pub struct MemoryEntryRuntimeCapabilityCatalog {
     pub cli: AdapterTransportVisibility,
     pub http_server: AdapterTransportVisibility,
-    pub webhook_receiver: AdapterTransportVisibility,
-    pub webhook_sender: AdapterTransportVisibility,
     pub wss_client: AdapterTransportVisibility,
     pub wss_server: AdapterTransportVisibility,
-    pub mqtt_client: AdapterTransportVisibility,
-    pub mqtt_bridge: AdapterTransportVisibility,
     pub mcp_server: AdapterTransportVisibility,
     pub a2a_bridge: AdapterTransportVisibility,
 }
@@ -228,12 +216,8 @@ impl MemoryEntryRuntimeCapabilityCatalog {
         Self {
             cli: AdapterTransportVisibility::hidden(),
             http_server: AdapterTransportVisibility::hidden(),
-            webhook_receiver: AdapterTransportVisibility::hidden(),
-            webhook_sender: AdapterTransportVisibility::hidden(),
             wss_client: AdapterTransportVisibility::hidden(),
             wss_server: AdapterTransportVisibility::hidden(),
-            mqtt_client: AdapterTransportVisibility::hidden(),
-            mqtt_bridge: AdapterTransportVisibility::hidden(),
             mcp_server: AdapterTransportVisibility::hidden(),
             a2a_bridge: AdapterTransportVisibility::hidden(),
         }
@@ -387,19 +371,9 @@ impl MemoryCapabilityCatalog {
                     policy.communication_adapter_enabled && policy.adapter.http_enabled,
                     true,
                 ),
-                webhook: adapter_visible(
-                    entry.adapter.webhook,
-                    policy.communication_adapter_enabled && policy.adapter.webhook_enabled,
-                    true,
-                ),
                 wss: adapter_visible(
                     entry.adapter.wss,
                     policy.communication_adapter_enabled && policy.adapter.wss_enabled,
-                    true,
-                ),
-                mqtt: adapter_visible(
-                    entry.adapter.mqtt,
-                    policy.communication_adapter_enabled && policy.adapter.mqtt_enabled,
                     true,
                 ),
                 mcp: adapter_visible(
@@ -424,16 +398,6 @@ impl MemoryCapabilityCatalog {
                     policy.communication_adapter_enabled && policy.adapter.http_enabled,
                     EntryMode::Server,
                 ),
-                webhook_receiver: entry_visible(
-                    entry.adapter.webhook,
-                    policy.communication_adapter_enabled && policy.adapter.webhook_enabled,
-                    EntryMode::Server,
-                ),
-                webhook_sender: entry_visible(
-                    entry.adapter.webhook,
-                    policy.communication_adapter_enabled && policy.adapter.webhook_enabled,
-                    EntryMode::Client,
-                ),
                 wss_client: entry_visible(
                     entry.adapter.wss,
                     policy.communication_adapter_enabled && policy.adapter.wss_enabled,
@@ -442,16 +406,6 @@ impl MemoryCapabilityCatalog {
                 wss_server: entry_visible(
                     entry.adapter.wss,
                     policy.communication_adapter_enabled && policy.adapter.wss_enabled,
-                    EntryMode::Server,
-                ),
-                mqtt_client: entry_visible(
-                    entry.adapter.mqtt,
-                    policy.communication_adapter_enabled && policy.adapter.mqtt_enabled,
-                    EntryMode::Client,
-                ),
-                mqtt_bridge: entry_visible(
-                    entry.adapter.mqtt,
-                    policy.communication_adapter_enabled && policy.adapter.mqtt_enabled,
                     EntryMode::Server,
                 ),
                 mcp_server: entry_visible(

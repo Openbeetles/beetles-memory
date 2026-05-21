@@ -1,13 +1,13 @@
 # 架构文档
 
-Beetle Memory 只有一套 memory runtime，但有多个入口表面。SDK、CLI、HTTP、WebSocket、MQTT、MCP、A2A 最终都进入 `MemoryRuntime`；协议 crates 不能实现第二套记忆语义。
+Beetle Memory 只有一套 memory runtime，但有多个入口表面。SDK、CLI、HTTP、WebSocket、MCP、A2A 最终都进入 `MemoryRuntime`；协议 crates 不能实现第二套记忆语义。
 
 Workspace crates 是并列 crate。核心依赖方向是：
 
 ```text
 bm-core <- bm-store <- bm-sdk
 bm-sdk <- bm-adapter <- bm-entry
-bm-entry <- bm-cli / bm-http / bm-wss / bm-mqtt / bm-mcp / bm-a2a
+bm-entry <- bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
 `bm-entry` 同时依赖 `bm-sdk` 和 `bm-adapter`：它打开 SDK runtime，再把 adapter envelope 派发进这套 runtime。
@@ -31,7 +31,7 @@ bm-entry <- bm-cli / bm-http / bm-wss / bm-mqtt / bm-mcp / bm-a2a
 | Replay/evolution | `bm-replay`, `bm-evolve` | fixture replay、cross-store validation、harness gates、benchmark gates、proposal-only evolution sandbox。 |
 | Entry runtime | `bm-entry` | 进程级 store/runtime opening，以及 identity、scope、auth、transport、idempotency 归一化。 |
 | Adapter contract | `bm-adapter` | 协议无关 envelope、command、operation、dispatch 和 response model。 |
-| Transport shells | `bm-cli`, `bm-http`, `bm-wss`, `bm-mqtt`, `bm-mcp`, `bm-a2a` | 解码 transport input，构造 adapter command，调用 `EntryRuntime`，渲染协议输出。 |
+| Transport shells | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` | 解码 transport input，构造 adapter command，调用 `EntryRuntime`，渲染协议输出。 |
 
 ## 主调用链
 
@@ -61,7 +61,7 @@ transport request
 
 | Operation | Runtime method | 典型调用方 |
 | --- | --- | --- |
-| Write | `MemoryRuntime::write` | SDK host、CLI、HTTP write candidate、MQTT write candidate |
+| Write | `MemoryRuntime::write` | SDK host、CLI、HTTP write candidate |
 | Recall | `MemoryRuntime::recall` | SDK host、CLI、HTTP、WebSocket、MCP、A2A |
 | Project | `MemoryRuntime::project` | 组装模型上下文的 SDK host 或 CLI |
 | Maintain | `MemoryRuntime::maintain` | 显式注入 LLM client 的 SDK host |
@@ -92,4 +92,4 @@ Profile 不是标签，而是编译和运行合同：
 
 ## 部署边界
 
-Beetle Memory 提供 memory runtime、SDK、store、entry runtime 和 adapter shells。UI console、workflow runner、tool executor、skill marketplace、built-in MQTT broker、reverse proxy、TLS certificate manager 或应用专属 adapter 由宿主系统提供；记忆状态仍经过 `MemoryRuntime`。
+Beetle Memory 提供 memory runtime、SDK、store、entry runtime 和 adapter shells。产品专属表面和部署基础设施由宿主系统提供；记忆状态仍经过 `MemoryRuntime`。

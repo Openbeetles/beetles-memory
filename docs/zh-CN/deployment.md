@@ -7,8 +7,8 @@
 | 形态 | Profile | Entry surface |
 | --- | --- | --- |
 | 本地 CLI/operator 进程 | `profile-server-linux-dev-full` 或 host profile | `bm-cli` |
-| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP/Webhook、WebSocket、MQTT、MCP、A2A |
-| Linux 硬件设备 | `profile-linux-device-standalone-memory` | local CLI、loopback HTTP/WebSocket、启用后的 MQTT bridge |
+| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP、WebSocket、MCP、A2A |
+| Linux 硬件设备 | `profile-linux-device-standalone-memory` | local CLI、loopback HTTP/WebSocket |
 | ESP standalone memory | `profile-esp-standalone-memory` | compact local/client surfaces with embedded store |
 
 ## 构建 Entry Runtime
@@ -48,9 +48,9 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
 })?;
 ```
 
-生产环境应把 `disabled_for_local()` 替换为进程拥有的认证边界。当前 crate 暴露配置边界；你的部署应在请求被标记为 authenticated 之前完成 token、mTLS、gateway 或 broker 认证。
+生产环境应把 `disabled_for_local()` 替换为进程拥有的认证边界。当前 crate 暴露配置边界；你的部署应在请求被标记为 authenticated 之前完成 token、mTLS 或 gateway 认证。
 
-## HTTP And Webhook
+## HTTP
 
 使用 `bm-http` 的 `server-std` feature 可以启用 standard-library listener/helper surface。
 
@@ -68,8 +68,6 @@ Crate 声明的 routes：
 | `/memory/replay` | `POST` | replay contract |
 | `/memory/export` | `POST` | export contract |
 | `/memory/import` | `POST` | import contract |
-| `/webhook/write-candidate` | `POST` | write candidate |
-| `/webhook/report` | `POST` | inspect/report contract |
 
 `server-std` decoder 使用共享 JSON adapter decoder，支持 write、recall、project、maintain、inspect、recover、replay、export、import、capabilities、close。`Subscribe` 是 stream operation，不是 HTTP memory command。`Maintain` 需要通过 `handle_http_request_with_services` 注入 LLM/HTTP services；`handle_http_request` 不注入 services，会对 maintain 返回结构化拒绝。
 
@@ -81,7 +79,6 @@ Standard-library HTTP helper 会读取这些 headers：
 | `x-idempotency-key` | mutation requests 的 idempotency key。 |
 | `x-audit-id` | 进入 adapter events 的 audit id。 |
 | `authorization` | 标记请求已认证。 |
-| `x-webhook-signature` | 标记 webhook 请求已认证。 |
 | `x-loopback: true` 或 `x-loopback: 1` | 标记本地 loopback 请求已认证。 |
 
 写入 body 示例：
@@ -135,39 +132,6 @@ Command frames 使用共享 JSON adapter decoder。Subscription frames 只更新
   "payload": "{\"query\":\"gateway\",\"limit\":2}"
 }
 ```
-
-## MQTT
-
-使用 `bm-mqtt` 的 `bridge-std` feature。
-
-当前 bridge topics：
-
-| Topic | Direction | Operation |
-| --- | --- | --- |
-| `memory/write_candidate` | inbound | write procedural memory |
-| `memory/write_report` | outbound | write report |
-| `memory/profile_capability` | outbound | capabilities |
-| `memory/projection_hint` | inbound/outbound contract | project |
-| `memory/health` | inbound/outbound contract | inspection/health |
-| `memory/lifecycle` | outbound | lifecycle |
-
-Inbound write payload 必须包含 request envelope fields：
-
-```json
-{
-  "request_id": "mqtt-req-1",
-  "source": "device-1",
-  "idempotency_key": "mqtt-idem-1",
-  "audit_id": "mqtt-audit-1",
-  "name": "runtime_skill__gateway_entry",
-  "topic": "gateway",
-  "title": "Gateway entry",
-  "summary": "Memory gateway accepts MQTT candidates through EntryRuntime.",
-  "content": "Consume gateway topic, normalize envelope fields, dispatch through EntryRuntime."
-}
-```
-
-Bridge 会按 topic 绑定的 operation 使用共享 JSON adapter decoder。该 crate 提供面向 external broker 的 bridge，不实现 broker。
 
 ## MCP
 

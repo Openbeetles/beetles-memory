@@ -32,7 +32,6 @@ cargo doc --no-deps --no-default-features \
   -p bm-cli \
   -p bm-http \
   -p bm-wss \
-  -p bm-mqtt \
   -p bm-mcp \
   -p bm-a2a
 bash scripts/check_platform_compile_gates.sh
@@ -54,7 +53,7 @@ bm-store
 bm-sdk
 bm-replay / bm-evolve / bm-adapter
 bm-entry
-bm-cli / bm-http / bm-wss / bm-mqtt / bm-mcp / bm-a2a
+bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
 通过 `scripts/check_release_surface.sh` 运行 staged `cargo publish --dry-run --allow-dirty -p <crate>`。正式发布使用干净工作区。
@@ -63,4 +62,4 @@ bm-cli / bm-http / bm-wss / bm-mqtt / bm-mcp / bm-a2a
 
 - README、examples 和 crates 描述的是宿主无关的 memory runtime。
 - Adapter crates 保持 memory write、recall、projection 和 store 语义由 `MemoryRuntime` 承担。
-- Standalone deployment 覆盖 memory runtime 入口。Workflow runner、UI console、broker、reverse proxy 和 certificate management 由宿主部署提供。
+- Standalone deployment 覆盖 memory runtime 入口。产品专属表面和部署基础设施由宿主部署提供。

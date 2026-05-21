@@ -14,9 +14,9 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Storage | `bm-store` |
 | Replay and proposal sandbox | `bm-replay`, `bm-evolve` |
 | Protocol contract and entry runtime | `bm-adapter`, `bm-entry` |
-| Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mqtt`, `bm-mcp`, `bm-a2a` |
+| Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-The Cargo workspace is versioned as `0.1.0`. The repository includes six smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
+The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
 
 ## Capabilities
 
@@ -26,7 +26,7 @@ The Cargo workspace is versioned as `0.1.0`. The repository includes six smoke-t
 - Project a bounded memory block for model context assembly.
 - Inspect runtime state, lifecycle reports, and operator-safe recovery actions.
 - Export, import, and replay continuity snapshots.
-- Run through SDK, CLI, HTTP/Webhook, WebSocket, MQTT, MCP, or A2A adapter shells without duplicating memory semantics.
+- Run through SDK, CLI, HTTP, WebSocket, MCP, or A2A adapter shells without duplicating memory semantics.
 - Compile for ESP, Linux hardware devices, macOS/Windows SDK hosts, and Linux server gateway profiles.
 
 ## Quick Start

@@ -74,9 +74,7 @@ pub struct PlatformValidationSnapshot {
 pub struct PlatformAdapterSnapshot {
     pub cli: PlatformAdapterTransportSnapshot,
     pub http: PlatformAdapterTransportSnapshot,
-    pub webhook: PlatformAdapterTransportSnapshot,
     pub wss: PlatformAdapterTransportSnapshot,
-    pub mqtt: PlatformAdapterTransportSnapshot,
     pub mcp: PlatformAdapterTransportSnapshot,
     pub a2a: PlatformAdapterTransportSnapshot,
 }
@@ -85,12 +83,8 @@ pub struct PlatformAdapterSnapshot {
 pub struct PlatformEntryRuntimeSnapshot {
     pub cli: PlatformAdapterTransportSnapshot,
     pub http_server: PlatformAdapterTransportSnapshot,
-    pub webhook_receiver: PlatformAdapterTransportSnapshot,
-    pub webhook_sender: PlatformAdapterTransportSnapshot,
     pub wss_client: PlatformAdapterTransportSnapshot,
     pub wss_server: PlatformAdapterTransportSnapshot,
-    pub mqtt_client: PlatformAdapterTransportSnapshot,
-    pub mqtt_bridge: PlatformAdapterTransportSnapshot,
     pub mcp_server: PlatformAdapterTransportSnapshot,
     pub a2a_bridge: PlatformAdapterTransportSnapshot,
 }
@@ -181,21 +175,15 @@ pub fn platform_capability_snapshot(
         adapter: PlatformAdapterSnapshot {
             cli: adapter_snapshot(catalog.adapter.cli),
             http: adapter_snapshot(catalog.adapter.http),
-            webhook: adapter_snapshot(catalog.adapter.webhook),
             wss: adapter_snapshot(catalog.adapter.wss),
-            mqtt: adapter_snapshot(catalog.adapter.mqtt),
             mcp: adapter_snapshot(catalog.adapter.mcp),
             a2a: adapter_snapshot(catalog.adapter.a2a),
         },
         entry: PlatformEntryRuntimeSnapshot {
             cli: adapter_snapshot(catalog.entry.cli),
             http_server: adapter_snapshot(catalog.entry.http_server),
-            webhook_receiver: adapter_snapshot(catalog.entry.webhook_receiver),
-            webhook_sender: adapter_snapshot(catalog.entry.webhook_sender),
             wss_client: adapter_snapshot(catalog.entry.wss_client),
             wss_server: adapter_snapshot(catalog.entry.wss_server),
-            mqtt_client: adapter_snapshot(catalog.entry.mqtt_client),
-            mqtt_bridge: adapter_snapshot(catalog.entry.mqtt_bridge),
             mcp_server: adapter_snapshot(catalog.entry.mcp_server),
             a2a_bridge: adapter_snapshot(catalog.entry.a2a_bridge),
         },
