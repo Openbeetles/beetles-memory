@@ -1,0 +1,68 @@
+{
+  "schema": "beetle-memory.platform.dependency-budget.v1",
+  "profiles": {
+    "profile-esp-standalone-memory": {
+      "package": "bm-sdk",
+      "features": ["profile-esp-standalone-memory"],
+      "forbidden_tree_needles": ["rusqlite", "tokio", "hyper", "axum", "warp", "tungstenite", "rumqttc"],
+      "required_tree_needles": ["bm-core", "bm-store"],
+      "store_backend": "embedded-store",
+      "sqlite_allowed": false,
+      "server_listener_allowed": false
+    },
+    "profile-esp-embedded-sdk": {
+      "package": "bm-sdk",
+      "features": ["profile-esp-embedded-sdk"],
+      "forbidden_tree_needles": ["rusqlite", "tokio", "hyper", "axum", "warp", "tungstenite", "rumqttc"],
+      "required_tree_needles": ["bm-core", "bm-store"],
+      "store_backend": "embedded-store",
+      "sqlite_allowed": false,
+      "server_listener_allowed": false
+    },
+    "profile-linux-device-standalone-memory": {
+      "package": "bm-sdk",
+      "features": ["profile-linux-device-standalone-memory"],
+      "forbidden_tree_needles": ["esp-idf-svc", "embedded-svc"],
+      "required_tree_needles": ["bm-core", "bm-store", "rusqlite"],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": true
+    },
+    "profile-desktop-macos-embedded-sdk": {
+      "package": "bm-sdk",
+      "features": ["profile-desktop-macos-embedded-sdk"],
+      "forbidden_tree_needles": ["esp-idf-svc", "embedded-svc"],
+      "required_tree_needles": ["bm-core", "bm-store", "rusqlite"],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": false
+    },
+    "profile-desktop-windows-embedded-sdk": {
+      "package": "bm-sdk",
+      "features": ["profile-desktop-windows-embedded-sdk"],
+      "forbidden_tree_needles": ["esp-idf-svc", "embedded-svc"],
+      "required_tree_needles": ["bm-core", "bm-store", "rusqlite"],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": false
+    },
+    "profile-server-linux-memory-gateway": {
+      "package": "bm-sdk",
+      "features": ["profile-server-linux-memory-gateway"],
+      "forbidden_tree_needles": ["esp-idf-svc", "embedded-svc"],
+      "required_tree_needles": ["bm-core", "bm-store", "rusqlite"],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": true
+    },
+    "profile-server-linux-dev-full": {
+      "package": "bm-sdk",
+      "features": ["profile-server-linux-dev-full"],
+      "forbidden_tree_needles": ["esp-idf-svc", "embedded-svc"],
+      "required_tree_needles": ["bm-core", "bm-store", "rusqlite"],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": true
+    }
+  }
+}

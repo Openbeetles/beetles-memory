@@ -9,6 +9,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
+name = "bm-a2a"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bm-adapter"
+version = "0.1.0"
+dependencies = [
+ "bm-sdk",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "bm-cli"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "bm-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bm-core"
 version = "0.1.0"
 dependencies = [
@@ -31,6 +60,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "bm-http"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bm-mcp"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bm-mqtt"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "bm-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bm-replay"
 version = "0.1.0"
 dependencies = [
@@ -47,6 +104,8 @@ version = "0.1.0"
 dependencies = [
  "bm-core",
  "bm-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -58,6 +117,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "bm-wss"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "bm-sdk",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

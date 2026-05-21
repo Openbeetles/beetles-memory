@@ -1,0 +1,35 @@
+{
+  "schema": "beetle-memory.platform.target-gates.v1",
+  "gates": [
+    {
+      "profile": "profile-esp-standalone-memory",
+      "target": "xtensa-esp32s3-espidf",
+      "package": "bm-sdk",
+      "features": ["profile-esp-standalone-memory"]
+    },
+    {
+      "profile": "profile-esp-embedded-sdk",
+      "target": "xtensa-esp32s3-espidf",
+      "package": "bm-sdk",
+      "features": ["profile-esp-embedded-sdk"]
+    },
+    {
+      "profile": "profile-linux-device-standalone-memory",
+      "target": "aarch64-unknown-linux-gnu",
+      "package": "bm-sdk",
+      "features": ["profile-linux-device-standalone-memory"]
+    },
+    {
+      "profile": "profile-server-linux-memory-gateway",
+      "target": "x86_64-unknown-linux-gnu",
+      "package": "bm-sdk",
+      "features": ["profile-server-linux-memory-gateway"]
+    },
+    {
+      "profile": "profile-desktop-windows-embedded-sdk",
+      "target": "x86_64-pc-windows-msvc",
+      "package": "bm-sdk",
+      "features": ["profile-desktop-windows-embedded-sdk"]
+    }
+  ]
+}

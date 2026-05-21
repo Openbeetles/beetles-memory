@@ -21,6 +21,9 @@
 - [dev-docs/store-backend-schema-plan.md](dev-docs/store-backend-schema-plan.md)：Store Backend + Schema 阶段实施真源。
 - [dev-docs/runtime-lifecycle-plan.md](dev-docs/runtime-lifecycle-plan.md)：Runtime Lifecycle 阶段实施真源。
 - [dev-docs/replay-sandbox-plan.md](dev-docs/replay-sandbox-plan.md)：Replay / Harness / Evolution Sandbox 阶段实施真源。
+- [dev-docs/adapter-communication-plan.md](dev-docs/adapter-communication-plan.md)：Adapter / Communication 阶段实施与验收真源。
+- [dev-docs/platform-compile-gates-plan.md](dev-docs/platform-compile-gates-plan.md)：Platform Compile Gates 阶段验收真源。
+- [dev-docs/release-surface-plan.md](dev-docs/release-surface-plan.md)：Release Surface 阶段实施与验收真源。
 - [dev-docs/procedural-memory-and-skill.md](dev-docs/procedural-memory-and-skill.md)：skill / procedural memory 边界。
 - [dev-docs/profile-and-platform-boundary.md](dev-docs/profile-and-platform-boundary.md)：profile 与平台边界。
 - [dev-docs/soul-and-subject-memory-boundary.md](dev-docs/soul-and-subject-memory-boundary.md)：灵魂治理与主体记忆边界。
@@ -28,6 +31,17 @@
 - [dev-docs/beetle-source-audit-and-capability-map.md](dev-docs/beetle-source-audit-and-capability-map.md)：Beetle 代码真源审计。
 - [dev-docs/full-port-plan.md](dev-docs/full-port-plan.md)：Beetle 记忆真源完整搬迁与验收真源。
 - [dev-docs/post-port-roadmap.md](dev-docs/post-port-roadmap.md)：完整搬迁后的后续实施路线图。
+
+## Public Docs
+
+- [docs/api.md](docs/api.md)：公开 crate / API surface。
+- [docs/sdk-quickstart.md](docs/sdk-quickstart.md)：非来源项目 SDK 接入 quickstart。
+- [docs/profile-matrix.md](docs/profile-matrix.md)：七个 first-class profile 的裁剪矩阵。
+- [docs/store-backends.md](docs/store-backends.md)：store backend 选择、约束和 ownership boundary。
+- [docs/replay-migration.md](docs/replay-migration.md)：replay、snapshot migration 和 evolution proposal 边界。
+- [docs/adapter-contract.md](docs/adapter-contract.md)：SDK / CLI / HTTP / Webhook / WSS / MQTT / MCP / A2A adapter 合同。
+- [docs/operator-inspection.md](docs/operator-inspection.md)：operator inspection、recover、close 和 lifecycle diagnosis。
+- [docs/release-checklist.md](docs/release-checklist.md)：release metadata、feature matrix、package audit 和 publish dry-run 清单。
 
 ## 一等目标
 
@@ -55,7 +69,7 @@
 - `crates/replay`：当前提供 fixture schema、SDK-driven runner、cross-store replay、memory harness gate、benchmark gate 和 profile validation capability，不引入某个宿主特权。
 - `crates/evolve`：当前提供 proposal-only evolution sandbox 合同、profile policy 和 SDK write governance commit helper；sandbox 不直接写 store。
 
-当前未实现外部通信 adapter；HTTP、Webhook、WSS、MQTT、MCP、CLI 仍只在文档中固定边界，不能在内核里分叉记忆语义。
+Adapter / Communication 协议合同层已落地，见 [dev-docs/adapter-communication-plan.md](dev-docs/adapter-communication-plan.md)。`bm-adapter` 是协议无关 command/envelope/policy/report 合同层；`bm-cli`、`bm-http`、`bm-wss`、`bm-mqtt`、`bm-mcp`、`bm-a2a` 只作为 thin adapter 消费 `MemoryRuntime`，不能在内核外分叉记忆语义。当前不引入真实网络 server/listener 依赖。
 
 当前第一轮代码质量治理已经完成：SDK-only host contract 已补齐，sqlite/index 后端改为显式 `sqlite-index` feature，ESP standalone / embedded SDK profile 不再拉入 `rusqlite`，未使用的 `base64` / `urlencoding` 已移除。
 
@@ -67,4 +81,8 @@ Runtime Lifecycle 已落地：`bm-core::runtime` 已提供 `RuntimeLifecycleEngi
 
 Replay / Harness / Evolution Sandbox 已落地：`bm-replay` 已提供 fixture/runner/harness/benchmark gate，`bm-evolve` 已提供 proposal-only sandbox 与 SDK commit helper，validation capability 已区分 ESP standalone、ESP embedded SDK、Linux device、desktop、server profile。本阶段验收脚本为 `bash scripts/check_replay_sandbox_contract.sh`。
 
-当前下一阶段只能进入 Adapter / Communication 真源核对与落地；外部通信 adapter、UI 和协议 server 仍不得提前进入内核或分叉记忆语义。
+Platform Compile Gates 已落地，见 [dev-docs/platform-compile-gates-plan.md](dev-docs/platform-compile-gates-plan.md)：SDK / adapter profile feature forwarding、七个 first-class profile 的 capability snapshot、dependency budget、cross-target host gate 和总验收脚本已经进入工程门禁。具备 ESP、Linux、Windows 目标工具链的 CI / release 环境继续运行 strict target gate。
+
+Release Surface 已落地，见 [dev-docs/release-surface-plan.md](dev-docs/release-surface-plan.md)：公开 API 文档、SDK quickstart、profile matrix、store / replay / adapter / operator guide、六个非来源项目 examples、license/package metadata、publish dry-run 和 `scripts/check_release_surface.sh` 已进入发布面门禁。
+
+当前主线已经完成完整搬迁后的 SDK/Profile、Store、Runtime、Replay/Sandbox、Adapter/Communication、Platform Gates 和 Release Surface 闭环；下一阶段必须另起真源文档定义，不能把 UI、管理控制台、executor、workflow runner、skill marketplace、来源项目专属 adapter 或真实网络 listener 直接塞入当前主线。

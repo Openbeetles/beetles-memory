@@ -1,0 +1,99 @@
+{
+  "schema": "beetle-memory.platform.capability.v1",
+  "profile": "profile-esp-embedded-sdk",
+  "target": "target-esp",
+  "role": "role-embedded-sdk",
+  "compiled": {
+    "target_esp": true,
+    "target_linux_device": false,
+    "target_desktop_macos": false,
+    "target_desktop_windows": false,
+    "target_server_linux": false,
+    "role_standalone_memory": false,
+    "role_embedded_sdk": true,
+    "role_memory_gateway": false,
+    "role_dev_full": false,
+    "replay_harness_compiled": false,
+    "sqlite_index_compiled": false,
+    "rusqlite_dependency_compiled": false
+  },
+  "memory": {
+    "write": true,
+    "recall": true,
+    "projection": true,
+    "maintenance": false,
+    "inspection": true,
+    "replay": false,
+    "export": false,
+    "import": false
+  },
+  "lifecycle": {
+    "recover": false,
+    "maintain_full": false,
+    "maintain_lightweight": false,
+    "operator_diagnosis": true,
+    "export_snapshot": false,
+    "import_snapshot": false,
+    "replay_inspection": false
+  },
+  "validation": {
+    "compact_replay_fixture": false,
+    "memory_harness": false,
+    "full_replay_suite": false,
+    "benchmark_gate": false,
+    "proposal_preview": true,
+    "compact_proposal_sandbox": false,
+    "full_proposal_sandbox": false,
+    "proposal_submission": false
+  },
+  "adapter": {
+    "cli": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "http": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "webhook": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "wss": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "mqtt": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "mcp": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "a2a": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
+    }
+  },
+  "indexed_recall": {
+    "archive": false,
+    "continuity_capsule": false,
+    "runtime_skill": false,
+    "task_learning": false
+  }
+}

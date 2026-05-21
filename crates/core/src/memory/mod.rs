@@ -697,7 +697,7 @@ pub trait RemindAtStore: Send + Sync {
     ) -> Result<Vec<crate::reminder::ReminderItem>>;
 }
 
-/// 情绪信号存储。本轮模型输出带 [SIGNAL:comfort] 时 set，下一轮 build_context 时 get_then_clear 注入 system 后清除。
+/// 情绪信号存储。本轮模型输出带 \[SIGNAL:comfort\] 时 set，下一轮 build_context 时 get_then_clear 注入 system 后清除。
 pub trait EmotionSignalStore: Send + Sync {
     fn set(&self, chat_id: &str, signal: &str) -> Result<()>;
     fn get_then_clear(&self, chat_id: &str) -> Result<Option<String>>;

@@ -5,16 +5,25 @@ members = [
     "crates/sdk",
     "crates/replay",
     "crates/evolve",
+    "crates/adapter",
+    "crates/cli",
+    "crates/http",
+    "crates/wss",
+    "crates/mqtt",
+    "crates/mcp",
+    "crates/a2a",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
+license = "Apache-2.0"
 
 [workspace.dependencies]
-bm-core = { path = "crates/core" }
-bm-store = { path = "crates/store" }
-bm-sdk = { path = "crates/sdk" }
+bm-core = { version = "0.1.0", path = "crates/core" }
+bm-store = { version = "0.1.0", path = "crates/store" }
+bm-sdk = { version = "0.1.0", path = "crates/sdk" }
+bm-adapter = { version = "0.1.0", path = "crates/adapter" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"

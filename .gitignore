@@ -1,4 +1,7 @@
 /AGENTS.md
 /skills/
 /dev-docs/
+/examples/*/Cargo.lock
+/examples/*/target/
+/memory/
 /target/

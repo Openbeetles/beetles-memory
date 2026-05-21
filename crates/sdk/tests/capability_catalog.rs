@@ -20,6 +20,12 @@ fn esp_standalone_and_embedded_sdk_have_distinct_visible_catalogs() {
     assert!(standalone.lifecycle.operator_diagnosis.visible);
     assert!(!standalone.sqlite_index_recall.archive.visible);
     assert!(!standalone.communication_adapter.visible);
+    assert!(standalone.adapter.cli.profile_allowed);
+    assert!(!standalone.adapter.cli.visible);
+    assert!(standalone.adapter.wss.client_allowed);
+    assert!(!standalone.adapter.wss.server_allowed);
+    assert!(standalone.adapter.mqtt.client_allowed);
+    assert!(!standalone.adapter.mqtt.server_allowed);
     assert_eq!(
         standalone.validation.compact_replay_fixture.visible,
         standalone.validation.compact_replay_fixture.compiled
@@ -44,6 +50,9 @@ fn esp_standalone_and_embedded_sdk_have_distinct_visible_catalogs() {
     assert!(!embedded.replay.visible);
     assert!(!embedded.sqlite_index_recall.archive.visible);
     assert!(!embedded.communication_adapter.visible);
+    assert!(!embedded.adapter.cli.profile_allowed);
+    assert!(!embedded.adapter.wss.profile_allowed);
+    assert!(!embedded.adapter.mqtt.profile_allowed);
     assert!(!embedded.validation.compact_replay_fixture.visible);
     assert!(embedded.validation.proposal_preview.visible);
     assert!(!embedded.validation.compact_proposal_sandbox.visible);
@@ -63,6 +72,15 @@ fn server_gateway_can_surface_adapter_permission_without_creating_adapter_code()
     assert!(catalog.communication_adapter.profile_allowed);
     assert!(catalog.communication_adapter.config_enabled);
     assert!(catalog.communication_adapter.visible);
+    assert!(catalog.adapter.http.visible);
+    assert!(catalog.adapter.http.server_allowed);
+    assert!(catalog.adapter.webhook.visible);
+    assert!(catalog.adapter.webhook.client_allowed);
+    assert!(catalog.adapter.webhook.server_allowed);
+    assert!(catalog.adapter.wss.visible);
+    assert!(catalog.adapter.mqtt.visible);
+    assert!(catalog.adapter.mcp.visible);
+    assert!(catalog.adapter.a2a.visible);
     assert_eq!(
         catalog.validation.full_replay_suite.visible,
         catalog.validation.full_replay_suite.compiled

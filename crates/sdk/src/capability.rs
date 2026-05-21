@@ -19,6 +19,7 @@ pub struct MemoryCapabilityPolicy {
     pub replay_harness_enabled: bool,
     pub evolution_sandbox_enabled: bool,
     pub communication_adapter_enabled: bool,
+    pub adapter: MemoryAdapterCapabilityPolicy,
 }
 
 impl MemoryCapabilityPolicy {
@@ -36,6 +37,32 @@ impl MemoryCapabilityPolicy {
             replay_harness_enabled: true,
             evolution_sandbox_enabled: true,
             communication_adapter_enabled: false,
+            adapter: MemoryAdapterCapabilityPolicy::all_enabled(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryAdapterCapabilityPolicy {
+    pub cli_enabled: bool,
+    pub http_enabled: bool,
+    pub webhook_enabled: bool,
+    pub wss_enabled: bool,
+    pub mqtt_enabled: bool,
+    pub mcp_enabled: bool,
+    pub a2a_enabled: bool,
+}
+
+impl MemoryAdapterCapabilityPolicy {
+    pub const fn all_enabled() -> Self {
+        Self {
+            cli_enabled: true,
+            http_enabled: true,
+            webhook_enabled: true,
+            wss_enabled: true,
+            mqtt_enabled: true,
+            mcp_enabled: true,
+            a2a_enabled: true,
         }
     }
 }
@@ -128,6 +155,60 @@ impl MemoryRuntimeLifecycleCapability {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdapterTransportVisibility {
+    pub profile_allowed: bool,
+    pub compiled: bool,
+    pub config_enabled: bool,
+    pub permission_allowed: bool,
+    pub privacy_allowed: bool,
+    pub client_allowed: bool,
+    pub server_allowed: bool,
+    pub private_data_allowed: bool,
+    pub visible: bool,
+}
+
+impl AdapterTransportVisibility {
+    pub const fn hidden() -> Self {
+        Self {
+            profile_allowed: false,
+            compiled: false,
+            config_enabled: false,
+            permission_allowed: false,
+            privacy_allowed: false,
+            client_allowed: false,
+            server_allowed: false,
+            private_data_allowed: false,
+            visible: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryAdapterCapabilityCatalog {
+    pub cli: AdapterTransportVisibility,
+    pub http: AdapterTransportVisibility,
+    pub webhook: AdapterTransportVisibility,
+    pub wss: AdapterTransportVisibility,
+    pub mqtt: AdapterTransportVisibility,
+    pub mcp: AdapterTransportVisibility,
+    pub a2a: AdapterTransportVisibility,
+}
+
+impl MemoryAdapterCapabilityCatalog {
+    pub const fn hidden() -> Self {
+        Self {
+            cli: AdapterTransportVisibility::hidden(),
+            http: AdapterTransportVisibility::hidden(),
+            webhook: AdapterTransportVisibility::hidden(),
+            wss: AdapterTransportVisibility::hidden(),
+            mqtt: AdapterTransportVisibility::hidden(),
+            mcp: AdapterTransportVisibility::hidden(),
+            a2a: AdapterTransportVisibility::hidden(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryValidationCapability {
     pub compact_replay_fixture: MemoryOperationVisibility,
@@ -170,6 +251,7 @@ pub struct MemoryCapabilityCatalog {
     pub export: MemoryOperationVisibility,
     pub import: MemoryOperationVisibility,
     pub communication_adapter: MemoryOperationVisibility,
+    pub adapter: MemoryAdapterCapabilityCatalog,
     pub sqlite_index_recall: MemoryIndexedRecallVisibility,
     pub lifecycle: MemoryRuntimeLifecycleCapability,
     pub validation: MemoryValidationCapability,
@@ -191,6 +273,7 @@ impl MemoryCapabilityCatalog {
             export: MemoryOperationVisibility::hidden(),
             import: MemoryOperationVisibility::hidden(),
             communication_adapter: MemoryOperationVisibility::hidden(),
+            adapter: MemoryAdapterCapabilityCatalog::hidden(),
             sqlite_index_recall: MemoryIndexedRecallVisibility::hidden(),
             lifecycle: MemoryRuntimeLifecycleCapability::hidden(),
             validation: MemoryValidationCapability::hidden(),
@@ -260,6 +343,43 @@ impl MemoryCapabilityCatalog {
                 true,
                 true,
             ),
+            adapter: MemoryAdapterCapabilityCatalog {
+                cli: adapter_visible(
+                    entry.adapter.cli,
+                    policy.communication_adapter_enabled && policy.adapter.cli_enabled,
+                    true,
+                ),
+                http: adapter_visible(
+                    entry.adapter.http,
+                    policy.communication_adapter_enabled && policy.adapter.http_enabled,
+                    true,
+                ),
+                webhook: adapter_visible(
+                    entry.adapter.webhook,
+                    policy.communication_adapter_enabled && policy.adapter.webhook_enabled,
+                    true,
+                ),
+                wss: adapter_visible(
+                    entry.adapter.wss,
+                    policy.communication_adapter_enabled && policy.adapter.wss_enabled,
+                    true,
+                ),
+                mqtt: adapter_visible(
+                    entry.adapter.mqtt,
+                    policy.communication_adapter_enabled && policy.adapter.mqtt_enabled,
+                    true,
+                ),
+                mcp: adapter_visible(
+                    entry.adapter.mcp,
+                    policy.communication_adapter_enabled && policy.adapter.mcp_enabled,
+                    true,
+                ),
+                a2a: adapter_visible(
+                    entry.adapter.a2a,
+                    policy.communication_adapter_enabled && policy.adapter.a2a_enabled,
+                    true,
+                ),
+            },
             lifecycle: MemoryRuntimeLifecycleCapability {
                 recover: visible(
                     profile_kind.recover_allowed,
@@ -447,6 +567,24 @@ fn indexed_visible(
         true,
         true,
     )
+}
+
+fn adapter_visible(
+    profile: bm_core::feature_gate::ProfileAdapterTransportCapability,
+    config_enabled: bool,
+    compiled: bool,
+) -> AdapterTransportVisibility {
+    AdapterTransportVisibility {
+        profile_allowed: profile.allowed,
+        compiled,
+        config_enabled,
+        permission_allowed: true,
+        privacy_allowed: true,
+        client_allowed: profile.client_allowed,
+        server_allowed: profile.server_allowed,
+        private_data_allowed: profile.private_data_allowed,
+        visible: profile.allowed && compiled && config_enabled,
+    }
 }
 
 #[derive(Clone, Copy)]

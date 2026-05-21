@@ -1,0 +1,27 @@
+[package]
+name = "bm-adapter"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Protocol-neutral adapter command and envelope contracts for Beetle Memory."
+documentation = "https://docs.rs/bm-adapter"
+
+[lib]
+name = "bm_adapter"
+path = "src/lib.rs"
+
+[features]
+default = []
+profile-esp-standalone-memory = ["bm-sdk/profile-esp-standalone-memory"]
+profile-esp-embedded-sdk = ["bm-sdk/profile-esp-embedded-sdk"]
+profile-linux-device-standalone-memory = ["bm-sdk/profile-linux-device-standalone-memory"]
+profile-desktop-macos-embedded-sdk = ["bm-sdk/profile-desktop-macos-embedded-sdk"]
+profile-desktop-windows-embedded-sdk = ["bm-sdk/profile-desktop-windows-embedded-sdk"]
+profile-server-linux-memory-gateway = ["bm-sdk/profile-server-linux-memory-gateway"]
+profile-server-linux-dev-full = ["bm-sdk/profile-server-linux-dev-full"]
+
+[dependencies]
+bm-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

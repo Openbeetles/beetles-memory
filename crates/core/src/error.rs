@@ -52,7 +52,7 @@ pub enum Error {
 }
 
 impl Error {
-    fn nested_beetle_error(&self) -> Option<&Error> {
+    fn nested_memory_error(&self) -> Option<&Error> {
         match self {
             Error::Nvs {
                 source: Some(source),
@@ -137,7 +137,7 @@ impl Error {
     pub fn is_tls_admission(&self) -> bool {
         self.stage() == "tls_admission"
             || self
-                .nested_beetle_error()
+                .nested_memory_error()
                 .is_some_and(|source| source.is_tls_admission())
     }
 
@@ -158,7 +158,7 @@ impl Error {
         };
         local
             || self
-                .nested_beetle_error()
+                .nested_memory_error()
                 .is_some_and(|source| source.is_connect_error())
     }
 
@@ -183,7 +183,7 @@ impl Error {
         if self.stage() == "tls_admission" || self.is_connect_error() {
             return self.stage();
         }
-        self.nested_beetle_error()
+        self.nested_memory_error()
             .map(|source| source.metrics_stage())
             .unwrap_or_else(|| self.stage())
     }

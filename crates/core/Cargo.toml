@@ -2,6 +2,9 @@
 name = "bm-core"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
+description = "Core memory planes, recall, projection, lifecycle, and feature contracts for Beetle Memory."
+documentation = "https://docs.rs/bm-core"
 
 [lib]
 name = "bm_core"

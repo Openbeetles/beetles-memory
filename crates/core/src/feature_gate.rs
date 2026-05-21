@@ -111,6 +111,73 @@ pub struct ProfileCapabilityCatalogEntry {
     pub indexed_runtime_skill_recall_allowed: bool,
     pub indexed_task_learning_recall_allowed: bool,
     pub communication_adapter_allowed: bool,
+    pub adapter: ProfileAdapterCapabilityCatalog,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProfileAdapterTransportCapability {
+    pub allowed: bool,
+    pub client_allowed: bool,
+    pub server_allowed: bool,
+    pub private_data_allowed: bool,
+}
+
+impl ProfileAdapterTransportCapability {
+    pub const fn forbidden() -> Self {
+        Self {
+            allowed: false,
+            client_allowed: false,
+            server_allowed: false,
+            private_data_allowed: false,
+        }
+    }
+
+    pub const fn local(private_data_allowed: bool) -> Self {
+        Self {
+            allowed: true,
+            client_allowed: false,
+            server_allowed: false,
+            private_data_allowed,
+        }
+    }
+
+    pub const fn client(private_data_allowed: bool) -> Self {
+        Self {
+            allowed: true,
+            client_allowed: true,
+            server_allowed: false,
+            private_data_allowed,
+        }
+    }
+
+    pub const fn server(private_data_allowed: bool) -> Self {
+        Self {
+            allowed: true,
+            client_allowed: false,
+            server_allowed: true,
+            private_data_allowed,
+        }
+    }
+
+    pub const fn bidirectional(private_data_allowed: bool) -> Self {
+        Self {
+            allowed: true,
+            client_allowed: true,
+            server_allowed: true,
+            private_data_allowed,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProfileAdapterCapabilityCatalog {
+    pub cli: ProfileAdapterTransportCapability,
+    pub http: ProfileAdapterTransportCapability,
+    pub webhook: ProfileAdapterTransportCapability,
+    pub wss: ProfileAdapterTransportCapability,
+    pub mqtt: ProfileAdapterTransportCapability,
+    pub mcp: ProfileAdapterTransportCapability,
+    pub a2a: ProfileAdapterTransportCapability,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,7 +252,16 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         indexed_continuity_capsule_recall_allowed: false,
         indexed_runtime_skill_recall_allowed: false,
         indexed_task_learning_recall_allowed: false,
-        communication_adapter_allowed: false,
+        communication_adapter_allowed: true,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(false),
+            http: ProfileAdapterTransportCapability::forbidden(),
+            webhook: ProfileAdapterTransportCapability::forbidden(),
+            wss: ProfileAdapterTransportCapability::client(false),
+            mqtt: ProfileAdapterTransportCapability::client(false),
+            mcp: ProfileAdapterTransportCapability::forbidden(),
+            a2a: ProfileAdapterTransportCapability::forbidden(),
+        },
     },
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::EspEmbeddedSdk,
@@ -200,6 +276,15 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         indexed_runtime_skill_recall_allowed: false,
         indexed_task_learning_recall_allowed: false,
         communication_adapter_allowed: false,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::forbidden(),
+            http: ProfileAdapterTransportCapability::forbidden(),
+            webhook: ProfileAdapterTransportCapability::forbidden(),
+            wss: ProfileAdapterTransportCapability::forbidden(),
+            mqtt: ProfileAdapterTransportCapability::forbidden(),
+            mcp: ProfileAdapterTransportCapability::forbidden(),
+            a2a: ProfileAdapterTransportCapability::forbidden(),
+        },
     },
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::LinuxDeviceStandaloneMemory,
@@ -213,7 +298,16 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         indexed_continuity_capsule_recall_allowed: true,
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
-        communication_adapter_allowed: false,
+        communication_adapter_allowed: true,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(false),
+            http: ProfileAdapterTransportCapability::server(false),
+            webhook: ProfileAdapterTransportCapability::bidirectional(false),
+            wss: ProfileAdapterTransportCapability::bidirectional(false),
+            mqtt: ProfileAdapterTransportCapability::bidirectional(false),
+            mcp: ProfileAdapterTransportCapability::forbidden(),
+            a2a: ProfileAdapterTransportCapability::forbidden(),
+        },
     },
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::DesktopMacosEmbeddedSdk,
@@ -227,7 +321,16 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         indexed_continuity_capsule_recall_allowed: true,
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
-        communication_adapter_allowed: false,
+        communication_adapter_allowed: true,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(true),
+            http: ProfileAdapterTransportCapability::server(true),
+            webhook: ProfileAdapterTransportCapability::client(false),
+            wss: ProfileAdapterTransportCapability::bidirectional(true),
+            mqtt: ProfileAdapterTransportCapability::client(false),
+            mcp: ProfileAdapterTransportCapability::bidirectional(true),
+            a2a: ProfileAdapterTransportCapability::forbidden(),
+        },
     },
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::DesktopWindowsEmbeddedSdk,
@@ -241,7 +344,16 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         indexed_continuity_capsule_recall_allowed: true,
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
-        communication_adapter_allowed: false,
+        communication_adapter_allowed: true,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(true),
+            http: ProfileAdapterTransportCapability::server(true),
+            webhook: ProfileAdapterTransportCapability::client(false),
+            wss: ProfileAdapterTransportCapability::bidirectional(true),
+            mqtt: ProfileAdapterTransportCapability::client(false),
+            mcp: ProfileAdapterTransportCapability::bidirectional(true),
+            a2a: ProfileAdapterTransportCapability::forbidden(),
+        },
     },
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::ServerLinuxMemoryGateway,
@@ -256,6 +368,15 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(true),
+            http: ProfileAdapterTransportCapability::server(true),
+            webhook: ProfileAdapterTransportCapability::bidirectional(false),
+            wss: ProfileAdapterTransportCapability::bidirectional(false),
+            mqtt: ProfileAdapterTransportCapability::bidirectional(false),
+            mcp: ProfileAdapterTransportCapability::server(false),
+            a2a: ProfileAdapterTransportCapability::bidirectional(false),
+        },
     },
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::ServerLinuxDevFull,
@@ -270,5 +391,14 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(true),
+            http: ProfileAdapterTransportCapability::server(true),
+            webhook: ProfileAdapterTransportCapability::bidirectional(false),
+            wss: ProfileAdapterTransportCapability::bidirectional(false),
+            mqtt: ProfileAdapterTransportCapability::bidirectional(false),
+            mcp: ProfileAdapterTransportCapability::server(false),
+            a2a: ProfileAdapterTransportCapability::bidirectional(false),
+        },
     },
 ];
