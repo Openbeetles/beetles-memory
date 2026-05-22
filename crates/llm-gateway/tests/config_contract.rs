@@ -86,6 +86,7 @@ fn provider_config_uses_secret_env_not_plaintext_api_key() {
         api_key_env: Some("VLLM_API_KEY".to_string()),
         model_aliases: vec![("local".to_string(), "qwen2.5".to_string())],
         timeout_ms: Some(30_000),
+        ollama_generate_system_supported: true,
     };
 
     assert_eq!(provider.secret_env_name(), Some("VLLM_API_KEY"));

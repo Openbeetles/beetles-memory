@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use bm_sdk::{MemoryProjectionRequest, RuntimeLifecycleModeInput};
 use serde_json::{Map, Value};
 
+use crate::provider::select_provider_for_kind;
 use crate::{
     maintenance::{
         run_json_maintenance, GatewayMaintenancePlan, GatewayMaintenancePlanInput,
@@ -259,17 +260,6 @@ pub trait OpenAiCompatibleUpstream {
     ) -> Result<OpenAiUpstreamResponse>;
 }
 
-impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {
-    fn from(value: GatewayMaintenanceRunOutcome) -> Self {
-        match value {
-            GatewayMaintenanceRunOutcome::Succeeded => Self::Succeeded,
-            GatewayMaintenanceRunOutcome::Failed => Self::Failed,
-            GatewayMaintenanceRunOutcome::Skipped => Self::Skipped,
-            GatewayMaintenanceRunOutcome::NotExecuted => Self::NotExecuted,
-        }
-    }
-}
-
 pub fn handle_openai_request(
     gateway: &GatewayRuntime,
     config: &GatewayConfig,
@@ -287,19 +277,12 @@ pub fn handle_openai_request_with_services(
     upstream: &mut dyn OpenAiCompatibleUpstream,
     services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OpenAiGatewayResponse> {
-    let provider_name = request
-        .provider_name
-        .as_deref()
-        .unwrap_or(config.default_provider.as_str());
-    let provider = config
-        .providers
-        .get(provider_name)
-        .ok_or_else(|| GatewayError::provider_unavailable("provider is not configured"))?;
-    if provider.kind != GatewayProviderKind::OpenAiCompatible {
-        return Err(GatewayError::provider_unavailable(
-            "provider is not openai-compatible",
-        ));
-    }
+    let provider = select_provider_for_kind(
+        config,
+        request.provider_name.as_deref(),
+        GatewayProviderKind::OpenAiCompatible,
+        "openai-compatible",
+    )?;
 
     match (request.method, request.path.as_str()) {
         (OpenAiGatewayMethod::Get, "/v1/models") => {

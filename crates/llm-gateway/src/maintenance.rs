@@ -9,7 +9,7 @@ use bm_sdk::{
 };
 use serde_json::{json, Value};
 
-use crate::{GatewayMaintenanceConfig, GatewayProviderConfig};
+use crate::{GatewayAuditOutcome, GatewayMaintenanceConfig, GatewayProviderConfig};
 
 pub struct OpenAiGatewayServices<'a> {
     maintenance_http: Option<&'a mut dyn LlmHttpClient>,
@@ -81,6 +81,10 @@ impl GatewayMaintenancePlan {
         }
     }
 
+    pub(crate) fn config(&self) -> GatewayMaintenanceConfig {
+        self.config
+    }
+
     fn task_from_snapshot(&self, snapshot: MaintenanceSnapshot) -> GatewayMaintenanceTask {
         GatewayMaintenanceTask {
             runtime: Arc::clone(&self.runtime),
@@ -98,6 +102,17 @@ impl GatewayMaintenancePlan {
                 mode_input: self.mode_input,
             },
             enabled: self.config.enabled,
+        }
+    }
+}
+
+impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {
+    fn from(value: GatewayMaintenanceRunOutcome) -> Self {
+        match value {
+            GatewayMaintenanceRunOutcome::Succeeded => Self::Succeeded,
+            GatewayMaintenanceRunOutcome::Failed => Self::Failed,
+            GatewayMaintenanceRunOutcome::Skipped => Self::Skipped,
+            GatewayMaintenanceRunOutcome::NotExecuted => Self::NotExecuted,
         }
     }
 }
@@ -174,6 +189,26 @@ pub(crate) fn run_json_maintenance(
     accumulator.observe_json_response(body);
     plan.task_from_snapshot(accumulator.into_snapshot())
         .run(services)
+}
+
+pub(crate) fn run_text_maintenance(
+    plan: GatewayMaintenancePlan,
+    reply_content: String,
+    tool_calls: u32,
+    reuse_outcome_note: String,
+    services: &mut OpenAiGatewayServices<'_>,
+) -> GatewayMaintenanceRunOutcome {
+    let config = plan.config;
+    plan.task_from_snapshot(MaintenanceSnapshot {
+        reply_content: bound_text(
+            &reply_content,
+            config.reply_max_chars,
+            config.reply_max_bytes,
+        ),
+        tool_calls,
+        reuse_outcome_note,
+    })
+    .run(services)
 }
 
 #[derive(Debug, Default)]
@@ -352,7 +387,7 @@ struct OpenAiToolCallParts {
     arguments: String,
 }
 
-struct BoundedText {
+pub(crate) struct BoundedText {
     text: String,
     max_chars: usize,
     max_bytes: usize,
@@ -360,7 +395,7 @@ struct BoundedText {
 }
 
 impl BoundedText {
-    fn new(max_chars: usize, max_bytes: usize) -> Self {
+    pub(crate) fn new(max_chars: usize, max_bytes: usize) -> Self {
         Self {
             text: String::new(),
             max_chars,
@@ -369,7 +404,7 @@ impl BoundedText {
         }
     }
 
-    fn push_str(&mut self, value: &str) {
+    pub(crate) fn push_str(&mut self, value: &str) {
         for ch in value.chars() {
             if self.chars >= self.max_chars {
                 break;
@@ -383,7 +418,7 @@ impl BoundedText {
         }
     }
 
-    fn into_string(self) -> String {
+    pub(crate) fn into_string(self) -> String {
         self.text.trim().to_string()
     }
 }

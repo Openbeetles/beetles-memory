@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{GatewayConfig, GatewayError, Result};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayProviderKind {
@@ -17,6 +19,8 @@ pub struct GatewayProviderConfig {
     pub model_aliases: Vec<(String, String)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub ollama_generate_system_supported: bool,
 }
 
 impl GatewayProviderConfig {
@@ -27,6 +31,7 @@ impl GatewayProviderConfig {
             api_key_env: api_key_env.map(str::to_string),
             model_aliases: Vec::new(),
             timeout_ms: None,
+            ollama_generate_system_supported: true,
         }
     }
 
@@ -37,10 +42,53 @@ impl GatewayProviderConfig {
             api_key_env: None,
             model_aliases: Vec::new(),
             timeout_ms: None,
+            ollama_generate_system_supported: true,
         }
     }
 
     pub fn secret_env_name(&self) -> Option<&str> {
         self.api_key_env.as_deref()
     }
+}
+
+pub(crate) fn select_provider_for_kind<'a>(
+    config: &'a GatewayConfig,
+    provider_name: Option<&str>,
+    kind: GatewayProviderKind,
+    protocol: &str,
+) -> Result<&'a GatewayProviderConfig> {
+    if let Some(provider_name) = provider_name {
+        let provider = config
+            .providers
+            .get(provider_name)
+            .ok_or_else(|| GatewayError::provider_unavailable("provider is not configured"))?;
+        if provider.kind != kind {
+            return Err(GatewayError::provider_unavailable(format!(
+                "provider is not {protocol}"
+            )));
+        }
+        return Ok(provider);
+    }
+
+    if let Some(provider) = config.providers.get(&config.default_provider) {
+        if provider.kind == kind {
+            return Ok(provider);
+        }
+    }
+
+    config
+        .providers
+        .values()
+        .find(|provider| provider.kind == kind)
+        .ok_or_else(|| {
+            GatewayError::provider_unavailable(format!("{protocol} provider is not configured"))
+        })
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }

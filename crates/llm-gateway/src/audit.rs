@@ -31,6 +31,7 @@ pub struct GatewayAuditReport {
     pub model_alias: String,
     pub scope: GatewayScopeResolution,
     pub stages: Vec<GatewayAuditStageReport>,
+    pub notes: Vec<String>,
 }
 
 impl GatewayAuditReport {
@@ -48,10 +49,18 @@ impl GatewayAuditReport {
             model_alias: model_alias.into(),
             scope,
             stages: Vec::new(),
+            notes: Vec::new(),
         }
     }
 
     pub fn record_stage(&mut self, stage: GatewayAuditStage, outcome: GatewayAuditOutcome) {
         self.stages.push(GatewayAuditStageReport { stage, outcome });
+    }
+
+    pub fn record_note(&mut self, note: impl Into<String>) {
+        let note = note.into();
+        if !note.trim().is_empty() {
+            self.notes.push(note);
+        }
     }
 }
