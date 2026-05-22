@@ -19,6 +19,7 @@ pub struct GatewayConfig {
     pub scope: GatewayScopeResolverConfig,
     pub runtime_cache: GatewayRuntimeCacheConfig,
     pub projection: GatewayProjectionConfig,
+    pub maintenance: GatewayMaintenanceConfig,
     pub audit: GatewayAuditConfig,
 }
 
@@ -65,6 +66,27 @@ impl Default for GatewayProjectionConfig {
             system_max_len: 8192,
             recent_messages_limit: 32,
             pressure: PressureLevel::Normal,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatewayMaintenanceConfig {
+    pub enabled: bool,
+    pub user_max_chars: usize,
+    pub user_max_bytes: usize,
+    pub reply_max_chars: usize,
+    pub reply_max_bytes: usize,
+}
+
+impl Default for GatewayMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            user_max_chars: 8192,
+            user_max_bytes: 16 * 1024,
+            reply_max_chars: 8192,
+            reply_max_bytes: 16 * 1024,
         }
     }
 }
@@ -117,6 +139,7 @@ impl GatewayConfig {
             scope: GatewayScopeResolverConfig::default_for_local_dev(),
             runtime_cache: GatewayRuntimeCacheConfig::default(),
             projection: GatewayProjectionConfig::default(),
+            maintenance: GatewayMaintenanceConfig::default(),
             audit: GatewayAuditConfig::default(),
         }
     }
@@ -135,6 +158,16 @@ impl GatewayConfig {
         if self.projection.recent_messages_limit == 0 {
             return Err(GatewayError::invalid_config(
                 "projection.recent_messages_limit must be greater than zero",
+            ));
+        }
+        if self.maintenance.user_max_chars == 0 || self.maintenance.user_max_bytes == 0 {
+            return Err(GatewayError::invalid_config(
+                "maintenance user accumulator limits must be greater than zero",
+            ));
+        }
+        if self.maintenance.reply_max_chars == 0 || self.maintenance.reply_max_bytes == 0 {
+            return Err(GatewayError::invalid_config(
+                "maintenance reply accumulator limits must be greater than zero",
             ));
         }
         if !self.providers.contains_key(&self.default_provider) {

@@ -4,9 +4,9 @@ use std::io::{Read, Write};
 use serde_json::json;
 
 use crate::{
-    handle_openai_request, GatewayConfig, GatewayError, GatewayErrorKey, GatewayRuntime,
-    GatewayScopeRequest, OpenAiCompatibleUpstream, OpenAiGatewayBody, OpenAiGatewayMethod,
-    OpenAiGatewayRequest, Result,
+    handle_openai_request_with_services, GatewayConfig, GatewayError, GatewayErrorKey,
+    GatewayRuntime, GatewayScopeRequest, OpenAiCompatibleUpstream, OpenAiGatewayBody,
+    OpenAiGatewayMethod, OpenAiGatewayRequest, OpenAiGatewayServices, Result,
 };
 
 pub fn serve_openai_http_stream<S: Read + Write>(
@@ -15,9 +15,20 @@ pub fn serve_openai_http_stream<S: Read + Write>(
     upstream: &mut dyn OpenAiCompatibleUpstream,
     stream: &mut S,
 ) -> Result<()> {
+    let mut services = OpenAiGatewayServices::new();
+    serve_openai_http_stream_with_services(gateway, config, upstream, &mut services, stream)
+}
+
+pub fn serve_openai_http_stream_with_services<S: Read + Write>(
+    gateway: &GatewayRuntime,
+    config: &GatewayConfig,
+    upstream: &mut dyn OpenAiCompatibleUpstream,
+    services: &mut OpenAiGatewayServices<'_>,
+    stream: &mut S,
+) -> Result<()> {
     let request = read_openai_http_request(stream)?;
-    match handle_openai_request(gateway, config, request, upstream) {
-        Ok(response) => write_openai_http_response(stream, response),
+    match handle_openai_request_with_services(gateway, config, request, upstream, services) {
+        Ok(response) => write_openai_http_response(stream, response, services),
         Err(error) => write_openai_error_response(stream, &error),
     }
 }
@@ -110,9 +121,10 @@ fn read_openai_http_request(stream: &mut impl Read) -> Result<OpenAiGatewayReque
 
 fn write_openai_http_response(
     stream: &mut impl Write,
-    response: crate::OpenAiGatewayResponse,
+    mut response: crate::OpenAiGatewayResponse,
+    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<()> {
-    match response.body {
+    match &mut response.body {
         OpenAiGatewayBody::Json(body) => {
             let body = body.to_string();
             write!(
@@ -128,7 +140,7 @@ fn write_openai_http_response(
                 .flush()
                 .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))
         }
-        OpenAiGatewayBody::Sse(mut body) => {
+        OpenAiGatewayBody::Sse(body) => {
             write!(
                 stream,
                 "HTTP/1.1 {} {}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n",
@@ -144,6 +156,7 @@ fn write_openai_http_response(
                     .flush()
                     .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
             }
+            response.finish_deferred_maintenance(services);
             Ok(())
         }
     }

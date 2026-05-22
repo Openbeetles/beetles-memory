@@ -25,6 +25,9 @@ fi
 if contract_rg_match 'bm_core::|bm_store::' crates/llm-gateway/src crates/llm-gateway/tests; then
   fail "bm-llm-gateway must not import core/store internals"
 fi
+if contract_rg_match 'MemoryWriteRequest|AdapterOperation::Write|runtime\(\)\.write\(' crates/llm-gateway/src; then
+  fail "bm-llm-gateway post-reply maintenance must not bypass SDK maintain with raw writes"
+fi
 
 for manifest in crates/http/Cargo.toml crates/wss/Cargo.toml crates/mcp/Cargo.toml crates/a2a/Cargo.toml; do
   if contract_rg_match 'bm-llm-gateway|bm_llm_gateway' "$manifest"; then

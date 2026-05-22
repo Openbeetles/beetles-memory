@@ -1,7 +1,8 @@
 use std::net::TcpListener;
 
 use bm_llm_gateway::{
-    serve_openai_http_stream, GatewayConfig, GatewayProviderConfig, GatewayRuntime,
+    serve_openai_http_stream_with_services, GatewayConfig, GatewayProviderConfig, GatewayRuntime,
+    OpenAiGatewayServices, OpenAiMaintenanceLlmClient, ReqwestGatewayLlmHttpClient,
     ReqwestOpenAiCompatibleUpstream,
 };
 
@@ -24,8 +25,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for stream in listener.incoming() {
         let mut stream = stream?;
         let mut upstream = ReqwestOpenAiCompatibleUpstream::new()?;
-        if let Err(error) = serve_openai_http_stream(&gateway, &config, &mut upstream, &mut stream)
-        {
+        let mut maintenance_http = ReqwestGatewayLlmHttpClient::new()?;
+        let maintenance_provider = config
+            .providers
+            .get(&config.default_provider)
+            .expect("validated default provider")
+            .clone();
+        let maintenance_model = std::env::var("BM_LLM_GATEWAY_MAINTENANCE_MODEL")
+            .unwrap_or_else(|_| "local".to_string());
+        let maintenance_llm =
+            OpenAiMaintenanceLlmClient::new(maintenance_provider, maintenance_model);
+        let mut services =
+            OpenAiGatewayServices::new().with_maintenance(&mut maintenance_http, &maintenance_llm);
+        if let Err(error) = serve_openai_http_stream_with_services(
+            &gateway,
+            &config,
+            &mut upstream,
+            &mut services,
+            &mut stream,
+        ) {
             eprintln!("bm-llm-gateway request failed: {error}");
         }
     }

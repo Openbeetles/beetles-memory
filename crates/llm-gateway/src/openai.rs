@@ -4,9 +4,13 @@ use bm_sdk::{MemoryProjectionRequest, RuntimeLifecycleModeInput};
 use serde_json::{Map, Value};
 
 use crate::{
+    maintenance::{
+        run_json_maintenance, GatewayMaintenancePlan, GatewayMaintenancePlanInput,
+        GatewayMaintenanceRunOutcome, OpenAiDeferredMaintenance,
+    },
     GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayConfig, GatewayError,
     GatewayProviderConfig, GatewayProviderKind, GatewayRuntime, GatewayScopeRequest,
-    GatewayScopeResolver, Result,
+    GatewayScopeResolver, OpenAiGatewayServices, Result,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +63,34 @@ pub struct OpenAiGatewayResponse {
     pub audit: GatewayAuditReport,
 }
 
+impl OpenAiGatewayResponse {
+    pub fn finish_deferred_maintenance(&mut self, services: &mut OpenAiGatewayServices<'_>) {
+        if let Some(outcome) = self.body.finish_deferred_maintenance(services) {
+            self.audit
+                .record_stage(GatewayAuditStage::Maintenance, outcome);
+        }
+    }
+
+    fn prepare_post_reply_maintenance(
+        &mut self,
+        plan: GatewayMaintenancePlan,
+        services: &mut OpenAiGatewayServices<'_>,
+    ) {
+        match &mut self.body {
+            OpenAiGatewayBody::Json(body) => {
+                let outcome = run_json_maintenance(plan, body, services);
+                self.audit
+                    .record_stage(GatewayAuditStage::Maintenance, outcome.into());
+            }
+            OpenAiGatewayBody::Sse(body) => {
+                let placeholder = OpenAiSseBody::buffered(Vec::new());
+                let owned = std::mem::replace(body, placeholder);
+                *body = owned.with_deferred_maintenance(plan);
+            }
+        }
+    }
+}
+
 pub enum OpenAiGatewayBody {
     Json(Value),
     Sse(OpenAiSseBody),
@@ -91,6 +123,18 @@ impl OpenAiGatewayBody {
             Self::Sse(_) => None,
         }
     }
+
+    fn finish_deferred_maintenance(
+        &mut self,
+        services: &mut OpenAiGatewayServices<'_>,
+    ) -> Option<GatewayAuditOutcome> {
+        match self {
+            Self::Json(_) => None,
+            Self::Sse(body) => body
+                .finish_deferred_maintenance(services)
+                .map(GatewayAuditOutcome::from),
+        }
+    }
 }
 
 pub trait OpenAiSseStream: Send {
@@ -99,6 +143,7 @@ pub trait OpenAiSseStream: Send {
 
 pub struct OpenAiSseBody {
     source: OpenAiSseSource,
+    deferred_maintenance: Option<Box<OpenAiDeferredMaintenance>>,
 }
 
 enum OpenAiSseSource {
@@ -110,13 +155,20 @@ impl OpenAiSseBody {
     pub fn buffered(chunks: Vec<String>) -> Self {
         Self {
             source: OpenAiSseSource::Buffered { chunks, offset: 0 },
+            deferred_maintenance: None,
         }
     }
 
     pub fn streaming(stream: Box<dyn OpenAiSseStream>) -> Self {
         Self {
             source: OpenAiSseSource::Streaming(stream),
+            deferred_maintenance: None,
         }
+    }
+
+    pub(crate) fn with_deferred_maintenance(mut self, plan: GatewayMaintenancePlan) -> Self {
+        self.deferred_maintenance = Some(Box::new(OpenAiDeferredMaintenance::new(plan)));
+        self
     }
 
     pub fn buffered_chunks(&self) -> Option<&[String]> {
@@ -127,17 +179,23 @@ impl OpenAiSseBody {
     }
 
     pub fn next_chunk(&mut self) -> Result<Option<String>> {
-        match &mut self.source {
+        let chunk = match &mut self.source {
             OpenAiSseSource::Buffered { chunks, offset } => {
                 if let Some(chunk) = chunks.get(*offset).cloned() {
                     *offset += 1;
-                    Ok(Some(chunk))
+                    Some(chunk)
                 } else {
-                    Ok(None)
+                    None
                 }
             }
-            OpenAiSseSource::Streaming(stream) => stream.next_chunk(),
+            OpenAiSseSource::Streaming(stream) => stream.next_chunk()?,
+        };
+        if let Some(chunk) = chunk.as_deref() {
+            if let Some(maintenance) = &mut self.deferred_maintenance {
+                maintenance.observe_sse_chunk(chunk);
+            }
         }
+        Ok(chunk)
     }
 
     pub fn collect_chunks(mut self) -> Result<Vec<String>> {
@@ -146,6 +204,15 @@ impl OpenAiSseBody {
             chunks.push(chunk);
         }
         Ok(chunks)
+    }
+
+    fn finish_deferred_maintenance(
+        &mut self,
+        services: &mut OpenAiGatewayServices<'_>,
+    ) -> Option<GatewayMaintenanceRunOutcome> {
+        self.deferred_maintenance
+            .take()
+            .map(|maintenance| maintenance.finish(services))
     }
 }
 
@@ -192,11 +259,33 @@ pub trait OpenAiCompatibleUpstream {
     ) -> Result<OpenAiUpstreamResponse>;
 }
 
+impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {
+    fn from(value: GatewayMaintenanceRunOutcome) -> Self {
+        match value {
+            GatewayMaintenanceRunOutcome::Succeeded => Self::Succeeded,
+            GatewayMaintenanceRunOutcome::Failed => Self::Failed,
+            GatewayMaintenanceRunOutcome::Skipped => Self::Skipped,
+            GatewayMaintenanceRunOutcome::NotExecuted => Self::NotExecuted,
+        }
+    }
+}
+
 pub fn handle_openai_request(
     gateway: &GatewayRuntime,
     config: &GatewayConfig,
     request: OpenAiGatewayRequest,
     upstream: &mut dyn OpenAiCompatibleUpstream,
+) -> Result<OpenAiGatewayResponse> {
+    let mut services = OpenAiGatewayServices::new();
+    handle_openai_request_with_services(gateway, config, request, upstream, &mut services)
+}
+
+pub fn handle_openai_request_with_services(
+    gateway: &GatewayRuntime,
+    config: &GatewayConfig,
+    request: OpenAiGatewayRequest,
+    upstream: &mut dyn OpenAiCompatibleUpstream,
+    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OpenAiGatewayResponse> {
     let provider_name = request
         .provider_name
@@ -217,7 +306,7 @@ pub fn handle_openai_request(
             handle_models(config, request, provider, upstream)
         }
         (OpenAiGatewayMethod::Post, "/v1/chat/completions") => {
-            handle_chat_completion(gateway, config, request, provider, upstream)
+            handle_chat_completion(gateway, config, request, provider, upstream, services)
         }
         _ => Err(GatewayError::invalid_request(
             "unsupported OpenAI gateway route",
@@ -253,6 +342,7 @@ fn handle_chat_completion(
     mut request: OpenAiGatewayRequest,
     provider: &GatewayProviderConfig,
     upstream: &mut dyn OpenAiCompatibleUpstream,
+    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OpenAiGatewayResponse> {
     let body = request
         .body
@@ -279,6 +369,8 @@ fn handle_chat_completion(
     );
     let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
     let extracted_user_text = extract_messages_text(body_object.get("messages"))?;
+    let external_content_used = request_uses_external_content(body_object.get("messages"))
+        || body_object.get("tools").is_some();
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
@@ -303,6 +395,17 @@ fn handle_chat_completion(
         .unwrap_or(false);
     let model = provider_model_name(provider, model_alias);
     let upstream_body = build_upstream_chat_body(&body, &projection.system_memory_block, &model)?;
+    let carry = projection.context.into_runtime_carry();
+    let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
+        runtime,
+        user_content: extracted_user_text.clone(),
+        external_content_used,
+        runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
+        task_learning_selected_ids: carry.task_recall_selected_ids,
+        pressure: config.projection.pressure,
+        mode_input: RuntimeLifecycleModeInput::default(),
+        config: config.maintenance,
+    });
     let upstream_request = OpenAiUpstreamRequest {
         endpoint: "/chat/completions".to_string(),
         body: upstream_body,
@@ -317,7 +420,9 @@ fn handle_chat_completion(
             GatewayError::upstream_unavailable(error.to_string())
         })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
+    let mut response = upstream_response_to_gateway(response, audit);
+    response.prepare_post_reply_maintenance(maintenance_plan, services);
+    Ok(response)
 }
 
 fn upstream_response_to_gateway(
@@ -388,6 +493,24 @@ fn extract_messages_text(messages: Option<&Value>) -> Result<String> {
         extract_content_text(message.get("content"), &mut parts);
     }
     Ok(parts.join("\n").trim().to_string())
+}
+
+fn request_uses_external_content(messages: Option<&Value>) -> bool {
+    let Some(messages) = messages.and_then(Value::as_array) else {
+        return false;
+    };
+    messages.iter().any(|message| {
+        matches!(message.get("role").and_then(Value::as_str), Some("tool"))
+            || message
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.get("type").and_then(Value::as_str) != Some("text"))
+                })
+                .unwrap_or(false)
+    })
 }
 
 fn extract_content_text(content: Option<&Value>, parts: &mut Vec<String>) {
