@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+source "$ROOT/scripts/lib_contract_checks.sh"
 
 budget_file="fixtures/platform/dependency-budgets.json"
 
@@ -89,15 +92,13 @@ adapter_manifests=(
   crates/wss/Cargo.toml
   crates/mcp/Cargo.toml
   crates/a2a/Cargo.toml
+  crates/llm-gateway/Cargo.toml
 )
 
 for manifest in "${adapter_manifests[@]}"; do
-  if rg -n '^(bm-core|bm-store)[[:space:]]*=' "$manifest" >/tmp/bm-adapter-direct-dep.$$; then
-    cat /tmp/bm-adapter-direct-dep.$$ >&2
-    rm -f /tmp/bm-adapter-direct-dep.$$
+  if contract_manifest_has_core_store_dependency "$manifest"; then
     fail "$manifest must not depend on bm-core or bm-store directly"
   fi
-  rm -f /tmp/bm-adapter-direct-dep.$$
 done
 
 protocol_manifests=(
@@ -108,12 +109,9 @@ protocol_manifests=(
 )
 
 for manifest in "${protocol_manifests[@]}"; do
-  if rg -n '^(tokio|hyper|axum|warp|tungstenite)[[:space:]]*=' "$manifest" >/tmp/bm-protocol-listener-dep.$$; then
-    cat /tmp/bm-protocol-listener-dep.$$ >&2
-    rm -f /tmp/bm-protocol-listener-dep.$$
+  if contract_manifest_has_protocol_listener_dependency "$manifest"; then
     fail "$manifest must not introduce real server/listener dependencies in the contract layer"
   fi
-  rm -f /tmp/bm-protocol-listener-dep.$$
 done
 
 echo "OK: platform dependency budget checks passed"

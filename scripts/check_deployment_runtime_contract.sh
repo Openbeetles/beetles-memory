@@ -4,10 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "check_deployment_runtime_contract: ripgrep (rg) is required" >&2
-  exit 1
-fi
+source "$ROOT/scripts/lib_contract_checks.sh"
 
 cargo test -p bm-http --features server-std --test http_runtime_contract
 cargo test -p bm-http --features server-std --test http_backend_contract
@@ -28,15 +25,14 @@ if rg -n "${removed_axum_feature}" \
   exit 1
 fi
 
-for crate in crates/http crates/wss crates/mcp crates/a2a; do
+for crate in crates/http crates/wss crates/mcp crates/a2a crates/llm-gateway; do
   if rg -n 'bm_core::|bm_store::|crates/core|crates/store' "$crate/src" >/tmp/bm-deployment-contract-hit 2>/dev/null; then
     echo "FAIL: transport backend must not import core/store directly: $crate" >&2
     cat /tmp/bm-deployment-contract-hit >&2
     exit 1
   fi
-  if rg -n '(^|\s)(bm-core|bm-store)\s*=' "$crate/Cargo.toml" >/tmp/bm-deployment-contract-hit 2>/dev/null; then
+  if contract_manifest_has_core_store_dependency "$crate/Cargo.toml"; then
     echo "FAIL: transport backend manifest must not depend on bm-core or bm-store directly: $crate" >&2
-    cat /tmp/bm-deployment-contract-hit >&2
     exit 1
   fi
 done

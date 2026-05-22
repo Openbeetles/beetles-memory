@@ -233,6 +233,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bm-llm-gateway"
+version = "0.1.0"
+dependencies = [
+ "bm-adapter",
+ "bm-entry",
+ "bm-sdk",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "bm-mcp"
 version = "0.1.0"
 dependencies = [
