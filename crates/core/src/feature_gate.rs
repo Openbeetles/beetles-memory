@@ -113,6 +113,7 @@ pub struct ProfileCapabilityCatalogEntry {
     pub indexed_runtime_skill_recall_allowed: bool,
     pub indexed_task_learning_recall_allowed: bool,
     pub communication_adapter_allowed: bool,
+    pub llm_gateway_server_allowed: bool,
     pub adapter: ProfileAdapterCapabilityCatalog,
 }
 
@@ -257,6 +258,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: false,
         indexed_task_learning_recall_allowed: false,
         communication_adapter_allowed: true,
+        llm_gateway_server_allowed: false,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(false),
             http: ProfileAdapterTransportCapability::forbidden(),
@@ -278,6 +280,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: false,
         indexed_task_learning_recall_allowed: false,
         communication_adapter_allowed: false,
+        llm_gateway_server_allowed: false,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::forbidden(),
             http: ProfileAdapterTransportCapability::forbidden(),
@@ -299,6 +302,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        llm_gateway_server_allowed: false,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(false),
             http: ProfileAdapterTransportCapability::server(false),
@@ -320,6 +324,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        llm_gateway_server_allowed: false,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -341,6 +346,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        llm_gateway_server_allowed: false,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -362,6 +368,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        llm_gateway_server_allowed: false,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -383,6 +390,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        llm_gateway_server_allowed: true,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -404,6 +412,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
         indexed_runtime_skill_recall_allowed: true,
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
+        llm_gateway_server_allowed: true,
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),

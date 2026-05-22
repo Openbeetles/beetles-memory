@@ -78,6 +78,7 @@ fn server_gateway_can_surface_adapter_permission_without_creating_adapter_code()
     assert!(catalog.entry.wss_server.visible);
     assert!(catalog.entry.mcp_server.visible);
     assert!(catalog.entry.a2a_bridge.visible);
+    assert!(catalog.entry.llm_gateway_server.visible);
     assert_eq!(
         catalog.validation.full_replay_suite.visible,
         catalog.validation.full_replay_suite.compiled
@@ -102,12 +103,51 @@ fn entry_runtime_visibility_distinguishes_esp_deployment_roles() {
     assert!(!standalone.entry.http_server.visible);
     assert!(!standalone.entry.mcp_server.visible);
     assert!(!standalone.entry.a2a_bridge.visible);
+    assert!(!standalone.entry.llm_gateway_server.visible);
 
     assert!(!embedded.entry.cli.visible);
     assert!(!embedded.entry.wss_client.visible);
     assert!(!embedded.entry.http_server.visible);
     assert!(!embedded.entry.mcp_server.visible);
     assert!(!embedded.entry.a2a_bridge.visible);
+    assert!(!embedded.entry.llm_gateway_server.visible);
+}
+
+#[test]
+fn llm_gateway_entry_is_limited_to_server_profiles() {
+    let mut policy = MemoryCapabilityPolicy::strict_profile();
+    policy.communication_adapter_enabled = true;
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+
+    for profile in [
+        ProfileId::ServerLinuxMemoryGateway,
+        ProfileId::ServerLinuxDevFull,
+    ] {
+        let catalog =
+            resolve_memory_capabilities(profile, &policy, &privacy).expect("server catalog");
+        assert!(
+            catalog.entry.llm_gateway_server.visible,
+            "{} should expose llm gateway server",
+            profile.as_str()
+        );
+    }
+
+    for profile in [
+        ProfileId::EspStandaloneMemory,
+        ProfileId::EspEmbeddedSdk,
+        ProfileId::LinuxDeviceStandaloneMemory,
+        ProfileId::DesktopMacosStandaloneMemory,
+        ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopWindowsEmbeddedSdk,
+    ] {
+        let catalog =
+            resolve_memory_capabilities(profile, &policy, &privacy).expect("non-server catalog");
+        assert!(
+            !catalog.entry.llm_gateway_server.visible,
+            "{} should hide llm gateway server",
+            profile.as_str()
+        );
+    }
 }
 
 #[test]

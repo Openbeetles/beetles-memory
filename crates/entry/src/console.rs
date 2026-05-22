@@ -796,6 +796,7 @@ fn store_label(backend: StoreBackendKind) -> &'static str {
 fn transports(config: &EntryTransportConfig) -> Vec<EntryConsoleTransport> {
     vec![
         transport("http", config.http_server, "0.0.0.0:8718"),
+        transport("llm-gateway", config.llm_gateway_server, "127.0.0.1:8787"),
         transport(
             "wss",
             config.wss_server || config.wss_client,

@@ -25,5 +25,8 @@ pub use console::{
 pub use error::EntryErrorKey;
 pub use idempotency::EntryIdempotencyCache;
 pub use response::{EntryResponse, EntryResponseStatus};
-pub use runtime::{entry_capability_view, EntryRuntime, EntryRuntimeConfig};
+pub use runtime::{
+    entry_capability_view, EntryRuntime, EntryRuntimeBaseConfig, EntryRuntimeConfig,
+    EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope,
+};
 pub use source::EntryTransportContext;

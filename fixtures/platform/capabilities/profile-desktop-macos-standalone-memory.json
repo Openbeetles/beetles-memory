@@ -114,6 +114,12 @@
       "client_allowed": false,
       "server_allowed": false,
       "private_data_allowed": false
+    },
+    "llm_gateway_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": false
     }
   },
   "indexed_recall": {

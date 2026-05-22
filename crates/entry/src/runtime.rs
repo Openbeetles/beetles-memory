@@ -1,9 +1,12 @@
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, Weak};
+
 use bm_adapter::{
     dispatch_adapter_command_with_services, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
     AdapterResponse, AdapterRuntimeServices,
 };
 use bm_sdk::{
-    resolve_memory_capabilities, Error, MemoryCapabilityPolicy, MemoryIdentity,
+    resolve_memory_capabilities, Error, MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity,
     MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemorySkillDeleteRequest,
     MemorySkillDetailRequest, MemorySkillListRequest, MemorySkillSetEnabledRequest,
     MemorySkillUpsertRequest, NoopMemoryAuditSink, ProfileId, Result, StoreBackendConfig,
@@ -20,6 +23,25 @@ use crate::{
     EntryResponse, EntryScope, EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
 };
 
+pub const DEFAULT_SCOPED_RUNTIME_CACHE_LIMIT: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryRuntimeBaseConfig {
+    pub profile: ProfileId,
+    pub store: EntryStoreConfig,
+    pub transports: EntryTransportConfig,
+    pub auth: EntryAuthConfig,
+    pub idempotency: EntryIdempotencyConfig,
+    pub privacy: MemoryPrivacyPolicy,
+    pub capability: MemoryCapabilityPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EntryRuntimeScope {
+    pub identity: EntryIdentity,
+    pub scope: EntryScope,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryRuntimeConfig {
     pub profile: ProfileId,
@@ -33,6 +55,143 @@ pub struct EntryRuntimeConfig {
     pub capability: MemoryCapabilityPolicy,
 }
 
+impl EntryRuntimeConfig {
+    pub fn base_config(&self) -> EntryRuntimeBaseConfig {
+        EntryRuntimeBaseConfig {
+            profile: self.profile,
+            store: self.store.clone(),
+            transports: self.transports.clone(),
+            auth: self.auth.clone(),
+            idempotency: self.idempotency.clone(),
+            privacy: self.privacy.clone(),
+            capability: self.capability.clone(),
+        }
+    }
+
+    pub fn runtime_scope(&self) -> EntryRuntimeScope {
+        EntryRuntimeScope {
+            identity: self.identity.clone(),
+            scope: self.scope.clone(),
+        }
+    }
+}
+
+pub struct EntryRuntimeFactory {
+    base: EntryRuntimeBaseConfig,
+    store: StorePlatform,
+}
+
+impl EntryRuntimeFactory {
+    pub fn open(base: EntryRuntimeBaseConfig) -> Result<Self> {
+        let store = open_store(&base.store, base.profile)?;
+        Ok(Self { base, store })
+    }
+
+    pub fn runtime_for_scope(&self, scope: EntryRuntimeScope) -> Result<EntryRuntime> {
+        let config = EntryRuntimeConfig {
+            profile: self.base.profile,
+            identity: scope.identity,
+            scope: scope.scope,
+            store: self.base.store.clone(),
+            transports: self.base.transports.clone(),
+            auth: self.base.auth.clone(),
+            idempotency: self.base.idempotency.clone(),
+            privacy: self.base.privacy.clone(),
+            capability: self.base.capability.clone(),
+        };
+        EntryRuntime::from_store_platform(config, self.store.clone())
+    }
+}
+
+pub struct EntryRuntimeManager {
+    factory: EntryRuntimeFactory,
+    max_runtimes: usize,
+    state: Mutex<EntryRuntimeManagerState>,
+}
+
+#[derive(Default)]
+struct EntryRuntimeManagerState {
+    cached: HashMap<EntryRuntimeScope, Arc<EntryRuntime>>,
+    active_evicted: HashMap<EntryRuntimeScope, Weak<EntryRuntime>>,
+    lru: VecDeque<EntryRuntimeScope>,
+}
+
+impl EntryRuntimeManager {
+    pub fn open(base: EntryRuntimeBaseConfig) -> Result<Self> {
+        Self::with_max_runtimes(base, DEFAULT_SCOPED_RUNTIME_CACHE_LIMIT)
+    }
+
+    pub fn with_max_runtimes(base: EntryRuntimeBaseConfig, max_runtimes: usize) -> Result<Self> {
+        if max_runtimes == 0 {
+            return Err(Error::config(
+                "entry_runtime_manager",
+                "max_runtimes must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            factory: EntryRuntimeFactory::open(base)?,
+            max_runtimes,
+            state: Mutex::new(EntryRuntimeManagerState::default()),
+        })
+    }
+
+    pub fn runtime_for_scope(&self, scope: EntryRuntimeScope) -> Result<Arc<EntryRuntime>> {
+        let mut close_after_unlock = Vec::new();
+        let mut state = self
+            .state
+            .lock()
+            .expect("entry runtime manager cache poisoned");
+        state.prune_dead_active_evicted();
+        if let Some(runtime) = state.cached.get(&scope).cloned() {
+            state.touch(&scope);
+            return Ok(Arc::clone(&runtime));
+        }
+        if let Some(runtime) = state.active_evicted.get(&scope).and_then(Weak::upgrade) {
+            return Ok(runtime);
+        }
+        state.active_evicted.remove(&scope);
+
+        let runtime = Arc::new(self.factory.runtime_for_scope(scope.clone())?);
+        while state.cached.len() >= self.max_runtimes {
+            let Some(oldest) = state.lru.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = state.cached.remove(&oldest) {
+                if Arc::strong_count(&evicted) == 1 {
+                    close_after_unlock.push(evicted);
+                } else {
+                    state
+                        .active_evicted
+                        .insert(oldest, Arc::downgrade(&evicted));
+                }
+            }
+        }
+        state.lru.push_back(scope.clone());
+        state.cached.insert(scope, Arc::clone(&runtime));
+        drop(state);
+        for evicted in close_after_unlock {
+            evicted.runtime.close(MemoryCloseRequest {
+                reason: "entry_runtime_manager_evicted".to_string(),
+            })?;
+        }
+        Ok(runtime)
+    }
+}
+
+impl EntryRuntimeManagerState {
+    fn touch(&mut self, scope: &EntryRuntimeScope) {
+        if let Some(index) = self.lru.iter().position(|candidate| candidate == scope) {
+            self.lru.remove(index);
+        }
+        self.lru.push_back(scope.clone());
+    }
+
+    fn prune_dead_active_evicted(&mut self) {
+        self.active_evicted
+            .retain(|_, runtime| runtime.strong_count() > 0);
+    }
+}
+
 pub struct EntryRuntime {
     config: EntryRuntimeConfig,
     runtime: MemoryRuntime,
@@ -43,7 +202,11 @@ pub struct EntryRuntime {
 
 impl EntryRuntime {
     pub fn open(config: EntryRuntimeConfig) -> Result<Self> {
-        let store = open_store(&config.store, config.profile)?;
+        let factory = EntryRuntimeFactory::open(config.base_config())?;
+        factory.runtime_for_scope(config.runtime_scope())
+    }
+
+    fn from_store_platform(config: EntryRuntimeConfig, store: StorePlatform) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
         let privacy = privacy_policy(config.privacy.clone());
         let runtime = MemoryRuntime::builder()
@@ -59,7 +222,7 @@ impl EntryRuntime {
             .store_platform(store)
             .capability_policy(capability_policy.clone())
             .privacy_policy(privacy.clone())
-            .audit_sink(std::sync::Arc::new(NoopMemoryAuditSink))
+            .audit_sink(Arc::new(NoopMemoryAuditSink))
             .build()?;
         let capability = entry_capability_view(
             config.profile,

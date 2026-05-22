@@ -87,6 +87,7 @@ pub struct PlatformEntryRuntimeSnapshot {
     pub wss_server: PlatformAdapterTransportSnapshot,
     pub mcp_server: PlatformAdapterTransportSnapshot,
     pub a2a_bridge: PlatformAdapterTransportSnapshot,
+    pub llm_gateway_server: PlatformAdapterTransportSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -187,6 +188,7 @@ pub fn platform_capability_snapshot(
             wss_server: adapter_snapshot(catalog.entry.wss_server),
             mcp_server: adapter_snapshot(catalog.entry.mcp_server),
             a2a_bridge: adapter_snapshot(catalog.entry.a2a_bridge),
+            llm_gateway_server: adapter_snapshot(catalog.entry.llm_gateway_server),
         },
         indexed_recall: PlatformIndexedRecallSnapshot {
             archive: catalog.sqlite_index_recall.archive.visible,

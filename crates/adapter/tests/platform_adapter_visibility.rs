@@ -36,4 +36,6 @@ fn server_gateway_adapter_visibility_stays_sdk_catalog_owned() {
     assert!(catalog.adapter.mcp.visible);
     assert!(catalog.adapter.mcp.server_allowed);
     assert!(catalog.adapter.a2a.visible);
+    assert!(catalog.entry.llm_gateway_server.visible);
+    assert!(catalog.entry.llm_gateway_server.server_allowed);
 }

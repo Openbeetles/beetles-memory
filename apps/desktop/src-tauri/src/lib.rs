@@ -71,6 +71,7 @@ impl DesktopConsoleState {
                 wss_server: false,
                 mcp_server: false,
                 a2a_bridge: false,
+                llm_gateway_server: false,
             },
             auth: EntryAuthConfig::disabled_for_local(),
             idempotency: EntryIdempotencyConfig { max_keys: 4096 },

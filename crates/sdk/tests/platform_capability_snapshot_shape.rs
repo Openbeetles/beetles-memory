@@ -33,4 +33,9 @@ fn snapshot_shape_is_stable_and_reviewable() {
     assert_eq!(value["memory"]["write"], true);
     assert_eq!(value["adapter"]["wss"]["client_allowed"], true);
     assert_eq!(value["adapter"]["wss"]["server_allowed"], false);
+    assert_eq!(value["entry"]["llm_gateway_server"]["visible"], false);
+    assert_eq!(
+        value["entry"]["llm_gateway_server"]["server_allowed"],
+        false
+    );
 }

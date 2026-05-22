@@ -174,6 +174,7 @@ fn capabilities_output_contains_runtime_validation_and_adapter_catalog() {
     assert!(output.contains("\"profile\""));
     assert!(output.contains("\"adapter\""));
     assert!(output.contains("\"entry\""));
+    assert!(output.contains("\"llm_gateway_server\""));
     assert!(output.contains("\"lifecycle\""));
     assert!(output.contains("\"validation\""));
     assert!(!output.contains("private_garden_raw"));

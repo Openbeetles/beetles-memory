@@ -7,7 +7,7 @@
 | 形态 | Profile | Entry surface |
 | --- | --- | --- |
 | 本地 CLI/operator 进程 | `profile-server-linux-dev-full` 或 host profile | `bm-cli` |
-| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP、WebSocket、MCP、A2A |
+| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP、WebSocket、MCP、A2A、LLM gateway server；具体 visible 取决于 enabled capability policy 和 `EntryTransportConfig` |
 | Linux 硬件设备 | `profile-linux-device-standalone-memory` | local CLI、loopback HTTP/WebSocket |
 | ESP standalone memory | `profile-esp-standalone-memory` | compact local/client surfaces with embedded store |
 
@@ -47,6 +47,8 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
     capability,
 })?;
 ```
+
+上面的运行时 view 之所以可以暴露 server entry surfaces，是因为示例显式设置了 `capability.communication_adapter_enabled = true`，并使用 `EntryTransportConfig::all_enabled()` 打开 transport。Profile 只表达允许关系；strict capability snapshot 仍可能显示 `server_allowed=true` 但 `visible=false`。
 
 生产环境应把 `disabled_for_local()` 替换为进程拥有的认证边界。当前 crate 暴露配置边界；你的部署应在请求被标记为 authenticated 之前完成 token、mTLS 或 gateway 认证。
 

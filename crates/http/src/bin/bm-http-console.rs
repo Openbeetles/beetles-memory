@@ -106,6 +106,7 @@ impl ConsoleServerOptions {
                 wss_server: true,
                 mcp_server: true,
                 a2a_bridge: true,
+                llm_gateway_server: false,
             },
             auth: EntryAuthConfig::disabled_for_local(),
             idempotency: EntryIdempotencyConfig { max_keys: 4096 },

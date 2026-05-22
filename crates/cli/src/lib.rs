@@ -182,6 +182,7 @@ pub fn render_capabilities(catalog: &MemoryCapabilityCatalog) -> serde_json::Res
             "wss_server": visibility_json(catalog.entry.wss_server.visible, catalog.entry.wss_server.client_allowed, catalog.entry.wss_server.server_allowed),
             "mcp_server": visibility_json(catalog.entry.mcp_server.visible, catalog.entry.mcp_server.client_allowed, catalog.entry.mcp_server.server_allowed),
             "a2a_bridge": visibility_json(catalog.entry.a2a_bridge.visible, catalog.entry.a2a_bridge.client_allowed, catalog.entry.a2a_bridge.server_allowed),
+            "llm_gateway_server": visibility_json(catalog.entry.llm_gateway_server.visible, catalog.entry.llm_gateway_server.client_allowed, catalog.entry.llm_gateway_server.server_allowed),
         },
         "lifecycle": {
             "recover": catalog.lifecycle.recover.visible,
