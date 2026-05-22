@@ -164,6 +164,7 @@ pub const fn profile_memory_system_kind(profile: ProfileId) -> MemorySystemKind 
         | ProfileId::DesktopWindowsEmbeddedSdk => MemorySystemKind::SdkEmbedded,
         ProfileId::EspStandaloneMemory
         | ProfileId::LinuxDeviceStandaloneMemory
+        | ProfileId::DesktopMacosStandaloneMemory
         | ProfileId::ServerLinuxMemoryGateway
         | ProfileId::ServerLinuxDevFull => MemorySystemKind::Standalone,
     }

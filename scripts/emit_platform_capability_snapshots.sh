@@ -28,6 +28,7 @@ profiles=(
   profile-esp-standalone-memory
   profile-esp-embedded-sdk
   profile-linux-device-standalone-memory
+  profile-desktop-macos-standalone-memory
   profile-desktop-macos-embedded-sdk
   profile-desktop-windows-embedded-sdk
   profile-server-linux-memory-gateway

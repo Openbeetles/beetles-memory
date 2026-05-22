@@ -77,6 +77,7 @@ pub enum ProfileId {
     EspStandaloneMemory,
     EspEmbeddedSdk,
     LinuxDeviceStandaloneMemory,
+    DesktopMacosStandaloneMemory,
     DesktopMacosEmbeddedSdk,
     DesktopWindowsEmbeddedSdk,
     ServerLinuxMemoryGateway,
@@ -89,6 +90,7 @@ impl ProfileId {
             Self::EspStandaloneMemory => "profile-esp-standalone-memory",
             Self::EspEmbeddedSdk => "profile-esp-embedded-sdk",
             Self::LinuxDeviceStandaloneMemory => "target-linux-device+role-standalone-memory",
+            Self::DesktopMacosStandaloneMemory => "target-desktop-macos+role-standalone-memory",
             Self::DesktopMacosEmbeddedSdk => "target-desktop-macos+role-embedded-sdk",
             Self::DesktopWindowsEmbeddedSdk => "target-desktop-windows+role-embedded-sdk",
             Self::ServerLinuxMemoryGateway => "target-server-linux+role-memory-gateway",
@@ -192,6 +194,7 @@ pub struct CompiledFeatureReport {
     pub profile_esp_standalone_memory: bool,
     pub profile_esp_embedded_sdk: bool,
     pub profile_linux_device_standalone_memory: bool,
+    pub profile_desktop_macos_standalone_memory: bool,
     pub profile_desktop_macos_embedded_sdk: bool,
     pub profile_desktop_windows_embedded_sdk: bool,
     pub profile_server_linux_memory_gateway: bool,
@@ -217,6 +220,9 @@ pub const fn compiled_feature_report() -> CompiledFeatureReport {
         profile_linux_device_standalone_memory: cfg!(
             feature = "profile-linux-device-standalone-memory"
         ),
+        profile_desktop_macos_standalone_memory: cfg!(
+            feature = "profile-desktop-macos-standalone-memory"
+        ),
         profile_desktop_macos_embedded_sdk: cfg!(feature = "profile-desktop-macos-embedded-sdk"),
         profile_desktop_windows_embedded_sdk: cfg!(
             feature = "profile-desktop-windows-embedded-sdk"
@@ -237,7 +243,7 @@ pub const fn profile_capability_catalog() -> &'static [ProfileCapabilityCatalogE
     &PROFILE_CAPABILITY_CATALOG
 }
 
-const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
+const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 8] = [
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::EspStandaloneMemory,
         target: TargetFeature::Esp,
@@ -298,6 +304,27 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 7] = [
             http: ProfileAdapterTransportCapability::server(false),
             wss: ProfileAdapterTransportCapability::bidirectional(false),
             mcp: ProfileAdapterTransportCapability::forbidden(),
+            a2a: ProfileAdapterTransportCapability::forbidden(),
+        },
+    },
+    ProfileCapabilityCatalogEntry {
+        profile: ProfileId::DesktopMacosStandaloneMemory,
+        target: TargetFeature::DesktopMacos,
+        role: RoleFeature::StandaloneMemory,
+        sqlite_index_allowed: true,
+        lexical_archive_recall: true,
+        heuristic_runtime_skill_recall: true,
+        heuristic_task_learning_recall: true,
+        indexed_archive_recall_allowed: true,
+        indexed_continuity_capsule_recall_allowed: true,
+        indexed_runtime_skill_recall_allowed: true,
+        indexed_task_learning_recall_allowed: true,
+        communication_adapter_allowed: true,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(true),
+            http: ProfileAdapterTransportCapability::server(true),
+            wss: ProfileAdapterTransportCapability::bidirectional(true),
+            mcp: ProfileAdapterTransportCapability::bidirectional(true),
             a2a: ProfileAdapterTransportCapability::forbidden(),
         },
     },

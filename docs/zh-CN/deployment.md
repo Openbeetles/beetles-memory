@@ -102,11 +102,29 @@ Standard-library HTTP helper 会读取这些 headers：
 }
 ```
 
+## macOS Desktop App
+
+macOS 独立桌面形态由 Tauri App 承载。它不是打开外部 HTTP console 的空壳；App 进程内直接打开 `EntryRuntime`、file store 和本地 lifecycle，并通过 Tauri command 调用同一套 console facade。用户不需要先启动 `bm-http-console`。
+
+开发态启动：
+
+```bash
+npm --prefix apps/desktop run dev
+```
+
+生产打包：
+
+```bash
+npm --prefix apps/desktop run build
+```
+
+Tauri 开发态会自动启动共享 `apps/console` 前端；生产打包会先构建 `apps/console/dist` 并把静态资源装入桌面 App。
+
 ## HTTP Console
 
 独立部署形态可以在同一 HTTP listener 上暴露配置台接口。Console routes 使用同一认证边界，但它们不是 memory operation routes；它们管理 entry 进程级配置和配置台观测状态。
 
-本仓库提供正式可执行入口 `bm-http-console`，用于 Mac / Linux / Windows 本地开发验证和非 SDK 独立部署的 HTTP console 进程。它不是 example，也不绕过内核；所有 `/console/*` 与 `/memory/*` 请求都进入同一个 `EntryRuntime`。
+本仓库提供正式可执行入口 `bm-http-console`，用于 Linux server、Linux device、非桌面部署、设备 HTTP console，以及需要显式验证 HTTP shell 的本地开发场景。它不是 macOS 桌面生产入口，不是 example，也不绕过内核；所有 `/console/*` 与 `/memory/*` 请求都进入同一个 `EntryRuntime`。
 
 ```bash
 cargo run -p bm-http --features server-std --bin bm-http-console -- \
@@ -114,7 +132,7 @@ cargo run -p bm-http --features server-std --bin bm-http-console -- \
   --store-path target/bm-http-console-store
 ```
 
-配置台前端开发态固定使用 `5176`，并把 `/console/*`、`/memory/*` 代理到 `127.0.0.1:8718`。因此 Mac 实机验证应同时启动正式 HTTP console 进程和前端开发服务器：
+HTTP shell 的前端开发态固定使用 `5176`，并把 `/console/*`、`/memory/*` 代理到 `127.0.0.1:8718`。这只验证 HTTP shell；macOS 桌面生产形态应使用上面的 Tauri 启动方式：
 
 ```bash
 npm --prefix apps/console run dev

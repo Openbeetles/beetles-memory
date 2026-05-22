@@ -110,6 +110,7 @@ pub const fn platform_profile_feature_id(profile: ProfileId) -> &'static str {
         ProfileId::EspStandaloneMemory => "profile-esp-standalone-memory",
         ProfileId::EspEmbeddedSdk => "profile-esp-embedded-sdk",
         ProfileId::LinuxDeviceStandaloneMemory => "profile-linux-device-standalone-memory",
+        ProfileId::DesktopMacosStandaloneMemory => "profile-desktop-macos-standalone-memory",
         ProfileId::DesktopMacosEmbeddedSdk => "profile-desktop-macos-embedded-sdk",
         ProfileId::DesktopWindowsEmbeddedSdk => "profile-desktop-windows-embedded-sdk",
         ProfileId::ServerLinuxMemoryGateway => "profile-server-linux-memory-gateway",

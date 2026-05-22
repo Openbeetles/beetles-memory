@@ -29,11 +29,11 @@ The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-
 - Inspect runtime state, lifecycle reports, and operator-safe recovery actions.
 - Export, import, and replay continuity snapshots.
 - Run through SDK, CLI, HTTP, WebSocket, MCP, or A2A adapter shells without duplicating memory semantics.
-- Compile for ESP, Linux hardware devices, macOS/Windows SDK hosts, and Linux server gateway profiles.
+- Compile for ESP, Linux hardware devices, the macOS standalone desktop app, macOS/Windows SDK hosts, and Linux server gateway profiles.
 
 ## Console Preview
 
-Standalone deployments include an HTTP console with Overview, Skill Memory, Communication, Devices, and Account pages. Skill Memory manages procedural memory records through the same `MemoryRuntime` governance path; it does not execute skills or install tools.
+Standalone deployments include a shared console UI that can run inside the macOS Tauri desktop app or the HTTP Console Shell. It includes Overview, Skill Memory, Communication, Devices, and Account pages. Skill Memory manages procedural memory records through the same `MemoryRuntime` governance path; it does not execute skills or install tools.
 
 | Runtime Status | Communication Setup |
 | --- | --- |
@@ -145,6 +145,7 @@ The documentation index is [docs/README.md](docs/README.md).
 | `profile-esp-standalone-memory` | ESP | standalone memory runtime | embedded or in-memory |
 | `profile-esp-embedded-sdk` | ESP | embedded SDK | embedded or in-memory |
 | `profile-linux-device-standalone-memory` | Linux hardware device | standalone memory runtime | file or sqlite |
+| `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file or sqlite |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file, sqlite, or in-memory |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file |

@@ -767,6 +767,9 @@ fn runtime_shape(config: &EntryRuntimeConfig) -> EntryConsoleRuntimeShape {
         profile: config.profile.as_str().to_string(),
         name: match config.profile {
             bm_sdk::ProfileId::LinuxDeviceStandaloneMemory => "Linux device standalone".to_string(),
+            bm_sdk::ProfileId::DesktopMacosStandaloneMemory => {
+                "macOS desktop standalone".to_string()
+            }
             bm_sdk::ProfileId::ServerLinuxMemoryGateway => {
                 "Linux server memory gateway".to_string()
             }

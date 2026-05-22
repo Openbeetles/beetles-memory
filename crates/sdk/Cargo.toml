@@ -29,6 +29,11 @@ profile-linux-device-standalone-memory = [
     "bm-core/sqlite-index",
     "bm-store/sqlite-store",
 ]
+profile-desktop-macos-standalone-memory = [
+    "bm-core/profile-desktop-macos-standalone-memory",
+    "bm-core/sqlite-index",
+    "bm-store/sqlite-store",
+]
 profile-desktop-macos-embedded-sdk = [
     "bm-core/profile-desktop-macos-embedded-sdk",
     "bm-core/sqlite-index",

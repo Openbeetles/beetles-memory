@@ -678,26 +678,26 @@ struct ProfileOperationDefaults {
 
 fn profile_kind(profile: ProfileId) -> ProfileOperationDefaults {
     match profile {
-        ProfileId::EspStandaloneMemory | ProfileId::LinuxDeviceStandaloneMemory => {
-            ProfileOperationDefaults {
-                recover_allowed: true,
-                maintenance_allowed: true,
-                maintenance_full_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
-                maintenance_lightweight_allowed: true,
-                inspection_allowed: true,
-                replay_allowed: false,
-                export_allowed: true,
-                import_allowed: true,
-                compact_replay_fixture_allowed: true,
-                memory_harness_allowed: true,
-                full_replay_suite_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
-                benchmark_gate_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
-                proposal_preview_allowed: true,
-                compact_proposal_sandbox_allowed: true,
-                full_proposal_sandbox_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
-                proposal_submission_allowed: true,
-            }
-        }
+        ProfileId::EspStandaloneMemory
+        | ProfileId::LinuxDeviceStandaloneMemory
+        | ProfileId::DesktopMacosStandaloneMemory => ProfileOperationDefaults {
+            recover_allowed: true,
+            maintenance_allowed: true,
+            maintenance_full_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+            maintenance_lightweight_allowed: true,
+            inspection_allowed: true,
+            replay_allowed: false,
+            export_allowed: true,
+            import_allowed: true,
+            compact_replay_fixture_allowed: true,
+            memory_harness_allowed: true,
+            full_replay_suite_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+            benchmark_gate_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+            proposal_preview_allowed: true,
+            compact_proposal_sandbox_allowed: true,
+            full_proposal_sandbox_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+            proposal_submission_allowed: true,
+        },
         ProfileId::EspEmbeddedSdk
         | ProfileId::DesktopMacosEmbeddedSdk
         | ProfileId::DesktopWindowsEmbeddedSdk => ProfileOperationDefaults {

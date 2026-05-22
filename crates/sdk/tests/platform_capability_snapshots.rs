@@ -5,11 +5,12 @@ use bm_sdk::{
 };
 use std::path::PathBuf;
 
-fn profiles() -> [ProfileId; 7] {
+fn profiles() -> [ProfileId; 8] {
     [
         ProfileId::EspStandaloneMemory,
         ProfileId::EspEmbeddedSdk,
         ProfileId::LinuxDeviceStandaloneMemory,
+        ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
         ProfileId::ServerLinuxMemoryGateway,
@@ -32,6 +33,8 @@ fn active_profile_feature() -> Option<ProfileId> {
         Some(ProfileId::EspEmbeddedSdk)
     } else if cfg!(feature = "profile-linux-device-standalone-memory") {
         Some(ProfileId::LinuxDeviceStandaloneMemory)
+    } else if cfg!(feature = "profile-desktop-macos-standalone-memory") {
+        Some(ProfileId::DesktopMacosStandaloneMemory)
     } else if cfg!(feature = "profile-desktop-macos-embedded-sdk") {
         Some(ProfileId::DesktopMacosEmbeddedSdk)
     } else if cfg!(feature = "profile-desktop-windows-embedded-sdk") {

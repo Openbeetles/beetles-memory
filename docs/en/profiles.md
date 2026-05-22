@@ -9,6 +9,7 @@ Profiles bind a target platform to a runtime role. They control feature selectio
 | `profile-esp-standalone-memory` | ESP | standalone memory | embedded or in-memory | compact entry surface plus local/client transports allowed by capability policy |
 | `profile-esp-embedded-sdk` | ESP | embedded SDK | embedded or in-memory | in-process SDK by default |
 | `profile-linux-device-standalone-memory` | Linux device | standalone memory | file or sqlite | local/device entry surface |
+| `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file or sqlite | in-process Tauri command surface plus optional local transports |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file | HTTP, WebSocket, MCP, and A2A gateway surfaces |

@@ -29,11 +29,11 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 - 检查运行状态、生命周期报告和 operator-safe recovery action。
 - 导出、导入并回放 continuity snapshot。
 - 通过 SDK、CLI、HTTP、WebSocket、MCP 或 A2A adapter shell 进入同一套记忆语义。
-- 面向 ESP、Linux 硬件设备、macOS/Windows SDK 宿主和 Linux server gateway profile 编译。
+- 面向 ESP、Linux 硬件设备、macOS 桌面独立 App、macOS/Windows SDK 宿主和 Linux server gateway profile 编译。
 
 ## 控制台预览
 
-独立部署形态提供 HTTP 配置台，页面包含总览、Skill 记忆、通信方式、开放设备和账户安全。Skill 记忆页通过同一套 `MemoryRuntime` governance 管理 procedural memory record，不执行 skill，也不安装工具。
+独立部署形态提供共享配置台页面，当前可由 macOS Tauri 桌面 App 或 HTTP Console Shell 承载。页面包含总览、Skill 记忆、通信方式、开放设备和账户安全。Skill 记忆页通过同一套 `MemoryRuntime` governance 管理 procedural memory record，不执行 skill，也不安装工具。
 
 | 运行状态 | 通信方式配置 |
 | --- | --- |
@@ -145,6 +145,7 @@ English documentation:
 | `profile-esp-standalone-memory` | ESP | standalone memory runtime | embedded 或 in-memory |
 | `profile-esp-embedded-sdk` | ESP | embedded SDK | embedded 或 in-memory |
 | `profile-linux-device-standalone-memory` | Linux 硬件设备 | standalone memory runtime | file 或 sqlite |
+| `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file 或 sqlite |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file、sqlite 或 in-memory |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file、sqlite 或 in-memory |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file |

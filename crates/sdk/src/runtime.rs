@@ -1122,6 +1122,7 @@ impl MemoryRuntime {
         match self.config.profile {
             ProfileId::EspStandaloneMemory | ProfileId::EspEmbeddedSdk => MemoryProfile::Embedded,
             ProfileId::LinuxDeviceStandaloneMemory
+            | ProfileId::DesktopMacosStandaloneMemory
             | ProfileId::DesktopMacosEmbeddedSdk
             | ProfileId::DesktopWindowsEmbeddedSdk
             | ProfileId::ServerLinuxMemoryGateway

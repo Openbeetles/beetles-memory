@@ -9,6 +9,7 @@ Profile 把目标平台和运行角色绑定在一起。它控制 feature select
 | `profile-esp-standalone-memory` | ESP | standalone memory | embedded 或 in-memory | capability policy 允许的 compact entry surface 和本地/client transport |
 | `profile-esp-embedded-sdk` | ESP | embedded SDK | embedded 或 in-memory | 默认 in-process SDK |
 | `profile-linux-device-standalone-memory` | Linux device | standalone memory | file 或 sqlite | 本地/device entry surface |
+| `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file 或 sqlite | in-process Tauri command surface 加可选本地 transport |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file | HTTP、WebSocket、MCP、A2A gateway surface |

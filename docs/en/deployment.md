@@ -102,11 +102,29 @@ Example recall body:
 }
 ```
 
+## macOS Desktop App
+
+The macOS standalone desktop shape is hosted by the Tauri app. It is not a wrapper around an external HTTP console; the app process opens `EntryRuntime`, the file store, and the local lifecycle directly, then calls the same console facade through Tauri commands. Users do not need to start `bm-http-console` first.
+
+Development:
+
+```bash
+npm --prefix apps/desktop run dev
+```
+
+Production bundle:
+
+```bash
+npm --prefix apps/desktop run build
+```
+
+Tauri development mode starts the shared `apps/console` frontend automatically. Production bundling builds `apps/console/dist` and embeds those static assets in the desktop app.
+
 ## HTTP Console
 
 Standalone deployments may expose the configuration console on the same HTTP listener. Console routes use the same authentication boundary, but they are not memory operation routes; they manage entry process configuration and console observability state.
 
-This repository provides the formal `bm-http-console` executable for Mac / Linux / Windows local verification and non-SDK standalone HTTP console deployments. It is not an example entry and it does not bypass the kernel; all `/console/*` and `/memory/*` requests enter the same `EntryRuntime`.
+This repository provides the formal `bm-http-console` executable for Linux server, Linux device, non-desktop deployments, device HTTP consoles, and local development scenarios that explicitly verify the HTTP shell. It is not the macOS desktop production entry, it is not an example entry, and it does not bypass the kernel; all `/console/*` and `/memory/*` requests enter the same `EntryRuntime`.
 
 ```bash
 cargo run -p bm-http --features server-std --bin bm-http-console -- \
@@ -114,7 +132,7 @@ cargo run -p bm-http --features server-std --bin bm-http-console -- \
   --store-path target/bm-http-console-store
 ```
 
-The console frontend dev server uses port `5176` and proxies `/console/*` and `/memory/*` to `127.0.0.1:8718`. Mac local verification should run the formal HTTP console process and the frontend dev server together:
+The HTTP shell frontend dev server uses port `5176` and proxies `/console/*` and `/memory/*` to `127.0.0.1:8718`. This verifies the HTTP shell only; the macOS desktop production shape should use the Tauri commands above:
 
 ```bash
 npm --prefix apps/console run dev

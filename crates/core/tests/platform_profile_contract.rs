@@ -6,6 +6,7 @@ fn every_first_class_profile_has_a_catalog_entry() {
         ProfileId::EspStandaloneMemory,
         ProfileId::EspEmbeddedSdk,
         ProfileId::LinuxDeviceStandaloneMemory,
+        ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
         ProfileId::ServerLinuxMemoryGateway,
@@ -20,6 +21,26 @@ fn every_first_class_profile_has_a_catalog_entry() {
             profile
         );
     }
+}
+
+#[test]
+fn macos_desktop_standalone_and_embedded_sdk_keep_distinct_runtime_roles() {
+    let catalog = profile_capability_catalog();
+    let standalone = catalog
+        .iter()
+        .find(|entry| entry.profile == ProfileId::DesktopMacosStandaloneMemory)
+        .expect("macOS standalone desktop profile");
+    let embedded = catalog
+        .iter()
+        .find(|entry| entry.profile == ProfileId::DesktopMacosEmbeddedSdk)
+        .expect("macOS embedded sdk profile");
+
+    assert_ne!(standalone.role, embedded.role);
+    assert!(standalone.communication_adapter_allowed);
+    assert!(standalone.adapter.cli.allowed);
+    assert!(standalone.adapter.http.server_allowed);
+    assert!(standalone.adapter.wss.allowed);
+    assert!(!embedded.adapter.a2a.allowed);
 }
 
 #[test]
