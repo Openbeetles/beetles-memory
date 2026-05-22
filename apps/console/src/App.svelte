@@ -11,6 +11,7 @@
     FileText,
     Globe2,
     KeyRound,
+    Languages,
     LockKeyhole,
     MemoryStick,
     Moon,
@@ -20,6 +21,7 @@
     RefreshCw,
     Search,
     Server,
+    Settings,
     ShieldCheck,
     Smartphone,
     Sun,
@@ -28,6 +30,9 @@
   } from "lucide-svelte";
   import { onMount } from "svelte";
   import type { Component } from "svelte";
+  import { apiJson } from "./api";
+
+  const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
   type PageId = "overview" | "skills" | "transports" | "devices" | "account";
   type StatusKind =
@@ -227,17 +232,12 @@
       labels: {
         console: "配置台",
         status: "状态",
-        shell: "配置壳",
         backendOffline: "后端未连接",
-        backendConnected: "已连接后端",
-        loggedIn: "已登录",
-        online: "在线",
-        offline: "离线",
         systemInfo: "系统信息",
         addressMode: "地址 / 模式",
       },
       actions: {
-        apply: "应用",
+        apply: "重启",
         dark: "夜间",
         light: "日间",
         language: "切换语言",
@@ -258,7 +258,7 @@
         { id: "skills", label: "Skill 记忆", eyebrow: "程序性记忆", title: "Skill 管理" },
         { id: "transports", label: "通信方式", count: "5", eyebrow: "通信入口", title: "通信方式配置" },
         { id: "devices", label: "开放设备", count: "4", eyebrow: "访问控制", title: "开放设备列表" },
-        { id: "account", label: "账户安全", eyebrow: "账户安全", title: "账户" },
+        { id: "account", label: "系统设置", eyebrow: "系统设置", title: "设置" },
       ] satisfies Page[],
       statusLabels: {
         ready: "可用",
@@ -273,11 +273,6 @@
         low_value: "低价值",
         retired: "已退役",
       } satisfies Record<StatusKind, string>,
-      runtimeShape: {
-        name: "Linux 设备独立部署",
-        store: "文件后端可用，嵌入式后端可裁剪",
-        shell: "HTTP 配置壳",
-      },
       overview: {
         storage: { title: "存储占用", value: "0 B / 0 B", desc: "当前系统占用 / 实际系统可用大小" },
         writes: { title: "今日写入", value: "0", desc: "等待后端运行数据" },
@@ -306,6 +301,12 @@
           { label: "记忆范围", value: "个人记忆" },
           { label: "会话状态", value: "已通过配对门禁" },
         ],
+      },
+      systemSettings: {
+        panel: "系统偏好",
+        title: "系统设置",
+        langLabel: "界面语言",
+        langOptions: { zh: "中文", en: "English" },
       },
       transportsPanel: { label: "通信入口", title: "通信方式与必要配置" },
       skillsPanel: {
@@ -425,17 +426,12 @@
       labels: {
         console: "Console",
         status: "Status",
-        shell: "Shell",
         backendOffline: "Backend offline",
-        backendConnected: "Backend connected",
-        loggedIn: "Signed in",
-        online: "Online",
-        offline: "Offline",
         systemInfo: "System Info",
         addressMode: "Address / Mode",
       },
       actions: {
-        apply: "Apply",
+        apply: "Restart",
         dark: "Dark",
         light: "Light",
         language: "Switch language",
@@ -456,7 +452,7 @@
         { id: "skills", label: "Skill Memory", eyebrow: "Procedural Memory", title: "Skill Management" },
         { id: "transports", label: "Communication", count: "5", eyebrow: "Entry Points", title: "Communication Setup" },
         { id: "devices", label: "Devices", count: "4", eyebrow: "Access Control", title: "Allowed Devices" },
-        { id: "account", label: "Account", eyebrow: "Account Security", title: "Account" },
+        { id: "account", label: "Settings", eyebrow: "System Settings", title: "Settings" },
       ] satisfies Page[],
       statusLabels: {
         ready: "Ready",
@@ -471,11 +467,6 @@
         low_value: "Low Value",
         retired: "Retired",
       } satisfies Record<StatusKind, string>,
-      runtimeShape: {
-        name: "Linux Device Standalone",
-        store: "File backend available, embedded backend can be trimmed",
-        shell: "HTTP Configuration Shell",
-      },
       overview: {
         storage: { title: "Storage Usage", value: "0 B / 0 B", desc: "Current usage / available system storage" },
         writes: { title: "Writes Today", value: "0", desc: "Waiting for backend runtime data" },
@@ -505,6 +496,12 @@
           { label: "Memory Scope", value: "Personal memory" },
           { label: "Session State", value: "Passed pairing gate" },
         ],
+      },
+      systemSettings: {
+        panel: "Preferences",
+        title: "System Settings",
+        langLabel: "Interface Language",
+        langOptions: { zh: "中文", en: "English" },
       },
       transportsPanel: { label: "Entry Points", title: "Communication Methods & Required Settings" },
       skillsPanel: {
@@ -647,7 +644,6 @@
   let skillOriginFilter: "all" | SkillOrigin = $state("all");
 
   const t = $derived(copy[lang]);
-  const runtimeShape = $derived(displayRuntimeShape(overviewData?.runtimeShape, t.runtimeShape, lang));
   const systemInfo = $derived(displaySystemInfo(overviewData?.systemInfo, lang));
   const enabledTransportCount = $derived(transports.filter((transport) => transport.enabled).length);
   const activeDeviceCount = $derived(devices.filter((device) => device.status !== "disabled").length);
@@ -661,7 +657,6 @@
     return page;
   }));
   const currentPage = $derived(pages.find((page) => page.id === activePage) ?? pages[0]);
-  const backendStatusLabel = $derived(backendConnected ? t.labels.backendConnected : t.labels.backendOffline);
 
   const overviewCards = $derived([
     {
@@ -697,6 +692,12 @@
   const recentEvents = $derived(localizedEvents(overviewData?.recentEvents, t.recentEvents, lang));
   const capabilityRows = $derived(localizedCapabilityRows(overviewData?.capabilities, t.capabilityRows, lang));
   const kernelRows = $derived(localizedKernelRows(overviewData?.kernel, t.kernel.rows, lang));
+  const systemInfoSpecs = $derived({
+    cpu:    systemInfo.cpu,
+    memory: systemInfo.memory,
+    date:   formatSystemTime(systemInfo.timeUnixSecs, lang).split(" ")[0] ?? "-",
+    time:   formatSystemTime(systemInfo.timeUnixSecs, lang).split(" ")[1] ?? "-",
+  });
 
   $effect(() => writeStorage(STORAGE_KEYS.theme, theme));
   $effect(() => writeStorage(STORAGE_KEYS.lang, lang));
@@ -712,22 +713,6 @@
   function sessionStateLabel(state: string, currentLang: Lang): string {
     if (state === "paired") return currentLang === "zh-CN" ? "已通过配对门禁" : "Paired";
     return state;
-  }
-
-  function displayRuntimeShape(api: ConsoleApiRuntimeShape | undefined, fallback: typeof copy["zh-CN"]["runtimeShape"], currentLang: Lang) {
-    if (!api) return fallback;
-    if (currentLang === "zh-CN") {
-      return {
-        name: profileLabel(api.profile, currentLang),
-        store: storeLabel(api.store, currentLang),
-        shell: "HTTP 配置壳",
-      };
-    }
-    return {
-      name: profileLabel(api.profile, currentLang) || api.name,
-      store: storeLabel(api.store, currentLang),
-      shell: api.shell,
-    };
   }
 
   function profileLabel(profile: string, currentLang: Lang): string {
@@ -871,9 +856,10 @@
   }
 
   function localizedKernelRows(rows: KVRow[] | undefined, fallback: KVRow[], currentLang: Lang): KVRow[] {
-    if (!rows || rows.length === 0) return fallback;
-    if (currentLang === "en") return rows;
-    return rows.map((row) => ({
+    const source = rows && rows.length > 0 ? rows : fallback;
+    const visibleRows = source.filter((row) => row.label !== "Console shell" && row.label !== "配置壳");
+    if (currentLang === "en") return visibleRows;
+    return visibleRows.map((row) => ({
       label: kernelLabel(row.label),
       value: kernelValue(row.label, row.value, currentLang),
     }));
@@ -899,7 +885,6 @@
     const labels: Record<string, string> = {
       Profile: "运行档位",
       "Store backend": "存储后端",
-      "Console shell": "配置壳",
     };
     return labels[label] ?? label;
   }
@@ -907,7 +892,6 @@
   function kernelValue(label: string, value: string, currentLang: Lang): string {
     if (label === "Profile") return profileLabel(value, currentLang);
     if (label === "Store backend") return storeLabel(value, currentLang);
-    if (label === "Console shell") return "HTTP 配置壳";
     return value;
   }
 
@@ -954,20 +938,6 @@
   onMount(() => {
     void loadConsoleData();
   });
-
-  async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const headers = new Headers(init.headers);
-    headers.set("content-type", "application/json");
-    headers.set("x-loopback", "true");
-    const response = await fetch(path, {
-      ...init,
-      headers,
-    });
-    if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}`);
-    }
-    return await response.json() as T;
-  }
 
   const fromApiTransport = (transport: ConsoleApiTransport): Transport => ({
     id: transport.id,
@@ -1305,14 +1275,16 @@
   </div>
 {/snippet}
 
-<main class:light={theme === "light"} class="shell">
+<main class:light={theme === "light"} class:tauri={isTauri} class="shell">
   <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-icon"><img src="/logo.png" alt="BM" /></div>
-      <div class="brand-text">
-        <span class="brand-name">{t.brand.name}</span>
-        <span class="brand-sub">{t.brand.sub}</span>
-      </div>
+    <div class="brand" data-tauri-drag-region>
+      {#if !isTauri}
+        <div class="brand-icon"><img src="/logo.png" alt="BM" /></div>
+        <div class="brand-text">
+          <span class="brand-name">{t.brand.name}</span>
+          <span class="brand-sub">{t.brand.sub}</span>
+        </div>
+      {/if}
     </div>
 
     <nav class="nav">
@@ -1329,16 +1301,10 @@
         </button>
       {/each}
     </nav>
-
-    <div class="sidebar-status">
-      <div class="ss-row"><span class="ss-label">{t.labels.status}</span><span class="ss-value ok">{t.labels.loggedIn}</span></div>
-      <div class="ss-row"><span class="ss-label">{t.labels.shell}</span><span class="ss-value">{runtimeShape.shell}</span></div>
-      <small class="ss-note">{backendStatusLabel}</small>
-    </div>
   </aside>
 
   <section class="workspace">
-    <header class="topbar">
+    <header class="topbar" data-tauri-drag-region>
       <div class="topbar-left">
         <div class="breadcrumb">
           <span>{t.labels.console}</span>
@@ -1349,52 +1315,47 @@
         </div>
       </div>
       <div class="top-actions">
-        <button class="ghost-button" type="button" onclick={() => (theme = theme === "light" ? "dark" : "light")}>
-          {#if theme === "light"}<Moon size={13} /> {t.actions.dark}{:else}<Sun size={13} /> {t.actions.light}{/if}
-        </button>
-        <select class="lang-select" bind:value={lang} aria-label={t.actions.language}>
-          <option value="zh-CN">{t.language.zh}</option>
-          <option value="en">{t.language.en}</option>
-        </select>
-        <button class="primary-button" type="button" onclick={loadConsoleData}><Power size={13} /> {t.actions.apply}</button>
       </div>
     </header>
 
     <div class="page-shell">
       {#if activePage === "overview"}
-        <section class="overview-grid">
-          {#each overviewCards as card, i}
-            {@const Icon = card.icon}
-            {#if i === 0}
-              <article class={`overview-card ${card.tone} featured`}>
-                <div class="oc-main">
-                  <div class="overview-card-head"><span>{card.title}</span></div>
-                  <strong>{card.value}</strong>
-                  <small>{card.desc}</small>
-                </div>
-                <div class="oc-deco">
-                  <Icon size={48} />
-                  <span class={`badge ${card.tone}`}>{card.tone === "ready" ? "READY" : "WARN"}</span>
-                </div>
-              </article>
-            {:else}
-              <article class={`overview-card ${card.tone}${i === overviewCards.length - 1 ? " wide" : ""}`}>
-                <div class="overview-card-head"><span>{card.title}</span><Icon size={18} /></div>
-                <strong>{card.value}</strong>
-                {#if card.progress !== null}
-                  <div class="hud-bar"><div class="hud-bar-fill" style="width:{card.progress}%"></div></div>
-                {/if}
-                <small>{card.desc}</small>
-              </article>
-            {/if}
-          {/each}
-        </section>
+        <!-- Hero: system identity -->
+        {@const heroCard = overviewCards[0]}
+        {@const HeroIcon = heroCard.icon}
+        <div class="hud-hero">
+          <div class="hud-hero-ident">
+            <em class="dot ready"></em>
+            <div class="hud-hero-text">
+              <strong class="hud-sysname">{heroCard.value}</strong>
+              <span class="hud-profile">{overviewData?.kernel?.profile ?? "—"}</span>
+            </div>
+          </div>
+          <div class="hud-hero-specs">
+            <span class="hud-chip"><em>CPU</em><code>{systemInfoSpecs.cpu}</code></span>
+            <span class="hud-chip"><em>MEM</em><code>{systemInfoSpecs.memory}</code></span>
+            <span class="hud-chip hud-chip-time"><em>{systemInfoSpecs.date}</em><code>{systemInfoSpecs.time}</code></span>
+            <div class="hud-hero-icon"><HeroIcon size={20} /></div>
+          </div>
+        </div>
 
-        <section class="section-grid overview-lower">
-          <article class="panel">
-            {@render panelHeader(t.overview.observation, t.overview.communicationAccess, Globe2)}
-            {@render kvStack(transportStats)}
-          </article>
+        <!-- Metric stat grid -->
+        <div class="hud-stats">
+          {#each overviewCards.slice(1) as card}
+            {@const Icon = card.icon}
+            <div class="stat-block {card.tone}">
+              <div class="stat-head"><Icon size={12} /><span>{card.title}</span></div>
+              <strong>{card.value}</strong>
+              {#if card.progress !== null}
+                <div class="hud-bar"><div class="hud-bar-fill" style="width:{card.progress}%"></div></div>
+              {/if}
+              <small>{card.desc}</small>
+            </div>
+          {/each}
+        </div>
+
+        <!-- Lower: events + vitals -->
+        <div class="hud-lower">
           <article class="panel">
             {@render panelHeader(t.overview.recentEvents, t.overview.timeline, Activity)}
             <div class="event-list">
@@ -1407,72 +1368,59 @@
               {/each}
             </div>
           </article>
-        </section>
-        <section class="section-grid overview-lower">
           <article class="panel">
-            {@render panelHeader(t.capabilityPanel.label, t.capabilityPanel.title, ShieldCheck)}
-            <div class="capability-list">
-              {#each capabilityRows as row}
-                {@const Icon = statusIcon(row.status)}
-                <div class="capability-row">
-                  <Icon size={16} />
-                  <div><strong>{row.title}</strong><small>{row.desc}</small></div>
-                  <span class={`badge ${row.status}`}>{statusLabel(row.status)}</span>
-                </div>
-              {/each}
-            </div>
-          </article>
-          <article class="panel">
-            {@render panelHeader(t.kernel.label, t.kernel.title, Server)}
+            {@render panelHeader(t.overview.observation, t.overview.communicationAccess, Globe2)}
+            {@render kvStack(transportStats)}
+            <div class="panel-divider"></div>
             {@render kvStack(kernelRows)}
           </article>
-        </section>
+        </div>
       {:else if activePage === "skills"}
-        <section class="skill-layout">
+        <div class="skill-top panel">
+          <div class="panel-title">
+            <div>
+              <p class="panel-label">{t.skillsPanel.label}</p>
+              <h3>{t.skillsPanel.title}</h3>
+            </div>
+            <div class="panel-title-actions">
+              <button class="ghost-button" type="button" onclick={openSkillImport}>
+                <Upload size={13} /> {t.actions.importSkill}
+              </button>
+              <button class="primary-button" type="button" onclick={openSkillCreate}>
+                <Plus size={13} /> {t.actions.createSkill}
+              </button>
+            </div>
+          </div>
+          <div class="skill-stats">
+            <div><span>{t.skillsPanel.total}</span><strong>{skillReport?.total ?? 0}</strong></div>
+            <div><span>{t.skillsPanel.active}</span><strong>{skillReport?.active ?? 0}</strong></div>
+            <div><span>{t.skillsPanel.disabled}</span><strong>{skillReport?.disabled ?? 0}</strong></div>
+            <div><span>{t.skillsPanel.runtimeLearned}</span><strong>{skillReport?.runtimeLearned ?? 0}</strong></div>
+            <div><span>{t.skillsPanel.userProvided}</span><strong>{skillReport?.userProvided ?? 0}</strong></div>
+          </div>
+          <div class="skill-toolbar">
+            <label class="skill-search">
+              <span><Search size={13} /> {t.skillsPanel.search}</span>
+              <input bind:value={skillSearch} placeholder={t.skillsPanel.search} />
+            </label>
+            <div class="skill-filters">
+              <select bind:value={skillStatusFilter}>
+                <option value="all">{t.skillsPanel.all}</option>
+                <option value="active">{t.skillsPanel.active}</option>
+                <option value="disabled">{t.skillsPanel.disabled}</option>
+                <option value="retired">{t.skillsPanel.retired}</option>
+              </select>
+              <select bind:value={skillOriginFilter}>
+                <option value="all">{t.skillsPanel.all}</option>
+                <option value="user_provided">{t.skillsPanel.userProvided}</option>
+                <option value="runtime_learned">{t.skillsPanel.runtimeLearned}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="skill-layout">
           <article class="panel skill-list-panel">
-            <div class="panel-title">
-              <div>
-                <p class="panel-label">{t.skillsPanel.label}</p>
-                <h3>{t.skillsPanel.title}</h3>
-              </div>
-              <div class="panel-title-actions">
-                <button class="ghost-button" type="button" onclick={openSkillImport}>
-                  <Upload size={13} /> {t.actions.importSkill}
-                </button>
-                <button class="primary-button" type="button" onclick={openSkillCreate}>
-                  <Plus size={13} /> {t.actions.createSkill}
-                </button>
-              </div>
-            </div>
-
-            <div class="skill-stats">
-              <div><span>{t.skillsPanel.total}</span><strong>{skillReport?.total ?? 0}</strong></div>
-              <div><span>{t.skillsPanel.active}</span><strong>{skillReport?.active ?? 0}</strong></div>
-              <div><span>{t.skillsPanel.disabled}</span><strong>{skillReport?.disabled ?? 0}</strong></div>
-              <div><span>{t.skillsPanel.runtimeLearned}</span><strong>{skillReport?.runtimeLearned ?? 0}</strong></div>
-              <div><span>{t.skillsPanel.userProvided}</span><strong>{skillReport?.userProvided ?? 0}</strong></div>
-            </div>
-
-            <div class="skill-toolbar">
-              <label class="skill-search">
-                <span><Search size={13} /> {t.skillsPanel.search}</span>
-                <input bind:value={skillSearch} placeholder={t.skillsPanel.search} />
-              </label>
-              <div class="skill-filters">
-                <select bind:value={skillStatusFilter}>
-                  <option value="all">{t.skillsPanel.all}</option>
-                  <option value="active">{t.skillsPanel.active}</option>
-                  <option value="disabled">{t.skillsPanel.disabled}</option>
-                  <option value="retired">{t.skillsPanel.retired}</option>
-                </select>
-                <select bind:value={skillOriginFilter}>
-                  <option value="all">{t.skillsPanel.all}</option>
-                  <option value="user_provided">{t.skillsPanel.userProvided}</option>
-                  <option value="runtime_learned">{t.skillsPanel.runtimeLearned}</option>
-                </select>
-              </div>
-            </div>
-
             <div class="skill-list">
               {#if filteredSkills.length === 0}
                 <div class="skill-empty">{t.skillsPanel.empty}</div>
@@ -1568,20 +1516,32 @@
               </div>
             {/if}
           </article>
-        </section>
+        </div>
       {:else if activePage === "account"}
-        <section class="panel account-panel">
-          {@render panelHeader(t.account.panel, t.account.title, KeyRound)}
-          <div class="runtime-summary">
-            {#each accountFields as row}
-              <div><span>{row.label}</span><strong>{row.value}</strong></div>
-            {/each}
-          </div>
-          <div class="notice">
-            <LockKeyhole size={16} />
-            <span>{t.account.notice}</span>
-          </div>
-        </section>
+        <div class="settings-grid">
+          <section class="panel account-panel">
+            {@render panelHeader(t.account.panel, t.account.title, KeyRound)}
+            <div class="runtime-summary">
+              {#each accountFields as row}
+                <div><span>{row.label}</span><strong>{row.value}</strong></div>
+              {/each}
+            </div>
+            <div class="notice">
+              <LockKeyhole size={16} />
+              <span>{t.account.notice}</span>
+            </div>
+          </section>
+          <section class="panel">
+            {@render panelHeader(t.systemSettings.panel, t.systemSettings.title, Settings)}
+            <div class="settings-row">
+              <span class="settings-row-label"><Languages size={13} />{t.systemSettings.langLabel}</span>
+              <select class="lang-select" bind:value={lang} aria-label={t.systemSettings.langLabel}>
+                <option value="zh-CN">{t.systemSettings.langOptions.zh}</option>
+                <option value="en">{t.systemSettings.langOptions.en}</option>
+              </select>
+            </div>
+          </section>
+        </div>
       {:else if activePage === "transports"}
         <section class="panel">
           {@render panelHeader(t.transportsPanel.label, t.transportsPanel.title, Globe2)}
@@ -1656,16 +1616,19 @@
   <div class="statusbar">
     <span class="sb-brand">{t.statusbar.brand}</span>
     <span class="sb-item">v1.0.0-dev</span>
-    <span class="sb-sep">│</span>
-    <span class="sb-item">{backendStatusLabel}</span>
     <div class="sb-right">
+      <div class="sb-theme-toggle">
+        <button class:active={theme === "light"} type="button" onclick={() => (theme = "light")} aria-label="日间模式"><Sun size={12} /></button>
+        <button class:active={theme === "dark"}  type="button" onclick={() => (theme = "dark")}  aria-label="夜间模式"><Moon size={12} /></button>
+      </div>
+      <span class="sb-sep">│</span>
       <span class="sb-item">{t.statusbar.skills}: {skillCount}</span>
       <span class="sb-sep">│</span>
       <span class="sb-item">{t.statusbar.transports}: {enabledTransportCount}/{transports.length}</span>
       <span class="sb-sep">│</span>
       <span class="sb-item">{t.statusbar.devices}: {activeDeviceCount}/{devices.length}</span>
       <span class="sb-sep">│</span>
-      <span class:ok={backendConnected} class="sb-item">● {backendConnected ? t.labels.online : t.labels.offline}</span>
+      <button class="sb-restart" type="button" onclick={loadConsoleData}><Power size={11} /> {t.actions.apply}</button>
     </div>
   </div>
 
