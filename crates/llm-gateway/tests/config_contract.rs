@@ -1,7 +1,8 @@
 use bm_llm_gateway::{
-    GatewayConfig, GatewayErrorKey, GatewayProviderConfig, GatewayProviderKind,
-    GatewayRuntimeCacheConfig,
+    GatewayConfig, GatewayErrorKey, GatewayProjectionConfig, GatewayProviderConfig,
+    GatewayProviderKind, GatewayRuntimeCacheConfig,
 };
+use bm_sdk::PressureLevel;
 
 #[test]
 fn gateway_config_defaults_are_loopback_memory_required_and_bounded() {
@@ -13,6 +14,14 @@ fn gateway_config_defaults_are_loopback_memory_required_and_bounded() {
     assert!(config.server.require_token_for_remote);
     assert_eq!(config.scope.default_channel, "llm.gateway");
     assert_eq!(config.runtime_cache.max_runtimes, 256);
+    assert_eq!(
+        config.projection,
+        GatewayProjectionConfig {
+            system_max_len: 8192,
+            recent_messages_limit: 32,
+            pressure: PressureLevel::Normal,
+        }
+    );
     assert!(!config.audit.record_raw_projection);
     assert!(!config.audit.record_full_request_body);
     assert!(!config.audit.record_full_response_body);
@@ -30,6 +39,13 @@ fn gateway_config_rejects_zero_runtime_cache_and_missing_default_provider() {
     let error = config
         .validate()
         .expect_err("default provider must exist in provider map");
+    assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
+
+    let mut config = GatewayConfig::default_for_local_dev();
+    config.projection.recent_messages_limit = 0;
+    let error = config
+        .validate()
+        .expect_err("zero projection recent messages limit must fail");
     assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
 }
 

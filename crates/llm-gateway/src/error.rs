@@ -1,7 +1,11 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GatewayErrorKey {
     InvalidConfig,
+    InvalidRequest,
+    ProviderUnavailable,
     ScopeResolutionFailed,
+    ProjectionFailed,
+    UpstreamUnavailable,
     RuntimeUnavailable,
 }
 
@@ -24,8 +28,24 @@ impl GatewayError {
         Self::new(GatewayErrorKey::InvalidConfig, message)
     }
 
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(GatewayErrorKey::InvalidRequest, message)
+    }
+
+    pub fn provider_unavailable(message: impl Into<String>) -> Self {
+        Self::new(GatewayErrorKey::ProviderUnavailable, message)
+    }
+
     pub fn scope_resolution_failed(message: impl Into<String>) -> Self {
         Self::new(GatewayErrorKey::ScopeResolutionFailed, message)
+    }
+
+    pub fn projection_failed(message: impl Into<String>) -> Self {
+        Self::new(GatewayErrorKey::ProjectionFailed, message)
+    }
+
+    pub fn upstream_unavailable(message: impl Into<String>) -> Self {
+        Self::new(GatewayErrorKey::UpstreamUnavailable, message)
     }
 
     pub fn runtime_unavailable(message: impl Into<String>) -> Self {

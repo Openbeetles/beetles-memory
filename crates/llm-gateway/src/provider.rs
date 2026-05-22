@@ -43,8 +43,4 @@ impl GatewayProviderConfig {
     pub fn secret_env_name(&self) -> Option<&str> {
         self.api_key_env.as_deref()
     }
-
-    pub const fn protocol_endpoint_for_cut_b(&self) -> Option<&'static str> {
-        None
-    }
 }

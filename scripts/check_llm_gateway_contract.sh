@@ -16,6 +16,7 @@ cargo test -p bm-llm-gateway --no-default-features --features server-async,clien
 cargo test -p bm-llm-gateway --no-default-features --features profile-server-linux-memory-gateway
 cargo test -p bm-llm-gateway --no-default-features --features profile-server-linux-dev-full
 cargo clippy -p bm-llm-gateway --all-targets --no-default-features --features server-async,client-reqwest -- -D warnings
+bash scripts/check_llm_gateway_local_openai_smoke.sh
 
 if contract_manifest_has_core_store_dependency crates/llm-gateway/Cargo.toml; then
   fail "bm-llm-gateway must not depend on bm-core or bm-store directly"
@@ -40,8 +41,8 @@ fi
 if ! rg -n 'name = "bm-llm-gateway"' crates/llm-gateway/Cargo.toml >/dev/null; then
   fail "bm-llm-gateway binary manifest entry is missing"
 fi
-if ! rg -n 'required-features = \["server-async"\]' crates/llm-gateway/Cargo.toml >/dev/null; then
-  fail "bm-llm-gateway binary must be gated behind server-async"
+if ! rg -n 'required-features = \["server-async", "client-reqwest"\]' crates/llm-gateway/Cargo.toml >/dev/null; then
+  fail "bm-llm-gateway binary must be gated behind server-async and client-reqwest"
 fi
 if contract_rg_match '/v1/chat/completions|/api/chat|/api/generate' crates/http/src crates/http/tests; then
   fail "model protocol routes must not be added to bm-http"

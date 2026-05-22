@@ -4,7 +4,9 @@ use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryRuntimeBaseConfig, EntryStoreConfig,
     EntryTransportConfig,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_sdk::{
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, PressureLevel, ProfileId, StoreBackendKind,
+};
 
 use crate::{GatewayError, GatewayProviderConfig, GatewayScopeResolverConfig};
 
@@ -16,6 +18,7 @@ pub struct GatewayConfig {
     pub default_provider: String,
     pub scope: GatewayScopeResolverConfig,
     pub runtime_cache: GatewayRuntimeCacheConfig,
+    pub projection: GatewayProjectionConfig,
     pub audit: GatewayAuditConfig,
 }
 
@@ -46,6 +49,23 @@ pub struct GatewayRuntimeCacheConfig {
 impl Default for GatewayRuntimeCacheConfig {
     fn default() -> Self {
         Self { max_runtimes: 256 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatewayProjectionConfig {
+    pub system_max_len: usize,
+    pub recent_messages_limit: usize,
+    pub pressure: PressureLevel,
+}
+
+impl Default for GatewayProjectionConfig {
+    fn default() -> Self {
+        Self {
+            system_max_len: 8192,
+            recent_messages_limit: 32,
+            pressure: PressureLevel::Normal,
+        }
     }
 }
 
@@ -96,6 +116,7 @@ impl GatewayConfig {
             default_provider: "local".to_string(),
             scope: GatewayScopeResolverConfig::default_for_local_dev(),
             runtime_cache: GatewayRuntimeCacheConfig::default(),
+            projection: GatewayProjectionConfig::default(),
             audit: GatewayAuditConfig::default(),
         }
     }
@@ -104,6 +125,16 @@ impl GatewayConfig {
         if self.runtime_cache.max_runtimes == 0 {
             return Err(GatewayError::invalid_config(
                 "runtime_cache.max_runtimes must be greater than zero",
+            ));
+        }
+        if self.projection.system_max_len == 0 {
+            return Err(GatewayError::invalid_config(
+                "projection.system_max_len must be greater than zero",
+            ));
+        }
+        if self.projection.recent_messages_limit == 0 {
+            return Err(GatewayError::invalid_config(
+                "projection.recent_messages_limit must be greater than zero",
             ));
         }
         if !self.providers.contains_key(&self.default_provider) {
