@@ -34,7 +34,7 @@ Chat、generate 和无状态 responses 请求会在上游模型请求前注入�
 
 ## Console 操作面
 
-共享配置台提供独立的 LLM 网关页面，数据来自 `GET /console/llm-gateway`。页面只展示协议端点、共享 runtime、`bm agent-rules export` 命令和本地 smoke gate；模型协议仍由 `bm-llm-gateway` 持有，配置台不实现 OpenAI 或 Ollama 协议逻辑。
+共享配置台提供独立的 LLM 网关页面，数据来自 `GET /console/llm-gateway`。页面只展示协议端点、`bm agent-rules export` 命令和本地 smoke gate；系统级记忆上下文归首页总览的 `GET /console/overview` 持有。模型协议仍由 `bm-llm-gateway` 持有，配置台不实现 OpenAI 或 Ollama 协议逻辑。
 
 ## 共享 Runtime
 

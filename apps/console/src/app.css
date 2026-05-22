@@ -96,7 +96,7 @@ h1,h2,h3,h4,p { margin-top:0; }
 .shell {
   position:relative; display:grid; height:100vh; overflow:hidden;
   grid-template-areas:"sidebar workspace" "statusbar statusbar";
-  grid-template-columns:188px 1fr; grid-template-rows:1fr 24px;
+  grid-template-columns:172px 1fr; grid-template-rows:1fr 24px;
   background:
     radial-gradient(circle,rgba(90,90,165,.09) 1px,transparent 1px),
     radial-gradient(ellipse 55% 45% at 0% 0%,rgba(255,111,97,.055),transparent),
@@ -139,12 +139,12 @@ h1,h2,h3,h4,p { margin-top:0; }
 }
 
 /* ─ SHARED: surface rows ─ */
-:is(.event-row,.transport-card,.capability-row,.runtime-summary > div,.gateway-endpoint-row,.gateway-protocol-row,.gateway-smoke-row),
+:is(.event-row,.transport-card,.capability-row,.runtime-summary > div,.gateway-protocol-row,.gateway-smoke-row),
 .device-row:not(.header),.skill-row,.skill-stats > div,.skill-meta-grid > div {
   border:1px solid var(--bd); background:var(--s2); border-radius:var(--r);
   transition:background var(--tr), border-color var(--tr);
 }
-:is(.event-row,.capability-row,.runtime-summary > div,.gateway-endpoint-row,.gateway-protocol-row,.gateway-smoke-row):hover,
+:is(.event-row,.capability-row,.runtime-summary > div,.gateway-protocol-row,.gateway-smoke-row):hover,
 .device-row:not(.header):hover,.skill-row:hover { background:var(--s3); }
 
 /* ─ SHARED: status left-border via :has() ─ */
@@ -163,7 +163,7 @@ h1,h2,h3,h4,p { margin-top:0; }
   border-right:1px solid var(--bd); background:var(--s0); overflow:hidden;
 }
 .brand {
-  display:flex; align-items:center; gap:10px; height:48px; padding:0 14px;
+  display:flex; align-items:center; gap:8px; height:48px; padding:0 12px;
   border-bottom:1px solid var(--bd); flex-shrink:0;
   background:linear-gradient(90deg,rgba(255,111,97,.04),transparent 70%);
 }
@@ -181,7 +181,7 @@ h1,h2,h3,h4,p { margin-top:0; }
 .nav::-webkit-scrollbar { width:3px; }
 .nav::-webkit-scrollbar-thumb { background:var(--fa); border-radius:1px; }
 .nav-item {
-  display:flex; align-items:center; gap:7px; height:36px; padding:0 14px;
+  display:flex; align-items:center; gap:6px; height:36px; padding:0 12px;
   font-size:13px; color:var(--mu); border:0; border-left:2px solid transparent;
   background:transparent; text-align:left; white-space:nowrap;
   transition:color var(--tr), background var(--tr), border-color var(--tr);
@@ -400,6 +400,19 @@ h1,h2,h3,h4,p { margin-top:0; }
 }
 .hud-lower .panel { margin-top:0; }
 
+.memory-context-panel { margin-top:12px; }
+.memory-context-panel .status-stack > div {
+  display:grid; grid-template-columns:minmax(112px,180px) minmax(0,1fr);
+  align-items:start; gap:12px;
+}
+.memory-context-panel .status-stack > div > span {
+  padding-top:1px;
+}
+.memory-context-panel .status-stack > div > strong {
+  min-width:0; text-align:left; line-height:1.45; overflow-wrap:anywhere; word-break:break-word;
+  font-family:var(--font);
+}
+
 /* ─ STATUS STACK ─ */
 .status-stack { display:grid; gap:2px; }
 .status-stack > div {
@@ -548,38 +561,30 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
 
 /* ─ LLM GATEWAY ─ */
 .llm-gateway-page { display:grid; gap:12px; }
-.gateway-summary-panel,.gateway-protocols-panel,.gateway-rules-panel,
-.gateway-checks-grid .panel { margin-top:0; }
+.gateway-top-grid {
+  display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start;
+}
+.gateway-summary-panel,.gateway-smoke-panel,.gateway-rules-panel { margin-top:0; }
 
-/* ① 摘要：状态行 + 端点列表 */
+/* ① 外部工具接入：状态行 + 协议地址 */
 .gateway-status-row {
   display:flex; align-items:center; gap:10px;
   padding:10px 0 12px; margin-bottom:4px; border-bottom:1px solid var(--bd);
+}
+.gateway-status-row > span:not(.badge) {
+  color:var(--mu); font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; flex-shrink:0;
 }
 .gateway-main-url {
   font-family:var(--font); font-size:13px; color:var(--cy); flex:1; min-width:0;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
-.gateway-endpoint-list { display:grid; gap:2px; }
-.gateway-endpoint-row {
-  display:grid; grid-template-columns:minmax(120px,.25fr) minmax(0,.75fr);
-  gap:12px; align-items:center; min-height:40px; padding:6px 10px;
-}
-.gateway-endpoint-row span {
-  color:var(--mu); font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; flex-shrink:0;
-}
-.gateway-endpoint-row code {
-  font-family:var(--font); font-size:12px; color:var(--cy);
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
-}
 
-/* ② 协议端点：全宽，URL 独占一行 */
+/* ② 协议地址：全宽，URL 独占一行 */
 .gateway-protocol-list { display:grid; gap:5px; }
 .gateway-protocol-row {
-  display:grid; grid-template-columns:16px minmax(0,1fr);
-  gap:10px; align-items:start; padding:12px; min-height:72px;
+  display:grid; grid-template-columns:minmax(0,1fr);
+  gap:8px; align-items:start; padding:12px; min-height:72px;
 }
-.gateway-protocol-row svg { color:var(--mu); flex-shrink:0; margin-top:2px; }
 .gateway-protocol-body { display:grid; gap:5px; min-width:0; }
 .gateway-protocol-head {
   display:flex; align-items:center; gap:8px;
@@ -594,16 +599,12 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
 }
 .gateway-protocol-body small { color:var(--fa); font-size:11px; line-height:1.35; }
 
-/* ③ 共享运行时 + Smoke：横排两列 */
-.gateway-checks-grid {
-  display:grid; grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr); gap:12px; align-items:start;
-}
+/* ③ 验收命令 */
 .gateway-smoke-list { display:grid; gap:5px; }
 .gateway-smoke-row { display:grid; gap:7px; padding:10px 12px; min-height:64px; }
 .gateway-smoke-head {
   display:flex; align-items:center; gap:7px;
 }
-.gateway-smoke-head svg { color:var(--mu); flex-shrink:0; }
 .gateway-smoke-head strong {
   flex:1; color:var(--tx); font-size:13px; font-weight:700; min-width:0;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
@@ -765,11 +766,10 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
 
 /* ─ RESPONSIVE ─ */
 @media (max-width:1180px) {
-  .shell { grid-template-columns:172px 1fr; }
+  .shell { grid-template-columns:160px 1fr; }
   .hud-lower { grid-template-columns:1fr; }
   .transport-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-  .gateway-checks-grid { grid-template-columns:1fr; }
-  .gateway-endpoint-row { grid-template-columns:minmax(110px,.3fr) minmax(0,.7fr); }
+  .gateway-top-grid { grid-template-columns:1fr; }
   .skill-layout { grid-template-columns:1fr; }
   .skill-list-panel,.skill-detail-panel { min-height:auto; }
   .skill-list { max-height:none; }
@@ -793,9 +793,9 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
   .top-actions button { flex:1; justify-content:center; }
   .page-shell { overflow:visible; }
   .overview-grid,.transport-grid { grid-template-columns:1fr; }
-  .gateway-checks-grid,.gateway-rule-grid { grid-template-columns:1fr; }
-  .gateway-endpoint-row { grid-template-columns:1fr; }
+  .gateway-rule-grid { grid-template-columns:1fr; }
   .gateway-smoke-head { flex-wrap:wrap; }
+  .memory-context-panel .status-stack > div { grid-template-columns:1fr; gap:4px; }
   .skill-stats,.skill-meta-grid,.skill-form-grid,.skill-filters { grid-template-columns:1fr; }
   .hud-hero { height:auto; padding:14px 16px; flex-wrap:wrap; gap:12px; }
   .hud-hero-specs { flex-wrap:wrap; gap:5px; }

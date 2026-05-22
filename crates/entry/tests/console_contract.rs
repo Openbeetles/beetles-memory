@@ -38,6 +38,14 @@ fn console_surface_exposes_process_config_without_app_key_plaintext() {
     let overview = runtime.console_overview();
     assert_eq!(overview.runtime_shape.store, "in-memory");
     assert_eq!(overview.runtime_shape.shell, "HTTP console");
+    assert!(overview
+        .memory_context
+        .iter()
+        .any(|row| row.label == "Owner" && row.value == "owner-default"));
+    assert!(overview
+        .memory_context
+        .iter()
+        .any(|row| row.label == "Chat" && row.value == "chat-1"));
 
     let devices = runtime.console_devices();
     assert_eq!(devices.len(), 1);
@@ -112,7 +120,7 @@ fn console_updates_transports_and_devices() {
 }
 
 #[test]
-fn console_llm_gateway_surface_reports_protocols_rules_and_shared_runtime() {
+fn console_llm_gateway_surface_reports_protocols_rules_and_smoke_checks() {
     let mut config = config();
     config.transports = EntryTransportConfig::all_enabled();
     let runtime = EntryRuntime::open(config).expect("runtime");
@@ -142,14 +150,6 @@ fn console_llm_gateway_surface_reports_protocols_rules_and_shared_runtime() {
             && rule
                 .command
                 .contains("--gateway-url http://127.0.0.1:8787/v1")));
-    assert!(gateway
-        .shared_runtime
-        .iter()
-        .any(|row| row.label == "Owner" && row.value == "owner-default"));
-    assert!(gateway
-        .shared_runtime
-        .iter()
-        .any(|row| row.label == "Chat" && row.value == "chat-1"));
     let provider_check = gateway
         .smoke_checks
         .iter()

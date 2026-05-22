@@ -34,7 +34,7 @@ Chat, generate, and stateless responses requests receive deterministic Beetle Me
 
 ## Console Surface
 
-The shared console includes a dedicated LLM Gateway page backed by `GET /console/llm-gateway`. The page only reports protocol endpoints, shared runtime rows, `bm agent-rules export` commands, and local smoke gates; `bm-llm-gateway` still owns the OpenAI and Ollama protocol logic.
+The shared console includes a dedicated LLM Gateway page backed by `GET /console/llm-gateway`. The page only reports protocol endpoints, `bm agent-rules export` commands, and local smoke gates; the system-wide memory context is owned by Overview through `GET /console/overview`. `bm-llm-gateway` still owns the OpenAI and Ollama protocol logic.
 
 ## Shared Runtime
 

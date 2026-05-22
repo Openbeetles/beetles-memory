@@ -77,6 +77,7 @@ pub struct EntryConsoleOverview {
     pub capabilities: Vec<EntryConsoleCapabilityRow>,
     pub kernel: Vec<EntryConsoleKv>,
     pub session: Vec<EntryConsoleKv>,
+    pub memory_context: Vec<EntryConsoleKv>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -99,7 +100,6 @@ pub struct EntryConsoleLlmGateway {
     pub ollama_base_url: String,
     pub provider_capabilities_url: String,
     pub mcp_streamable_http_url: String,
-    pub shared_runtime: Vec<EntryConsoleKv>,
     pub protocols: Vec<EntryConsoleLlmGatewayProtocol>,
     pub rule_exports: Vec<EntryConsoleLlmGatewayRuleExport>,
     pub smoke_checks: Vec<EntryConsoleLlmGatewaySmokeCheck>,
@@ -414,6 +414,7 @@ impl EntryConsoleState {
                     value: inner.session.session_state.clone(),
                 },
             ],
+            memory_context: memory_context_rows(&inner),
         }
     }
 
@@ -455,7 +456,6 @@ impl EntryConsoleState {
             ollama_base_url: ollama_base_url.clone(),
             provider_capabilities_url: provider_capabilities_url.clone(),
             mcp_streamable_http_url: mcp_streamable_http_url.clone(),
-            shared_runtime: shared_runtime_rows(&inner),
             protocols: vec![
                 llm_protocol(
                     "openai-compatible",
@@ -1001,7 +1001,7 @@ fn mcp_streamable_http_url(endpoint: &str) -> String {
     }
 }
 
-fn shared_runtime_rows(inner: &EntryConsoleInner) -> Vec<EntryConsoleKv> {
+fn memory_context_rows(inner: &EntryConsoleInner) -> Vec<EntryConsoleKv> {
     vec![
         EntryConsoleKv {
             label: "Store".to_string(),

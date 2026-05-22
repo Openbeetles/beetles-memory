@@ -258,6 +258,42 @@ export function localizedKernelRows(rows: KVRow[] | undefined, fallback: KVRow[]
   }));
 }
 
+export function localizedMemoryContextRows(rows: KVRow[] | undefined, currentLang: Lang): KVRow[] {
+  const source = rows ?? [];
+  if (currentLang === "en") {
+    return source.map((row) => ({
+      label: memoryContextEnglishLabel(row.label),
+      value: row.value,
+    }));
+  }
+  return source.map((row) => ({
+    label: memoryContextChineseLabel(row.label),
+    value: row.value,
+  }));
+}
+
+function memoryContextChineseLabel(label: string): string {
+  const labels: Record<string, string> = {
+    Store: "存储位置",
+    Owner: "所属主体",
+    Agent: "入口身份",
+    Channel: "来源通道",
+    Chat: "会话范围",
+  };
+  return labels[label] ?? label;
+}
+
+function memoryContextEnglishLabel(label: string): string {
+  const labels: Record<string, string> = {
+    Store: "Storage",
+    Owner: "Owner",
+    Agent: "Entry Agent",
+    Channel: "Source Channel",
+    Chat: "Chat Scope",
+  };
+  return labels[label] ?? label;
+}
+
 function kernelLabel(label: string): string {
   const labels: Record<string, string> = {
     Profile: "运行档位",

@@ -79,6 +79,15 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
     assert!(kernel.iter().any(|row| row["label"] == "Profile"));
     assert!(kernel.iter().any(|row| row["label"] == "Store backend"));
     assert!(kernel.iter().any(|row| row["label"] == "Console shell"));
+    let memory_context = overview["overview"]["memoryContext"]
+        .as_array()
+        .expect("memory context");
+    assert!(memory_context
+        .iter()
+        .any(|row| row["label"] == "Owner" && row["value"] == "owner-default"));
+    assert!(memory_context
+        .iter()
+        .any(|row| row["label"] == "Chat" && row["value"] == "chat-1"));
 
     let transports = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/transports"))
         .expect("transports");
@@ -107,11 +116,11 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
         llm_gateway["llmGateway"]["mcpStreamableHttpUrl"],
         "http://127.0.0.1:8788/mcp"
     );
-    assert!(llm_gateway["llmGateway"]["sharedRuntime"]
-        .as_array()
-        .expect("shared runtime")
-        .iter()
-        .any(|row| row["label"] == "Owner" && row["value"] == "owner-default"));
+    assert!(llm_gateway["llmGateway"]
+        .as_object()
+        .expect("llm gateway object")
+        .get("sharedRuntime")
+        .is_none());
     let protocols = llm_gateway["llmGateway"]["protocols"]
         .as_array()
         .expect("protocols");

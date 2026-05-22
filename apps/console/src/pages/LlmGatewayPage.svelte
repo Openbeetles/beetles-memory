@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { Activity, Bot, Check, ClipboardList, Copy, LoaderCircle, Network, Play } from "lucide-svelte";
-  import KvStack from "../components/KvStack.svelte";
+  import { Activity, Bot, Check, ClipboardList, Copy, LoaderCircle, Play } from "lucide-svelte";
   import PanelHeader from "../components/PanelHeader.svelte";
   import { runLlmGatewaySmokeCheck } from "../lib/console-api";
   import type { ConsoleCopy } from "../lib/i18n";
@@ -8,10 +7,9 @@
     ConsoleApiLlmGateway,
     ConsoleApiLlmGatewaySmokeCheck,
     ConsoleApiLlmGatewaySmokeRunReport,
-    KVRow,
     StatusKind,
   } from "../lib/types";
-  import { statusIcon, statusLabel } from "../lib/view-model";
+  import { statusLabel } from "../lib/view-model";
 
   let {
     t,
@@ -24,17 +22,6 @@
   } = $props();
 
   const gatewayStatus = $derived((backendConnected ? (llmGateway?.status ?? "draft") : "blocked") as StatusKind);
-  const endpointRows = $derived<KVRow[]>(
-    llmGateway
-      ? [
-          { label: t.llmGatewayPanel.openaiBaseUrl, value: llmGateway.openaiBaseUrl },
-          { label: t.llmGatewayPanel.ollamaBaseUrl, value: llmGateway.ollamaBaseUrl },
-          { label: t.llmGatewayPanel.providerCapabilitiesUrl, value: llmGateway.providerCapabilitiesUrl },
-          { label: t.llmGatewayPanel.mcpStreamableHttpUrl, value: llmGateway.mcpStreamableHttpUrl },
-        ]
-      : [],
-  );
-  const sharedRuntime = $derived(llmGateway?.sharedRuntime ?? []);
   const protocols = $derived(llmGateway?.protocols ?? []);
   const ruleExports = $derived(llmGateway?.ruleExports ?? []);
   const smokeChecks = $derived(llmGateway?.smokeChecks ?? []);
@@ -44,6 +31,10 @@
 
   function protocolDetail(id: string, fallback: string): string {
     return t.llmGatewayPanel.protocolDetails[id as keyof typeof t.llmGatewayPanel.protocolDetails] ?? fallback;
+  }
+
+  function protocolTitle(id: string, fallback: string): string {
+    return t.llmGatewayPanel.protocolTitles[id as keyof typeof t.llmGatewayPanel.protocolTitles] ?? fallback;
   }
 
   async function copyCommand(id: string, command: string) {
@@ -90,73 +81,55 @@
 
 <div class="llm-gateway-page">
 
-  <!-- ① 摘要：状态 + 网关 URL + 所有子端点（全宽）-->
-  <section class="panel gateway-summary-panel">
-    <PanelHeader label={t.llmGatewayPanel.label} title={t.llmGatewayPanel.title} icon={Bot} />
-    <div class="gateway-status-row">
-      <span class={`badge ${gatewayStatus}`}>{statusLabel(t, gatewayStatus)}</span>
-      <code class="gateway-main-url">{llmGateway?.endpoint ?? "—"}</code>
-    </div>
-    {#if endpointRows.length > 0}
-      <div class="gateway-endpoint-list">
-        {#each endpointRows as row}
-          <div class="gateway-endpoint-row">
-            <span>{row.label}</span>
-            <code>{row.value}</code>
-          </div>
-        {/each}
+  <div class="gateway-top-grid">
+    <!-- ① 外部工具接入：状态 + 监听地址 + 可复制协议地址 -->
+    <section class="panel gateway-summary-panel">
+      <PanelHeader label={t.llmGatewayPanel.label} title={t.llmGatewayPanel.title} icon={Bot} />
+      <div class="gateway-status-row">
+        <span class={`badge ${gatewayStatus}`}>{statusLabel(t, gatewayStatus)}</span>
+        <span>{t.llmGatewayPanel.gatewayEndpoint}</span>
+        <code class="gateway-main-url">{llmGateway?.endpoint ?? "—"}</code>
       </div>
-    {/if}
-  </section>
 
-  <!-- ② 协议端点：全宽，每行充分展示 URL -->
-  <section class="panel gateway-protocols-panel">
-    <PanelHeader label={t.llmGatewayPanel.protocols} title={t.llmGatewayPanel.endpoints} icon={Network} />
-    {#if protocols.length > 0}
-      <div class="gateway-protocol-list">
-        {#each protocols as protocol}
-          {@const Icon = statusIcon(protocol.status)}
-          <article class="gateway-protocol-row {protocol.status}">
-            <Icon size={14} />
-            <div class="gateway-protocol-body">
-              <div class="gateway-protocol-head">
-                <strong>{protocol.title}</strong>
-                <span class={`badge ${protocol.status}`}>{statusLabel(t, protocol.status)}</span>
+      {#if protocols.length > 0}
+        <div class="gateway-protocol-list">
+          {#each protocols as protocol}
+            <article class="gateway-protocol-row {protocol.status}">
+              <div class="gateway-protocol-body">
+                <div class="gateway-protocol-head">
+                  <span class={`badge ${protocol.status}`}>{statusLabel(t, protocol.status)}</span>
+                  <strong>{protocolTitle(protocol.id, protocol.title)}</strong>
+                  <button
+                    aria-label={`${t.llmGatewayPanel.copy} ${protocolTitle(protocol.id, protocol.title)}`}
+                    class="input-action-btn"
+                    type="button"
+                    onclick={() => void copyCommand(`protocol:${protocol.id}`, protocol.endpoint)}
+                  >
+                    {#if copiedCommand === `protocol:${protocol.id}`}<Check size={14} />{:else}<Copy size={14} />{/if}
+                  </button>
+                </div>
+                <code class="gateway-proto-url">{protocol.endpoint}</code>
+                <small>{protocolDetail(protocol.id, protocol.detail)}</small>
               </div>
-              <code class="gateway-proto-url">{protocol.endpoint}</code>
-              <small>{protocolDetail(protocol.id, protocol.detail)}</small>
-            </div>
-          </article>
-        {/each}
-      </div>
-    {:else}
-      <div class="skill-empty">{t.llmGatewayPanel.empty}</div>
-    {/if}
-  </section>
-
-  <!-- ③ 共享运行时 + Smoke 检测：左右横排 -->
-  <div class="gateway-checks-grid">
-    <section class="panel">
-      <PanelHeader label={t.llmGatewayPanel.sharedRuntime} title={t.llmGatewayPanel.sharedRuntime} icon={Activity} />
-      {#if sharedRuntime.length > 0}
-        <KvStack items={sharedRuntime} />
+            </article>
+          {/each}
+        </div>
       {:else}
         <div class="skill-empty">{t.llmGatewayPanel.empty}</div>
       {/if}
     </section>
 
-    <section class="panel">
+    <!-- ② 验收命令 -->
+    <section class="panel gateway-smoke-panel">
       <PanelHeader label={t.llmGatewayPanel.smokeChecks} title={t.llmGatewayPanel.smokeChecks} icon={Activity} />
       {#if smokeChecks.length > 0}
         <div class="gateway-smoke-list">
           {#each smokeChecks as check}
-            {@const Icon = statusIcon(check.status)}
             {@const report = smokeReports[check.id]}
             <article class="gateway-smoke-row {check.status}">
               <div class="gateway-smoke-head">
-                <Icon size={13} />
-                <strong>{check.label}</strong>
                 <span class={`badge ${check.status}`}>{statusLabel(t, check.status)}</span>
+                <strong>{check.label}</strong>
                 <button
                   aria-label={`${t.llmGatewayPanel.run} ${check.label}`}
                   class="gateway-run-btn"

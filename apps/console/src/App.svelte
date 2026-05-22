@@ -36,6 +36,7 @@
     fromApiDevice,
     localizedEvents,
     localizedKernelRows,
+    localizedMemoryContextRows,
     mapDev,
     mapId,
     pagesWithCounts,
@@ -87,6 +88,7 @@
   const accountFields = $derived(accountRows(t, sessionData, lang));
   const recentEvents = $derived(localizedEvents(overviewData?.recentEvents, t.recentEvents, lang));
   const kernelRows = $derived(localizedKernelRows(overviewData?.kernel, t.kernel.rows, lang));
+  const memoryContextRows = $derived(localizedMemoryContextRows(overviewData?.memoryContext, lang));
   const systemInfoSpecs = $derived(systemInfoSpecRows(systemInfo, lang));
 
   $effect(() => writeStorage(STORAGE_KEYS.theme, theme));
@@ -299,6 +301,7 @@
           {recentEvents}
           {transportStats}
           {kernelRows}
+          {memoryContextRows}
         />
       {:else if activePage === "skills"}
         <SkillMemoryPage

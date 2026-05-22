@@ -67,14 +67,14 @@ The Console API is only for standalone deployments that serve the Beetle Memory 
 
 | Route | Method | Purpose |
 | --- | --- | --- |
-| `/console/overview` | `GET` | System info, runtime shape, observable metrics, kernel summary, and session overview. |
+| `/console/overview` | `GET` | System info, runtime shape, observable metrics, kernel summary, session overview, and current memory context. |
 | `/console/skills` | `GET` | Skill Memory list and summary counts. |
 | `/console/skills/{name}` | `GET` | Single Skill Memory detail. |
 | `/console/skills` | `POST` | Create or import a skill through `MemoryRuntime::upsert_skill`. |
 | `/console/skills/{name}` | `PATCH` | Edit a skill through `MemoryRuntime::upsert_skill`. |
 | `/console/skills/{name}/enabled` | `PATCH` | Enable or disable a skill. |
 | `/console/skills/{name}` | `DELETE` | Delete a Skill Memory record. |
-| `/console/llm-gateway` | `GET` | Return the LLM Gateway operator surface: OpenAI/Ollama/MCP endpoints, shared runtime rows, rule export commands, and smoke checks. |
+| `/console/llm-gateway` | `GET` | Return the LLM Gateway operator surface: OpenAI/Ollama/MCP endpoints, rule export commands, and smoke checks. |
 | `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | Run a backend-whitelisted LLM Gateway smoke check and return exit code, duration, and bounded stdout/stderr. |
 | `/console/transports` | `GET` | List configurable communication entries. |
 | `/console/transports/{id}` | `PATCH` | Update a communication entry's enabled state or endpoint. |

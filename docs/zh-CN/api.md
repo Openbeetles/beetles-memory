@@ -67,14 +67,14 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 
 | Route | Method | 用途 |
 | --- | --- | --- |
-| `/console/overview` | `GET` | 返回系统信息、运行形态、观测指标、内核摘要和 session 概览。 |
+| `/console/overview` | `GET` | 返回系统信息、运行形态、观测指标、内核摘要、session 概览和当前记忆上下文。 |
 | `/console/skills` | `GET` | 返回 Skill 记忆列表和统计。 |
 | `/console/skills/{name}` | `GET` | 返回单条 Skill 详情。 |
 | `/console/skills` | `POST` | 新建或导入 Skill，最终进入 `MemoryRuntime::upsert_skill`。 |
 | `/console/skills/{name}` | `PATCH` | 编辑 Skill，最终进入 `MemoryRuntime::upsert_skill`。 |
 | `/console/skills/{name}/enabled` | `PATCH` | 启用或停用 Skill。 |
 | `/console/skills/{name}` | `DELETE` | 删除 Skill 记忆。 |
-| `/console/llm-gateway` | `GET` | 返回 LLM Gateway 操作面：OpenAI/Ollama/MCP 端点、共享 runtime、规则导出命令和 smoke checks。 |
+| `/console/llm-gateway` | `GET` | 返回 LLM Gateway 操作面：OpenAI/Ollama/MCP 端点、规则导出命令和 smoke checks。 |
 | `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | 运行后端白名单中的 LLM Gateway 验收项，并返回退出码、耗时和受限 stdout/stderr。 |
 | `/console/transports` | `GET` | 返回可配置通信入口。 |
 | `/console/transports/{id}` | `PATCH` | 更新通信入口开关或 endpoint。 |

@@ -142,8 +142,8 @@ npm --prefix apps/console run dev
 
 | Route | Method | 说明 |
 | --- | --- | --- |
-| `/console/overview` | `GET` | 系统信息、运行形态、观测指标、能力摘要、内核摘要。 |
-| `/console/llm-gateway` | `GET` | LLM Gateway 协议端点、共享 runtime、规则导出命令和 smoke checks。 |
+| `/console/overview` | `GET` | 系统信息、运行形态、观测指标、能力摘要、内核摘要和当前记忆上下文。 |
+| `/console/llm-gateway` | `GET` | LLM Gateway 协议端点、规则导出命令和 smoke checks。 |
 | `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | 运行后端白名单中的 LLM Gateway smoke check，返回受限输出和退出状态。 |
 | `/console/transports` | `GET` | 通信入口列表。 |
 | `/console/transports/{id}` | `PATCH` | 更新通信入口。 |

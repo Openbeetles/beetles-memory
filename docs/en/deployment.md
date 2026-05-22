@@ -142,8 +142,8 @@ npm --prefix apps/console run dev
 
 | Route | Method | Notes |
 | --- | --- | --- |
-| `/console/overview` | `GET` | System info, runtime shape, observable metrics, capability summary, and kernel summary. |
-| `/console/llm-gateway` | `GET` | LLM Gateway protocol endpoints, shared runtime rows, rule export commands, and smoke checks. |
+| `/console/overview` | `GET` | System info, runtime shape, observable metrics, capability summary, kernel summary, and current memory context. |
+| `/console/llm-gateway` | `GET` | LLM Gateway protocol endpoints, rule export commands, and smoke checks. |
 | `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | Run a backend-whitelisted LLM Gateway smoke check and return bounded output plus exit status. |
 | `/console/transports` | `GET` | Communication entry list. |
 | `/console/transports/{id}` | `PATCH` | Update a communication entry. |

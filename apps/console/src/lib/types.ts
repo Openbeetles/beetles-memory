@@ -90,7 +90,6 @@ export type ConsoleApiLlmGateway = {
   ollamaBaseUrl: string;
   providerCapabilitiesUrl: string;
   mcpStreamableHttpUrl: string;
-  sharedRuntime: KVRow[];
   protocols: ConsoleApiLlmGatewayProtocol[];
   ruleExports: ConsoleApiLlmGatewayRuleExport[];
   smokeChecks: ConsoleApiLlmGatewaySmokeCheck[];
@@ -185,6 +184,7 @@ export type ConsoleApiOverview = {
   capabilities: CapRow[];
   kernel: KVRow[];
   session: KVRow[];
+  memoryContext: KVRow[];
 };
 
 export type StaticDeviceId = "bm-linux-core-01" | "bm-desktop-mac-studio" | "bm-esp-memory-7f2" | "legacy-lab-device";

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Activity, Globe2 } from "lucide-svelte";
+  import { Activity, Crosshair, Globe2 } from "lucide-svelte";
   import PanelHeader from "../components/PanelHeader.svelte";
   import KvStack from "../components/KvStack.svelte";
   import type { ConsoleCopy } from "../lib/i18n";
@@ -13,6 +13,7 @@
     recentEvents,
     transportStats,
     kernelRows,
+    memoryContextRows,
   }: {
     t: ConsoleCopy;
     overviewCards: OverviewCard[];
@@ -21,6 +22,7 @@
     recentEvents: TimelineEvent[];
     transportStats: KVRow[];
     kernelRows: KVRow[];
+    memoryContextRows: KVRow[];
   } = $props();
 </script>
 
@@ -57,6 +59,15 @@
     </div>
   {/each}
 </div>
+
+<article class="panel memory-context-panel">
+  <PanelHeader label={t.overview.memoryContextLabel} title={t.overview.memoryContextTitle} icon={Crosshair} />
+  {#if memoryContextRows.length > 0}
+    <KvStack items={memoryContextRows} />
+  {:else}
+    <div class="skill-empty">{t.overview.memoryContextEmpty}</div>
+  {/if}
+</article>
 
 <div class="hud-lower">
   <article class="panel">
