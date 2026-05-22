@@ -1,9 +1,9 @@
+import { invoke } from "@tauri-apps/api/core";
+
 type DesktopConsoleResponse = {
   statusCode: number;
   body: string;
 };
-
-type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (isTauriRuntime()) {
@@ -27,7 +27,6 @@ async function httpJson<T>(path: string, init: RequestInit): Promise<T> {
 }
 
 async function tauriJson<T>(path: string, init: RequestInit): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core") as { invoke: TauriInvoke };
   const response = await invoke<DesktopConsoleResponse>("console_request", {
     request: {
       method: (init.method ?? "GET").toUpperCase(),

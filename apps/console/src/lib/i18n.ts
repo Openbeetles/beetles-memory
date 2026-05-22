@@ -7,8 +7,8 @@ export const STORAGE_KEYS = {
 
 export const copy = {
   "zh-CN": {
-    headTitle: "Beetles Memory",
-    brand: { name: "Beetles Memory", sub: "" },
+    headTitle: "Beetle Memory",
+    brand: { name: "Beetle Memory", sub: "" },
     labels: {
       console: "配置台",
       status: "状态",
@@ -35,7 +35,7 @@ export const copy = {
     language: { zh: "中文", en: "English" },
     pages: [
       { id: "overview", label: "总览", eyebrow: "观测总览", title: "运行状态" },
-      { id: "skills", label: "Skill 记忆", eyebrow: "程序性记忆", title: "Skill 管理" },
+      { id: "skills", label: "Skills", eyebrow: "Skills", title: "Skills" },
       { id: "transports", label: "通信方式", count: "5", eyebrow: "通信入口", title: "通信方式配置" },
       { id: "devices", label: "开放设备", count: "4", eyebrow: "访问控制", title: "开放设备列表" },
       { id: "account", label: "系统设置", eyebrow: "系统设置", title: "设置" },
@@ -90,8 +90,8 @@ export const copy = {
     },
     transportsPanel: { label: "通信入口", title: "通信方式与必要配置" },
     skillsPanel: {
-      label: "程序性记忆",
-      title: "Skill 记忆管理",
+      label: "Skills",
+      title: "Skills",
       search: "搜索名称、主题、摘要、过程",
       all: "全部",
       active: "启用",
@@ -108,7 +108,7 @@ export const copy = {
       citations: "引用",
       lineage: "演化谱系",
       strategyDiffs: "策略变更",
-      empty: "暂无 Skill 记忆",
+      empty: "暂无 Skills",
       emptyDetail: "选择一个 Skill 查看详情",
       name: "名称",
       titleLabel: "标题",
@@ -118,7 +118,7 @@ export const copy = {
       citationsInput: "引用，一行一个",
       file: "读取本地文本",
       deleteTitle: "删除 Skill",
-      deleteDesc: "删除后会从记忆存储移除，不保留配置台墓碑。",
+      deleteDesc: "删除后会从存储移除，不保留配置台墓碑。",
       modalTitle: {
         create: "新建 Skill",
         import: "导入 Skill",
@@ -177,7 +177,7 @@ export const copy = {
         { label: "生命周期", value: "运行时已打开" },
       ],
     },
-    statusbar: { brand: "Beetles Memory", skills: "Skill", transports: "传输", devices: "设备" },
+    statusbar: { brand: "Beetle Memory", skills: "Skills", transports: "传输", devices: "设备" },
     addDevice: {
       btn: "添加设备",
       title: "添加新设备",
@@ -194,8 +194,8 @@ export const copy = {
     },
   },
   en: {
-    headTitle: "Beetles Memory",
-    brand: { name: "Beetles Memory", sub: "" },
+    headTitle: "Beetle Memory",
+    brand: { name: "Beetle Memory", sub: "" },
     labels: {
       console: "Console",
       status: "Status",
@@ -222,7 +222,7 @@ export const copy = {
     language: { zh: "中文", en: "English" },
     pages: [
       { id: "overview", label: "Overview", eyebrow: "Observability", title: "Runtime Status" },
-      { id: "skills", label: "Skill Memory", eyebrow: "Procedural Memory", title: "Skill Management" },
+      { id: "skills", label: "Skills", eyebrow: "Skills", title: "Skills" },
       { id: "transports", label: "Communication", count: "5", eyebrow: "Entry Points", title: "Communication Setup" },
       { id: "devices", label: "Devices", count: "4", eyebrow: "Access Control", title: "Allowed Devices" },
       { id: "account", label: "Settings", eyebrow: "System Settings", title: "Settings" },
@@ -278,8 +278,8 @@ export const copy = {
     },
     transportsPanel: { label: "Entry Points", title: "Communication Methods & Required Settings" },
     skillsPanel: {
-      label: "Procedural Memory",
-      title: "Skill Memory Management",
+      label: "Skills",
+      title: "Skills",
       search: "Search name, topic, summary, procedure",
       all: "All",
       active: "Active",
@@ -296,7 +296,7 @@ export const copy = {
       citations: "Citations",
       lineage: "Lineage",
       strategyDiffs: "Strategy Diffs",
-      empty: "No Skill Memory yet",
+      empty: "No Skills yet",
       emptyDetail: "Select a skill to inspect details",
       name: "Name",
       titleLabel: "Title",
@@ -306,7 +306,7 @@ export const copy = {
       citationsInput: "Citations, one per line",
       file: "Read local text",
       deleteTitle: "Delete Skill",
-      deleteDesc: "Deletion removes the memory record from storage without a console tombstone.",
+      deleteDesc: "Deletion removes the record from storage without a console tombstone.",
       modalTitle: {
         create: "New Skill",
         import: "Import Skill",
@@ -365,7 +365,7 @@ export const copy = {
         { label: "Lifecycle", value: "Runtime opened" },
       ],
     },
-    statusbar: { brand: "Beetles Memory", skills: "Skills", transports: "Transports", devices: "Devices" },
+    statusbar: { brand: "Beetle Memory", skills: "Skills", transports: "Transports", devices: "Devices" },
     addDevice: {
       btn: "Add Device",
       title: "Add New Device",

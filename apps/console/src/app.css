@@ -1,4 +1,4 @@
-/* Beetles Memory Console — IDE HUD v2 */
+/* Beetle Memory Console - IDE HUD v2 */
 
 @keyframes dot-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(45,212,164,.5); }
@@ -31,28 +31,39 @@
 }
 
 /* ─ LIGHT THEME ─ */
+/* 设计原则：亮色模式是暗色模式的"日光版"，而非另一套产品。
+   - 底色用暖白 + 极淡紫蓝调（而非饱和灰）
+   - 文字保留深紫海军色（与暗色文字同家族，只是亮暗倒置）
+   - 边框保留紫蓝色调，维持 HUD 质感
+   - 主色珊瑚红略加深以保证在亮底上的对比度
+   - 功能色（绿/黄/红/青）统一加深，确保 WCAG AA 可读性 */
 .shell.light {
-  --bg:#f0f0f6; --s0:#e8e8f2; --s1:#e0e0ec; --s2:#d8d8e6; --s3:#d0d0de; --s4:#c8c8d8; --s5:#c0c0d0;
-  --bd:rgba(80,80,145,.18); --bd-md:rgba(70,70,135,.30); --bd-hi:rgba(60,60,125,.44);
-  --tx:#1a1a2c; --mu:#5050a0; --fa:#9090c0;
-  --p:#e05a50; --p-hi:#c04040;
-  --p-lo:rgba(224,90,80,.08); --p-md:rgba(224,90,80,.14);
-  --p-gw:rgba(224,90,80,.20); --p-bd:rgba(224,90,80,.30);
-  --gn:#18a070; --am:#c07010; --rd:#d02048; --cy:#1880c0; --pu:#6030d0;
-  --gn-lo:rgba(24,160,112,.08); --gn-bd:rgba(24,160,112,.28);
-  --am-lo:rgba(192,112,16,.08); --am-bd:rgba(192,112,16,.28);
-  --rd-lo:rgba(208,32,72,.08);  --rd-bd:rgba(208,32,72,.28);
+  --bg:#f6f5f8; --s0:#fdfcff; --s1:#f8f7fb; --s2:#f0eff5; --s3:#e8e7ef; --s4:#d4d3de; --s5:#c0bfcc;
+
+  --bd:rgba(80,70,140,.14); --bd-md:rgba(70,60,130,.24); --bd-hi:rgba(60,50,120,.38);
+
+  --tx:#161525; --mu:#635f8a; --fa:#9e9bc0;
+
+  --p:#e8544a; --p-hi:#c83d32;
+  --p-lo:rgba(232,84,74,.08); --p-md:rgba(232,84,74,.14);
+  --p-gw:rgba(232,84,74,.20); --p-bd:rgba(232,84,74,.30);
+
+  --cy:#0072b0; --gn:#0d9060; --am:#b06008; --rd:#cc1844; --pu:#5020b8;
+  --gn-lo:rgba(13,144,96,.07);  --gn-bd:rgba(13,144,96,.25);
+  --am-lo:rgba(176,96,8,.07);   --am-bd:rgba(176,96,8,.25);
+  --rd-lo:rgba(204,24,68,.07);  --rd-bd:rgba(204,24,68,.25);
+
   color:var(--tx); background:var(--bg);
+  /* 亮色模式下 shell 背景：珊瑚红角光更淡，无青色渐变 */
+  background:
+    radial-gradient(ellipse 45% 40% at 0% 0%, rgba(232,84,74,.04), transparent),
+    var(--bg);
 }
 
 /* ─ RESET ─ */
 *,*::before,*::after { box-sizing:border-box; margin:0; }
 html,body,#app { height:100%; }
 body { overflow:hidden; background:var(--bg); }
-body::after {
-  content:""; position:fixed; inset:0; z-index:9999; pointer-events:none;
-  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.038) 2px,rgba(0,0,0,.038) 3px);
-}
 button,input,select,textarea { font:inherit; }
 button { color:inherit; border:0; cursor:pointer; background:transparent; }
 button:disabled { cursor:not-allowed; opacity:.45; transform:none !important; box-shadow:none !important; }
@@ -69,6 +80,14 @@ h1,h2,h3,h4,p { margin-top:0; }
     radial-gradient(ellipse 55% 45% at 0% 0%,rgba(255,111,97,.055),transparent),
     radial-gradient(ellipse 40% 55% at 100% 100%,rgba(78,200,244,.035),transparent),
     var(--bg);
+}
+/* 扫描线纹理：暗色模式下增加 CRT 质感，亮色模式下极淡以保持视觉干净 */
+.shell::after {
+  content:""; position:absolute; inset:0; z-index:9999; pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.036) 2px,rgba(0,0,0,.036) 3px);
+}
+.shell.light::after {
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.010) 2px,rgba(0,0,0,.010) 3px);
 }
 
 /* ─ SHARED: accent top line (::before) ─ */
@@ -181,7 +200,13 @@ h1,h2,h3,h4,p { margin-top:0; }
   background:linear-gradient(180deg,rgba(255,255,255,.14) 0%,transparent 55%), var(--p);
   box-shadow:0 2px 10px rgba(255,111,97,.28);
 }
-.primary-button :global(svg) { color:#fff; }
+.primary-button svg,
+.ghost-button svg {
+  flex:0 0 auto; width:14px; height:14px; stroke-width:2.6;
+}
+.primary-button svg {
+  color:#fff; stroke:currentColor; filter:drop-shadow(0 1px 1px rgba(90,20,18,.35));
+}
 .primary-button:hover {
   background:linear-gradient(180deg,rgba(255,255,255,.18) 0%,transparent 55%), var(--p-hi);
   border-color:var(--p-hi); box-shadow:0 4px 16px rgba(255,111,97,.38); transform:translateY(-1px);
@@ -708,4 +733,4 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
 
 /* ─ PANEL TITLE ACTIONS ─ */
 .panel-title-actions { display:flex; align-items:center; gap:10px; flex-shrink:0; }
-.panel-title-actions :global(svg) { color:var(--p); }
+.panel-title-actions svg { color:currentColor; }

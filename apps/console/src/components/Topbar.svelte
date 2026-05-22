@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ConsoleCopy } from "../lib/i18n";
   import type { Page } from "../lib/types";
+  import { windowDragRegion } from "../lib/window-drag";
 
   let {
     consoleLabel,
@@ -11,15 +12,15 @@
   } = $props();
 </script>
 
-<header class="topbar" data-tauri-drag-region>
-  <div class="topbar-left">
-    <div class="breadcrumb">
-      <span>{consoleLabel}</span>
-      <span class="bc-sep">›</span>
-      <span>{currentPage.eyebrow}</span>
-      <span class="bc-sep">›</span>
-      <span class="bc-title">{currentPage.title}</span>
+<header class="topbar" data-tauri-drag-region use:windowDragRegion>
+  <div class="topbar-left" data-tauri-drag-region>
+    <div class="breadcrumb" data-tauri-drag-region>
+      <span data-tauri-drag-region>{consoleLabel}</span>
+      <span class="bc-sep" data-tauri-drag-region>›</span>
+      <span data-tauri-drag-region>{currentPage.eyebrow}</span>
+      <span class="bc-sep" data-tauri-drag-region>›</span>
+      <span class="bc-title" data-tauri-drag-region>{currentPage.title}</span>
     </div>
   </div>
-  <div class="top-actions"></div>
+  <div class="top-actions" data-tauri-drag-region></div>
 </header>

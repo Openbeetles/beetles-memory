@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ConsoleCopy } from "../lib/i18n";
   import type { Page, PageId } from "../lib/types";
+  import { windowDragRegion } from "../lib/window-drag";
 
   let {
     pages,
@@ -20,9 +21,9 @@
 </script>
 
 <aside class="sidebar">
-  <div class="brand" data-tauri-drag-region>
+  <div class="brand" data-tauri-drag-region use:windowDragRegion>
     {#if !isTauri}
-      <div class="brand-icon"><img src="/logo.png" alt="BM" /></div>
+      <div class="brand-icon"><img src="/logo.png" alt="Beetle Memory" /></div>
       <div class="brand-text">
         <span class="brand-name">{brand.name}</span>
         <span class="brand-sub">{brand.sub}</span>

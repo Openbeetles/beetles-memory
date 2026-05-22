@@ -28,7 +28,7 @@
       <h3>{t.devicesPanel.title}</h3>
     </div>
     <div class="panel-title-actions">
-      <button class="ghost-button" type="button" onclick={onOpenAddDevice}>
+      <button class="primary-button" type="button" onclick={onOpenAddDevice}>
         <Plus size={13} /> {t.addDevice.btn}
       </button>
       <Smartphone size={18} />
