@@ -1,10 +1,22 @@
 #![cfg(feature = "server-std")]
 
+use std::sync::Mutex;
+
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
-use bm_http::{handle_http_request, HttpMethod, HttpRuntimeRequest};
+use bm_http::{
+    console_route_specs, handle_http_request, handle_http_request_with_console,
+    HttpConsoleServices, HttpMethod, HttpRuntimeRequest,
+};
+use bm_ollama_transparent::{
+    DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, GatewayFrontReport,
+    ManagedRunnerReport, OllamaAppReport, OllamaTransparentController,
+    OllamaTransparentPreflightReport, OllamaTransparentState, OllamaTransparentStatus,
+    OllamaTransparentTransitionReport, PortBindingReport, PortOwnerKind, ProcessActionReport,
+    TransitionOutcome, TransitionStep, TransitionStepReport,
+};
 use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
 use serde_json::Value;
 
@@ -33,6 +45,254 @@ fn runtime() -> EntryRuntime {
         capability,
     })
     .expect("entry runtime")
+}
+
+#[derive(Default)]
+struct MockOllamaTransparentController {
+    calls: Mutex<Vec<String>>,
+}
+
+impl MockOllamaTransparentController {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("mock calls").clone()
+    }
+
+    fn record(&self, call: impl Into<String>) {
+        self.calls.lock().expect("mock calls").push(call.into());
+    }
+}
+
+impl OllamaTransparentController for MockOllamaTransparentController {
+    fn preflight(&self) -> bm_ollama_transparent::Result<OllamaTransparentPreflightReport> {
+        self.record("preflight");
+        Ok(mock_preflight_report())
+    }
+
+    fn enable(
+        &self,
+        request: EnableOllamaTransparentRequest,
+    ) -> bm_ollama_transparent::Result<OllamaTransparentTransitionReport> {
+        self.record(format!(
+            "enable:open_app={:?}:allow_stop={}",
+            request.open_app, request.allow_stop_official_ollama
+        ));
+        Ok(mock_transition_report(
+            OllamaTransparentState::Disabled,
+            OllamaTransparentState::Active,
+            TransitionStep::StartTransparentFront,
+        ))
+    }
+
+    fn disable(
+        &self,
+        request: DisableOllamaTransparentRequest,
+    ) -> bm_ollama_transparent::Result<OllamaTransparentTransitionReport> {
+        self.record(format!(
+            "disable:restore={:?}",
+            request.restore_official_app
+        ));
+        Ok(mock_transition_report(
+            OllamaTransparentState::Active,
+            OllamaTransparentState::Disabled,
+            TransitionStep::StopTransparentFront,
+        ))
+    }
+
+    fn status(&self) -> bm_ollama_transparent::Result<OllamaTransparentStatus> {
+        self.record("status");
+        Ok(mock_status_report())
+    }
+
+    fn open_app(&self) -> bm_ollama_transparent::Result<ProcessActionReport> {
+        self.record("open_app");
+        Ok(ProcessActionReport::ok("open_official_app"))
+    }
+}
+
+fn mock_status_report() -> OllamaTransparentStatus {
+    let public_port = PortBindingReport::owned(
+        "127.0.0.1:11434".parse().expect("public bind"),
+        PortOwnerKind::BeetleMemoryTransparentFront,
+        bm_ollama_transparent::ObservedProcess::new(11434, "bm-llm-gateway", "/tmp/bm-llm-gateway"),
+    );
+    OllamaTransparentStatus {
+        state: OllamaTransparentState::Active,
+        public_port: public_port.clone(),
+        upstream_port: PortBindingReport::owned(
+            "127.0.0.1:11435".parse().expect("upstream bind"),
+            PortOwnerKind::ManagedOllamaRunner,
+            bm_ollama_transparent::ObservedProcess::new(
+                11435,
+                "bm-real-ollama",
+                "/tmp/bm-real-ollama",
+            ),
+        ),
+        app: OllamaAppReport {
+            bundle_path: "/Applications/Ollama.app".into(),
+            allow_stop_official_ollama: false,
+            open_app_after_enable: true,
+            restore_official_after_disable: true,
+            last_action: None,
+        },
+        managed_runner: mock_runner_report(),
+        gateway_front: GatewayFrontReport::from_public_port(&public_port),
+        last_transition: None,
+    }
+}
+
+fn mock_preflight_report() -> OllamaTransparentPreflightReport {
+    OllamaTransparentPreflightReport {
+        accepted: true,
+        resulting_state: OllamaTransparentState::Disabled,
+        public_port: PortBindingReport::empty("127.0.0.1:11434".parse().expect("public bind")),
+        upstream_port: PortBindingReport::empty("127.0.0.1:11435".parse().expect("upstream bind")),
+        managed_runner: mock_runner_report(),
+        stop_plan: None,
+        blockers: Vec::new(),
+    }
+}
+
+fn mock_runner_report() -> ManagedRunnerReport {
+    ManagedRunnerReport::installed(
+        "/Applications/Ollama.app/Contents/Resources/ollama".into(),
+        "/tmp/beetle-memory/ollama-runner".into(),
+        Some("fnv1a64:test".to_string()),
+    )
+}
+
+fn mock_transition_report(
+    from_state: OllamaTransparentState,
+    to_state: OllamaTransparentState,
+    step: TransitionStep,
+) -> OllamaTransparentTransitionReport {
+    OllamaTransparentTransitionReport {
+        from_state,
+        to_state,
+        outcome: TransitionOutcome::Completed,
+        steps: vec![TransitionStepReport::ok(step)],
+        failing_step: None,
+        rollback: None,
+    }
+}
+
+#[test]
+fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
+    let routes = console_route_specs();
+
+    for (method, path) in [
+        (HttpMethod::Get, "/console/ollama-transparent/status"),
+        (HttpMethod::Post, "/console/ollama-transparent/preflight"),
+        (HttpMethod::Post, "/console/ollama-transparent/enable"),
+        (HttpMethod::Post, "/console/ollama-transparent/disable"),
+        (HttpMethod::Post, "/console/ollama-transparent/open-app"),
+    ] {
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.method == method && route.path == path),
+            "missing console route {method:?} {path}"
+        );
+    }
+}
+
+#[test]
+fn console_ollama_transparent_routes_delegate_to_controller_trait() {
+    let runtime = runtime();
+    let controller = MockOllamaTransparentController::default();
+    let services = HttpConsoleServices::with_ollama_transparent(&controller);
+
+    let status = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/ollama-transparent/status"),
+        services,
+    )
+    .expect("status");
+    assert_eq!(status.status_code, 200, "{}", status.body);
+    let status: Value = serde_json::from_str(&status.body).expect("status json");
+    assert_eq!(status["status"], "accepted");
+    assert_eq!(status["ollamaTransparent"]["state"], "Active");
+    assert_eq!(
+        status["ollamaTransparent"]["gatewayFront"]["expectedOwner"],
+        "BeetleMemoryTransparentFront"
+    );
+
+    let preflight = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/preflight", "{}"),
+        services,
+    )
+    .expect("preflight");
+    assert_eq!(preflight.status_code, 200, "{}", preflight.body);
+    let preflight: Value = serde_json::from_str(&preflight.body).expect("preflight json");
+    assert_eq!(preflight["status"], "accepted");
+    assert_eq!(preflight["preflight"]["accepted"], true);
+
+    let enable = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/enable",
+            r#"{"openApp":false,"allowStopOfficialOllama":true}"#,
+        ),
+        services,
+    )
+    .expect("enable");
+    assert_eq!(enable.status_code, 200, "{}", enable.body);
+    let enable: Value = serde_json::from_str(&enable.body).expect("enable json");
+    assert_eq!(enable["transition"]["outcome"], "Completed");
+    assert_eq!(enable["transition"]["toState"], "Active");
+
+    let disable = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/disable",
+            r#"{"restoreOfficialApp":false}"#,
+        ),
+        services,
+    )
+    .expect("disable");
+    assert_eq!(disable.status_code, 200, "{}", disable.body);
+    let disable: Value = serde_json::from_str(&disable.body).expect("disable json");
+    assert_eq!(disable["transition"]["outcome"], "Completed");
+    assert_eq!(disable["transition"]["toState"], "Disabled");
+
+    let open_app = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/open-app", "{}"),
+        services,
+    )
+    .expect("open app");
+    assert_eq!(open_app.status_code, 200, "{}", open_app.body);
+    let open_app: Value = serde_json::from_str(&open_app.body).expect("open app json");
+    assert_eq!(open_app["action"]["action"], "open_official_app");
+    assert_eq!(open_app["action"]["ok"], true);
+
+    assert_eq!(
+        controller.calls(),
+        vec![
+            "status",
+            "preflight",
+            "enable:open_app=Some(false):allow_stop=true",
+            "disable:restore=Some(false)",
+            "open_app",
+        ]
+    );
+}
+
+#[test]
+fn console_ollama_transparent_routes_fail_when_controller_is_not_wired() {
+    let runtime = runtime();
+    let error = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/console/ollama-transparent/status"),
+    )
+    .expect_err("missing controller should be a configuration error");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ollama transparent controller is not configured"),
+        "{error}"
+    );
 }
 
 #[test]

@@ -5,13 +5,24 @@ use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
-use bm_http::{handle_http_request, HttpMethod, HttpRuntimeRequest};
+use bm_http::{
+    handle_http_request_with_console, HttpConsoleServices, HttpMethod, HttpRuntimeRequest,
+};
+use bm_ollama_transparent::{
+    FileSystemRunnerInstaller, OllamaTransparentConfig, SystemPortOwnerObserver,
+    SystemProcessManager, TransparentController,
+};
 use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, Result, StoreBackendKind};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 pub struct DesktopConsoleState {
     runtime: EntryRuntime,
+    ollama_transparent: TransparentController<
+        SystemPortOwnerObserver,
+        FileSystemRunnerInstaller,
+        SystemProcessManager,
+    >,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,14 +89,31 @@ impl DesktopConsoleState {
             privacy: MemoryPrivacyPolicy::standard_private_boundary(),
             capability,
         })?;
-        Ok(Self { runtime })
+        let transparent_config = OllamaTransparentConfig::for_data_dir(&data_dir);
+        let transparent_ports =
+            SystemPortOwnerObserver::new(transparent_config.port_owner_classifier());
+        let ollama_transparent = TransparentController::new(
+            transparent_config,
+            transparent_ports,
+            FileSystemRunnerInstaller,
+            SystemProcessManager::default(),
+        )
+        .map_err(|error| bm_sdk::Error::config("desktop_ollama_transparent", error.to_string()))?;
+        Ok(Self {
+            runtime,
+            ollama_transparent,
+        })
     }
 
     pub fn handle_console_request(
         &self,
         request: DesktopConsoleRequest,
     ) -> Result<DesktopConsoleResponse> {
-        let response = handle_http_request(&self.runtime, request.into_http_runtime_request())?;
+        let response = handle_http_request_with_console(
+            &self.runtime,
+            request.into_http_runtime_request(),
+            HttpConsoleServices::with_ollama_transparent(&self.ollama_transparent),
+        )?;
         Ok(DesktopConsoleResponse {
             status_code: response.status_code,
             body: response.body,
@@ -119,7 +147,7 @@ impl From<DesktopConsoleResponse> for DesktopConsoleInvokeResponse {
 pub mod commands {
     use super::*;
 
-    #[tauri::command]
+    #[tauri::command(async)]
     pub fn console_request(
         state: tauri::State<'_, Mutex<DesktopConsoleState>>,
         request: DesktopConsoleInvokeRequest,

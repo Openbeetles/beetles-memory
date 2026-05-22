@@ -14,6 +14,10 @@ use bm_entry::{
     EntryRuntime, EntryTransportContext,
 };
 #[cfg(feature = "server-std")]
+use bm_ollama_transparent::{
+    DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, OllamaTransparentController,
+};
+#[cfg(feature = "server-std")]
 use serde_json::json;
 #[cfg(feature = "server-std")]
 use std::collections::BTreeMap;
@@ -92,6 +96,11 @@ const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_delete("/console/skills/{name}"),
     console_get("/console/llm-gateway"),
     console_post("/console/llm-gateway/smoke-checks/{id}/run"),
+    console_get("/console/ollama-transparent/status"),
+    console_post("/console/ollama-transparent/preflight"),
+    console_post("/console/ollama-transparent/enable"),
+    console_post("/console/ollama-transparent/disable"),
+    console_post("/console/ollama-transparent/open-app"),
     console_get("/console/transports"),
     console_patch("/console/transports/{id}"),
     console_get("/console/devices"),
@@ -242,11 +251,39 @@ pub struct HttpRuntimeResponse {
 }
 
 #[cfg(feature = "server-std")]
+#[derive(Clone, Copy, Default)]
+pub struct HttpConsoleServices<'a> {
+    pub ollama_transparent: Option<&'a dyn OllamaTransparentController>,
+}
+
+#[cfg(feature = "server-std")]
+impl<'a> HttpConsoleServices<'a> {
+    pub const fn none() -> Self {
+        Self {
+            ollama_transparent: None,
+        }
+    }
+
+    pub const fn with_ollama_transparent(
+        ollama_transparent: &'a dyn OllamaTransparentController,
+    ) -> Self {
+        Self {
+            ollama_transparent: Some(ollama_transparent),
+        }
+    }
+}
+
+#[cfg(feature = "server-std")]
 pub fn handle_http_request(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
-    handle_http_request_with_services(runtime, request, AdapterRuntimeServices::none())
+    handle_http_request_with_console_services(
+        runtime,
+        request,
+        AdapterRuntimeServices::none(),
+        HttpConsoleServices::none(),
+    )
 }
 
 #[cfg(feature = "server-std")]
@@ -255,8 +292,37 @@ pub fn handle_http_request_with_services(
     request: HttpRuntimeRequest,
     services: AdapterRuntimeServices<'_>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
+    handle_http_request_with_console_services(
+        runtime,
+        request,
+        services,
+        HttpConsoleServices::none(),
+    )
+}
+
+#[cfg(feature = "server-std")]
+pub fn handle_http_request_with_console(
+    runtime: &EntryRuntime,
+    request: HttpRuntimeRequest,
+    console_services: HttpConsoleServices<'_>,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
+    handle_http_request_with_console_services(
+        runtime,
+        request,
+        AdapterRuntimeServices::none(),
+        console_services,
+    )
+}
+
+#[cfg(feature = "server-std")]
+pub fn handle_http_request_with_console_services(
+    runtime: &EntryRuntime,
+    request: HttpRuntimeRequest,
+    services: AdapterRuntimeServices<'_>,
+    console_services: HttpConsoleServices<'_>,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
     if request.path.starts_with("/console/") {
-        return handle_console_request(runtime, request);
+        return handle_console_request(runtime, request, console_services);
     }
     let route = route_specs()
         .iter()
@@ -295,10 +361,19 @@ pub fn serve_http_listener_once(
     runtime: &EntryRuntime,
     listener: &TcpListener,
 ) -> bm_sdk::Result<()> {
+    serve_http_listener_once_with_console_services(runtime, listener, HttpConsoleServices::none())
+}
+
+#[cfg(feature = "server-std")]
+pub fn serve_http_listener_once_with_console_services(
+    runtime: &EntryRuntime,
+    listener: &TcpListener,
+    console_services: HttpConsoleServices<'_>,
+) -> bm_sdk::Result<()> {
     let (mut stream, _) = listener
         .accept()
         .map_err(|err| bm_sdk::Error::config("http_listener_accept", err.to_string()))?;
-    serve_http_stream(runtime, &mut stream)
+    serve_http_stream_with_console_services(runtime, &mut stream, console_services)
 }
 
 #[cfg(feature = "server-std")]
@@ -306,8 +381,22 @@ pub fn serve_http_stream<S: Read + Write>(
     runtime: &EntryRuntime,
     stream: &mut S,
 ) -> bm_sdk::Result<()> {
+    serve_http_stream_with_console_services(runtime, stream, HttpConsoleServices::none())
+}
+
+#[cfg(feature = "server-std")]
+pub fn serve_http_stream_with_console_services<S: Read + Write>(
+    runtime: &EntryRuntime,
+    stream: &mut S,
+    console_services: HttpConsoleServices<'_>,
+) -> bm_sdk::Result<()> {
     let request = read_http_runtime_request(stream)?;
-    let response = handle_http_request(runtime, request)?;
+    let response = handle_http_request_with_console_services(
+        runtime,
+        request,
+        AdapterRuntimeServices::none(),
+        console_services,
+    )?;
     write_http_response(stream, response)
 }
 
@@ -456,6 +545,7 @@ fn header_or_default(headers: &BTreeMap<String, String>, name: &str, default: &s
 fn handle_console_request(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
+    services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
     if !request.authenticated {
         return Ok(json_response(
@@ -491,6 +581,58 @@ fn handle_console_request(
                 "llmGateway": runtime.console_llm_gateway(),
             }),
         )),
+        (HttpMethod::Get, "/console/ollama-transparent/status") => {
+            let controller = require_ollama_transparent_controller(services)?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "ollamaTransparent": controller.status().map_err(map_transparent_error)?,
+                }),
+            ))
+        }
+        (HttpMethod::Post, "/console/ollama-transparent/preflight") => {
+            let controller = require_ollama_transparent_controller(services)?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "preflight": controller.preflight().map_err(map_transparent_error)?,
+                }),
+            ))
+        }
+        (HttpMethod::Post, "/console/ollama-transparent/enable") => {
+            let controller = require_ollama_transparent_controller(services)?;
+            let payload: EnableOllamaTransparentRequest = parse_console_json(&request.body)?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "transition": controller.enable(payload).map_err(map_transparent_error)?,
+                }),
+            ))
+        }
+        (HttpMethod::Post, "/console/ollama-transparent/disable") => {
+            let controller = require_ollama_transparent_controller(services)?;
+            let payload: DisableOllamaTransparentRequest = parse_console_json(&request.body)?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "transition": controller.disable(payload).map_err(map_transparent_error)?,
+                }),
+            ))
+        }
+        (HttpMethod::Post, "/console/ollama-transparent/open-app") => {
+            let controller = require_ollama_transparent_controller(services)?;
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "action": controller.open_app().map_err(map_transparent_error)?,
+                }),
+            ))
+        }
         (HttpMethod::Post, path)
             if path.starts_with("/console/llm-gateway/smoke-checks/") && path.ends_with("/run") =>
         {
@@ -706,6 +848,26 @@ fn parse_console_json<T: serde::de::DeserializeOwned>(body: &str) -> bm_sdk::Res
 }
 
 #[cfg(feature = "server-std")]
+fn require_ollama_transparent_controller(
+    services: HttpConsoleServices<'_>,
+) -> bm_sdk::Result<&dyn OllamaTransparentController> {
+    services.ollama_transparent.ok_or_else(|| {
+        bm_sdk::Error::config(
+            "console_ollama_transparent",
+            "ollama transparent controller is not configured",
+        )
+    })
+}
+
+#[cfg(feature = "server-std")]
+fn map_transparent_error(error: bm_ollama_transparent::OllamaTransparentError) -> bm_sdk::Error {
+    bm_sdk::Error::config(
+        "console_ollama_transparent",
+        format!("{:?}: {}", error.key(), error.message()),
+    )
+}
+
+#[cfg(feature = "server-std")]
 fn trim_suffix_path<'a>(path: &'a str, prefix: &str) -> &'a str {
     path.strip_prefix(prefix).unwrap_or(path).trim_matches('/')
 }
@@ -733,6 +895,11 @@ fn is_known_console_path(path: &str) -> bool {
         "/console/overview"
             | "/console/skills"
             | "/console/llm-gateway"
+            | "/console/ollama-transparent/status"
+            | "/console/ollama-transparent/preflight"
+            | "/console/ollama-transparent/enable"
+            | "/console/ollama-transparent/disable"
+            | "/console/ollama-transparent/open-app"
             | "/console/transports"
             | "/console/devices"
             | "/console/session"

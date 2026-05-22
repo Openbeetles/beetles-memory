@@ -845,7 +845,12 @@ pub struct ReqwestOpenAiCompatibleUpstream {
 #[cfg(feature = "client-reqwest")]
 impl ReqwestOpenAiCompatibleUpstream {
     pub fn new() -> Result<Self> {
+        Self::new_with_timeout(std::time::Duration::from_secs(600))
+    }
+
+    pub fn new_with_timeout(timeout: std::time::Duration) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
             .build()
             .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
         Ok(Self { client })

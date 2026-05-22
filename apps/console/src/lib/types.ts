@@ -94,6 +94,96 @@ export type ConsoleApiLlmGateway = {
   ruleExports: ConsoleApiLlmGatewayRuleExport[];
   smokeChecks: ConsoleApiLlmGatewaySmokeCheck[];
 };
+export type ConsoleApiOllamaTransparentState =
+  | "Disabled"
+  | "PreflightFailed"
+  | "Enabling"
+  | "Active"
+  | "Degraded"
+  | "Disabling"
+  | "RollingBack";
+export type ConsoleApiPortOwnerKind =
+  | "NoListener"
+  | "OfficialOllama"
+  | "BeetleMemoryTransparentFront"
+  | "ManagedOllamaRunner"
+  | "Unknown";
+export type ConsoleApiObservedProcess = {
+  pid: number;
+  command: string;
+  executable: string;
+};
+export type ConsoleApiPortBindingReport = {
+  bind: string;
+  owner: ConsoleApiPortOwnerKind;
+  process: ConsoleApiObservedProcess | null;
+  detail: string | null;
+};
+export type ConsoleApiManagedRunnerReport = {
+  sourcePath: string;
+  managedPath: string;
+  sourceExists: boolean;
+  managedExists: boolean;
+  installed: boolean;
+  sourceDigest: string | null;
+  managedDigest: string | null;
+  copyDigest: string | null;
+  message: string | null;
+};
+export type ConsoleApiGatewayFrontReport = {
+  expectedOwner: ConsoleApiPortOwnerKind;
+  bind: string;
+  active: boolean;
+  message: string | null;
+};
+export type ConsoleApiOllamaAppReport = {
+  bundlePath: string;
+  allowStopOfficialOllama: boolean;
+  openAppAfterEnable: boolean;
+  restoreOfficialAfterDisable: boolean;
+  lastAction: unknown | null;
+};
+export type ConsoleApiTransitionStep = {
+  step: string;
+  ok: boolean;
+  message: string | null;
+};
+export type ConsoleApiTransitionOutcome = "Completed" | "Rejected" | "Failed" | "RolledBack";
+export type ConsoleApiRollbackReport = {
+  attempted: boolean;
+  completed: boolean;
+  steps: ConsoleApiTransitionStep[];
+};
+export type ConsoleApiOllamaTransition = {
+  fromState: ConsoleApiOllamaTransparentState;
+  toState: ConsoleApiOllamaTransparentState;
+  outcome: ConsoleApiTransitionOutcome;
+  steps: ConsoleApiTransitionStep[];
+  failingStep: ConsoleApiTransitionStep | null;
+  rollback: ConsoleApiRollbackReport | null;
+};
+export type ConsoleApiPreflightBlocker = {
+  code: string;
+  message: string;
+};
+export type ConsoleApiOllamaPreflight = {
+  accepted: boolean;
+  resultingState: ConsoleApiOllamaTransparentState;
+  publicPort: ConsoleApiPortBindingReport;
+  upstreamPort: ConsoleApiPortBindingReport;
+  managedRunner: ConsoleApiManagedRunnerReport;
+  stopPlan: unknown | null;
+  blockers: ConsoleApiPreflightBlocker[];
+};
+export type ConsoleApiOllamaTransparentStatus = {
+  state: ConsoleApiOllamaTransparentState;
+  publicPort: ConsoleApiPortBindingReport;
+  upstreamPort: ConsoleApiPortBindingReport;
+  app: ConsoleApiOllamaAppReport;
+  managedRunner: ConsoleApiManagedRunnerReport;
+  gatewayFront: ConsoleApiGatewayFrontReport;
+  lastTransition: ConsoleApiOllamaTransition | null;
+};
 export type ConsoleApiDevice = {
   deviceId: string;
   label: string;

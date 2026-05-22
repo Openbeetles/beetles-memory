@@ -1,10 +1,12 @@
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 
 use bm_llm_gateway::{
     serve_llm_gateway_http_stream_with_services, GatewayConfig, GatewayError,
-    GatewayProviderConfig, GatewayProviderKind, GatewayRuntime, OllamaMaintenanceLlmClient,
-    OpenAiGatewayServices, OpenAiMaintenanceLlmClient, ReqwestGatewayLlmHttpClient,
-    ReqwestOllamaNativeUpstream, ReqwestOpenAiCompatibleUpstream,
+    GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig, GatewayProviderConfig,
+    GatewayProviderKind, GatewayRuntime, OllamaMaintenanceLlmClient, OpenAiGatewayServices,
+    OpenAiMaintenanceLlmClient, ReqwestGatewayLlmHttpClient, ReqwestOllamaNativeUpstream,
+    ReqwestOpenAiCompatibleUpstream,
 };
 use bm_sdk::StoreBackendKind;
 
@@ -33,15 +35,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.validate()?;
 
     let listener = TcpListener::bind(&config.server.bind_addr)?;
-    let gateway = GatewayRuntime::open(config.clone())?;
-    for stream in listener.incoming() {
-        let mut stream = stream?;
-        let mut upstream = ReqwestOpenAiCompatibleUpstream::new()?;
-        let mut ollama_upstream = ReqwestOllamaNativeUpstream::new()?;
-        let mut maintenance_http = ReqwestGatewayLlmHttpClient::new()?;
+    let gateway = Arc::new(GatewayRuntime::open(config.clone())?);
+    let front = GatewayHttpFront::new(GatewayHttpFrontConfig::default())?;
+    let front_config = front.config();
+    front.serve_listener_with_factory(listener, move || {
+        Box::new(ReqwestGatewayConnectionHandler {
+            gateway: Arc::clone(&gateway),
+            config: config.clone(),
+            request_timeout: front_config.request_timeout,
+        })
+    })?;
+    Ok(())
+}
+
+struct ReqwestGatewayConnectionHandler {
+    gateway: Arc<GatewayRuntime>,
+    config: GatewayConfig,
+    request_timeout: std::time::Duration,
+}
+
+impl GatewayHttpConnectionHandler for ReqwestGatewayConnectionHandler {
+    fn handle(&mut self, stream: &mut TcpStream) -> bm_llm_gateway::Result<()> {
+        let mut upstream = ReqwestOpenAiCompatibleUpstream::new_with_timeout(self.request_timeout)?;
+        let mut ollama_upstream =
+            ReqwestOllamaNativeUpstream::new_with_timeout(self.request_timeout)?;
+        let mut maintenance_http =
+            ReqwestGatewayLlmHttpClient::new_with_timeout(self.request_timeout)?;
         let maintenance_provider_name = std::env::var("BM_LLM_GATEWAY_MAINTENANCE_PROVIDER")
-            .unwrap_or_else(|_| config.default_provider.clone());
-        let maintenance_provider = config
+            .unwrap_or_else(|_| self.config.default_provider.clone());
+        let maintenance_provider = self
+            .config
             .providers
             .get(&maintenance_provider_name)
             .ok_or_else(|| {
@@ -52,19 +75,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .clone();
         let maintenance_model = std::env::var("BM_LLM_GATEWAY_MAINTENANCE_MODEL")
             .unwrap_or_else(|_| "local".to_string());
-        let result = match maintenance_provider.kind {
+        match maintenance_provider.kind {
             GatewayProviderKind::OpenAiCompatible => {
                 let maintenance_llm =
                     OpenAiMaintenanceLlmClient::new(maintenance_provider, maintenance_model);
                 let mut services = OpenAiGatewayServices::new()
                     .with_maintenance(&mut maintenance_http, &maintenance_llm);
                 serve_llm_gateway_http_stream_with_services(
-                    &gateway,
-                    &config,
+                    &self.gateway,
+                    &self.config,
                     &mut upstream,
                     &mut ollama_upstream,
                     &mut services,
-                    &mut stream,
+                    stream,
                 )
             }
             GatewayProviderKind::OllamaNative => {
@@ -73,20 +96,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut services = OpenAiGatewayServices::new()
                     .with_maintenance(&mut maintenance_http, &maintenance_llm);
                 serve_llm_gateway_http_stream_with_services(
-                    &gateway,
-                    &config,
+                    &self.gateway,
+                    &self.config,
                     &mut upstream,
                     &mut ollama_upstream,
                     &mut services,
-                    &mut stream,
+                    stream,
                 )
             }
-        };
-        if let Err(error) = result {
-            eprintln!("bm-llm-gateway request failed: {error}");
         }
     }
-    Ok(())
 }
 
 fn apply_shared_memory_runtime_env(config: &mut GatewayConfig) {

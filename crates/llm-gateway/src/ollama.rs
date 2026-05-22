@@ -9,6 +9,13 @@ use serde_json::{json, Map, Value};
 use crate::maintenance::{
     run_text_maintenance, BoundedText, GatewayMaintenancePlan, GatewayMaintenancePlanInput,
 };
+use crate::ollama_passthrough::{
+    classify_ollama_route, ollama_passthrough_audit_id, ollama_passthrough_prefers_stream,
+    OllamaKnownEndpoint, OllamaPassthroughRequest, OllamaRouteAction, OllamaRouteDecision,
+};
+use crate::ollama_privacy::{
+    force_ollama_think_false, strip_ollama_thinking, strip_ollama_thinking_from_ndjson_chunk,
+};
 use crate::provider::select_provider_for_kind;
 use crate::{
     GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayConfig, GatewayError,
@@ -20,6 +27,7 @@ use crate::{
 pub enum OllamaGatewayMethod {
     Get,
     Post,
+    Delete,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +101,26 @@ impl OllamaGatewayResponse {
             }
         }
     }
+
+    fn apply_thinking_response_policy(&mut self) -> bool {
+        match &mut self.body {
+            OllamaGatewayBody::Json(body) => strip_ollama_thinking(body),
+            OllamaGatewayBody::Ndjson(body) => {
+                let placeholder = OllamaNdjsonBody::buffered(Vec::new());
+                let owned = std::mem::replace(body, placeholder);
+                *body = owned.with_thinking_stripped();
+                true
+            }
+        }
+    }
+
+    fn enable_stream_privacy_sanitizer(&mut self) {
+        if let OllamaGatewayBody::Ndjson(body) = &mut self.body {
+            let placeholder = OllamaNdjsonBody::buffered(Vec::new());
+            let owned = std::mem::replace(body, placeholder);
+            *body = owned.with_thinking_stripped();
+        }
+    }
 }
 
 pub enum OllamaGatewayBody {
@@ -148,6 +176,7 @@ pub trait OllamaNdjsonStream: Send {
 pub struct OllamaNdjsonBody {
     source: OllamaNdjsonSource,
     deferred_maintenance: Option<Box<OllamaDeferredMaintenance>>,
+    strip_thinking: bool,
 }
 
 enum OllamaNdjsonSource {
@@ -160,6 +189,7 @@ impl OllamaNdjsonBody {
         Self {
             source: OllamaNdjsonSource::Buffered { chunks, offset: 0 },
             deferred_maintenance: None,
+            strip_thinking: false,
         }
     }
 
@@ -167,7 +197,13 @@ impl OllamaNdjsonBody {
         Self {
             source: OllamaNdjsonSource::Streaming(stream),
             deferred_maintenance: None,
+            strip_thinking: false,
         }
+    }
+
+    fn with_thinking_stripped(mut self) -> Self {
+        self.strip_thinking = true;
+        self
     }
 
     fn with_deferred_maintenance(
@@ -187,7 +223,7 @@ impl OllamaNdjsonBody {
     }
 
     pub fn next_chunk(&mut self) -> Result<Option<String>> {
-        let chunk = match &mut self.source {
+        let mut chunk = match &mut self.source {
             OllamaNdjsonSource::Buffered { chunks, offset } => {
                 if let Some(chunk) = chunks.get(*offset).cloned() {
                     *offset += 1;
@@ -198,6 +234,11 @@ impl OllamaNdjsonBody {
             }
             OllamaNdjsonSource::Streaming(stream) => stream.next_chunk()?,
         };
+        if self.strip_thinking {
+            if let Some(raw_chunk) = chunk.take() {
+                chunk = Some(strip_ollama_thinking_from_ndjson_chunk(&raw_chunk).0);
+            }
+        }
         if let Some(chunk) = chunk.as_deref() {
             if let Some(maintenance) = &mut self.deferred_maintenance {
                 maintenance.observe_ndjson_chunk(chunk);
@@ -258,9 +299,59 @@ impl OllamaUpstreamResponse {
 }
 
 pub trait OllamaNativeUpstream {
-    fn tags(&mut self, provider: &GatewayProviderConfig) -> Result<OllamaUpstreamResponse>;
+    fn passthrough(
+        &mut self,
+        provider: &GatewayProviderConfig,
+        request: OllamaPassthroughRequest,
+    ) -> Result<OllamaUpstreamResponse> {
+        match (
+            request.method,
+            request
+                .path
+                .split_once('?')
+                .map(|(path, _)| path)
+                .unwrap_or(&request.path),
+        ) {
+            (OllamaGatewayMethod::Get, "/api/tags") => self.tags(provider),
+            (OllamaGatewayMethod::Get, "/api/version") => self.version(provider),
+            (OllamaGatewayMethod::Post, "/api/embed") => {
+                self.embed(provider, request.body.unwrap_or(Value::Null))
+            }
+            (OllamaGatewayMethod::Post, "/api/embeddings") => {
+                self.embeddings(provider, request.body.unwrap_or(Value::Null))
+            }
+            (OllamaGatewayMethod::Post, "/api/show") => {
+                self.show(provider, request.body.unwrap_or(Value::Null))
+            }
+            _ => Err(GatewayError::invalid_request(
+                "unsupported Ollama passthrough route for upstream",
+            )),
+        }
+    }
 
-    fn version(&mut self, provider: &GatewayProviderConfig) -> Result<OllamaUpstreamResponse>;
+    fn tags(&mut self, provider: &GatewayProviderConfig) -> Result<OllamaUpstreamResponse> {
+        self.passthrough(
+            provider,
+            OllamaPassthroughRequest {
+                method: OllamaGatewayMethod::Get,
+                path: "/api/tags".to_string(),
+                headers: BTreeMap::new(),
+                body: None,
+            },
+        )
+    }
+
+    fn version(&mut self, provider: &GatewayProviderConfig) -> Result<OllamaUpstreamResponse> {
+        self.passthrough(
+            provider,
+            OllamaPassthroughRequest {
+                method: OllamaGatewayMethod::Get,
+                path: "/api/version".to_string(),
+                headers: BTreeMap::new(),
+                body: None,
+            },
+        )
+    }
 
     fn chat(
         &mut self,
@@ -278,19 +369,49 @@ pub trait OllamaNativeUpstream {
         &mut self,
         provider: &GatewayProviderConfig,
         body: Value,
-    ) -> Result<OllamaUpstreamResponse>;
+    ) -> Result<OllamaUpstreamResponse> {
+        self.passthrough(
+            provider,
+            OllamaPassthroughRequest {
+                method: OllamaGatewayMethod::Post,
+                path: "/api/embed".to_string(),
+                headers: BTreeMap::new(),
+                body: Some(body),
+            },
+        )
+    }
 
     fn embeddings(
         &mut self,
         provider: &GatewayProviderConfig,
         body: Value,
-    ) -> Result<OllamaUpstreamResponse>;
+    ) -> Result<OllamaUpstreamResponse> {
+        self.passthrough(
+            provider,
+            OllamaPassthroughRequest {
+                method: OllamaGatewayMethod::Post,
+                path: "/api/embeddings".to_string(),
+                headers: BTreeMap::new(),
+                body: Some(body),
+            },
+        )
+    }
 
     fn show(
         &mut self,
         provider: &GatewayProviderConfig,
         body: Value,
-    ) -> Result<OllamaUpstreamResponse>;
+    ) -> Result<OllamaUpstreamResponse> {
+        self.passthrough(
+            provider,
+            OllamaPassthroughRequest {
+                method: OllamaGatewayMethod::Post,
+                path: "/api/show".to_string(),
+                headers: BTreeMap::new(),
+                body: Some(body),
+            },
+        )
+    }
 }
 
 pub fn handle_ollama_request(
@@ -317,25 +438,16 @@ pub fn handle_ollama_request_with_services(
         "ollama-native",
     )?;
 
-    match (request.method, request.path.as_str()) {
-        (OllamaGatewayMethod::Get, "/api/tags") => handle_tags(config, request, provider, upstream),
-        (OllamaGatewayMethod::Get, "/api/version") => {
-            handle_version(config, request, provider, upstream)
-        }
-        (OllamaGatewayMethod::Post, "/api/chat") => {
+    let route = classify_ollama_route(request.method, &request.path);
+    match (route.action, route.known_endpoint) {
+        (OllamaRouteAction::Intercept, Some(OllamaKnownEndpoint::Chat)) => {
             handle_chat(gateway, config, request, provider, upstream, services)
         }
-        (OllamaGatewayMethod::Post, "/api/generate") => {
+        (OllamaRouteAction::Intercept, Some(OllamaKnownEndpoint::Generate)) => {
             handle_generate(gateway, config, request, provider, upstream, services)
         }
-        (OllamaGatewayMethod::Post, "/api/embed") => {
-            handle_embed(config, request, provider, upstream)
-        }
-        (OllamaGatewayMethod::Post, "/api/embeddings") => {
-            handle_embeddings(config, request, provider, upstream)
-        }
-        (OllamaGatewayMethod::Post, "/api/show") => {
-            handle_show(config, request, provider, upstream)
+        (OllamaRouteAction::Passthrough, _) => {
+            handle_passthrough(config, request, provider, upstream, route)
         }
         _ => Err(GatewayError::invalid_request(
             "unsupported Ollama gateway route",
@@ -343,83 +455,35 @@ pub fn handle_ollama_request_with_services(
     }
 }
 
-fn handle_tags(
+fn handle_passthrough(
     config: &GatewayConfig,
     request: OllamaGatewayRequest,
     provider: &GatewayProviderConfig,
     upstream: &mut dyn OllamaNativeUpstream,
+    route: OllamaRouteDecision,
 ) -> Result<OllamaGatewayResponse> {
-    let mut audit = audit_for_passthrough(config, &request, "ollama-tags", "none")?;
-    let response = upstream.tags(provider).map_err(|error| {
+    let audit_id = ollama_passthrough_audit_id(route.known_endpoint);
+    let model = request.body.as_ref().map(model_alias).unwrap_or("none");
+    let mut audit = audit_for_passthrough(config, &request, audit_id, model)?;
+    if route.known_endpoint.is_none() {
+        audit.record_note("ollama_passthrough_unknown_api_endpoint");
+    }
+    let request = OllamaPassthroughRequest {
+        method: request.method,
+        path: request.path,
+        headers: request.headers,
+        body: request.body,
+    };
+    let response = upstream.passthrough(provider, request).map_err(|error| {
         audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
         GatewayError::upstream_unavailable(error.to_string())
     })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
-}
-
-fn handle_version(
-    config: &GatewayConfig,
-    request: OllamaGatewayRequest,
-    provider: &GatewayProviderConfig,
-    upstream: &mut dyn OllamaNativeUpstream,
-) -> Result<OllamaGatewayResponse> {
-    let mut audit = audit_for_passthrough(config, &request, "ollama-version", "none")?;
-    let response = upstream.version(provider).map_err(|error| {
-        audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
-        GatewayError::upstream_unavailable(error.to_string())
-    })?;
-    audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
-}
-
-fn handle_embed(
-    config: &GatewayConfig,
-    mut request: OllamaGatewayRequest,
-    provider: &GatewayProviderConfig,
-    upstream: &mut dyn OllamaNativeUpstream,
-) -> Result<OllamaGatewayResponse> {
-    let body = required_body(&mut request, "embed body is required")?;
-    let mut audit = audit_for_passthrough(config, &request, "ollama-embed", model_alias(&body))?;
-    let response = upstream.embed(provider, body).map_err(|error| {
-        audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
-        GatewayError::upstream_unavailable(error.to_string())
-    })?;
-    audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
-}
-
-fn handle_embeddings(
-    config: &GatewayConfig,
-    mut request: OllamaGatewayRequest,
-    provider: &GatewayProviderConfig,
-    upstream: &mut dyn OllamaNativeUpstream,
-) -> Result<OllamaGatewayResponse> {
-    let body = required_body(&mut request, "embeddings body is required")?;
-    let mut audit =
-        audit_for_passthrough(config, &request, "ollama-embeddings", model_alias(&body))?;
-    let response = upstream.embeddings(provider, body).map_err(|error| {
-        audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
-        GatewayError::upstream_unavailable(error.to_string())
-    })?;
-    audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
-}
-
-fn handle_show(
-    config: &GatewayConfig,
-    mut request: OllamaGatewayRequest,
-    provider: &GatewayProviderConfig,
-    upstream: &mut dyn OllamaNativeUpstream,
-) -> Result<OllamaGatewayResponse> {
-    let body = required_body(&mut request, "show body is required")?;
-    let mut audit = audit_for_passthrough(config, &request, "ollama-show", model_alias(&body))?;
-    let response = upstream.show(provider, body).map_err(|error| {
-        audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
-        GatewayError::upstream_unavailable(error.to_string())
-    })?;
-    audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
+    let mut response = upstream_response_to_gateway(response, audit);
+    if ollama_passthrough_prefers_stream(route.known_endpoint) {
+        response.enable_stream_privacy_sanitizer();
+    }
+    Ok(response)
 }
 
 fn handle_chat(
@@ -477,7 +541,11 @@ fn handle_chat(
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let model = provider_model_name(provider, model_alias);
-    let upstream_body = build_upstream_chat_body(&body, &projection.system_memory_block, &model)?;
+    let mut upstream_body =
+        build_upstream_chat_body(&body, &projection.system_memory_block, &model)?;
+    if force_ollama_think_false(&mut upstream_body) {
+        audit.record_note("ollama_thinking_request_forced_false");
+    }
     let carry = projection.context.into_runtime_carry();
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
@@ -502,6 +570,11 @@ fn handle_chat(
     })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
     let mut response = upstream_response_to_gateway(response, audit);
+    if response.apply_thinking_response_policy() {
+        response
+            .audit
+            .record_note("ollama_thinking_response_stripped");
+    }
     response.prepare_post_reply_maintenance(
         maintenance_plan,
         OllamaCompletionEndpoint::Chat,
@@ -573,8 +646,11 @@ fn handle_generate(
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let model = provider_model_name(provider, model_alias);
-    let (upstream_body, used_prompt_prefix_fallback) =
+    let (mut upstream_body, used_prompt_prefix_fallback) =
         build_upstream_generate_body(&body, &projection.system_memory_block, &model, provider)?;
+    if force_ollama_think_false(&mut upstream_body) {
+        audit.record_note("ollama_thinking_request_forced_false");
+    }
     if used_prompt_prefix_fallback {
         audit.record_note("ollama_generate_prompt_prefix_fallback");
     }
@@ -604,6 +680,11 @@ fn handle_generate(
         })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
     let mut response = upstream_response_to_gateway(response, audit);
+    if response.apply_thinking_response_policy() {
+        response
+            .audit
+            .record_note("ollama_thinking_response_stripped");
+    }
     response.prepare_post_reply_maintenance(
         maintenance_plan,
         OllamaCompletionEndpoint::Generate,
@@ -1043,6 +1124,7 @@ impl LlmClient for OllamaMaintenanceLlmClient {
             "model": self.model,
             "messages": ollama_messages,
             "stream": false,
+            "think": false,
         })
         .to_string();
         let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
@@ -1106,7 +1188,12 @@ pub struct ReqwestOllamaNativeUpstream {
 #[cfg(feature = "client-reqwest")]
 impl ReqwestOllamaNativeUpstream {
     pub fn new() -> Result<Self> {
+        Self::new_with_timeout(std::time::Duration::from_secs(600))
+    }
+
+    pub fn new_with_timeout(timeout: std::time::Duration) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
             .build()
             .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
         Ok(Self { client })
@@ -1115,6 +1202,43 @@ impl ReqwestOllamaNativeUpstream {
 
 #[cfg(feature = "client-reqwest")]
 impl OllamaNativeUpstream for ReqwestOllamaNativeUpstream {
+    fn passthrough(
+        &mut self,
+        provider: &GatewayProviderConfig,
+        request: OllamaPassthroughRequest,
+    ) -> Result<OllamaUpstreamResponse> {
+        let method = match request.method {
+            OllamaGatewayMethod::Get => reqwest::Method::GET,
+            OllamaGatewayMethod::Post => reqwest::Method::POST,
+            OllamaGatewayMethod::Delete => reqwest::Method::DELETE,
+        };
+        let endpoint = request.endpoint_suffix().to_string();
+        let prefer_stream = ollama_passthrough_prefers_stream(
+            classify_ollama_route(request.method, &request.path).known_endpoint,
+        );
+        let mut builder = self.authorized_request(provider, method, &endpoint)?;
+        if let Some(body) = request.body {
+            builder = builder.json(&body);
+        }
+        let response = builder
+            .send()
+            .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if prefer_stream || content_type.contains("ndjson") {
+            let status_code = response.status().as_u16();
+            return Ok(OllamaUpstreamResponse::Ndjson {
+                status_code,
+                body: OllamaNdjsonBody::streaming(Box::new(ReqwestLineNdjsonStream::new(response))),
+            });
+        }
+        ollama_response_to_json(response)
+    }
+
     fn tags(&mut self, provider: &GatewayProviderConfig) -> Result<OllamaUpstreamResponse> {
         let response = self
             .authorized_request(provider, reqwest::Method::GET, "/tags")?

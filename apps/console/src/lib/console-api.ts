@@ -3,6 +3,8 @@ import type {
   ConsoleApiDevice,
   ConsoleApiLlmGateway,
   ConsoleApiLlmGatewaySmokeRunReport,
+  ConsoleApiOllamaTransition,
+  ConsoleApiOllamaTransparentStatus,
   ConsoleApiOverview,
   ConsoleApiSession,
   ConsoleApiSkillDetail,
@@ -20,6 +22,7 @@ export type ConsoleSnapshot = {
   overview: ConsoleApiOverview;
   skills: ConsoleApiSkillList;
   llmGateway: ConsoleApiLlmGateway;
+  ollamaTransparent: ConsoleApiOllamaTransparentStatus;
   transports: Transport[];
   devices: Device[];
   session: ConsoleApiSession;
@@ -34,10 +37,19 @@ export type SkillUpsertInput = {
 };
 
 export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
-  const [overviewResponse, skillResponse, llmGatewayResponse, transportResponse, deviceResponse, sessionResponse] = await Promise.all([
+  const [
+    overviewResponse,
+    skillResponse,
+    llmGatewayResponse,
+    ollamaTransparentResponse,
+    transportResponse,
+    deviceResponse,
+    sessionResponse,
+  ] = await Promise.all([
     apiJson<{ overview: ConsoleApiOverview }>("/console/overview"),
     apiJson<{ skills: ConsoleApiSkillList }>("/console/skills"),
     apiJson<{ llmGateway: ConsoleApiLlmGateway }>("/console/llm-gateway"),
+    apiJson<{ ollamaTransparent: ConsoleApiOllamaTransparentStatus }>("/console/ollama-transparent/status"),
     apiJson<{ transports: ConsoleApiTransport[] }>("/console/transports"),
     apiJson<{ devices: ConsoleApiDevice[] }>("/console/devices"),
     apiJson<{ session: ConsoleApiSession }>("/console/session"),
@@ -46,6 +58,7 @@ export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
     overview: overviewResponse.overview,
     skills: skillResponse.skills,
     llmGateway: llmGatewayResponse.llmGateway,
+    ollamaTransparent: ollamaTransparentResponse.ollamaTransparent,
     transports: transportResponse.transports.map(fromApiTransport),
     devices: deviceResponse.devices.map(fromApiDevice),
     session: sessionResponse.session,
@@ -125,4 +138,32 @@ export async function runLlmGatewaySmokeCheck(id: string): Promise<ConsoleApiLlm
     },
   );
   return response.result;
+}
+
+export async function enableOllamaTransparent(): Promise<ConsoleApiOllamaTransition> {
+  const response = await apiJson<{ transition: ConsoleApiOllamaTransition }>("/console/ollama-transparent/enable", {
+    method: "POST",
+    body: JSON.stringify({
+      allowStopOfficialOllama: true,
+      openApp: true,
+    }),
+  });
+  return response.transition;
+}
+
+export async function disableOllamaTransparent(): Promise<ConsoleApiOllamaTransition> {
+  const response = await apiJson<{ transition: ConsoleApiOllamaTransition }>("/console/ollama-transparent/disable", {
+    method: "POST",
+    body: JSON.stringify({
+      restoreOfficialApp: true,
+    }),
+  });
+  return response.transition;
+}
+
+export async function openOllamaApp(): Promise<void> {
+  await apiJson<{ action: unknown }>("/console/ollama-transparent/open-app", {
+    method: "POST",
+    body: "{}",
+  });
 }

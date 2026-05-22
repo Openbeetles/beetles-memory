@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_desktop::{DesktopConsoleRequest, DesktopConsoleState};
+use serde_json::Value;
 
 #[test]
 fn desktop_console_serves_skills_without_http_listener() {
@@ -13,6 +14,23 @@ fn desktop_console_serves_skills_without_http_listener() {
     assert_eq!(response.status_code, 200);
     assert!(response.body.contains(r#""status":"accepted""#));
     assert!(response.body.contains(r#""skills""#));
+}
+
+#[test]
+fn desktop_console_serves_ollama_transparent_status_without_404() {
+    let state = DesktopConsoleState::open_for_data_dir(test_store_dir("ollama-transparent-status"))
+        .unwrap();
+
+    let response = state
+        .handle_console_request(DesktopConsoleRequest::get(
+            "/console/ollama-transparent/status",
+        ))
+        .unwrap();
+
+    assert_eq!(response.status_code, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("status json");
+    assert_eq!(body["status"], "accepted");
+    assert!(body.get("ollamaTransparent").is_some(), "{}", response.body);
 }
 
 #[test]

@@ -559,7 +559,12 @@ pub struct ReqwestGatewayLlmHttpClient {
 #[cfg(feature = "client-reqwest")]
 impl ReqwestGatewayLlmHttpClient {
     pub fn new() -> bm_sdk::Result<Self> {
+        Self::new_with_timeout(std::time::Duration::from_secs(600))
+    }
+
+    pub fn new_with_timeout(timeout: std::time::Duration) -> bm_sdk::Result<Self> {
         let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
             .build()
             .map_err(|error| bm_sdk::Error::config("gateway_llm_http_client", error.to_string()))?;
         Ok(Self { client })

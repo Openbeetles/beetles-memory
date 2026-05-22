@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Moon, Power, Sun } from "lucide-svelte";
+  import { LoaderCircle, Moon, Power, Sun } from "lucide-svelte";
   import type { ConsoleCopy } from "../lib/i18n";
   import type { Theme } from "../lib/types";
   import { windowDragRegion } from "../lib/window-drag";
@@ -12,6 +12,7 @@
     transportCount,
     activeDeviceCount,
     deviceCount,
+    loading = false,
     onThemeChange,
     onRefresh,
   }: {
@@ -22,8 +23,9 @@
     transportCount: number;
     activeDeviceCount: number;
     deviceCount: number;
+    loading?: boolean;
     onThemeChange: (theme: Theme) => void;
-    onRefresh: () => void;
+    onRefresh: () => void | Promise<void>;
   } = $props();
 </script>
 
@@ -43,6 +45,9 @@
     <span class="sb-sep" data-tauri-drag-region>│</span>
     <span class="sb-item" data-tauri-drag-region>{t.statusbar.devices}: {activeDeviceCount}/{deviceCount}</span>
     <span class="sb-sep" data-tauri-drag-region>│</span>
-    <button class="sb-restart" type="button" onclick={onRefresh}><Power size={11} /> {t.actions.apply}</button>
+    <button class="sb-restart" type="button" onclick={onRefresh} disabled={loading}>
+      {#if loading}<LoaderCircle class="spin-icon" size={11} />{:else}<Power size={11} />{/if}
+      {t.actions.apply}
+    </button>
   </div>
 </div>

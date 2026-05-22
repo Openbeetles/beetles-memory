@@ -214,6 +214,7 @@ version = "0.1.0"
 dependencies = [
  "bm-entry",
  "bm-http",
+ "bm-ollama-transparent",
  "bm-sdk",
  "serde",
  "serde_json",
@@ -249,6 +250,7 @@ version = "0.1.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
+ "bm-ollama-transparent",
  "bm-sdk",
  "serde",
  "serde_json",
@@ -276,6 +278,15 @@ dependencies = [
  "bm-sdk",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "bm-ollama-transparent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

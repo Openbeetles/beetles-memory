@@ -3,8 +3,11 @@
 mod audit;
 mod config;
 mod error;
+mod http_front;
 mod maintenance;
 mod ollama;
+mod ollama_passthrough;
+mod ollama_privacy;
 mod openai;
 mod provider;
 mod provider_probe;
@@ -20,6 +23,7 @@ pub use config::{
     GatewayRuntimeCacheConfig, GatewayServerConfig,
 };
 pub use error::{GatewayError, GatewayErrorKey, Result};
+pub use http_front::{GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig};
 #[cfg(feature = "client-reqwest")]
 pub use maintenance::ReqwestGatewayLlmHttpClient;
 pub use maintenance::{OpenAiGatewayServices, OpenAiMaintenanceLlmClient};
@@ -30,6 +34,10 @@ pub use ollama::{
     OllamaGatewayMethod, OllamaGatewayRequest, OllamaGatewayResponse, OllamaMaintenanceLlmClient,
     OllamaNativeUpstream, OllamaNdjsonBody, OllamaNdjsonStream, OllamaUpstreamRequest,
     OllamaUpstreamResponse,
+};
+pub use ollama_passthrough::{
+    classify_ollama_route, OllamaKnownEndpoint, OllamaPassthroughRequest, OllamaRouteAction,
+    OllamaRouteDecision,
 };
 #[cfg(feature = "client-reqwest")]
 pub use openai::ReqwestOpenAiCompatibleUpstream;

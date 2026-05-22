@@ -17,6 +17,7 @@
   import type {
     ConsoleApiDevice,
     ConsoleApiLlmGateway,
+    ConsoleApiOllamaTransparentStatus,
     ConsoleApiOverview,
     ConsoleApiSession,
     ConsoleApiSkillList,
@@ -53,14 +54,18 @@
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const isMacOS   = isTauri && typeof navigator !== "undefined" && navigator.userAgent.includes("Mac OS X");
   const isWindows = isTauri && typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+  type DeviceBusyAction = DeviceConfirmAction | "enable";
 
   let activePage: PageId = $state("overview");
   let theme: Theme = $state(readTheme());
   let lang: Lang = $state(readLang());
   let backendConnected = $state(false);
+  let consoleLoading = $state(false);
+  let consoleLoadSeq = 0;
 
   let overviewData: ConsoleApiOverview | null = $state(null);
   let llmGateway: ConsoleApiLlmGateway | null = $state(null);
+  let ollamaTransparent: ConsoleApiOllamaTransparentStatus | null = $state(null);
   let sessionData: ConsoleApiSession | null = $state(null);
   let transports: Transport[] = $state([]);
   let devices: Device[] = $state([]);
@@ -69,12 +74,16 @@
   let skills: ConsoleApiSkillSummary[] = $state([]);
 
   let addDeviceOpen = $state(false);
+  let addDeviceSaving = $state(false);
   let newDevice = $state({ label: "" });
   let formError = $state("");
   let issuedKeyDialog: { deviceId: string; label: string; appKey: string } | null = $state(null);
   let issuedKeyCopied = $state(false);
+  let issuedKeyCopying = $state(false);
   let deviceConfirm: { action: DeviceConfirmAction; device: Device } | null = $state(null);
-  let deviceConfirmError = $state("");
+  let deviceActionError = $state("");
+  let deviceBusy: { deviceId: string; action: DeviceBusyAction } | null = $state(null);
+  let transportBusy: { id: TransportId; action: "toggle" | "save" } | null = $state(null);
 
   const t = $derived(copy[lang]);
   const systemInfo = $derived(displaySystemInfo(overviewData?.systemInfo, lang));
@@ -111,10 +120,13 @@
   }
 
   async function loadConsoleData() {
+    const loadId = ++consoleLoadSeq;
+    consoleLoading = true;
     try {
       const snapshot = await loadConsoleSnapshot();
       overviewData = snapshot.overview;
       llmGateway = snapshot.llmGateway;
+      ollamaTransparent = snapshot.ollamaTransparent;
       skillReport = snapshot.skills;
       skills = snapshot.skills.skills;
       transports = snapshot.transports;
@@ -124,22 +136,29 @@
     } catch {
       overviewData = null;
       llmGateway = null;
+      ollamaTransparent = null;
       skillReport = null;
       skills = [];
       transports = [];
       devices = [];
       sessionData = null;
       backendConnected = false;
+    } finally {
+      if (consoleLoadSeq === loadId) {
+        consoleLoading = false;
+      }
     }
   }
 
   function openAddDevice() {
+    if (addDeviceSaving) return;
     newDevice = { label: "" };
     formError = "";
     addDeviceOpen = true;
   }
 
   function closeAddDeviceModal() {
+    if (addDeviceSaving) return;
     addDeviceOpen = false;
   }
 
@@ -157,6 +176,7 @@
   }
 
   function closeIssuedKeyDialog() {
+    if (issuedKeyCopying) return;
     issuedKeyDialog = null;
     issuedKeyCopied = false;
   }
@@ -168,23 +188,28 @@
   function openDeviceConfirm(action: DeviceConfirmAction, deviceId: string) {
     const device = devices.find((item) => item.deviceId === deviceId);
     if (!device) return;
-    deviceConfirmError = "";
+    deviceActionError = "";
     deviceConfirm = { action, device };
   }
 
   function closeDeviceConfirm() {
     deviceConfirm = null;
-    deviceConfirmError = "";
   }
 
   async function copyIssuedKey() {
-    if (!issuedKeyDialog || typeof navigator === "undefined" || !navigator.clipboard) return;
-    await navigator.clipboard.writeText(issuedKeyDialog.appKey);
-    issuedKeyCopied = true;
+    if (!issuedKeyDialog || issuedKeyCopying || typeof navigator === "undefined" || !navigator.clipboard) return;
+    issuedKeyCopying = true;
+    try {
+      await navigator.clipboard.writeText(issuedKeyDialog.appKey);
+      issuedKeyCopied = true;
+    } finally {
+      issuedKeyCopying = false;
+    }
   }
 
   async function saveDevice(e: SubmitEvent) {
     e.preventDefault();
+    if (addDeviceSaving) return;
     if (!newDevice.label.trim()) {
       formError = lang === "zh-CN" ? "设备名称不能为空" : "Device name is required";
       return;
@@ -193,91 +218,115 @@
       formError = t.labels.backendOffline;
       return;
     }
+    addDeviceSaving = true;
     try {
       const response = await createDevice(newDevice.label.trim());
       devices = [...devices, fromApiDevice(response.device)];
-      closeAddDeviceModal();
+      addDeviceOpen = false;
       showIssuedKey(response.device, response.appKeyOnce);
       void loadConsoleData();
     } catch (error) {
       formError = error instanceof Error ? error.message : String(error);
       backendConnected = false;
+    } finally {
+      addDeviceSaving = false;
     }
   }
 
   async function updateTransport(id: TransportId, update: Partial<Transport>) {
-    if (!backendConnected) return;
+    if (!backendConnected || transportBusy !== null) return;
+    const action = Object.prototype.hasOwnProperty.call(update, "enabled") ? "toggle" : "save";
+    transportBusy = { id, action };
     try {
       const transport = await updateTransportConfig(id, update);
       transports = mapId(transports, id, () => transport);
       void loadConsoleData();
     } catch {
       backendConnected = false;
+    } finally {
+      transportBusy = null;
     }
   }
 
   function toggleTransport(id: TransportId) {
-    if (!backendConnected) return;
+    if (!backendConnected || transportBusy !== null) return;
     const current = transports.find((transport) => transport.id === id);
     if (!current || current.editable === false) return;
     void updateTransport(id, { enabled: !current.enabled });
   }
 
   function saveTransportEndpoint(id: TransportId, endpoint: string) {
+    if (transportBusy !== null) return;
     void updateTransport(id, { endpoint });
   }
 
   async function rotateAppKey(deviceId: string) {
-    if (!backendConnected) return;
+    if (!backendConnected || deviceBusy !== null) return;
+    deviceActionError = "";
+    deviceBusy = { deviceId, action: "rotate_key" };
     try {
       const response = await rotateDeviceKey(deviceId);
       devices = mapDev(devices, deviceId, () => fromApiDevice(response.device));
-      closeDeviceConfirm();
       showIssuedKey(response.device, response.appKeyOnce);
       void loadConsoleData();
     } catch (error) {
-      deviceConfirmError = error instanceof Error ? error.message : String(error);
+      deviceActionError = error instanceof Error ? error.message : String(error);
       backendConnected = false;
+    } finally {
+      deviceBusy = null;
     }
   }
 
   async function disableDevice(deviceId: string) {
-    if (!backendConnected) return;
+    if (!backendConnected || deviceBusy !== null) return;
+    deviceActionError = "";
+    deviceBusy = { deviceId, action: "disable" };
     try {
       const device = await updateDeviceStatus(deviceId, "disabled");
       devices = mapDev(devices, deviceId, () => device);
-      closeDeviceConfirm();
       void loadConsoleData();
     } catch (error) {
-      deviceConfirmError = error instanceof Error ? error.message : String(error);
+      deviceActionError = error instanceof Error ? error.message : String(error);
       backendConnected = false;
+    } finally {
+      deviceBusy = null;
     }
   }
 
-  function confirmDeviceAction() {
-    if (!deviceConfirm) return;
-    if (deviceConfirm.action === "rotate_key") {
-      void rotateAppKey(deviceConfirm.device.deviceId);
+  function runConfirmedDeviceAction(action: DeviceConfirmAction, deviceId: string) {
+    if (deviceBusy !== null) return;
+    if (!backendConnected) {
+      deviceActionError = t.labels.backendOffline;
+      return;
+    }
+    if (action === "rotate_key") {
+      void rotateAppKey(deviceId);
     } else {
-      void disableDevice(deviceConfirm.device.deviceId);
+      void disableDevice(deviceId);
     }
   }
 
   function toggleDevice(deviceId: string) {
-    if (!backendConnected) return;
+    if (!backendConnected || deviceBusy !== null) return;
     const current = devices.find((device) => device.deviceId === deviceId);
     if (!current) return;
     if (current.status !== "disabled") {
       openDeviceConfirm("disable", deviceId);
       return;
     }
+    deviceActionError = "";
+    deviceBusy = { deviceId, action: "enable" };
     void updateDeviceStatus(deviceId, "allowed")
       .then((device) => {
         devices = mapDev(devices, deviceId, () => device);
         void loadConsoleData();
       })
-      .catch(() => {
+      .catch((error) => {
+        deviceActionError = error instanceof Error ? error.message : String(error);
         backendConnected = false;
+      })
+      .finally(() => {
+        deviceBusy = null;
       });
   }
 </script>
@@ -314,7 +363,14 @@
           onBackendDisconnected={() => (backendConnected = false)}
         />
       {:else if activePage === "llm-gateway"}
-        <LlmGatewayPage {t} {llmGateway} {backendConnected} />
+        <LlmGatewayPage
+          {t}
+          {llmGateway}
+          {ollamaTransparent}
+          {backendConnected}
+          onRefresh={loadConsoleData}
+          onBackendDisconnected={() => (backendConnected = false)}
+        />
       {:else if activePage === "account"}
         <AccountPage {t} {lang} {accountFields} onLangChange={setLang} />
       {:else if activePage === "transports"}
@@ -322,6 +378,8 @@
           {t}
           {transports}
           {backendConnected}
+          busyTransportId={transportBusy?.id ?? null}
+          busyTransportAction={transportBusy?.action ?? null}
           onToggleTransport={toggleTransport}
           onSaveTransportEndpoint={saveTransportEndpoint}
         />
@@ -330,6 +388,9 @@
           {t}
           {devices}
           {backendConnected}
+          actionError={deviceActionError}
+          busyDeviceId={deviceBusy?.deviceId ?? null}
+          busyDeviceAction={deviceBusy?.action ?? null}
           onOpenAddDevice={openAddDevice}
           onRotateAppKey={(deviceId) => openDeviceConfirm("rotate_key", deviceId)}
           onToggleDevice={toggleDevice}
@@ -346,6 +407,7 @@
     transportCount={transports.length}
     {activeDeviceCount}
     deviceCount={devices.length}
+    loading={consoleLoading}
     onThemeChange={setTheme}
     onRefresh={() => void loadConsoleData()}
   />
@@ -355,6 +417,7 @@
       {t}
       label={newDevice.label}
       error={formError}
+      loading={addDeviceSaving}
       onClose={closeAddDeviceModal}
       onSubmit={(event) => void saveDevice(event)}
       onLabelChange={setNewDeviceLabel}
@@ -366,24 +429,26 @@
       {t}
       dialog={issuedKeyDialog}
       copied={issuedKeyCopied}
+      loading={issuedKeyCopying}
       onClose={closeIssuedKeyDialog}
       onCopy={() => void copyIssuedKey()}
     />
   {/if}
 
   {#if deviceConfirm}
+    {@const confirmAction = deviceConfirm.action}
+    {@const confirmDeviceId = deviceConfirm.device.deviceId}
     <ConfirmActionModal
-      title={deviceConfirm.action === "rotate_key" ? t.deviceConfirm.rotateTitle : t.deviceConfirm.disableTitle}
-      description={deviceConfirm.action === "rotate_key" ? t.deviceConfirm.rotateDesc : t.deviceConfirm.disableDesc}
+      title={confirmAction === "rotate_key" ? t.deviceConfirm.rotateTitle : t.deviceConfirm.disableTitle}
+      description={confirmAction === "rotate_key" ? t.deviceConfirm.rotateDesc : t.deviceConfirm.disableDesc}
       subjectLabel={t.deviceConfirm.deviceLabel}
       subject={deviceName(deviceConfirm.device)}
-      meta={deviceConfirm.device.deviceId}
-      confirmLabel={deviceConfirm.action === "rotate_key" ? t.deviceConfirm.rotateConfirm : t.deviceConfirm.disableConfirm}
+      meta={confirmDeviceId}
+      confirmLabel={confirmAction === "rotate_key" ? t.deviceConfirm.rotateConfirm : t.deviceConfirm.disableConfirm}
       cancelLabel={t.actions.cancel}
       closeLabel={t.addDevice.closeLabel}
-      error={deviceConfirmError}
       onClose={closeDeviceConfirm}
-      onConfirm={confirmDeviceAction}
+      onConfirm={() => runConfirmedDeviceAction(confirmAction, confirmDeviceId)}
     />
   {/if}
 </main>

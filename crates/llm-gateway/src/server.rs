@@ -38,7 +38,7 @@ pub fn serve_llm_gateway_http_stream_with_services<S: Read + Write>(
 ) -> Result<()> {
     let request = read_http_gateway_request(stream)?;
     if request.path.starts_with("/v1/") {
-        let request = request.into_openai_request();
+        let request = request.into_openai_request()?;
         return match handle_openai_request_with_services(
             gateway,
             config,
@@ -86,7 +86,7 @@ pub fn serve_openai_http_stream_with_services<S: Read + Write>(
     services: &mut OpenAiGatewayServices<'_>,
     stream: &mut S,
 ) -> Result<()> {
-    let request = read_http_gateway_request(stream)?.into_openai_request();
+    let request = read_http_gateway_request(stream)?.into_openai_request()?;
     match handle_openai_request_with_services(gateway, config, request, upstream, services) {
         Ok(response) => write_openai_http_response(stream, response, services),
         Err(error) => write_error_response(stream, &error),
@@ -121,6 +121,7 @@ pub fn serve_ollama_http_stream_with_services<S: Read + Write>(
 enum HttpGatewayMethod {
     Get,
     Post,
+    Delete,
 }
 
 struct HttpGatewayRequest {
@@ -133,19 +134,25 @@ struct HttpGatewayRequest {
 }
 
 impl HttpGatewayRequest {
-    fn into_openai_request(self) -> OpenAiGatewayRequest {
-        OpenAiGatewayRequest {
-            method: match self.method {
-                HttpGatewayMethod::Get => OpenAiGatewayMethod::Get,
-                HttpGatewayMethod::Post => OpenAiGatewayMethod::Post,
-            },
+    fn into_openai_request(self) -> Result<OpenAiGatewayRequest> {
+        let method = match self.method {
+            HttpGatewayMethod::Get => OpenAiGatewayMethod::Get,
+            HttpGatewayMethod::Post => OpenAiGatewayMethod::Post,
+            HttpGatewayMethod::Delete => {
+                return Err(GatewayError::invalid_request(
+                    "unsupported OpenAI HTTP method",
+                ));
+            }
+        };
+        Ok(OpenAiGatewayRequest {
+            method,
             path: self.path,
             headers: self.headers,
             body: self.body,
             scope: self.scope,
             provider_name: self.provider_name,
             client_profile: "openai_http".to_string(),
-        }
+        })
     }
 
     fn into_ollama_request(self) -> OllamaGatewayRequest {
@@ -153,6 +160,7 @@ impl HttpGatewayRequest {
             method: match self.method {
                 HttpGatewayMethod::Get => OllamaGatewayMethod::Get,
                 HttpGatewayMethod::Post => OllamaGatewayMethod::Post,
+                HttpGatewayMethod::Delete => OllamaGatewayMethod::Delete,
             },
             path: self.path,
             headers: self.headers,
@@ -192,6 +200,7 @@ fn read_http_gateway_request(stream: &mut impl Read) -> Result<HttpGatewayReques
     let method = match request_parts.next() {
         Some("GET") => HttpGatewayMethod::Get,
         Some("POST") => HttpGatewayMethod::Post,
+        Some("DELETE") => HttpGatewayMethod::Delete,
         _ => return Err(GatewayError::invalid_request("unsupported HTTP method")),
     };
     let path = request_parts
@@ -260,7 +269,7 @@ fn write_openai_http_response(
             let body = body.to_string();
             write!(
                 stream,
-                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 response.status_code,
                 reason_phrase(response.status_code),
                 body.len(),
@@ -274,7 +283,7 @@ fn write_openai_http_response(
         OpenAiGatewayBody::Sse(body) => {
             write!(
                 stream,
-                "HTTP/1.1 {} {}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n",
+                "HTTP/1.1 {} {}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
                 response.status_code,
                 reason_phrase(response.status_code)
             )
@@ -303,7 +312,7 @@ fn write_ollama_http_response(
             let body = body.to_string();
             write!(
                 stream,
-                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 response.status_code,
                 reason_phrase(response.status_code),
                 body.len(),
@@ -317,7 +326,7 @@ fn write_ollama_http_response(
         OllamaGatewayBody::Ndjson(body) => {
             write!(
                 stream,
-                "HTTP/1.1 {} {}\r\ncontent-type: application/x-ndjson\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n",
+                "HTTP/1.1 {} {}\r\ncontent-type: application/x-ndjson\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
                 response.status_code,
                 reason_phrase(response.status_code)
             )
@@ -347,7 +356,7 @@ fn write_error_response(stream: &mut impl Write, error: &GatewayError) -> Result
     .to_string();
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         status_code,
         reason_phrase(status_code),
         body.len(),
