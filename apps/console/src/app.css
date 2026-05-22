@@ -640,15 +640,6 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
 .shell.tauri.macos .topbar {
   height: 36px; padding:0 14px;
 }
-/* macOS sidebar vibrancy: 侧栏背景透明，让 NSVisualEffectView 的 Sidebar 材质透出。
-   主内容区 (.workspace) 保持不透明深色背景，维持 HUD 可读性。 */
-.shell.tauri.macos { background: transparent; }
-.shell.tauri.macos .sidebar {
-  background: transparent;
-  border-right-color: rgba(90,90,165,.12);
-}
-.shell.tauri.macos .brand { background: transparent; }
-.shell.tauri.macos.light .sidebar { border-right-color: rgba(0,0,0,.08); }
 
 /* ─ TAURI PLATFORM: WINDOWS ─ */
 /* Windows 使用原生装饰（lib.rs 中 setup 时恢复 set_decorations(true)），
