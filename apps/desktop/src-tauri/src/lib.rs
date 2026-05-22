@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+#[cfg(target_os = "macos")]
+use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryStoreConfig, EntryTransportConfig,
@@ -145,6 +148,23 @@ pub fn run() {
             let state = DesktopConsoleState::open_for_data_dir(data_dir)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             app.manage(Mutex::new(state));
+
+            // macOS: Apply sidebar vibrancy to give the native translucent sidebar look.
+            // CSS handles transparency on the sidebar element (.shell.tauri.macos .sidebar).
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None);
+            }
+
+            // On non-macOS platforms (Windows, Linux), re-enable native window decorations.
+            // The titleBarStyle "Overlay" + hiddenTitle in tauri.conf.json is macOS-only;
+            // on Windows it creates a frameless window without visible controls unless
+            // we restore decorations at runtime.
+            #[cfg(not(target_os = "macos"))]
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_decorations(true);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![commands::console_request])

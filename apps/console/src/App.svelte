@@ -47,6 +47,8 @@
   import TransportsPage from "./pages/TransportsPage.svelte";
 
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const isMacOS   = isTauri && typeof navigator !== "undefined" && navigator.userAgent.includes("Mac OS X");
+  const isWindows = isTauri && typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
 
   let activePage: PageId = $state("overview");
   let theme: Theme = $state(readTheme());
@@ -231,8 +233,8 @@
   <title>{t.headTitle}</title>
 </svelte:head>
 
-<main class:light={theme === "light"} class:tauri={isTauri} class="shell">
-  <Sidebar pages={pages} activePage={activePage} {isTauri} brand={t.brand} onSelectPage={setActivePage} />
+<main class:light={theme === "light"} class:tauri={isTauri} class:macos={isMacOS} class:windows={isWindows} class="shell">
+  <Sidebar pages={pages} activePage={activePage} {isTauri} {isMacOS} brand={t.brand} onSelectPage={setActivePage} />
 
   <section class="workspace">
     <Topbar consoleLabel={t.labels.console} currentPage={currentPage} />

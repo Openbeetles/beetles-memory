@@ -6,7 +6,7 @@
 }
 
 :root {
-  --font: "JetBrains Mono","Fira Code","Cascadia Code","SF Mono","Consolas",ui-monospace,monospace;
+  --font: "SF Mono","Cascadia Code","JetBrains Mono","Fira Code","Consolas",ui-monospace,monospace;
 
   --bg:#09090e; --s0:#0d0d17; --s1:#111121; --s2:#161626; --s3:#1e1e30; --s4:#26263c; --s5:#2e2e48;
 
@@ -629,17 +629,38 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
   *,*::before,*::after { transition:none !important; animation:none !important; }
 }
 
-/* ─ TAURI OVERLAY TITLEBAR (macOS) ─ */
+/* ─ TAURI PLATFORM: macOS ─ */
 /* 原生标题栏隐藏后，为红绿灯让出空间；拖拽区域通过 data-tauri-drag-region 声明 */
-.shell.tauri .brand {
+.shell.tauri.macos .brand {
   padding-left: 80px; height: 36px;
 }
-.shell.tauri.light .brand {
+.shell.tauri.macos.light .brand {
   padding-left: 80px;
 }
-.shell.tauri .topbar {
+.shell.tauri.macos .topbar {
   height: 36px; padding:0 14px;
 }
+/* macOS sidebar vibrancy: 侧栏背景透明，让 NSVisualEffectView 的 Sidebar 材质透出。
+   主内容区 (.workspace) 保持不透明深色背景，维持 HUD 可读性。 */
+.shell.tauri.macos { background: transparent; }
+.shell.tauri.macos .sidebar {
+  background: transparent;
+  border-right-color: rgba(90,90,165,.12);
+}
+.shell.tauri.macos .brand { background: transparent; }
+.shell.tauri.macos.light .sidebar { border-right-color: rgba(0,0,0,.08); }
+
+/* ─ TAURI PLATFORM: WINDOWS ─ */
+/* Windows 使用原生装饰（lib.rs 中 setup 时恢复 set_decorations(true)），
+   无需为系统按钮留空，尺寸恢复与浏览器模式一致 */
+.shell.tauri.windows .topbar { height: 48px; padding: 0 18px; }
+.shell.tauri.windows .brand  { height: 48px; padding-left: 14px; }
+/* Windows Fluent Design 倾向：更大圆角，收减浮层阴影 */
+.shell.tauri.windows { --r: 4px; }
+.shell.tauri.windows .primary-button { box-shadow: none; }
+.shell.tauri.windows .hud-hero { box-shadow: none; }
+.shell.tauri.windows .transport-card:hover { box-shadow: 0 1px 6px rgba(0,0,0,.18); }
+.shell.tauri.windows .panel:hover { box-shadow: none; }
 
 /* ─ MODAL ─ */
 .modal-backdrop {

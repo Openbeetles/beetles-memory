@@ -6,12 +6,14 @@
     pages,
     activePage,
     isTauri,
+    isMacOS = false,
     brand,
     onSelectPage,
   }: {
     pages: Page[];
     activePage: PageId;
     isTauri: boolean;
+    isMacOS?: boolean;
     brand: ConsoleCopy["brand"];
     onSelectPage: (page: PageId) => void;
   } = $props();
