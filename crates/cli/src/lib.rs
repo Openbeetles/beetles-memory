@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+pub mod agent_rules;
+
+use agent_rules::{render_agent_rules_export, AgentRulesExportRequest, AgentRulesTarget};
 use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_entry::{
     EntryAuthConfig, EntryAuthDecision, EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert,
@@ -151,6 +154,9 @@ where
     if args.first().is_some_and(|scope| scope == "memory") {
         return run_memory_cli(&args[1..]);
     }
+    if args.first().is_some_and(|scope| scope == "agent-rules") {
+        return run_agent_rules_cli(&args[1..]);
+    }
     match args.as_slice() {
         [scope, command, flag, profile]
             if scope == "platform" && command == "capability-snapshot" && flag == "--profile" =>
@@ -160,7 +166,7 @@ where
             render_platform_capability_snapshot(profile)
         }
         _ => {
-            Err("usage: bm platform capability-snapshot --profile <profile-feature-id>".to_string())
+            Err("usage: bm memory <command> [options] | bm platform capability-snapshot --profile <profile-feature-id> | bm agent-rules export --target <target> --gateway-url <url> --mcp-url <url>".to_string())
         }
     }
 }
@@ -229,6 +235,63 @@ fn run_memory_cli(args: &[String]) -> Result<String, String> {
         .handle(options.transport_context(operation), adapter_command)
         .map_err(|err| err.to_string())?;
     render_entry_response(response.adapter, options.output_path.as_deref())
+}
+
+fn run_agent_rules_cli(args: &[String]) -> Result<String, String> {
+    match args.split_first() {
+        Some((command, rest)) if command == "export" => {
+            let request = AgentRulesCliOptions::parse(rest)?.export_request()?;
+            render_agent_rules_export(&request)
+        }
+        Some((command, _)) => Err(format!("unsupported agent-rules command: {command}")),
+        None => Err(
+            "usage: bm agent-rules export --target <target> --gateway-url <url> --mcp-url <url>"
+                .to_string(),
+        ),
+    }
+}
+
+struct AgentRulesCliOptions {
+    target: Option<AgentRulesTarget>,
+    gateway_url: String,
+    mcp_url: String,
+}
+
+impl AgentRulesCliOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut target = None;
+        let mut gateway_url = String::new();
+        let mut mcp_url = String::new();
+        let mut index = 0;
+        while index < args.len() {
+            let key = args[index].as_str();
+            index += 1;
+            match key {
+                "--target" => {
+                    let raw = next_value(args, &mut index, key)?;
+                    target = Some(AgentRulesTarget::parse(raw)?);
+                }
+                "--gateway-url" => gateway_url = next_value(args, &mut index, key)?.to_string(),
+                "--mcp-url" => mcp_url = next_value(args, &mut index, key)?.to_string(),
+                other => return Err(format!("unsupported agent-rules option: {other}")),
+            }
+        }
+        Ok(Self {
+            target,
+            gateway_url,
+            mcp_url,
+        })
+    }
+
+    fn export_request(self) -> Result<AgentRulesExportRequest, String> {
+        Ok(AgentRulesExportRequest {
+            target: self
+                .target
+                .ok_or_else(|| "--target is required".to_string())?,
+            gateway_url: required_value(&self.gateway_url, "--gateway-url")?.to_string(),
+            mcp_url: required_value(&self.mcp_url, "--mcp-url")?.to_string(),
+        })
+    }
 }
 
 fn is_skill_command(command: &str) -> bool {

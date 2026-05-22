@@ -208,10 +208,10 @@
     <div><span>{t.skillsPanel.userProvided}</span><strong>{skillReport?.userProvided ?? 0}</strong></div>
   </div>
   <div class="skill-toolbar">
-    <label class="skill-search">
-      <span><Search size={13} /> {t.skillsPanel.search}</span>
+    <div class="skill-search">
+      <span class="skill-search-icon-wrap"><Search size={13} /></span>
       <input value={skillSearch} placeholder={t.skillsPanel.search} oninput={(event) => (skillSearch = (event.currentTarget as HTMLInputElement).value)} />
-    </label>
+    </div>
     <div class="skill-filters">
       <select value={skillStatusFilter} onchange={(event) => (skillStatusFilter = (event.currentTarget as HTMLSelectElement).value as typeof skillStatusFilter)}>
         <option value="all">{t.skillsPanel.all}</option>

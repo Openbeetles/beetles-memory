@@ -13,6 +13,7 @@ fn gateway_config_defaults_are_loopback_memory_required_and_bounded() {
     assert!(config.server.memory_required);
     assert!(config.server.require_token_for_remote);
     assert_eq!(config.scope.default_channel, "llm.gateway");
+    assert_eq!(config.scope.default_chat_id, None);
     assert_eq!(config.runtime_cache.max_runtimes, 256);
     assert_eq!(
         config.projection,
@@ -87,6 +88,11 @@ fn provider_config_uses_secret_env_not_plaintext_api_key() {
         model_aliases: vec![("local".to_string(), "qwen2.5".to_string())],
         timeout_ms: Some(30_000),
         ollama_generate_system_supported: true,
+        openai_responses_supported: true,
+        openai_stateful_responses_supported: false,
+        openai_embeddings_supported: true,
+        openai_tools_supported: true,
+        openai_streaming_supported: true,
     };
 
     assert_eq!(provider.secret_env_name(), Some("VLLM_API_KEY"));

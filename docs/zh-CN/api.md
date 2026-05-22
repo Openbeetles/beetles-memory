@@ -74,6 +74,8 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 | `/console/skills/{name}` | `PATCH` | 编辑 Skill，最终进入 `MemoryRuntime::upsert_skill`。 |
 | `/console/skills/{name}/enabled` | `PATCH` | 启用或停用 Skill。 |
 | `/console/skills/{name}` | `DELETE` | 删除 Skill 记忆。 |
+| `/console/llm-gateway` | `GET` | 返回 LLM Gateway 操作面：OpenAI/Ollama/MCP 端点、共享 runtime、规则导出命令和 smoke checks。 |
+| `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | 运行后端白名单中的 LLM Gateway 验收项，并返回退出码、耗时和受限 stdout/stderr。 |
 | `/console/transports` | `GET` | 返回可配置通信入口。 |
 | `/console/transports/{id}` | `PATCH` | 更新通信入口开关或 endpoint。 |
 | `/console/devices` | `GET` | 返回允许访问设备列表，只包含 app_key 指纹。 |
@@ -88,6 +90,7 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 - 新增和轮换设备时，`appKeyOnce` 只在该次响应中返回。
 - 通信页的 HTTP 开关表示外部 memory HTTP API，不表示配置台自身的 HTTP console 入口。
 - Skill 管理页管理 procedural memory，不执行 skill，不提供 marketplace、executor 或 workflow runner。
+- LLM Gateway 验收运行接口只接受后端已知的 smoke check `id`，不执行前端传入的任意命令。
 
 ## Capability Catalog
 

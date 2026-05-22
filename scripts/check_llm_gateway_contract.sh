@@ -17,6 +17,7 @@ cargo test -p bm-llm-gateway --no-default-features --features profile-server-lin
 cargo test -p bm-llm-gateway --no-default-features --features profile-server-linux-dev-full
 cargo clippy -p bm-llm-gateway --all-targets --no-default-features --features server-async,client-reqwest -- -D warnings
 bash scripts/check_llm_gateway_local_openai_smoke.sh
+bash scripts/check_llm_gateway_release_integrations.sh
 
 if contract_manifest_has_core_store_dependency crates/llm-gateway/Cargo.toml; then
   fail "bm-llm-gateway must not depend on bm-core or bm-store directly"

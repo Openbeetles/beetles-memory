@@ -7,6 +7,7 @@ mod maintenance;
 mod ollama;
 mod openai;
 mod provider;
+mod provider_probe;
 mod runtime;
 mod scope;
 mod server;
@@ -38,6 +39,10 @@ pub use openai::{
     OpenAiSseBody, OpenAiSseStream, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 pub use provider::{GatewayProviderConfig, GatewayProviderKind};
+pub use provider_probe::{
+    probe_openai_provider_capabilities, GatewayModelCapabilityReport,
+    GatewayProviderCapabilityReport,
+};
 pub use runtime::GatewayRuntime;
 pub use scope::{
     GatewayScopeRequest, GatewayScopeResolution, GatewayScopeResolver, GatewayScopeResolverConfig,

@@ -9,9 +9,9 @@ use crate::{
         run_json_maintenance, GatewayMaintenancePlan, GatewayMaintenancePlanInput,
         GatewayMaintenanceRunOutcome, OpenAiDeferredMaintenance,
     },
-    GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayConfig, GatewayError,
-    GatewayProviderConfig, GatewayProviderKind, GatewayRuntime, GatewayScopeRequest,
-    GatewayScopeResolver, OpenAiGatewayServices, Result,
+    probe_openai_provider_capabilities, GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage,
+    GatewayConfig, GatewayError, GatewayProviderConfig, GatewayProviderKind, GatewayRuntime,
+    GatewayScopeRequest, GatewayScopeResolver, OpenAiGatewayServices, Result,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,6 +258,26 @@ pub trait OpenAiCompatibleUpstream {
         provider: &GatewayProviderConfig,
         request: OpenAiUpstreamRequest,
     ) -> Result<OpenAiUpstreamResponse>;
+
+    fn responses(
+        &mut self,
+        _provider: &GatewayProviderConfig,
+        _request: OpenAiUpstreamRequest,
+    ) -> Result<OpenAiUpstreamResponse> {
+        Err(GatewayError::provider_unavailable(
+            "openai-compatible provider does not support responses",
+        ))
+    }
+
+    fn embeddings(
+        &mut self,
+        _provider: &GatewayProviderConfig,
+        _request: OpenAiUpstreamRequest,
+    ) -> Result<OpenAiUpstreamResponse> {
+        Err(GatewayError::provider_unavailable(
+            "openai-compatible provider does not support embeddings",
+        ))
+    }
 }
 
 pub fn handle_openai_request(
@@ -290,6 +310,15 @@ pub fn handle_openai_request_with_services(
         }
         (OpenAiGatewayMethod::Post, "/v1/chat/completions") => {
             handle_chat_completion(gateway, config, request, provider, upstream, services)
+        }
+        (OpenAiGatewayMethod::Post, "/v1/responses") => {
+            handle_responses(gateway, config, request, provider, upstream, services)
+        }
+        (OpenAiGatewayMethod::Post, "/v1/embeddings") => {
+            handle_embeddings(config, request, provider, upstream)
+        }
+        (OpenAiGatewayMethod::Get, "/v1/bm/provider-capabilities") => {
+            handle_provider_capabilities(config, request, upstream)
         }
         _ => Err(GatewayError::invalid_request(
             "unsupported OpenAI gateway route",
@@ -408,6 +437,197 @@ fn handle_chat_completion(
     Ok(response)
 }
 
+fn handle_responses(
+    gateway: &GatewayRuntime,
+    config: &GatewayConfig,
+    mut request: OpenAiGatewayRequest,
+    provider: &GatewayProviderConfig,
+    upstream: &mut dyn OpenAiCompatibleUpstream,
+    services: &mut OpenAiGatewayServices<'_>,
+) -> Result<OpenAiGatewayResponse> {
+    if !provider.openai_responses_supported {
+        return Err(GatewayError::provider_unavailable(
+            "openai-compatible provider does not support responses",
+        ));
+    }
+    let body = request
+        .body
+        .take()
+        .ok_or_else(|| GatewayError::invalid_request("responses body is required"))?;
+    let body_object = body
+        .as_object()
+        .ok_or_else(|| GatewayError::invalid_request("responses body must be an object"))?;
+    let model_alias = body_object
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::invalid_request("responses model is required"))?;
+    if body_object.get("previous_response_id").is_some()
+        && !provider.openai_stateful_responses_supported
+    {
+        return Err(GatewayError::provider_unavailable(
+            "stateful responses are not supported by this provider",
+        ));
+    }
+    if request.scope.model_alias.is_none() {
+        request.scope.model_alias = Some(model_alias.to_string());
+    }
+
+    let scope = GatewayScopeResolver::new(config.scope.clone()).resolve(&request.scope)?;
+    let mut audit = GatewayAuditReport::new(
+        "openai-responses",
+        "/v1/responses",
+        request.client_profile,
+        model_alias,
+        scope.clone(),
+    );
+    if body_object.get("previous_response_id").is_some() {
+        audit.record_note("openai_responses_stateful_passthrough");
+    }
+    let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
+    let extracted_user_text = extract_response_input_text(body_object.get("input"));
+    let external_content_used = response_input_uses_external_content(body_object.get("input"))
+        || body_object.get("tools").is_some();
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: extracted_user_text.clone(),
+            system_max_len: config.projection.system_max_len,
+            recent_messages_limit: config.projection.recent_messages_limit,
+            pressure: config.projection.pressure,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .map_err(|error| {
+            audit.record_stage(GatewayAuditStage::Projection, GatewayAuditOutcome::Failed);
+            GatewayError::projection_failed(error.to_string())
+        })?;
+    audit.record_stage(
+        GatewayAuditStage::Projection,
+        GatewayAuditOutcome::Succeeded,
+    );
+
+    let stream = body_object
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let model = provider_model_name(provider, model_alias);
+    let upstream_body =
+        build_upstream_responses_body(&body, &projection.system_memory_block, &model)?;
+    let carry = projection.context.into_runtime_carry();
+    let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
+        runtime,
+        user_content: extracted_user_text.clone(),
+        external_content_used,
+        runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
+        task_learning_selected_ids: carry.task_recall_selected_ids,
+        pressure: config.projection.pressure,
+        mode_input: RuntimeLifecycleModeInput::default(),
+        config: config.maintenance,
+    });
+    let upstream_request = OpenAiUpstreamRequest {
+        endpoint: "/responses".to_string(),
+        body: upstream_body,
+        stream,
+        model,
+        extracted_user_text,
+    };
+    let response = upstream
+        .responses(provider, upstream_request)
+        .map_err(|error| {
+            audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
+            GatewayError::upstream_unavailable(error.to_string())
+        })?;
+    audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
+    let mut response = upstream_response_to_gateway(response, audit);
+    response.prepare_post_reply_maintenance(maintenance_plan, services);
+    Ok(response)
+}
+
+fn handle_embeddings(
+    config: &GatewayConfig,
+    mut request: OpenAiGatewayRequest,
+    provider: &GatewayProviderConfig,
+    upstream: &mut dyn OpenAiCompatibleUpstream,
+) -> Result<OpenAiGatewayResponse> {
+    if !provider.openai_embeddings_supported {
+        return Err(GatewayError::provider_unavailable(
+            "openai-compatible provider does not support embeddings",
+        ));
+    }
+    let body = request
+        .body
+        .take()
+        .ok_or_else(|| GatewayError::invalid_request("embeddings body is required"))?;
+    let body_object = body
+        .as_object()
+        .ok_or_else(|| GatewayError::invalid_request("embeddings body must be an object"))?;
+    let model_alias = body_object
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::invalid_request("embeddings model is required"))?;
+    if request.scope.model_alias.is_none() {
+        request.scope.model_alias = Some(model_alias.to_string());
+    }
+    let scope = GatewayScopeResolver::new(config.scope.clone()).resolve(&request.scope)?;
+    let mut audit = GatewayAuditReport::new(
+        "openai-embeddings",
+        "/v1/embeddings",
+        request.client_profile,
+        model_alias,
+        scope,
+    );
+    let model = provider_model_name(provider, model_alias);
+    let upstream_body = build_upstream_passthrough_body(&body, &model)?;
+    let response = upstream
+        .embeddings(
+            provider,
+            OpenAiUpstreamRequest {
+                endpoint: "/embeddings".to_string(),
+                body: upstream_body,
+                stream: false,
+                model,
+                extracted_user_text: String::new(),
+            },
+        )
+        .map_err(|error| {
+            audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
+            GatewayError::upstream_unavailable(error.to_string())
+        })?;
+    audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
+    Ok(upstream_response_to_gateway(response, audit))
+}
+
+fn handle_provider_capabilities(
+    config: &GatewayConfig,
+    request: OpenAiGatewayRequest,
+    upstream: &mut dyn OpenAiCompatibleUpstream,
+) -> Result<OpenAiGatewayResponse> {
+    let scope = GatewayScopeResolver::new(config.scope.clone()).resolve(&request.scope)?;
+    let mut audit = GatewayAuditReport::new(
+        "openai-provider-capabilities",
+        "/v1/bm/provider-capabilities",
+        request.client_profile,
+        request
+            .provider_name
+            .clone()
+            .unwrap_or_else(|| config.default_provider.clone()),
+        scope,
+    );
+    let report =
+        probe_openai_provider_capabilities(config, request.provider_name.as_deref(), upstream)
+            .inspect_err(|_| {
+                audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
+            })?;
+    audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
+    Ok(OpenAiGatewayResponse {
+        status_code: 200,
+        body: OpenAiGatewayBody::Json(
+            serde_json::to_value(report)
+                .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?,
+        ),
+        audit,
+    })
+}
+
 fn upstream_response_to_gateway(
     response: OpenAiUpstreamResponse,
     audit: GatewayAuditReport,
@@ -464,6 +684,43 @@ fn build_upstream_chat_body(
     Ok(Value::Object(object))
 }
 
+fn build_upstream_responses_body(
+    original_body: &Value,
+    memory_block: &str,
+    model: &str,
+) -> Result<Value> {
+    let mut object = original_body
+        .as_object()
+        .cloned()
+        .ok_or_else(|| GatewayError::invalid_request("responses body must be an object"))?;
+    object.insert("model".to_string(), Value::String(model.to_string()));
+    if !memory_block.trim().is_empty() {
+        let memory = format!("Beetle Memory context:\n{memory_block}");
+        let instructions = match object.get("instructions") {
+            Some(Value::String(existing)) if !existing.trim().is_empty() => {
+                format!("{}\n\n{memory}", existing.trim())
+            }
+            Some(Value::String(_)) | None => memory,
+            Some(_) => {
+                return Err(GatewayError::invalid_request(
+                    "responses instructions must be a string",
+                ))
+            }
+        };
+        object.insert("instructions".to_string(), Value::String(instructions));
+    }
+    Ok(Value::Object(object))
+}
+
+fn build_upstream_passthrough_body(original_body: &Value, model: &str) -> Result<Value> {
+    let mut object = original_body
+        .as_object()
+        .cloned()
+        .ok_or_else(|| GatewayError::invalid_request("request body must be an object"))?;
+    object.insert("model".to_string(), Value::String(model.to_string()));
+    Ok(Value::Object(object))
+}
+
 fn extract_messages_text(messages: Option<&Value>) -> Result<String> {
     let messages = messages.and_then(Value::as_array).ok_or_else(|| {
         GatewayError::invalid_request("chat completions messages must be an array")
@@ -476,6 +733,72 @@ fn extract_messages_text(messages: Option<&Value>) -> Result<String> {
         extract_content_text(message.get("content"), &mut parts);
     }
     Ok(parts.join("\n").trim().to_string())
+}
+
+fn extract_response_input_text(input: Option<&Value>) -> String {
+    let mut parts = Vec::new();
+    extract_response_value_text(input, &mut parts, true);
+    parts.join("\n").trim().to_string()
+}
+
+fn extract_response_value_text(value: Option<&Value>, parts: &mut Vec<String>, role_allowed: bool) {
+    match value {
+        Some(Value::String(text)) if role_allowed && !text.trim().is_empty() => {
+            parts.push(text.trim().to_string())
+        }
+        Some(Value::Array(items)) => {
+            for item in items {
+                extract_response_value_text(Some(item), parts, role_allowed);
+            }
+        }
+        Some(Value::Object(object)) => {
+            let item_role_allowed = match object.get("role").and_then(Value::as_str) {
+                Some("user") => true,
+                Some(_) => false,
+                None => role_allowed,
+            };
+            if object.get("type").and_then(Value::as_str) == Some("input_text") {
+                if let Some(text) = object.get("text").and_then(Value::as_str) {
+                    if item_role_allowed && !text.trim().is_empty() {
+                        parts.push(text.trim().to_string());
+                    }
+                }
+            } else if let Some(text) = object.get("text").and_then(Value::as_str) {
+                if item_role_allowed && !text.trim().is_empty() {
+                    parts.push(text.trim().to_string());
+                }
+            }
+            extract_response_value_text(object.get("content"), parts, item_role_allowed);
+        }
+        _ => {}
+    }
+}
+
+fn response_input_uses_external_content(input: Option<&Value>) -> bool {
+    match input {
+        Some(Value::Array(items)) => items.iter().any(response_value_uses_external_content),
+        Some(value) => response_value_uses_external_content(value),
+        None => false,
+    }
+}
+
+fn response_value_uses_external_content(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if let Some(kind) = object.get("type").and_then(Value::as_str) {
+        if !matches!(kind, "message" | "input_text") {
+            return true;
+        }
+    }
+    match object.get("content") {
+        Some(Value::Array(items)) => items.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) != Some("input_text")
+                || response_value_uses_external_content(item)
+        }),
+        Some(value) => response_value_uses_external_content(value),
+        None => false,
+    }
 }
 
 fn request_uses_external_content(messages: Option<&Value>) -> bool {
@@ -556,6 +879,39 @@ impl OpenAiCompatibleUpstream for ReqwestOpenAiCompatibleUpstream {
                 body: OpenAiSseBody::streaming(Box::new(ReqwestLineSseStream::new(response))),
             });
         }
+        response_to_json(response)
+    }
+
+    fn responses(
+        &mut self,
+        provider: &GatewayProviderConfig,
+        request: OpenAiUpstreamRequest,
+    ) -> Result<OpenAiUpstreamResponse> {
+        let response = self
+            .authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?
+            .json(&request.body)
+            .send()
+            .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
+        if request.stream {
+            let status_code = response.status().as_u16();
+            return Ok(OpenAiUpstreamResponse::Sse {
+                status_code,
+                body: OpenAiSseBody::streaming(Box::new(ReqwestLineSseStream::new(response))),
+            });
+        }
+        response_to_json(response)
+    }
+
+    fn embeddings(
+        &mut self,
+        provider: &GatewayProviderConfig,
+        request: OpenAiUpstreamRequest,
+    ) -> Result<OpenAiUpstreamResponse> {
+        let response = self
+            .authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?
+            .json(&request.body)
+            .send()
+            .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
         response_to_json(response)
     }
 }

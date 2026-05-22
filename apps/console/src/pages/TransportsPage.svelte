@@ -23,7 +23,7 @@
   <PanelHeader label={t.transportsPanel.label} title={t.transportsPanel.title} icon={Globe2} />
   <div class="transport-grid">
     {#each transports as transport}
-      {@const transportCopy = t.transports[transport.id]}
+      {@const transportCopy = t.transports[transport.id] ?? { name: transport.id, detail: transport.endpoint, fields: [] }}
       <article class:disabled={!transport.enabled} class="transport-card">
         <div class="transport-head">
           <button

@@ -90,6 +90,8 @@ const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_patch("/console/skills/{name}"),
     console_patch("/console/skills/{name}/enabled"),
     console_delete("/console/skills/{name}"),
+    console_get("/console/llm-gateway"),
+    console_post("/console/llm-gateway/smoke-checks/{id}/run"),
     console_get("/console/transports"),
     console_patch("/console/transports/{id}"),
     console_get("/console/devices"),
@@ -482,6 +484,34 @@ fn handle_console_request(
                 "transports": runtime.console_transports(),
             }),
         )),
+        (HttpMethod::Get, "/console/llm-gateway") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "llmGateway": runtime.console_llm_gateway(),
+            }),
+        )),
+        (HttpMethod::Post, path)
+            if path.starts_with("/console/llm-gateway/smoke-checks/") && path.ends_with("/run") =>
+        {
+            let id = trim_suffix_path(path, "/console/llm-gateway/smoke-checks/")
+                .strip_suffix("/run")
+                .unwrap_or("")
+                .trim_matches('/');
+            if id.is_empty() {
+                return Ok(not_found("console llm gateway smoke check not found"));
+            }
+            match runtime.console_run_llm_gateway_smoke_check(id) {
+                Some(result) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "result": result,
+                    }),
+                )),
+                None => Ok(not_found("console llm gateway smoke check not found")),
+            }
+        }
         (HttpMethod::Get, "/console/devices") => Ok(json_response(
             200,
             json!({
@@ -702,10 +732,12 @@ fn is_known_console_path(path: &str) -> bool {
         path,
         "/console/overview"
             | "/console/skills"
+            | "/console/llm-gateway"
             | "/console/transports"
             | "/console/devices"
             | "/console/session"
     ) || path.starts_with("/console/skills/")
+        || path.starts_with("/console/llm-gateway/smoke-checks/")
         || path.starts_with("/console/transports/")
         || path.starts_with("/console/devices/")
 }

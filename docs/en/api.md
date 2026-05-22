@@ -74,6 +74,8 @@ The Console API is only for standalone deployments that serve the Beetle Memory 
 | `/console/skills/{name}` | `PATCH` | Edit a skill through `MemoryRuntime::upsert_skill`. |
 | `/console/skills/{name}/enabled` | `PATCH` | Enable or disable a skill. |
 | `/console/skills/{name}` | `DELETE` | Delete a Skill Memory record. |
+| `/console/llm-gateway` | `GET` | Return the LLM Gateway operator surface: OpenAI/Ollama/MCP endpoints, shared runtime rows, rule export commands, and smoke checks. |
+| `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | Run a backend-whitelisted LLM Gateway smoke check and return exit code, duration, and bounded stdout/stderr. |
 | `/console/transports` | `GET` | List configurable communication entries. |
 | `/console/transports/{id}` | `PATCH` | Update a communication entry's enabled state or endpoint. |
 | `/console/devices` | `GET` | List allowed devices with app_key fingerprints only. |
@@ -88,6 +90,7 @@ Security boundaries:
 - Device creation and key rotation return `appKeyOnce` only in that response.
 - The HTTP switch in the communication page controls the external memory HTTP API, not the HTTP console entry itself.
 - The Skill Memory page manages procedural memory. It does not execute skills and does not provide a marketplace, executor, or workflow runner.
+- The LLM Gateway smoke runner accepts only backend-known smoke check IDs; it never executes arbitrary command strings supplied by the frontend.
 
 ## Capability Catalog
 

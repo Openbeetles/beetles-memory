@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Trash2 } from "lucide-svelte";
   import type { ConsoleCopy } from "../lib/i18n";
+  import { modalBackdrop, modalPanel } from "../lib/modal-transition";
   import type { ConsoleApiSkillSummary } from "../lib/types";
 
   let {
@@ -18,8 +19,8 @@
   } = $props();
 </script>
 
-<button class="modal-backdrop" type="button" onclick={onClose} aria-label={t.addDevice.closeLabel}></button>
-<div class="modal" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title">
+<div class="modal-backdrop" aria-hidden="true" transition:modalBackdrop></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title" transition:modalPanel>
   <div class="modal-header">
     <h3 id="skill-delete-title"><Trash2 size={14} /> {t.skillsPanel.deleteTitle}</h3>
     <button class="modal-close" type="button" onclick={onClose} aria-label={t.addDevice.closeLabel}>✕</button>

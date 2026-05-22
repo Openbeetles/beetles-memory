@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Plus } from "lucide-svelte";
   import type { ConsoleCopy } from "../lib/i18n";
+  import { modalBackdrop, modalPanel } from "../lib/modal-transition";
 
   let {
     t,
@@ -19,8 +20,8 @@
   } = $props();
 </script>
 
-<button class="modal-backdrop" type="button" onclick={onClose} aria-label={t.addDevice.closeLabel}></button>
-<div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-device-title">
+<div class="modal-backdrop" aria-hidden="true" transition:modalBackdrop></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-device-title" transition:modalPanel>
   <div class="modal-header">
     <h3 id="add-device-title"><Plus size={14} /> {t.addDevice.title}</h3>
     <button class="modal-close" type="button" onclick={onClose} aria-label={t.addDevice.closeLabel}>✕</button>

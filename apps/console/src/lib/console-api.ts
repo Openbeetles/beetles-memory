@@ -1,6 +1,8 @@
 import { apiJson } from "../api";
 import type {
   ConsoleApiDevice,
+  ConsoleApiLlmGateway,
+  ConsoleApiLlmGatewaySmokeRunReport,
   ConsoleApiOverview,
   ConsoleApiSession,
   ConsoleApiSkillDetail,
@@ -17,6 +19,7 @@ import { fromApiDevice, fromApiTransport } from "./view-model";
 export type ConsoleSnapshot = {
   overview: ConsoleApiOverview;
   skills: ConsoleApiSkillList;
+  llmGateway: ConsoleApiLlmGateway;
   transports: Transport[];
   devices: Device[];
   session: ConsoleApiSession;
@@ -31,9 +34,10 @@ export type SkillUpsertInput = {
 };
 
 export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
-  const [overviewResponse, skillResponse, transportResponse, deviceResponse, sessionResponse] = await Promise.all([
+  const [overviewResponse, skillResponse, llmGatewayResponse, transportResponse, deviceResponse, sessionResponse] = await Promise.all([
     apiJson<{ overview: ConsoleApiOverview }>("/console/overview"),
     apiJson<{ skills: ConsoleApiSkillList }>("/console/skills"),
+    apiJson<{ llmGateway: ConsoleApiLlmGateway }>("/console/llm-gateway"),
     apiJson<{ transports: ConsoleApiTransport[] }>("/console/transports"),
     apiJson<{ devices: ConsoleApiDevice[] }>("/console/devices"),
     apiJson<{ session: ConsoleApiSession }>("/console/session"),
@@ -41,6 +45,7 @@ export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
   return {
     overview: overviewResponse.overview,
     skills: skillResponse.skills,
+    llmGateway: llmGatewayResponse.llmGateway,
     transports: transportResponse.transports.map(fromApiTransport),
     devices: deviceResponse.devices.map(fromApiDevice),
     session: sessionResponse.session,
@@ -109,4 +114,15 @@ export async function updateDeviceStatus(deviceId: string, status: StatusKind): 
     body: JSON.stringify({ status }),
   });
   return fromApiDevice(response.device);
+}
+
+export async function runLlmGatewaySmokeCheck(id: string): Promise<ConsoleApiLlmGatewaySmokeRunReport> {
+  const response = await apiJson<{ result: ConsoleApiLlmGatewaySmokeRunReport }>(
+    `/console/llm-gateway/smoke-checks/${encodeURIComponent(id)}/run`,
+    {
+      method: "POST",
+      body: "{}",
+    },
+  );
+  return response.result;
 }

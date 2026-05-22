@@ -84,6 +84,88 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
         .expect("transports");
     assert_eq!(transports.status_code, 200);
     assert!(transports.body.contains("\"transports\""));
+
+    let llm_gateway =
+        handle_http_request(&runtime, HttpRuntimeRequest::get("/console/llm-gateway"))
+            .expect("llm gateway");
+    assert_eq!(llm_gateway.status_code, 200);
+    let llm_gateway: Value = serde_json::from_str(&llm_gateway.body).expect("llm gateway json");
+    assert_eq!(llm_gateway["status"], "accepted");
+    assert_eq!(
+        llm_gateway["llmGateway"]["openaiBaseUrl"],
+        "http://127.0.0.1:8787/v1"
+    );
+    assert_eq!(
+        llm_gateway["llmGateway"]["ollamaBaseUrl"],
+        "http://127.0.0.1:8787/api"
+    );
+    assert_eq!(
+        llm_gateway["llmGateway"]["providerCapabilitiesUrl"],
+        "http://127.0.0.1:8787/v1/bm/provider-capabilities"
+    );
+    assert_eq!(
+        llm_gateway["llmGateway"]["mcpStreamableHttpUrl"],
+        "http://127.0.0.1:8788/mcp"
+    );
+    assert!(llm_gateway["llmGateway"]["sharedRuntime"]
+        .as_array()
+        .expect("shared runtime")
+        .iter()
+        .any(|row| row["label"] == "Owner" && row["value"] == "owner-default"));
+    let protocols = llm_gateway["llmGateway"]["protocols"]
+        .as_array()
+        .expect("protocols");
+    assert!(protocols
+        .iter()
+        .any(|protocol| protocol["id"] == "openai-compatible"));
+    assert!(protocols
+        .iter()
+        .any(|protocol| protocol["id"] == "ollama-native"));
+    assert!(protocols
+        .iter()
+        .any(|protocol| protocol["id"] == "mcp-streamable-http"));
+    assert!(llm_gateway["llmGateway"]["ruleExports"]
+        .as_array()
+        .expect("rule exports")
+        .iter()
+        .any(|rule| rule["target"] == "continue"
+            && rule["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("--target continue"))));
+    assert!(llm_gateway["llmGateway"]["smokeChecks"]
+        .as_array()
+        .expect("smoke checks")
+        .iter()
+        .any(|check| check["id"] == "provider-capabilities"
+            && check["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("/v1/bm/provider-capabilities"))));
+
+    let smoke_run = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/llm-gateway/smoke-checks/provider-capabilities/run",
+            "{}",
+        ),
+    )
+    .expect("smoke run");
+    assert_eq!(smoke_run.status_code, 200);
+    let smoke_run: Value = serde_json::from_str(&smoke_run.body).expect("smoke run json");
+    assert_eq!(smoke_run["status"], "accepted");
+    assert_eq!(smoke_run["result"]["id"], "provider-capabilities");
+    assert!(smoke_run["result"]["command"]
+        .as_str()
+        .is_some_and(|command| command.contains("/v1/bm/provider-capabilities")));
+
+    let unknown_smoke = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/llm-gateway/smoke-checks/not-a-smoke-check/run",
+            "{}",
+        ),
+    )
+    .expect("unknown smoke");
+    assert_eq!(unknown_smoke.status_code, 404);
 }
 
 #[test]

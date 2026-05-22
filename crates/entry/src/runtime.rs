@@ -265,6 +265,17 @@ impl EntryRuntime {
         self.console.update_transport(id, update)
     }
 
+    pub fn console_llm_gateway(&self) -> crate::console::EntryConsoleLlmGateway {
+        self.console.llm_gateway()
+    }
+
+    pub fn console_run_llm_gateway_smoke_check(
+        &self,
+        id: &str,
+    ) -> Option<crate::console::EntryConsoleLlmGatewaySmokeRunReport> {
+        self.console.run_llm_gateway_smoke_check(id)
+    }
+
     pub fn console_devices(&self) -> Vec<EntryConsoleDevice> {
         self.console.devices()
     }

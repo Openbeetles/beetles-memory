@@ -9,6 +9,7 @@ fn scope_resolver_never_accepts_owner_from_untrusted_headers() {
         first_run_owner_id: Some("first-run-owner".to_string()),
         default_agent_id: "agent-default".to_string(),
         default_channel: "llm.gateway".to_string(),
+        default_chat_id: None,
         trusted_headers: GatewayTrustedHeaders::none(),
     });
     let mut request = GatewayScopeRequest::default();
@@ -32,6 +33,7 @@ fn scope_resolver_owner_source_order_uses_auth_then_local_then_first_run() {
         first_run_owner_id: Some("first-run-owner".to_string()),
         default_agent_id: "agent-default".to_string(),
         default_channel: "llm.gateway".to_string(),
+        default_chat_id: None,
         trusted_headers: GatewayTrustedHeaders::none(),
     });
     let resolved = resolver
@@ -47,6 +49,7 @@ fn scope_resolver_owner_source_order_uses_auth_then_local_then_first_run() {
         first_run_owner_id: Some("first-run-owner".to_string()),
         default_agent_id: "agent-default".to_string(),
         default_channel: "llm.gateway".to_string(),
+        default_chat_id: None,
         trusted_headers: GatewayTrustedHeaders::none(),
     });
     let resolved = resolver
@@ -62,6 +65,7 @@ fn scope_resolver_uses_trusted_agent_channel_chat_headers_and_auth_owner_first()
         first_run_owner_id: Some("first-run-owner".to_string()),
         default_agent_id: "agent-default".to_string(),
         default_channel: "llm.gateway".to_string(),
+        default_chat_id: None,
         trusted_headers: GatewayTrustedHeaders {
             agent_id: Some("x-bm-agent-id".to_string()),
             channel: Some("x-bm-channel".to_string()),
@@ -88,6 +92,24 @@ fn scope_resolver_uses_trusted_agent_channel_chat_headers_and_auth_owner_first()
     assert_eq!(resolved.entry_scope.identity.agent_id, "agent-header");
     assert_eq!(resolved.entry_scope.scope.channel, "ide.zed");
     assert_eq!(resolved.entry_scope.scope.chat_id, "chat-header");
+}
+
+#[test]
+fn scope_resolver_can_use_configured_default_chat_id_for_local_gateway_and_mcp_pairing() {
+    let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig {
+        local_owner_id: Some("local-owner".to_string()),
+        first_run_owner_id: Some("first-run-owner".to_string()),
+        default_agent_id: "agent-default".to_string(),
+        default_channel: "llm.gateway".to_string(),
+        default_chat_id: Some("chat-shared".to_string()),
+        trusted_headers: GatewayTrustedHeaders::none(),
+    });
+
+    let resolved = resolver
+        .resolve(&GatewayScopeRequest::default())
+        .expect("resolve configured chat");
+
+    assert_eq!(resolved.entry_scope.scope.chat_id, "chat-shared");
 }
 
 #[test]

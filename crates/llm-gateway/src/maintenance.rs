@@ -236,6 +236,7 @@ impl OpenAiReplyAccumulator {
     }
 
     fn observe_json_response(&mut self, body: &Value) {
+        self.observe_responses_json(body);
         let Some(choices) = body.get("choices").and_then(Value::as_array) else {
             return;
         };
@@ -254,6 +255,28 @@ impl OpenAiReplyAccumulator {
             {
                 for (tool_index, tool_call) in tool_calls.iter().enumerate() {
                     self.observe_tool_call(choice_index as u64, tool_index as u64, tool_call);
+                }
+            }
+        }
+    }
+
+    fn observe_responses_json(&mut self, body: &Value) {
+        if let Some(output_text) = body.get("output_text").and_then(Value::as_str) {
+            self.reply.push_str(output_text);
+            return;
+        }
+        let Some(output) = body.get("output").and_then(Value::as_array) else {
+            return;
+        };
+        for item in output {
+            let Some(content) = item.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for content_item in content {
+                if content_item.get("type").and_then(Value::as_str) == Some("output_text") {
+                    if let Some(text) = content_item.get("text").and_then(Value::as_str) {
+                        self.reply.push_str(text);
+                    }
                 }
             }
         }

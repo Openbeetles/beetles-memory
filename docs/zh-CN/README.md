@@ -4,6 +4,7 @@ Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter �
 
 - [架构文档](architecture.md)
 - [集成文档](integration.md)
+- [LLM Gateway 集成](llm-gateway-integrations.md)
 - [部署文档](deployment.md)
 - [CLI 使用](cli-usage.md)
 - [快速开始](getting-started.md)

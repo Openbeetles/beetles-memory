@@ -21,6 +21,16 @@ pub struct GatewayProviderConfig {
     pub timeout_ms: Option<u64>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub ollama_generate_system_supported: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub openai_responses_supported: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub openai_stateful_responses_supported: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub openai_embeddings_supported: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub openai_tools_supported: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub openai_streaming_supported: bool,
 }
 
 impl GatewayProviderConfig {
@@ -32,6 +42,11 @@ impl GatewayProviderConfig {
             model_aliases: Vec::new(),
             timeout_ms: None,
             ollama_generate_system_supported: true,
+            openai_responses_supported: true,
+            openai_stateful_responses_supported: false,
+            openai_embeddings_supported: true,
+            openai_tools_supported: true,
+            openai_streaming_supported: true,
         }
     }
 
@@ -43,6 +58,11 @@ impl GatewayProviderConfig {
             model_aliases: Vec::new(),
             timeout_ms: None,
             ollama_generate_system_supported: true,
+            openai_responses_supported: false,
+            openai_stateful_responses_supported: false,
+            openai_embeddings_supported: false,
+            openai_tools_supported: false,
+            openai_streaming_supported: true,
         }
     }
 
@@ -91,4 +111,8 @@ fn default_true() -> bool {
 
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

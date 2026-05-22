@@ -1,5 +1,9 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_sdk::{
@@ -83,6 +87,65 @@ pub struct EntryConsoleTransport {
     pub status: String,
     pub endpoint: String,
     pub editable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleLlmGateway {
+    pub enabled: bool,
+    pub status: String,
+    pub endpoint: String,
+    pub openai_base_url: String,
+    pub ollama_base_url: String,
+    pub provider_capabilities_url: String,
+    pub mcp_streamable_http_url: String,
+    pub shared_runtime: Vec<EntryConsoleKv>,
+    pub protocols: Vec<EntryConsoleLlmGatewayProtocol>,
+    pub rule_exports: Vec<EntryConsoleLlmGatewayRuleExport>,
+    pub smoke_checks: Vec<EntryConsoleLlmGatewaySmokeCheck>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleLlmGatewayProtocol {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub endpoint: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleLlmGatewayRuleExport {
+    pub target: String,
+    pub label: String,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleLlmGatewaySmokeCheck {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleLlmGatewaySmokeRunReport {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+    pub timed_out: bool,
+    pub started_at_unix_secs: u64,
+    pub cwd: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -213,6 +276,8 @@ pub struct EntryConsoleState {
 struct EntryConsoleInner {
     runtime_shape: EntryConsoleRuntimeShape,
     storage_path: Option<PathBuf>,
+    agent_id: String,
+    channel: String,
     transports: Vec<EntryConsoleTransport>,
     devices: Vec<EntryConsoleDevice>,
     session: EntryConsoleSession,
@@ -231,6 +296,8 @@ impl EntryConsoleState {
             inner: Mutex::new(EntryConsoleInner {
                 runtime_shape: runtime_shape(config),
                 storage_path: config.store.data_path.clone(),
+                agent_id: config.identity.agent_id.clone(),
+                channel: config.scope.channel.clone(),
                 transports: transports(&config.transports),
                 devices: default_devices(config),
                 session: EntryConsoleSession {
@@ -356,6 +423,102 @@ impl EntryConsoleState {
             .expect("console state lock")
             .transports
             .clone()
+    }
+
+    pub fn llm_gateway(&self) -> EntryConsoleLlmGateway {
+        let inner = self.inner.lock().expect("console state lock");
+        let gateway = inner
+            .transports
+            .iter()
+            .find(|transport| transport.id == "llm-gateway")
+            .cloned()
+            .unwrap_or_else(|| transport("llm-gateway", false, "127.0.0.1:8787"));
+        let mcp = inner
+            .transports
+            .iter()
+            .find(|transport| transport.id == "mcp")
+            .cloned()
+            .unwrap_or_else(|| transport("mcp", false, "stdio"));
+        let base_url = http_base_url(&gateway.endpoint, "127.0.0.1:8787");
+        let openai_base_url = join_url(&base_url, "v1");
+        let ollama_base_url = join_url(&base_url, "api");
+        let provider_capabilities_url = join_url(&openai_base_url, "bm/provider-capabilities");
+        let mcp_streamable_http_url = mcp_streamable_http_url(&mcp.endpoint);
+        let gateway_status = if gateway.enabled { "ready" } else { "draft" }.to_string();
+        let mcp_status = if mcp.enabled { "ready" } else { "draft" }.to_string();
+
+        EntryConsoleLlmGateway {
+            enabled: gateway.enabled,
+            status: gateway_status.clone(),
+            endpoint: gateway.endpoint,
+            openai_base_url: openai_base_url.clone(),
+            ollama_base_url: ollama_base_url.clone(),
+            provider_capabilities_url: provider_capabilities_url.clone(),
+            mcp_streamable_http_url: mcp_streamable_http_url.clone(),
+            shared_runtime: shared_runtime_rows(&inner),
+            protocols: vec![
+                llm_protocol(
+                    "openai-compatible",
+                    "OpenAI-compatible",
+                    &gateway_status,
+                    &openai_base_url,
+                    "Models, chat completions, responses, embeddings, and provider capability report",
+                ),
+                llm_protocol(
+                    "ollama-native",
+                    "Ollama native",
+                    &gateway_status,
+                    &ollama_base_url,
+                    "Native tags, version, chat, generate, embeddings, and show passthrough",
+                ),
+                llm_protocol(
+                    "mcp-streamable-http",
+                    "MCP Streamable HTTP",
+                    &mcp_status,
+                    &mcp_streamable_http_url,
+                    "Explicit recall, projection preview, inspection, and governed write candidates",
+                ),
+            ],
+            rule_exports: rule_exports(&openai_base_url, &mcp_streamable_http_url),
+            smoke_checks: vec![
+                smoke_check(
+                    "provider-capabilities",
+                    "Provider capabilities",
+                    &gateway_status,
+                    format!("curl -fsS {provider_capabilities_url}"),
+                ),
+                smoke_check(
+                    "release-integrations",
+                    "Release integration gate",
+                    "ready",
+                    "bash scripts/check_llm_gateway_release_integrations.sh".to_string(),
+                ),
+                smoke_check(
+                    "ollama-native",
+                    "Ollama native live smoke",
+                    "draft",
+                    "BM_LLM_GATEWAY_OLLAMA_SMOKE=1 bash scripts/check_llm_gateway_release_integrations.sh".to_string(),
+                ),
+            ],
+        }
+    }
+
+    pub fn run_llm_gateway_smoke_check(
+        &self,
+        id: &str,
+    ) -> Option<EntryConsoleLlmGatewaySmokeRunReport> {
+        let spec = {
+            let inner = self.inner.lock().expect("console state lock");
+            llm_gateway_smoke_command(&inner, id)?
+        };
+        let report = run_console_smoke_command(spec);
+        let mut inner = self.inner.lock().expect("console state lock");
+        push_event(
+            &mut inner,
+            format!("LLM Gateway smoke {} {}", report.id, report.status),
+            report.status.as_str(),
+        );
+        Some(report)
     }
 
     pub fn update_transport(
@@ -805,6 +968,321 @@ fn transports(config: &EntryTransportConfig) -> Vec<EntryConsoleTransport> {
         transport("mcp", config.mcp_server, "stdio"),
         transport("a2a", config.a2a_bridge, "http://127.0.0.1:8720/a2a"),
     ]
+}
+
+fn http_base_url(endpoint: &str, fallback: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    let endpoint = if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    };
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    }
+}
+
+fn join_url(base: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+fn mcp_streamable_http_url(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        "http://127.0.0.1:8788/mcp".to_string()
+    }
+}
+
+fn shared_runtime_rows(inner: &EntryConsoleInner) -> Vec<EntryConsoleKv> {
+    vec![
+        EntryConsoleKv {
+            label: "Store".to_string(),
+            value: match inner.storage_path.as_deref() {
+                Some(path) => format!("{}:{}", inner.runtime_shape.store, path.display()),
+                None => inner.runtime_shape.store.clone(),
+            },
+        },
+        EntryConsoleKv {
+            label: "Owner".to_string(),
+            value: inner.session.owner.clone(),
+        },
+        EntryConsoleKv {
+            label: "Agent".to_string(),
+            value: inner.agent_id.clone(),
+        },
+        EntryConsoleKv {
+            label: "Channel".to_string(),
+            value: inner.channel.clone(),
+        },
+        EntryConsoleKv {
+            label: "Chat".to_string(),
+            value: inner.session.memory_scope.clone(),
+        },
+    ]
+}
+
+fn llm_protocol(
+    id: &str,
+    title: &str,
+    status: &str,
+    endpoint: &str,
+    detail: &str,
+) -> EntryConsoleLlmGatewayProtocol {
+    EntryConsoleLlmGatewayProtocol {
+        id: id.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        endpoint: endpoint.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+fn rule_exports(openai_base_url: &str, mcp_url: &str) -> Vec<EntryConsoleLlmGatewayRuleExport> {
+    [
+        ("continue", "Continue"),
+        ("cline", "Cline"),
+        ("aider", "Aider"),
+        ("zed", "Zed"),
+        ("opencode", "OpenCode"),
+        ("open-webui", "Open WebUI"),
+        ("vscode", "VS Code / VSCodium"),
+    ]
+    .into_iter()
+    .map(|(target, label)| EntryConsoleLlmGatewayRuleExport {
+        target: target.to_string(),
+        label: label.to_string(),
+        command: format!(
+            "bm agent-rules export --target {target} --gateway-url {openai_base_url} --mcp-url {mcp_url}"
+        ),
+    })
+    .collect()
+}
+
+fn smoke_check(
+    id: &str,
+    label: &str,
+    status: &str,
+    command: String,
+) -> EntryConsoleLlmGatewaySmokeCheck {
+    EntryConsoleLlmGatewaySmokeCheck {
+        id: id.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        command,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EntryConsoleSmokeCommand {
+    id: String,
+    label: String,
+    command: String,
+    program: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    timeout: Duration,
+}
+
+fn llm_gateway_smoke_command(
+    inner: &EntryConsoleInner,
+    id: &str,
+) -> Option<EntryConsoleSmokeCommand> {
+    let gateway = inner
+        .transports
+        .iter()
+        .find(|item| item.id == "llm-gateway")
+        .cloned()
+        .unwrap_or_else(|| transport("llm-gateway", false, "http://127.0.0.1:8787"));
+    let base_url = http_base_url(&gateway.endpoint, "127.0.0.1:8787");
+    let openai_base_url = join_url(&base_url, "v1");
+    let provider_capabilities_url = join_url(&openai_base_url, "bm/provider-capabilities");
+    match id {
+        "provider-capabilities" => Some(EntryConsoleSmokeCommand {
+            id: id.to_string(),
+            label: "Provider capabilities".to_string(),
+            command: format!("curl -fsS {provider_capabilities_url}"),
+            program: "curl".to_string(),
+            args: vec!["-fsS".to_string(), provider_capabilities_url],
+            env: Vec::new(),
+            timeout: Duration::from_secs(10),
+        }),
+        "release-integrations" => Some(EntryConsoleSmokeCommand {
+            id: id.to_string(),
+            label: "Release integration gate".to_string(),
+            command: "bash scripts/check_llm_gateway_release_integrations.sh".to_string(),
+            program: "bash".to_string(),
+            args: vec!["scripts/check_llm_gateway_release_integrations.sh".to_string()],
+            env: Vec::new(),
+            timeout: Duration::from_secs(120),
+        }),
+        "ollama-native" => Some(EntryConsoleSmokeCommand {
+            id: id.to_string(),
+            label: "Ollama native live smoke".to_string(),
+            command: "BM_LLM_GATEWAY_OLLAMA_SMOKE=1 bash scripts/check_llm_gateway_release_integrations.sh"
+                .to_string(),
+            program: "bash".to_string(),
+            args: vec!["scripts/check_llm_gateway_release_integrations.sh".to_string()],
+            env: vec![("BM_LLM_GATEWAY_OLLAMA_SMOKE".to_string(), "1".to_string())],
+            timeout: Duration::from_secs(120),
+        }),
+        _ => None,
+    }
+}
+
+const CONSOLE_SMOKE_OUTPUT_LIMIT: usize = 24 * 1024;
+
+fn run_console_smoke_command(
+    spec: EntryConsoleSmokeCommand,
+) -> EntryConsoleLlmGatewaySmokeRunReport {
+    let started_at_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let started = Instant::now();
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return EntryConsoleLlmGatewaySmokeRunReport {
+                id: spec.id,
+                label: spec.label,
+                status: "blocked".to_string(),
+                command: spec.command,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: error.to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                timed_out: false,
+                started_at_unix_secs,
+                cwd,
+            };
+        }
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = thread::spawn(move || read_capped_output(stdout));
+    let stderr_handle = thread::spawn(move || read_capped_output(stderr));
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(done)) => {
+                break Some(done);
+            }
+            Ok(None) => {
+                if started.elapsed() >= spec.timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break child.wait().ok();
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let mut report =
+                    command_report(spec, started, started_at_unix_secs, cwd, None, timed_out);
+                report.status = "blocked".to_string();
+                report.stderr = error.to_string();
+                return report;
+            }
+        }
+    };
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    let mut report = command_report(
+        spec,
+        started,
+        started_at_unix_secs,
+        cwd,
+        status.as_ref().and_then(|value| value.code()),
+        timed_out,
+    );
+    report.stdout = stdout;
+    report.stderr = stderr;
+    report
+}
+
+fn command_report(
+    spec: EntryConsoleSmokeCommand,
+    started: Instant,
+    started_at_unix_secs: u64,
+    cwd: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+) -> EntryConsoleLlmGatewaySmokeRunReport {
+    let status = if timed_out {
+        "limited"
+    } else if exit_code == Some(0) {
+        "ready"
+    } else {
+        "blocked"
+    };
+    EntryConsoleLlmGatewaySmokeRunReport {
+        id: spec.id,
+        label: spec.label,
+        status: status.to_string(),
+        command: spec.command,
+        exit_code,
+        stdout: String::new(),
+        stderr: String::new(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        timed_out,
+        started_at_unix_secs,
+        cwd,
+    }
+}
+
+fn read_capped_output<R: Read + Send + 'static>(reader: Option<R>) -> String {
+    let Some(mut reader) = reader else {
+        return String::new();
+    };
+    let mut out = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                if out.len() < CONSOLE_SMOKE_OUTPUT_LIMIT {
+                    let remaining = CONSOLE_SMOKE_OUTPUT_LIMIT - out.len();
+                    let take = remaining.min(read);
+                    out.extend_from_slice(&buffer[..take]);
+                    truncated |= take < read;
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(error) => {
+                if out.len() < CONSOLE_SMOKE_OUTPUT_LIMIT {
+                    out.extend_from_slice(error.to_string().as_bytes());
+                }
+                break;
+            }
+        }
+    }
+    let mut text = String::from_utf8_lossy(&out).to_string();
+    if truncated {
+        text.push_str("\n[output truncated]");
+    }
+    text
 }
 
 fn transport(id: &str, enabled: bool, endpoint: &str) -> EntryConsoleTransport {

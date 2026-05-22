@@ -29,6 +29,7 @@
 
 <div class="statusbar" data-tauri-drag-region use:windowDragRegion>
   <span class="sb-brand" data-tauri-drag-region>{t.statusbar.brand}</span>
+  <span class="sb-live" aria-label="live" title="LIVE">●</span>
   <span class="sb-item" data-tauri-drag-region>v1.0.0-dev</span>
   <div class="sb-right" data-tauri-drag-region>
     <div class="sb-theme-toggle">

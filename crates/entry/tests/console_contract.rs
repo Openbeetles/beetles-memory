@@ -110,3 +110,64 @@ fn console_updates_transports_and_devices() {
     assert_eq!(updated.label, "Console owner");
     assert_eq!(updated.status, "disabled");
 }
+
+#[test]
+fn console_llm_gateway_surface_reports_protocols_rules_and_shared_runtime() {
+    let mut config = config();
+    config.transports = EntryTransportConfig::all_enabled();
+    let runtime = EntryRuntime::open(config).expect("runtime");
+
+    let gateway = runtime.console_llm_gateway();
+
+    assert!(gateway.enabled);
+    assert_eq!(gateway.status, "ready");
+    assert_eq!(gateway.openai_base_url, "http://127.0.0.1:8787/v1");
+    assert_eq!(gateway.ollama_base_url, "http://127.0.0.1:8787/api");
+    assert_eq!(
+        gateway.provider_capabilities_url,
+        "http://127.0.0.1:8787/v1/bm/provider-capabilities"
+    );
+    assert!(gateway
+        .protocols
+        .iter()
+        .any(|protocol| protocol.id == "openai-compatible" && protocol.status == "ready"));
+    assert!(gateway
+        .protocols
+        .iter()
+        .any(|protocol| protocol.id == "ollama-native" && protocol.status == "ready"));
+    assert!(gateway
+        .rule_exports
+        .iter()
+        .any(|rule| rule.target == "continue"
+            && rule
+                .command
+                .contains("--gateway-url http://127.0.0.1:8787/v1")));
+    assert!(gateway
+        .shared_runtime
+        .iter()
+        .any(|row| row.label == "Owner" && row.value == "owner-default"));
+    assert!(gateway
+        .shared_runtime
+        .iter()
+        .any(|row| row.label == "Chat" && row.value == "chat-1"));
+    let provider_check = gateway
+        .smoke_checks
+        .iter()
+        .find(|check| check.id == "provider-capabilities")
+        .expect("provider check");
+    assert!(provider_check
+        .command
+        .contains("/v1/bm/provider-capabilities"));
+    let run_report = runtime
+        .console_run_llm_gateway_smoke_check("provider-capabilities")
+        .expect("provider check run report");
+    assert_eq!(run_report.id, "provider-capabilities");
+    assert_eq!(run_report.command, provider_check.command);
+    assert!(matches!(
+        run_report.status.as_str(),
+        "ready" | "blocked" | "limited"
+    ));
+    assert!(runtime
+        .console_run_llm_gateway_smoke_check("not-a-smoke-check")
+        .is_none());
+}

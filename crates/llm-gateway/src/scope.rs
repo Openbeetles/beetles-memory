@@ -20,6 +20,7 @@ pub struct GatewayScopeResolverConfig {
     pub first_run_owner_id: Option<String>,
     pub default_agent_id: String,
     pub default_channel: String,
+    pub default_chat_id: Option<String>,
     pub trusted_headers: GatewayTrustedHeaders,
 }
 
@@ -58,6 +59,7 @@ impl GatewayScopeResolverConfig {
             first_run_owner_id: Some("owner-first-run".to_string()),
             default_agent_id: "agent-main".to_string(),
             default_channel: "llm.gateway".to_string(),
+            default_chat_id: None,
             trusted_headers: GatewayTrustedHeaders::none(),
         }
     }
@@ -91,10 +93,13 @@ impl GatewayScopeResolver {
             Some(self.config.default_channel.as_str()),
         ])
         .ok_or_else(|| GatewayError::scope_resolution_failed("channel is unavailable"))?;
-        let chat_id = first_non_empty([trusted_header(
-            &request.headers,
-            self.config.trusted_headers.chat_id.as_deref(),
-        )])
+        let chat_id = first_non_empty([
+            trusted_header(
+                &request.headers,
+                self.config.trusted_headers.chat_id.as_deref(),
+            ),
+            self.config.default_chat_id.as_deref(),
+        ])
         .map(str::to_string)
         .unwrap_or_else(|| stable_chat_id(owner_id, agent_id, channel, request));
 

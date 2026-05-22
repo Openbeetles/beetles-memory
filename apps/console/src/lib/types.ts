@@ -1,4 +1,4 @@
-export type PageId = "overview" | "skills" | "transports" | "devices" | "account";
+export type PageId = "overview" | "skills" | "llm-gateway" | "transports" | "devices" | "account";
 export type IconComponent = typeof import("lucide-svelte")["Activity"];
 export type StatusKind =
   | "ready"
@@ -14,7 +14,8 @@ export type StatusKind =
   | "retired";
 export type Lang = "zh-CN" | "en";
 export type Theme = "light" | "dark";
-export type TransportId = "http" | "wss" | "mcp" | "a2a";
+export type TransportId = "http" | "wss" | "mcp" | "a2a" | "llm-gateway";
+export type DeviceConfirmAction = "rotate_key" | "disable";
 export type SkillOrigin = "user_provided" | "runtime_learned";
 export type SkillKind = "runtime_skill" | "manual_document";
 export type SkillModal = "create" | "import" | "edit" | "delete" | null;
@@ -49,6 +50,50 @@ export type ConsoleApiTransport = {
   status: StatusKind;
   endpoint: string;
   editable: boolean;
+};
+export type ConsoleApiLlmGatewayProtocol = {
+  id: string;
+  title: string;
+  status: StatusKind;
+  endpoint: string;
+  detail: string;
+};
+export type ConsoleApiLlmGatewayRuleExport = {
+  target: string;
+  label: string;
+  command: string;
+};
+export type ConsoleApiLlmGatewaySmokeCheck = {
+  id: string;
+  label: string;
+  status: StatusKind;
+  command: string;
+};
+export type ConsoleApiLlmGatewaySmokeRunReport = {
+  id: string;
+  label: string;
+  status: StatusKind;
+  command: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+  startedAtUnixSecs: number;
+  cwd: string;
+};
+export type ConsoleApiLlmGateway = {
+  enabled: boolean;
+  status: StatusKind;
+  endpoint: string;
+  openaiBaseUrl: string;
+  ollamaBaseUrl: string;
+  providerCapabilitiesUrl: string;
+  mcpStreamableHttpUrl: string;
+  sharedRuntime: KVRow[];
+  protocols: ConsoleApiLlmGatewayProtocol[];
+  ruleExports: ConsoleApiLlmGatewayRuleExport[];
+  smokeChecks: ConsoleApiLlmGatewaySmokeCheck[];
 };
 export type ConsoleApiDevice = {
   deviceId: string;

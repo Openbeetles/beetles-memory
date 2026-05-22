@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AddDeviceModal from "./components/AddDeviceModal.svelte";
+  import ConfirmActionModal from "./components/ConfirmActionModal.svelte";
   import IssuedKeyModal from "./components/IssuedKeyModal.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import StatusBar from "./components/StatusBar.svelte";
@@ -15,14 +16,15 @@
   import { copy, readLang, readTheme, STORAGE_KEYS, writeStorage } from "./lib/i18n";
   import type {
     ConsoleApiDevice,
+    ConsoleApiLlmGateway,
     ConsoleApiOverview,
     ConsoleApiSession,
     ConsoleApiSkillList,
     ConsoleApiSkillSummary,
     Device,
+    DeviceConfirmAction,
     Lang,
     PageId,
-    StatusKind,
     Theme,
     Transport,
     TransportId,
@@ -42,6 +44,7 @@
   } from "./lib/view-model";
   import AccountPage from "./pages/AccountPage.svelte";
   import DevicesPage from "./pages/DevicesPage.svelte";
+  import LlmGatewayPage from "./pages/LlmGatewayPage.svelte";
   import OverviewPage from "./pages/OverviewPage.svelte";
   import SkillMemoryPage from "./pages/SkillMemoryPage.svelte";
   import TransportsPage from "./pages/TransportsPage.svelte";
@@ -56,6 +59,7 @@
   let backendConnected = $state(false);
 
   let overviewData: ConsoleApiOverview | null = $state(null);
+  let llmGateway: ConsoleApiLlmGateway | null = $state(null);
   let sessionData: ConsoleApiSession | null = $state(null);
   let transports: Transport[] = $state([]);
   let devices: Device[] = $state([]);
@@ -68,6 +72,8 @@
   let formError = $state("");
   let issuedKeyDialog: { deviceId: string; label: string; appKey: string } | null = $state(null);
   let issuedKeyCopied = $state(false);
+  let deviceConfirm: { action: DeviceConfirmAction; device: Device } | null = $state(null);
+  let deviceConfirmError = $state("");
 
   const t = $derived(copy[lang]);
   const systemInfo = $derived(displaySystemInfo(overviewData?.systemInfo, lang));
@@ -106,6 +112,7 @@
     try {
       const snapshot = await loadConsoleSnapshot();
       overviewData = snapshot.overview;
+      llmGateway = snapshot.llmGateway;
       skillReport = snapshot.skills;
       skills = snapshot.skills.skills;
       transports = snapshot.transports;
@@ -114,6 +121,7 @@
       backendConnected = true;
     } catch {
       overviewData = null;
+      llmGateway = null;
       skillReport = null;
       skills = [];
       transports = [];
@@ -149,6 +157,22 @@
   function closeIssuedKeyDialog() {
     issuedKeyDialog = null;
     issuedKeyCopied = false;
+  }
+
+  function deviceName(device: Device): string {
+    return device.label?.trim() || device.deviceId;
+  }
+
+  function openDeviceConfirm(action: DeviceConfirmAction, deviceId: string) {
+    const device = devices.find((item) => item.deviceId === deviceId);
+    if (!device) return;
+    deviceConfirmError = "";
+    deviceConfirm = { action, device };
+  }
+
+  function closeDeviceConfirm() {
+    deviceConfirm = null;
+    deviceConfirmError = "";
   }
 
   async function copyIssuedKey() {
@@ -206,10 +230,34 @@
     try {
       const response = await rotateDeviceKey(deviceId);
       devices = mapDev(devices, deviceId, () => fromApiDevice(response.device));
+      closeDeviceConfirm();
       showIssuedKey(response.device, response.appKeyOnce);
       void loadConsoleData();
-    } catch {
+    } catch (error) {
+      deviceConfirmError = error instanceof Error ? error.message : String(error);
       backendConnected = false;
+    }
+  }
+
+  async function disableDevice(deviceId: string) {
+    if (!backendConnected) return;
+    try {
+      const device = await updateDeviceStatus(deviceId, "disabled");
+      devices = mapDev(devices, deviceId, () => device);
+      closeDeviceConfirm();
+      void loadConsoleData();
+    } catch (error) {
+      deviceConfirmError = error instanceof Error ? error.message : String(error);
+      backendConnected = false;
+    }
+  }
+
+  function confirmDeviceAction() {
+    if (!deviceConfirm) return;
+    if (deviceConfirm.action === "rotate_key") {
+      void rotateAppKey(deviceConfirm.device.deviceId);
+    } else {
+      void disableDevice(deviceConfirm.device.deviceId);
     }
   }
 
@@ -217,8 +265,11 @@
     if (!backendConnected) return;
     const current = devices.find((device) => device.deviceId === deviceId);
     if (!current) return;
-    const status: StatusKind = current.status === "disabled" ? "allowed" : "disabled";
-    void updateDeviceStatus(deviceId, status)
+    if (current.status !== "disabled") {
+      openDeviceConfirm("disable", deviceId);
+      return;
+    }
+    void updateDeviceStatus(deviceId, "allowed")
       .then((device) => {
         devices = mapDev(devices, deviceId, () => device);
         void loadConsoleData();
@@ -259,6 +310,8 @@
           onRefresh={loadConsoleData}
           onBackendDisconnected={() => (backendConnected = false)}
         />
+      {:else if activePage === "llm-gateway"}
+        <LlmGatewayPage {t} {llmGateway} {backendConnected} />
       {:else if activePage === "account"}
         <AccountPage {t} {lang} {accountFields} onLangChange={setLang} />
       {:else if activePage === "transports"}
@@ -275,7 +328,7 @@
           {devices}
           {backendConnected}
           onOpenAddDevice={openAddDevice}
-          onRotateAppKey={(deviceId) => void rotateAppKey(deviceId)}
+          onRotateAppKey={(deviceId) => openDeviceConfirm("rotate_key", deviceId)}
           onToggleDevice={toggleDevice}
         />
       {/if}
@@ -312,6 +365,22 @@
       copied={issuedKeyCopied}
       onClose={closeIssuedKeyDialog}
       onCopy={() => void copyIssuedKey()}
+    />
+  {/if}
+
+  {#if deviceConfirm}
+    <ConfirmActionModal
+      title={deviceConfirm.action === "rotate_key" ? t.deviceConfirm.rotateTitle : t.deviceConfirm.disableTitle}
+      description={deviceConfirm.action === "rotate_key" ? t.deviceConfirm.rotateDesc : t.deviceConfirm.disableDesc}
+      subjectLabel={t.deviceConfirm.deviceLabel}
+      subject={deviceName(deviceConfirm.device)}
+      meta={deviceConfirm.device.deviceId}
+      confirmLabel={deviceConfirm.action === "rotate_key" ? t.deviceConfirm.rotateConfirm : t.deviceConfirm.disableConfirm}
+      cancelLabel={t.actions.cancel}
+      closeLabel={t.addDevice.closeLabel}
+      error={deviceConfirmError}
+      onClose={closeDeviceConfirm}
+      onConfirm={confirmDeviceAction}
     />
   {/if}
 </main>

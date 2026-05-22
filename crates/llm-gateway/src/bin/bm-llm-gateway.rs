@@ -6,9 +6,11 @@ use bm_llm_gateway::{
     OpenAiGatewayServices, OpenAiMaintenanceLlmClient, ReqwestGatewayLlmHttpClient,
     ReqwestOllamaNativeUpstream, ReqwestOpenAiCompatibleUpstream,
 };
+use bm_sdk::StoreBackendKind;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = GatewayConfig::default_for_local_dev();
+    apply_shared_memory_runtime_env(&mut config);
     if let Ok(bind_addr) = std::env::var("BM_LLM_GATEWAY_BIND") {
         config.server.bind_addr = bind_addr;
     }
@@ -85,4 +87,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn apply_shared_memory_runtime_env(config: &mut GatewayConfig) {
+    config.entry.store.backend = StoreBackendKind::File;
+    config.entry.store.data_path = Some("target/bm-memory-gateway-store".into());
+    config.entry.store.fsync = true;
+
+    if env_truthy("BM_MEMORY_STORE_MEMORY") {
+        config.entry.store.backend = StoreBackendKind::InMemory;
+        config.entry.store.data_path = None;
+        config.entry.store.fsync = false;
+    } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_SQLITE") {
+        config.entry.store.backend = StoreBackendKind::Sqlite;
+        config.entry.store.data_path = Some(path.into());
+        config.entry.store.fsync = true;
+    } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_FILE") {
+        config.entry.store.backend = StoreBackendKind::File;
+        config.entry.store.data_path = Some(path.into());
+        config.entry.store.fsync = true;
+    }
+    if let Ok(owner) = std::env::var("BM_MEMORY_OWNER_ID") {
+        config.scope.local_owner_id = Some(owner);
+    }
+    if let Ok(agent) = std::env::var("BM_MEMORY_AGENT_ID") {
+        config.scope.default_agent_id = agent;
+    }
+    if let Ok(channel) = std::env::var("BM_MEMORY_CHANNEL") {
+        config.scope.default_channel = channel;
+    }
+    if let Ok(chat_id) = std::env::var("BM_MEMORY_CHAT_ID") {
+        config.scope.default_chat_id = Some(chat_id);
+    }
+}
+
+fn env_truthy(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }

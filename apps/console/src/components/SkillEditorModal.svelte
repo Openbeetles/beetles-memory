@@ -1,6 +1,7 @@
 <script lang="ts">
   import { FileText, Pencil, Plus, Upload } from "lucide-svelte";
   import type { ConsoleCopy } from "../lib/i18n";
+  import { modalBackdrop, modalPanel } from "../lib/modal-transition";
   import type { SkillForm, SkillModal } from "../lib/types";
 
   type SkillEditorMode = Exclude<SkillModal, "delete" | null>;
@@ -26,8 +27,8 @@
   } = $props();
 </script>
 
-<button class="modal-backdrop" type="button" onclick={onClose} aria-label={t.addDevice.closeLabel}></button>
-<div class="modal skill-editor-modal" role="dialog" aria-modal="true" aria-labelledby="skill-editor-title">
+<div class="modal-backdrop" aria-hidden="true" transition:modalBackdrop></div>
+<div class="modal skill-editor-modal" role="dialog" aria-modal="true" aria-labelledby="skill-editor-title" transition:modalPanel>
   <div class="modal-header">
     <h3 id="skill-editor-title">
       {#if mode === "import"}<Upload size={14} />{:else if mode === "edit"}<Pencil size={14} />{:else}<Plus size={14} />{/if}
