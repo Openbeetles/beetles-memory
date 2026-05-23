@@ -9,6 +9,7 @@ mod ollama;
 mod ollama_passthrough;
 mod ollama_privacy;
 mod openai;
+mod projection;
 mod provider;
 mod provider_probe;
 mod runtime;

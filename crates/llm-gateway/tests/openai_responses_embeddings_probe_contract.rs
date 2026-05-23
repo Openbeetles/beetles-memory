@@ -168,7 +168,7 @@ fn responses_stateless_injects_memory_into_instructions_and_preserves_payload() 
         .as_str()
         .expect("instructions string");
     assert!(instructions.contains("Keep the answer short."));
-    assert!(instructions.contains("Beetle Memory context:"));
+    assert!(instructions.contains("<beetle-memory-projection version=\"1\">"));
     assert_eq!(response.body.json()["output_text"], "ok");
 }
 

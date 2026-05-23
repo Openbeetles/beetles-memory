@@ -6,6 +6,7 @@ use bm_sdk::{
 };
 use serde_json::{Map, Value};
 
+use crate::projection::render_model_facing_projection;
 use crate::provider::select_provider_for_kind;
 use crate::{
     maintenance::{
@@ -716,19 +717,46 @@ fn build_upstream_chat_body(
         .and_then(Value::as_array)
         .ok_or_else(|| GatewayError::invalid_request("chat completions messages must be an array"))?
         .clone();
-    if !memory_block.trim().is_empty() {
-        let mut injected = Vec::with_capacity(messages.len() + 1);
-        let mut memory_message = Map::new();
-        memory_message.insert("role".to_string(), Value::String("system".to_string()));
-        memory_message.insert(
-            "content".to_string(),
-            Value::String(format!("Beetle Memory context:\n{memory_block}")),
+    if let Some(memory_text) = render_model_facing_projection(memory_block) {
+        object.insert(
+            "messages".to_string(),
+            Value::Array(inject_memory_projection_into_messages(
+                messages,
+                memory_text,
+            )),
         );
-        injected.push(Value::Object(memory_message));
-        injected.extend(messages);
-        object.insert("messages".to_string(), Value::Array(injected));
     }
     Ok(Value::Object(object))
+}
+
+fn inject_memory_projection_into_messages(
+    mut messages: Vec<Value>,
+    memory_text: String,
+) -> Vec<Value> {
+    for message in messages.iter_mut() {
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        if object.get("role").and_then(Value::as_str) != Some("system") {
+            continue;
+        }
+        let Some(content) = object.get("content").and_then(Value::as_str) else {
+            break;
+        };
+        let content = if content.trim().is_empty() {
+            memory_text
+        } else {
+            format!("{content}\n\n{memory_text}")
+        };
+        object.insert("content".to_string(), Value::String(content));
+        return messages;
+    }
+
+    let mut memory_message = Map::new();
+    memory_message.insert("role".to_string(), Value::String("system".to_string()));
+    memory_message.insert("content".to_string(), Value::String(memory_text));
+    messages.insert(0, Value::Object(memory_message));
+    messages
 }
 
 fn build_upstream_responses_body(
@@ -741,8 +769,7 @@ fn build_upstream_responses_body(
         .cloned()
         .ok_or_else(|| GatewayError::invalid_request("responses body must be an object"))?;
     object.insert("model".to_string(), Value::String(model.to_string()));
-    if !memory_block.trim().is_empty() {
-        let memory = format!("Beetle Memory context:\n{memory_block}");
+    if let Some(memory) = render_model_facing_projection(memory_block) {
         let instructions = match object.get("instructions") {
             Some(Value::String(existing)) if !existing.trim().is_empty() => {
                 format!("{}\n\n{memory}", existing.trim())

@@ -173,8 +173,8 @@ fn chat_and_generate_still_enter_projection_instead_of_passthrough() {
     let generate_system = upstream.generate_calls[0].body["system"]
         .as_str()
         .expect("generate system");
-    assert!(chat_system.contains("Beetle Memory context:"));
-    assert!(generate_system.contains("Beetle Memory context:"));
+    assert!(chat_system.contains("<beetle-memory-projection version=\"1\">"));
+    assert!(generate_system.contains("<beetle-memory-projection version=\"1\">"));
 }
 
 #[test]

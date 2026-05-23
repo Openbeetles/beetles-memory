@@ -183,7 +183,7 @@ fn chat_non_streaming_injects_memory_and_preserves_openai_payload_shape() {
     assert!(sent.body["messages"][0]["content"]
         .as_str()
         .expect("memory system content")
-        .contains("Beetle Memory context:"));
+        .contains("<beetle-memory-projection version=\"1\">"));
     assert_eq!(
         response.body.json()["choices"][0]["message"]["content"],
         "ok"

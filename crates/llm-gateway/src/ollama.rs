@@ -17,6 +17,7 @@ use crate::ollama_passthrough::{
 use crate::ollama_privacy::{
     force_ollama_think_false, strip_ollama_thinking, strip_ollama_thinking_from_ndjson_chunk,
 };
+use crate::projection::render_model_facing_projection;
 use crate::provider::select_provider_for_kind;
 use crate::{
     GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayConfig, GatewayError,
@@ -814,7 +815,9 @@ fn build_upstream_chat_body(
 }
 
 fn inject_memory_into_messages(messages: &mut Vec<Value>, memory_block: &str) {
-    let memory_text = format!("Beetle Memory context:\n{memory_block}");
+    let Some(memory_text) = render_model_facing_projection(memory_block) else {
+        return;
+    };
     for message in messages.iter_mut() {
         let Some(object) = message.as_object_mut() else {
             continue;
@@ -855,7 +858,9 @@ fn build_upstream_generate_body(
         return Ok((Value::Object(object), false));
     }
 
-    let memory_text = format!("Beetle Memory context:\n{memory_block}");
+    let Some(memory_text) = render_model_facing_projection(memory_block) else {
+        return Ok((Value::Object(object), false));
+    };
     if provider.ollama_generate_system_supported {
         let system = object
             .get("system")

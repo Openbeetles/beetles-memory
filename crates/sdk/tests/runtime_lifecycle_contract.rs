@@ -77,7 +77,7 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
     let event_reader = platform.clone();
     let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
 
-    runtime
+    let write = runtime
         .write(MemoryWriteRequest::Procedural {
             writes: vec![RuntimeSkillWrite {
                 name: "ollama_memory_projection_hit".to_string(),
@@ -85,7 +85,7 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
                 title: "Ollama transparent metrics".to_string(),
                 summary: "Ollama transparent projection must be counted as a memory hit."
                     .to_string(),
-                content: "When projection injects remembered context, the runtime event records memory_hit=true."
+                content: "- When projection injects remembered context, record memory_hit=true.\n- Use hit_count to back UI metrics instead of fabricating counters."
                     .to_string(),
                 citations: vec!["runtime lifecycle telemetry contract".to_string()],
                 source_chat_id: Some("chat-1".to_string()),
@@ -94,6 +94,10 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("write");
+    assert!(
+        write.accepted,
+        "telemetry fixture must seed recallable memory"
+    );
 
     runtime
         .recall(MemoryRecallRequest {

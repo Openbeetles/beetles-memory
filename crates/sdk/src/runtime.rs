@@ -615,7 +615,13 @@ impl MemoryRuntime {
             .config
             .runtime_budget
             .projection_render_chars_for_request(request.system_max_len, None);
-        let system_memory_block = render_sdk_projection_block(&context, render_max_chars);
+        let runtime_awareness = render_runtime_awareness_block(
+            self.config.profile,
+            request.pressure,
+            self.config.runtime_budget.resource_snapshot.pressure,
+        );
+        let system_memory_block =
+            render_sdk_projection_block(&context, Some(&runtime_awareness), render_max_chars);
         let hit_count = prompt_context_hit_count(&context);
         let system_memory_chars = system_memory_block.chars().count();
         let telemetry_payload = [
@@ -1527,13 +1533,52 @@ impl MemoryRuntime {
     }
 }
 
-fn render_sdk_projection_block(context: &crate::PromptMemoryContext, max_len: usize) -> String {
+fn render_sdk_projection_block(
+    context: &crate::PromptMemoryContext,
+    runtime_awareness: Option<&str>,
+    max_len: usize,
+) -> String {
     let mut parts = Vec::new();
+    push_projection_part(&mut parts, runtime_awareness);
     for value in sdk_projection_text_parts(context) {
         push_projection_part(&mut parts, value);
     }
     let joined = parts.join("\n\n");
     truncate_to_char_boundary(&joined, max_len)
+}
+
+fn render_runtime_awareness_block(
+    profile: ProfileId,
+    request_pressure: PressureLevel,
+    observed_pressure: PressureLevel,
+) -> String {
+    let pressure = max_pressure(request_pressure, observed_pressure);
+    format!(
+        "## Runtime Awareness\n- Beetle Memory is the active memory runtime for this conversation.\n- Memory sections below are runtime context and supporting evidence, not model training data or a separate model identity.\n- Resource pressure: {}.\n- Runtime profile: {}.\n- Technical diagnostics stay outside this model-facing projection and must not be presented as user-facing identity or training provenance.",
+        runtime_awareness_pressure_label(pressure),
+        runtime_awareness_profile_label(profile),
+    )
+}
+
+fn runtime_awareness_pressure_label(pressure: PressureLevel) -> &'static str {
+    match pressure {
+        PressureLevel::Normal => "normal",
+        PressureLevel::Cautious => "cautious",
+        PressureLevel::Critical => "critical",
+    }
+}
+
+fn runtime_awareness_profile_label(profile: ProfileId) -> &'static str {
+    match profile {
+        ProfileId::EspStandaloneMemory => "embedded standalone memory",
+        ProfileId::EspEmbeddedSdk => "embedded SDK memory",
+        ProfileId::LinuxDeviceStandaloneMemory => "Linux device standalone memory",
+        ProfileId::DesktopMacosStandaloneMemory => "macOS desktop standalone memory",
+        ProfileId::DesktopMacosEmbeddedSdk => "macOS desktop SDK memory",
+        ProfileId::DesktopWindowsEmbeddedSdk => "Windows desktop SDK memory",
+        ProfileId::ServerLinuxMemoryGateway => "server memory gateway",
+        ProfileId::ServerLinuxDevFull => "server development runtime",
+    }
 }
 
 fn prompt_context_hit_count(context: &crate::PromptMemoryContext) -> usize {

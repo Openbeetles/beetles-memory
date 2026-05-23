@@ -374,7 +374,7 @@ fn chat_non_streaming_injects_memory_into_existing_system_and_preserves_native_s
         .as_str()
         .expect("system content");
     assert!(system.contains("Base system."));
-    assert!(system.contains("Beetle Memory context:"));
+    assert!(system.contains("<beetle-memory-projection version=\"1\">"));
     assert_eq!(sent.body["messages"].as_array().expect("messages").len(), 2);
     assert_eq!(response.body.json()["message"]["content"], "ok");
 }
@@ -538,7 +538,7 @@ fn generate_injects_system_field_without_prompt_prefix_when_supported() {
     assert_eq!(sent.body["keep_alive"], "10m");
     let system = sent.body["system"].as_str().expect("system");
     assert!(system.contains("Base generate system."));
-    assert!(system.contains("Beetle Memory context:"));
+    assert!(system.contains("<beetle-memory-projection version=\"1\">"));
     assert!(!response
         .audit
         .notes
@@ -577,7 +577,7 @@ fn generate_prompt_prefix_fallback_is_explicitly_audited_when_system_is_unsuppor
     let sent = &upstream.generate_calls[0];
     assert!(sent.body.get("system").is_none());
     let prompt = sent.body["prompt"].as_str().expect("prompt");
-    assert!(prompt.starts_with("Beetle Memory context:\n"));
+    assert!(prompt.starts_with("<beetle-memory-projection version=\"1\">\n"));
     assert!(prompt.ends_with("Use fallback."));
     assert!(response
         .audit
