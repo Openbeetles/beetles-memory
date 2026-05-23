@@ -210,7 +210,7 @@ function localizedMetricDesc(
   currentLang: Lang,
 ): string {
   if (currentLang === "en") return desc || fallback;
-  if (kind === "storage") return "当前系统占用 / 实际系统可用大小";
+  if (kind === "storage") return "当前记忆系统占用 / 当前系统总存储";
   if (kind === "writes") return "当前运行时已接受的记忆写入";
   if (kind === "recall") return desc.replace(" recall requests / ", " 次召回请求 / ").replace(" with hits", " 次命中");
   if (kind === "projection") return desc.replace(" projection requests served", " 次投影请求已服务");

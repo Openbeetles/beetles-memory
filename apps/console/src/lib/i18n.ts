@@ -55,7 +55,7 @@ export const copy = {
       retired: "已退役",
     } satisfies Record<StatusKind, string>,
     overview: {
-      storage: { title: "存储占用", value: "0 B / 0 B", desc: "当前系统占用 / 实际系统可用大小" },
+      storage: { title: "存储占用", value: "0 B / 0 B", desc: "当前记忆系统占用 / 当前系统总存储" },
       writes: { title: "今日写入", value: "0", desc: "等待后端运行数据" },
       recall: { title: "召回命中", value: "0.0%", desc: "等待后端运行数据" },
       projection: { title: "最近投影", value: "0", desc: "等待后端运行数据" },
@@ -363,7 +363,7 @@ export const copy = {
       retired: "Retired",
     } satisfies Record<StatusKind, string>,
     overview: {
-      storage: { title: "Storage Usage", value: "0 B / 0 B", desc: "Current usage / available system storage" },
+      storage: { title: "Storage Usage", value: "0 B / 0 B", desc: "Memory store usage / host total storage" },
       writes: { title: "Writes Today", value: "0", desc: "Waiting for backend runtime data" },
       recall: { title: "Recall Hits", value: "0.0%", desc: "Waiting for backend runtime data" },
       projection: { title: "Last Projection", value: "0", desc: "Waiting for backend runtime data" },

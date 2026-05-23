@@ -600,6 +600,15 @@ where
             "official Ollama binary is missing; managed runner cannot be installed",
         ));
     }
+    if !config.gateway_binary_path.is_file() {
+        blockers.push(PreflightBlocker::new(
+            PreflightBlockerCode::GatewayFrontUnavailable,
+            format!(
+                "bm-llm-gateway transparent front binary is missing: {}",
+                config.gateway_binary_path.display()
+            ),
+        ));
+    }
 
     Ok(report_from_parts(
         public_port,

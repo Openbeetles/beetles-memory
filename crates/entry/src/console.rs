@@ -1,5 +1,6 @@
+use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -502,7 +503,7 @@ impl EntryConsoleState {
             runtime_shape: inner.runtime_shape.clone(),
             system_info: system_info(runtime_budget),
             runtime_budget: EntryConsoleRuntimeBudget::from_report(runtime_budget),
-            storage: storage_metric(runtime_budget),
+            storage: storage_metric(runtime_budget, inner.storage_path.as_deref()),
             writes_today: EntryConsoleMetric {
                 value: writes_today.to_string(),
                 desc: "Accepted memory writes recorded by the runtime event stream".to_string(),
@@ -1403,37 +1404,47 @@ fn default_devices(config: &EntryRuntimeConfig) -> Vec<EntryConsoleDevice> {
     }]
 }
 
-fn storage_metric(runtime_budget: &RuntimeBudgetReport) -> EntryConsoleMetric {
-    let available = runtime_budget.resource_snapshot.storage_available_bytes;
+fn storage_metric(
+    runtime_budget: &RuntimeBudgetReport,
+    storage_path: Option<&Path>,
+) -> EntryConsoleMetric {
+    let store_used = storage_path
+        .and_then(|path| storage_path_bytes(path).ok())
+        .unwrap_or(0);
     let total = runtime_budget.resource_snapshot.storage_total_bytes;
-    let used = match (total, available) {
-        (Some(total), Some(available)) => total.saturating_sub(available),
-        _ => 0,
-    };
     EntryConsoleMetric {
-        value: match (available, total) {
-            (Some(available), Some(total)) => {
-                format!(
-                    "{} / {}",
-                    format_bytes(used),
-                    format_bytes(total.max(available))
-                )
-            }
-            (Some(available), None) => format!("unknown / {}", format_bytes(available)),
-            _ => "unavailable".to_string(),
+        value: match total {
+            Some(total) => format!("{} / {}", format_bytes(store_used), format_bytes(total)),
+            None => format!("{} / unknown", format_bytes(store_used)),
         },
         desc: format!(
-            "Cached resource snapshot / store snapshot budget {}",
+            "Memory store usage / host total storage; store snapshot budget {}",
             format_bytes(runtime_budget.store_budget.snapshot_max_bytes as u64)
         ),
         progress: total.and_then(|total| {
-            if total == 0 || used == 0 {
+            if total == 0 || store_used == 0 {
                 None
             } else {
-                Some((used as f32 / total as f32) * 100.0)
+                Some((store_used as f32 / total as f32) * 100.0)
             }
         }),
     }
+}
+
+fn storage_path_bytes(path: &Path) -> std::io::Result<u64> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        total = total.saturating_add(storage_path_bytes(&entry.path())?);
+    }
+    Ok(total)
 }
 
 fn format_bytes(bytes: u64) -> String {

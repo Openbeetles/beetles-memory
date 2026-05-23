@@ -153,6 +153,30 @@ fn preflight_builds_stop_plan_for_official_ollama_when_allowed() {
     assert!(stop_plan.allowed);
 }
 
+#[test]
+fn preflight_rejects_missing_gateway_front_binary() {
+    let mut config = test_config(true);
+    config.gateway_binary_path =
+        std::env::temp_dir().join("beetle-memory-missing-bm-llm-gateway-for-preflight-test");
+    let controller = controller(
+        config.clone(),
+        MockPorts::new(
+            PortBindingReport::empty(config.public_bind),
+            PortBindingReport::empty(config.upstream_bind),
+        ),
+        MockRunner::installed(),
+        MockProcesses::default(),
+    );
+
+    let report = controller.preflight().expect("preflight report");
+
+    assert!(!report.accepted);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker.code == PreflightBlockerCode::GatewayFrontUnavailable));
+}
+
 fn controller(
     config: OllamaTransparentConfig,
     ports: MockPorts,
@@ -167,6 +191,7 @@ fn test_config(allow_stop_official_ollama: bool) -> OllamaTransparentConfig {
         app_bundle_path: PathBuf::from("/Applications/Ollama.app"),
         official_ollama_binary: PathBuf::from("/Applications/Ollama.app/Contents/Resources/ollama"),
         managed_runner_path: PathBuf::from("/tmp/beetle-memory/ollama/bin/bm-real-ollama"),
+        gateway_binary_path: std::env::current_exe().expect("test executable path"),
         public_bind: loopback(11434),
         upstream_bind: loopback(11435),
         allow_stop_official_ollama,

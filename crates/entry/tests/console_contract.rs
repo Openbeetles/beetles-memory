@@ -8,6 +8,7 @@ use bm_sdk::{
     PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
     RuntimeSkillWriteSource, StoreBackendKind,
 };
+use std::fs;
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -102,6 +103,31 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
         .starts_with("1 projection requests served"));
     assert_ne!(overview.projection.value, "0");
     assert!(overview.runtime_budget.projection_render_max_chars > 0);
+}
+
+#[test]
+fn console_storage_metric_reports_memory_store_usage_over_host_total_storage() {
+    let store_path =
+        std::env::temp_dir().join(format!("bm-console-storage-metric-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&store_path);
+    fs::create_dir_all(&store_path).expect("store path");
+    fs::File::create(store_path.join("memory-store.bin"))
+        .expect("marker file")
+        .set_len(2 * 1024 * 1024)
+        .expect("marker len");
+
+    let mut config = config();
+    config.store.backend = StoreBackendKind::File;
+    config.store.data_path = Some(store_path);
+
+    let runtime = EntryRuntime::open(config).expect("runtime");
+    let overview = runtime.console_overview();
+
+    assert!(
+        overview.storage.value.starts_with("2.00 MB / "),
+        "storage metric must start with Beetle Memory store usage, got {}",
+        overview.storage.value
+    );
 }
 
 #[test]

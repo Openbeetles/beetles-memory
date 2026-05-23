@@ -110,6 +110,24 @@ fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
     );
 }
 
+#[test]
+fn desktop_tauri_bundle_declares_ollama_gateway_sidecar() {
+    let config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+    let config = std::fs::read_to_string(&config_path).expect("tauri config");
+    let config: Value = serde_json::from_str(&config).expect("tauri config json");
+
+    assert_eq!(
+        config["build"]["beforeBuildCommand"],
+        "node scripts/build-sidecars.mjs"
+    );
+    let external_bins = config["bundle"]["externalBin"]
+        .as_array()
+        .expect("externalBin array");
+    assert!(external_bins
+        .iter()
+        .any(|entry| { entry.as_str() == Some("../../../target/release/bm-llm-gateway") }));
+}
+
 fn test_store_dir(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

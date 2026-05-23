@@ -63,7 +63,7 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 
 `bm-entry` 持有 console 状态，`bm-http` 只负责把 `/console/*` 请求路由到 entry console 操作。Console API 不写 memory plane，不实现第二套记忆语义，也不替代 `/memory/*`。
 
-`/console/overview` 的指标来自同一进程内的真实 runtime 状态：系统信息读取当前运行系统、CPU、内存和系统时间；存储占用读取当前 store 路径实际占用，并读取该路径所在系统磁盘当前可用容量；写入、召回、投影指标由 `/memory/*` 操作结果回写。配置台前端不得硬编码这些观测值，只能在后端不可达时使用本地占位数据。
+`/console/overview` 的指标来自同一进程内的真实 runtime 状态：系统信息读取当前运行系统、CPU、内存和系统时间；存储占用前半段读取当前 Beetle Memory store 路径实际占用，后半段读取当前系统总存储；写入、召回、投影指标由 `/memory/*` 操作结果回写。配置台前端不得硬编码这些观测值，只能在后端不可达时使用本地占位数据。
 
 | Route | Method | 用途 |
 | --- | --- | --- |

@@ -261,6 +261,7 @@ fn test_config(allow_stop_official_ollama: bool) -> OllamaTransparentConfig {
         app_bundle_path: PathBuf::from("/Applications/Ollama.app"),
         official_ollama_binary: PathBuf::from("/Applications/Ollama.app/Contents/Resources/ollama"),
         managed_runner_path: PathBuf::from("/tmp/beetle-memory/ollama/bin/bm-real-ollama"),
+        gateway_binary_path: std::env::current_exe().expect("test executable path"),
         public_bind: loopback(11434),
         upstream_bind: loopback(11435),
         allow_stop_official_ollama,

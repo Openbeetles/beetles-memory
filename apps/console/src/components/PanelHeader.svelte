@@ -6,8 +6,8 @@
 
 <div class="panel-title">
   <div>
-    <p class="panel-label">{label}</p>
+    <span class="panel-label">{label}</span>
     <h3>{title}</h3>
   </div>
-  <Icon size={18} />
+  <Icon size={13} />
 </div>

@@ -10,6 +10,7 @@ pub enum PreflightBlockerCode {
     OfficialOllamaStopNotAllowed,
     UpstreamPortUnavailable,
     ManagedRunnerUnavailable,
+    GatewayFrontUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
