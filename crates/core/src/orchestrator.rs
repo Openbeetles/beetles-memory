@@ -196,10 +196,10 @@ pub struct OrchestratorSnapshot {
 impl Default for OrchestratorSnapshot {
     fn default() -> Self {
         Self {
-            pressure: PressureLevel::Normal,
-            heap_free_internal: 1024 * 1024,
+            pressure: PressureLevel::Cautious,
+            heap_free_internal: 0,
             heap_free_spiram: 0,
-            heap_largest_block_internal: 1024 * 1024,
+            heap_largest_block_internal: 0,
             storage_used_kb: 0,
             storage_total_kb: 0,
             inbound_depth: 0,
@@ -209,7 +209,7 @@ impl Default for OrchestratorSnapshot {
             active_agent_tasks: 0,
             audio_recording: false,
             audio_playing: false,
-            storage_contention_risk: StorageContentionRisk::Healthy,
+            storage_contention_risk: StorageContentionRisk::Cautious,
         }
     }
 }
@@ -219,7 +219,7 @@ pub fn snapshot() -> OrchestratorSnapshot {
 }
 
 pub fn refresh_heap_if_stale() -> PressureLevel {
-    PressureLevel::Normal
+    snapshot().pressure
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -148,7 +148,7 @@ fn sqlite_store_rejects_unknown_schema_and_duplicate_events() {
 }
 
 #[test]
-fn embedded_store_returns_quota_error_instead_of_dropping_data() {
+fn embedded_store_returns_budget_error_instead_of_dropping_data() {
     let mut config = StoreBackendConfig::embedded(ProfileId::EspEmbeddedSdk).unwrap();
     config.capacity.blob_max_bytes = 1;
     let platform = StorePlatform::open(config).unwrap();
@@ -156,8 +156,8 @@ fn embedded_store_returns_quota_error_instead_of_dropping_data() {
     let err = platform
         .state_fs()
         .write("too-large", b"12")
-        .expect_err("embedded quota overflow must be explicit");
-    assert_eq!(err.stage(), "embedded_store_quota");
+        .expect_err("embedded budget overflow must be explicit");
+    assert_eq!(err.stage(), "store_budget_exceeded");
 }
 
 #[test]

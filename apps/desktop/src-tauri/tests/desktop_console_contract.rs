@@ -98,9 +98,15 @@ fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
     let body: Value = serde_json::from_str(&response.body).expect("overview json");
     assert_eq!(body["overview"]["writesToday"]["value"], "1");
     assert_eq!(body["overview"]["recall"]["value"], "100.0%");
-    assert_eq!(
-        body["overview"]["projection"]["desc"],
-        "1 projection requests served"
+    assert!(body["overview"]["projection"]["desc"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("1 projection requests served"));
+    assert!(
+        body["overview"]["runtimeBudget"]["projectionRenderMaxChars"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
     );
 }
 

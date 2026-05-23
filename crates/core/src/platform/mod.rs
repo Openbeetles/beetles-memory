@@ -81,6 +81,10 @@ pub trait Platform: Send + Sync {
         Arc::new(crate::runtime::NoopRuntimeLifecycleEventSink)
     }
 
+    fn runtime_resource_probe(&self) -> Arc<dyn crate::resource::RuntimeResourceProbe> {
+        Arc::new(crate::resource::UnavailableRuntimeResourceProbe::default())
+    }
+
     fn state_fs(&self) -> Arc<dyn StateFs>;
     fn skill_storage(&self) -> Arc<dyn SkillStorage>;
     fn skill_meta_store(&self) -> Arc<dyn SkillMetaStore>;

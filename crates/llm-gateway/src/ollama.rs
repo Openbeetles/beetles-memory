@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bm_sdk::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryProjectionRequest, Message,
-    RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
+    ProviderModelContextLimit, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
 };
 use serde_json::{json, Map, Value};
 
@@ -19,8 +19,8 @@ use crate::ollama_privacy::{
 use crate::provider::select_provider_for_kind;
 use crate::{
     GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayConfig, GatewayError,
-    GatewayMaintenanceConfig, GatewayProviderConfig, GatewayProviderKind, GatewayRuntime,
-    GatewayScopeRequest, GatewayScopeResolver, OpenAiGatewayServices, Result,
+    GatewayProviderConfig, GatewayProviderKind, GatewayRuntime, GatewayScopeRequest,
+    GatewayScopeResolver, OpenAiGatewayServices, Result,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,12 +518,17 @@ fn handle_chat(
     let extracted_user_text = extract_chat_messages_text(body_object.get("messages"))?;
     let external_content_used = chat_uses_external_content(body_object.get("messages"))
         || body_object.get("tools").is_some();
+    let provider_limit = provider_model_context_limit(provider, model_alias);
+    let runtime_budget = runtime.runtime().runtime_budget();
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
             user_query: extracted_user_text.clone(),
-            system_max_len: config.projection.system_max_len,
-            recent_messages_limit: config.projection.recent_messages_limit,
+            system_max_len: runtime_budget
+                .projection_render_chars_for_request(usize::MAX, Some(&provider_limit)),
+            recent_messages_limit: runtime_budget
+                .projection_source_budget
+                .recent_messages_limit,
             pressure: config.projection.pressure,
             mode_input: RuntimeLifecycleModeInput::default(),
         })
@@ -623,12 +628,17 @@ fn handle_generate(
         .and_then(Value::as_array)
         .map(|images| !images.is_empty())
         .unwrap_or(false);
+    let provider_limit = provider_model_context_limit(provider, model_alias);
+    let runtime_budget = runtime.runtime().runtime_budget();
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
             user_query: extracted_user_text.clone(),
-            system_max_len: config.projection.system_max_len,
-            recent_messages_limit: config.projection.recent_messages_limit,
+            system_max_len: runtime_budget
+                .projection_render_chars_for_request(usize::MAX, Some(&provider_limit)),
+            recent_messages_limit: runtime_budget
+                .projection_source_budget
+                .recent_messages_limit,
             pressure: config.projection.pressure,
             mode_input: RuntimeLifecycleModeInput::default(),
         })
@@ -744,6 +754,18 @@ fn provider_model_name(provider: &GatewayProviderConfig, model_alias: &str) -> S
         .iter()
         .find_map(|(alias, model)| (alias == model_alias).then(|| model.clone()))
         .unwrap_or_else(|| model_alias.to_string())
+}
+
+fn provider_model_context_limit(
+    provider: &GatewayProviderConfig,
+    model_alias: &str,
+) -> ProviderModelContextLimit {
+    ProviderModelContextLimit {
+        provider: Some(provider.base_url.clone()),
+        model: Some(provider_model_name(provider, model_alias)),
+        max_context_tokens: None,
+        max_prompt_chars: provider.max_prompt_chars,
+    }
 }
 
 fn build_upstream_chat_body(
@@ -900,11 +922,11 @@ struct OllamaDeferredMaintenance {
 
 impl OllamaDeferredMaintenance {
     fn new(plan: GatewayMaintenancePlan, endpoint: OllamaCompletionEndpoint) -> Self {
-        let config = plan.config();
+        let budget = plan.budget();
         Self {
             plan,
             endpoint,
-            accumulator: OllamaReplyAccumulator::new(config),
+            accumulator: OllamaReplyAccumulator::new(budget),
         }
     }
 
@@ -937,7 +959,7 @@ fn run_ollama_json_maintenance(
     body: &Value,
     services: &mut OpenAiGatewayServices<'_>,
 ) -> crate::maintenance::GatewayMaintenanceRunOutcome {
-    let mut accumulator = OllamaReplyAccumulator::new(plan.config());
+    let mut accumulator = OllamaReplyAccumulator::new(plan.budget());
     accumulator.observe_json_response(body, endpoint);
     let (reply_content, tool_calls, reuse_outcome_note, saw_done) =
         accumulator.into_parts(endpoint);
@@ -961,9 +983,9 @@ struct OllamaReplyAccumulator {
 }
 
 impl OllamaReplyAccumulator {
-    fn new(config: GatewayMaintenanceConfig) -> Self {
+    fn new(budget: bm_sdk::MaintenanceBudget) -> Self {
         Self {
-            reply: BoundedText::new(config.reply_max_chars, config.reply_max_bytes),
+            reply: BoundedText::new(budget.reply_input_max_chars, budget.reply_input_max_bytes),
             tool_calls: Vec::new(),
             ndjson_buffer: String::new(),
             saw_done: false,

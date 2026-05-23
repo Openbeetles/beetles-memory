@@ -55,16 +55,12 @@ impl Default for GatewayRuntimeCacheConfig {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GatewayProjectionConfig {
-    pub system_max_len: usize,
-    pub recent_messages_limit: usize,
     pub pressure: PressureLevel,
 }
 
 impl Default for GatewayProjectionConfig {
     fn default() -> Self {
         Self {
-            system_max_len: 8192,
-            recent_messages_limit: 32,
             pressure: PressureLevel::Normal,
         }
     }
@@ -73,21 +69,11 @@ impl Default for GatewayProjectionConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GatewayMaintenanceConfig {
     pub enabled: bool,
-    pub user_max_chars: usize,
-    pub user_max_bytes: usize,
-    pub reply_max_chars: usize,
-    pub reply_max_bytes: usize,
 }
 
 impl Default for GatewayMaintenanceConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            user_max_chars: 8192,
-            user_max_bytes: 16 * 1024,
-            reply_max_chars: 8192,
-            reply_max_bytes: 16 * 1024,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -148,26 +134,6 @@ impl GatewayConfig {
         if self.runtime_cache.max_runtimes == 0 {
             return Err(GatewayError::invalid_config(
                 "runtime_cache.max_runtimes must be greater than zero",
-            ));
-        }
-        if self.projection.system_max_len == 0 {
-            return Err(GatewayError::invalid_config(
-                "projection.system_max_len must be greater than zero",
-            ));
-        }
-        if self.projection.recent_messages_limit == 0 {
-            return Err(GatewayError::invalid_config(
-                "projection.recent_messages_limit must be greater than zero",
-            ));
-        }
-        if self.maintenance.user_max_chars == 0 || self.maintenance.user_max_bytes == 0 {
-            return Err(GatewayError::invalid_config(
-                "maintenance user accumulator limits must be greater than zero",
-            ));
-        }
-        if self.maintenance.reply_max_chars == 0 || self.maintenance.reply_max_bytes == 0 {
-            return Err(GatewayError::invalid_config(
-                "maintenance reply accumulator limits must be greater than zero",
             ));
         }
         if !self.providers.contains_key(&self.default_provider) {

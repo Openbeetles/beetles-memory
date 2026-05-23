@@ -718,11 +718,17 @@ fn console_overview_aggregates_extra_memory_event_store_paths() {
         body["overview"]["recall"]["desc"],
         "1 recall requests / 1 with hits"
     );
-    assert_eq!(
-        body["overview"]["projection"]["desc"],
-        "1 projection requests served"
-    );
+    assert!(body["overview"]["projection"]["desc"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("1 projection requests served"));
     assert_ne!(body["overview"]["projection"]["value"], "0");
+    assert!(
+        body["overview"]["runtimeBudget"]["projectionRenderMaxChars"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
 }
 
 #[test]

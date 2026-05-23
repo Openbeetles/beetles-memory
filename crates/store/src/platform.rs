@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bm_core::agent::{ActiveWorkRecord, ActiveWorkStore};
 use bm_core::memory::*;
 use bm_core::platform::{MemorySystemKind, Platform, SkillMetaStore, SkillStorage, StateFs};
+use bm_core::resource::{HostRuntimeResourceProbe, RuntimeResourceProbe};
 use bm_core::runtime::{
     RuntimeLifecycleEvent, RuntimeLifecycleEventKind, RuntimeLifecycleEventSink,
 };
@@ -205,6 +206,19 @@ impl StorePlatform {
     where
         T: Serialize,
     {
+        if self.engine.get_json_value(namespace, key)?.is_none() {
+            let current_entries = self.engine.list_json_keys(namespace)?.len();
+            if current_entries >= self.config.capacity.kv_max_entries {
+                return Err(Error::config(
+                    "store_budget_exceeded",
+                    format!(
+                        "kv entries {} exceed {}",
+                        current_entries.saturating_add(1),
+                        self.config.capacity.kv_max_entries
+                    ),
+                ));
+            }
+        }
         let value = serde_json::to_value(value)
             .map_err(|error| Error::config("store_json_encode", error.to_string()))?;
         let content_hash = stable_hash_json(&value)?;
@@ -247,6 +261,16 @@ impl StorePlatform {
     }
 
     fn blob_put(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
+        if value.len() > self.config.capacity.blob_max_bytes {
+            return Err(Error::config(
+                "store_budget_exceeded",
+                format!(
+                    "blob bytes {} exceed {}",
+                    value.len(),
+                    self.config.capacity.blob_max_bytes
+                ),
+            ));
+        }
         let content_hash = stable_hash_hex(value);
         let event = self.build_memory_event(
             MemoryStoreEventKind::MemoryWrite,
@@ -300,14 +324,11 @@ impl StorePlatform {
     }
 
     fn enforce_snapshot_budget(&self, snapshot: &StoreSnapshot) -> Result<()> {
-        if self.config.backend != StoreBackendKind::Embedded {
-            return Ok(());
-        }
         let bytes = serde_json::to_vec(snapshot)
             .map_err(|error| Error::config("store_snapshot_budget", error.to_string()))?;
         if bytes.len() > self.config.capacity.snapshot_max_bytes {
             return Err(Error::config(
-                "embedded_store_quota",
+                "store_budget_exceeded",
                 format!(
                     "snapshot bytes {} exceed {}",
                     bytes.len(),
@@ -412,6 +433,10 @@ impl Platform for StorePlatform {
 
     fn runtime_lifecycle_event_sink(&self) -> Arc<dyn bm_core::runtime::RuntimeLifecycleEventSink> {
         Arc::new(self.clone())
+    }
+
+    fn runtime_resource_probe(&self) -> Arc<dyn RuntimeResourceProbe> {
+        Arc::new(HostRuntimeResourceProbe)
     }
 
     fn state_fs(&self) -> Arc<dyn StateFs> {

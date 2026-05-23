@@ -10,6 +10,7 @@ pub mod memory;
 pub mod skills;
 
 pub mod agent;
+pub mod budget;
 mod constants;
 pub mod error;
 pub mod feature_gate;
@@ -20,6 +21,7 @@ pub mod orchestrator;
 pub mod platform;
 pub mod reasoning;
 pub mod reminder;
+pub mod resource;
 pub mod runtime;
 pub mod state;
 pub mod task;

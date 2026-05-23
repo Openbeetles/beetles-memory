@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_sdk::{
     MemorySkillDetailReport, MemorySkillKind, MemorySkillListReport, MemorySkillMutationReport,
-    MemorySkillOrigin, MemorySkillSummary, MemoryStoreEvent, StoreBackendKind,
+    MemorySkillOrigin, MemorySkillSummary, MemoryStoreEvent, ProfileId, RuntimeBudgetReport,
+    StoreBackendKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,7 @@ pub struct EntryConsoleKv {
 pub struct EntryConsoleOverview {
     pub runtime_shape: EntryConsoleRuntimeShape,
     pub system_info: EntryConsoleSystemInfo,
+    pub runtime_budget: EntryConsoleRuntimeBudget,
     pub storage: EntryConsoleMetric,
     pub writes_today: EntryConsoleMetric,
     pub recall: EntryConsoleMetric,
@@ -78,6 +80,44 @@ pub struct EntryConsoleOverview {
     pub kernel: Vec<EntryConsoleKv>,
     pub session: Vec<EntryConsoleKv>,
     pub memory_context: Vec<EntryConsoleKv>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleRuntimeBudget {
+    pub report_id: String,
+    pub profile: String,
+    pub resource_source: String,
+    pub stale: bool,
+    pub limited_by: Vec<String>,
+    pub unavailable_reasons: Vec<String>,
+    pub store_snapshot_max_bytes: usize,
+    pub http_body_max_bytes: usize,
+    pub wss_frame_max_bytes: usize,
+    pub projection_source_max_chars: usize,
+    pub projection_render_max_chars: usize,
+    pub maintenance_user_max_chars: usize,
+    pub maintenance_reply_max_chars: usize,
+}
+
+impl EntryConsoleRuntimeBudget {
+    fn from_report(report: &RuntimeBudgetReport) -> Self {
+        Self {
+            report_id: report.report_id.clone(),
+            profile: report.profile.as_str().to_string(),
+            resource_source: report.resource_snapshot.source.as_str().to_string(),
+            stale: report.resource_snapshot.stale,
+            limited_by: report.limited_by.clone(),
+            unavailable_reasons: report.unavailable_reasons.clone(),
+            store_snapshot_max_bytes: report.store_budget.snapshot_max_bytes,
+            http_body_max_bytes: report.adapter_budget.http_body_max_bytes,
+            wss_frame_max_bytes: report.adapter_budget.wss_frame_max_bytes,
+            projection_source_max_chars: report.projection_source_budget.context_assembly_max_chars,
+            projection_render_max_chars: report.projection_render_budget.system_block_max_chars,
+            maintenance_user_max_chars: report.maintenance_budget.user_input_max_chars,
+            maintenance_reply_max_chars: report.maintenance_budget.reply_input_max_chars,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -366,6 +406,7 @@ impl EntryConsoleTelemetrySnapshot {
 #[derive(Clone, Debug)]
 struct EntryConsoleInner {
     runtime_shape: EntryConsoleRuntimeShape,
+    profile: ProfileId,
     storage_path: Option<PathBuf>,
     agent_id: String,
     channel: String,
@@ -386,6 +427,7 @@ impl EntryConsoleState {
         Self {
             inner: Mutex::new(EntryConsoleInner {
                 runtime_shape: runtime_shape(config),
+                profile: config.profile,
                 storage_path: config.store.data_path.clone(),
                 agent_id: config.identity.agent_id.clone(),
                 channel: config.scope.channel.clone(),
@@ -420,6 +462,21 @@ impl EntryConsoleState {
         &self,
         telemetry: EntryConsoleTelemetrySnapshot,
     ) -> EntryConsoleOverview {
+        let profile = {
+            let inner = self.inner.lock().expect("console state lock");
+            inner.profile
+        };
+        self.overview_with_telemetry_and_budget(
+            telemetry,
+            &RuntimeBudgetReport::static_for_profile(profile),
+        )
+    }
+
+    pub fn overview_with_telemetry_and_budget(
+        &self,
+        telemetry: EntryConsoleTelemetrySnapshot,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> EntryConsoleOverview {
         let inner = self.inner.lock().expect("console state lock");
         let active_devices = inner
             .devices
@@ -443,8 +500,9 @@ impl EntryConsoleState {
         let recall_rate = percentage_value(recall_hits, recall_requests);
         EntryConsoleOverview {
             runtime_shape: inner.runtime_shape.clone(),
-            system_info: system_info(),
-            storage: storage_metric(&inner),
+            system_info: system_info(runtime_budget),
+            runtime_budget: EntryConsoleRuntimeBudget::from_report(runtime_budget),
+            storage: storage_metric(runtime_budget),
             writes_today: EntryConsoleMetric {
                 value: writes_today.to_string(),
                 desc: "Accepted memory writes recorded by the runtime event stream".to_string(),
@@ -464,7 +522,12 @@ impl EntryConsoleState {
                 } else {
                     format!("{last_projection_chars} chars")
                 },
-                desc: format!("{projection_requests} projection requests served"),
+                desc: format!(
+                    "{projection_requests} projection requests served / render budget {} chars",
+                    runtime_budget
+                        .projection_render_budget
+                        .system_block_max_chars
+                ),
                 progress: None,
             },
             devices: EntryConsoleMetric {
@@ -915,11 +978,28 @@ fn skill_kind_label(kind: MemorySkillKind) -> &'static str {
     }
 }
 
-fn system_info() -> EntryConsoleSystemInfo {
+fn system_info(runtime_budget: &RuntimeBudgetReport) -> EntryConsoleSystemInfo {
     EntryConsoleSystemInfo {
         name: system_name().to_string(),
-        cpu: cpu_label(),
-        memory: memory_label(),
+        cpu: runtime_budget
+            .resource_snapshot
+            .available_parallelism
+            .map(|threads| format!("{} / {threads} threads", std::env::consts::ARCH))
+            .unwrap_or_else(|| std::env::consts::ARCH.to_string()),
+        memory: match (
+            runtime_budget.resource_snapshot.memory_available_bytes,
+            runtime_budget.resource_snapshot.memory_total_bytes,
+        ) {
+            (Some(available), Some(total)) => {
+                format!(
+                    "{} available / {} total",
+                    format_bytes(available),
+                    format_bytes(total)
+                )
+            }
+            (Some(available), None) => format!("{} available", format_bytes(available)),
+            _ => "unavailable".to_string(),
+        },
         time_unix_secs: current_unix_secs(),
     }
 }
@@ -932,96 +1012,6 @@ fn system_name() -> &'static str {
         "espidf" => "ESP-IDF",
         other => other,
     }
-}
-
-fn cpu_label() -> String {
-    let threads = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(0);
-    let brand = cpu_brand().unwrap_or_else(|| std::env::consts::ARCH.to_string());
-    if threads == 0 {
-        brand
-    } else {
-        format!("{brand} / {threads} threads")
-    }
-}
-
-fn cpu_brand() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        command_output("sysctl", &["-n", "machdep.cpu.brand_string"])
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_to_string("/proc/cpuinfo")
-            .ok()
-            .and_then(|content| {
-                content
-                    .lines()
-                    .find_map(|line| line.strip_prefix("model name"))
-                    .and_then(|line| {
-                        line.split_once(':')
-                            .map(|(_, value)| value.trim().to_string())
-                    })
-            })
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("PROCESSOR_IDENTIFIER")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        None
-    }
-}
-
-fn memory_label() -> String {
-    memory_bytes()
-        .map(format_bytes)
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn memory_bytes() -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        command_output("sysctl", &["-n", "hw.memsize"]).and_then(|value| value.parse().ok())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|content| {
-                content.lines().find_map(|line| {
-                    line.strip_prefix("MemTotal:")
-                        .and_then(|value| value.split_whitespace().next())
-                        .and_then(|kb| kb.parse::<u64>().ok())
-                        .map(|kb| kb.saturating_mul(1024))
-                })
-            })
-    }
-    #[cfg(target_os = "windows")]
-    {
-        None
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        None
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    std::process::Command::new(program)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn current_unix_secs() -> u64 {
@@ -1413,70 +1403,37 @@ fn default_devices(config: &EntryRuntimeConfig) -> Vec<EntryConsoleDevice> {
     }]
 }
 
-fn storage_metric(inner: &EntryConsoleInner) -> EntryConsoleMetric {
-    let used = inner.storage_path.as_deref().map(path_size).unwrap_or(0);
-    let available = storage_available_bytes(inner.storage_path.as_deref());
+fn storage_metric(runtime_budget: &RuntimeBudgetReport) -> EntryConsoleMetric {
+    let available = runtime_budget.resource_snapshot.storage_available_bytes;
+    let total = runtime_budget.resource_snapshot.storage_total_bytes;
+    let used = match (total, available) {
+        (Some(total), Some(available)) => total.saturating_sub(available),
+        _ => 0,
+    };
     EntryConsoleMetric {
-        value: match available {
-            Some(available) => format!("{} / {}", format_bytes(used), format_bytes(available)),
-            None => format!("{} / unknown", format_bytes(used)),
+        value: match (available, total) {
+            (Some(available), Some(total)) => {
+                format!(
+                    "{} / {}",
+                    format_bytes(used),
+                    format_bytes(total.max(available))
+                )
+            }
+            (Some(available), None) => format!("unknown / {}", format_bytes(available)),
+            _ => "unavailable".to_string(),
         },
-        desc: "Current storage usage / system available storage".to_string(),
-        progress: available.and_then(|available| {
-            let total = used.saturating_add(available);
-            if total == 0 {
+        desc: format!(
+            "Cached resource snapshot / store snapshot budget {}",
+            format_bytes(runtime_budget.store_budget.snapshot_max_bytes as u64)
+        ),
+        progress: total.and_then(|total| {
+            if total == 0 || used == 0 {
                 None
             } else {
                 Some((used as f32 / total as f32) * 100.0)
             }
         }),
     }
-}
-
-fn storage_available_bytes(path: Option<&Path>) -> Option<u64> {
-    let owned_current;
-    let path = match path {
-        Some(path) => path,
-        None => {
-            owned_current = std::env::current_dir().ok()?;
-            owned_current.as_path()
-        }
-    };
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        command_output("df", &["-k", path.to_str()?])
-            .and_then(|output| output.lines().last().map(str::to_string))
-            .and_then(|line| {
-                line.split_whitespace()
-                    .nth(3)
-                    .and_then(|kb| kb.parse::<u64>().ok())
-                    .map(|kb| kb.saturating_mul(1024))
-            })
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = path;
-        None
-    }
-}
-
-fn path_size(path: &Path) -> u64 {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return 0;
-    };
-    if metadata.is_file() {
-        return metadata.len();
-    }
-    if !metadata.is_dir() {
-        return 0;
-    }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| path_size(&entry.path()))
-        .sum()
 }
 
 fn format_bytes(bytes: u64) -> String {

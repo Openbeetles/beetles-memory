@@ -483,17 +483,16 @@ pub struct WssBudget {
 }
 
 impl WssBudget {
-    pub const fn esp_standalone() -> Self {
+    pub fn from_runtime_budget(report: &bm_sdk::RuntimeBudgetReport) -> Self {
         Self {
-            max_frame_bytes: 8 * 1024,
-            max_subscriptions: 4,
+            max_frame_bytes: report.adapter_budget.wss_frame_max_bytes,
+            max_subscriptions: report.adapter_budget.wss_max_subscriptions,
         }
     }
+}
 
-    pub const fn server_gateway() -> Self {
-        Self {
-            max_frame_bytes: 64 * 1024,
-            max_subscriptions: 64,
-        }
+impl From<&bm_sdk::RuntimeBudgetReport> for WssBudget {
+    fn from(value: &bm_sdk::RuntimeBudgetReport) -> Self {
+        Self::from_runtime_budget(value)
     }
 }

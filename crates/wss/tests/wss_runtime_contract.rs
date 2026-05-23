@@ -37,7 +37,10 @@ fn runtime() -> EntryRuntime {
 #[test]
 fn wss_session_dispatches_command_frame_through_entry_runtime() {
     let runtime = runtime();
-    let mut session = WssRuntimeSession::new("session-1", bm_wss::WssBudget::server_gateway());
+    let mut session = WssRuntimeSession::new(
+        "session-1",
+        bm_wss::WssBudget::from_runtime_budget(runtime.runtime_budget()),
+    );
     let response = session
         .handle_frame(
             &runtime,
@@ -78,7 +81,10 @@ fn wss_subscription_respects_budget_and_never_allows_private_raw() {
 #[test]
 fn wss_runtime_decodes_declared_command_operations() {
     let runtime = runtime();
-    let mut session = WssRuntimeSession::new("session-ops", bm_wss::WssBudget::server_gateway());
+    let mut session = WssRuntimeSession::new(
+        "session-ops",
+        bm_wss::WssBudget::from_runtime_budget(runtime.runtime_budget()),
+    );
     let frames = [
         (
             "command.write",

@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use bm_entry::EntryRuntime;
 use bm_sdk::{
-    IngressKind, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryMaintenanceRequest,
-    Message, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, StopReason, ToolChoicePolicy,
-    ToolSpec,
+    IngressKind, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MaintenanceBudget,
+    MemoryMaintenanceRequest, Message, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
+    StopReason, ToolChoicePolicy, ToolSpec,
 };
 use serde_json::{json, Value};
 
@@ -50,6 +50,7 @@ pub(crate) struct GatewayMaintenancePlan {
     pressure: bm_sdk::PressureLevel,
     mode_input: RuntimeLifecycleModeInput,
     config: GatewayMaintenanceConfig,
+    budget: MaintenanceBudget,
 }
 
 pub(crate) struct GatewayMaintenancePlanInput {
@@ -65,12 +66,13 @@ pub(crate) struct GatewayMaintenancePlanInput {
 
 impl GatewayMaintenancePlan {
     pub(crate) fn new(input: GatewayMaintenancePlanInput) -> Self {
+        let budget = input.runtime.runtime().runtime_budget().maintenance_budget;
         Self {
             runtime: input.runtime,
             user_content: bound_text(
                 &input.user_content,
-                input.config.user_max_chars,
-                input.config.user_max_bytes,
+                budget.user_input_max_chars,
+                budget.user_input_max_bytes,
             ),
             external_content_used: input.external_content_used,
             runtime_skill_selected_ids: input.runtime_skill_selected_ids,
@@ -78,11 +80,12 @@ impl GatewayMaintenancePlan {
             pressure: input.pressure,
             mode_input: input.mode_input,
             config: input.config,
+            budget,
         }
     }
 
-    pub(crate) fn config(&self) -> GatewayMaintenanceConfig {
-        self.config
+    pub(crate) fn budget(&self) -> MaintenanceBudget {
+        self.budget
     }
 
     fn task_from_snapshot(&self, snapshot: MaintenanceSnapshot) -> GatewayMaintenanceTask {
@@ -159,10 +162,10 @@ pub(crate) struct OpenAiDeferredMaintenance {
 
 impl OpenAiDeferredMaintenance {
     pub(crate) fn new(plan: GatewayMaintenancePlan) -> Self {
-        let config = plan.config;
+        let budget = plan.budget;
         Self {
             plan,
-            accumulator: OpenAiReplyAccumulator::new(config),
+            accumulator: OpenAiReplyAccumulator::new(budget),
         }
     }
 
@@ -185,7 +188,7 @@ pub(crate) fn run_json_maintenance(
     body: &Value,
     services: &mut OpenAiGatewayServices<'_>,
 ) -> GatewayMaintenanceRunOutcome {
-    let mut accumulator = OpenAiReplyAccumulator::new(plan.config);
+    let mut accumulator = OpenAiReplyAccumulator::new(plan.budget);
     accumulator.observe_json_response(body);
     plan.task_from_snapshot(accumulator.into_snapshot())
         .run(services)
@@ -198,12 +201,12 @@ pub(crate) fn run_text_maintenance(
     reuse_outcome_note: String,
     services: &mut OpenAiGatewayServices<'_>,
 ) -> GatewayMaintenanceRunOutcome {
-    let config = plan.config;
+    let budget = plan.budget;
     plan.task_from_snapshot(MaintenanceSnapshot {
         reply_content: bound_text(
             &reply_content,
-            config.reply_max_chars,
-            config.reply_max_bytes,
+            budget.reply_input_max_chars,
+            budget.reply_input_max_bytes,
         ),
         tool_calls,
         reuse_outcome_note,
@@ -226,9 +229,9 @@ struct OpenAiReplyAccumulator {
 }
 
 impl OpenAiReplyAccumulator {
-    fn new(config: GatewayMaintenanceConfig) -> Self {
+    fn new(budget: MaintenanceBudget) -> Self {
         Self {
-            reply: BoundedText::new(config.reply_max_chars, config.reply_max_bytes),
+            reply: BoundedText::new(budget.reply_input_max_chars, budget.reply_input_max_bytes),
             tool_calls: BTreeMap::new(),
             sse_buffer: String::new(),
             sse_event_parts: Vec::new(),
@@ -599,19 +602,18 @@ impl LlmHttpClient for ReqwestGatewayLlmHttpClient {
 mod tests {
     use super::*;
 
-    fn small_config() -> GatewayMaintenanceConfig {
-        GatewayMaintenanceConfig {
-            enabled: true,
-            user_max_chars: 32,
-            user_max_bytes: 128,
-            reply_max_chars: 5,
-            reply_max_bytes: 128,
+    fn small_budget() -> MaintenanceBudget {
+        MaintenanceBudget {
+            user_input_max_chars: 32,
+            user_input_max_bytes: 128,
+            reply_input_max_chars: 5,
+            reply_input_max_bytes: 128,
         }
     }
 
     #[test]
     fn sse_accumulator_keeps_passthrough_bounded_reply_and_tool_call_count() {
-        let mut accumulator = OpenAiReplyAccumulator::new(small_config());
+        let mut accumulator = OpenAiReplyAccumulator::new(small_budget());
 
         accumulator.observe_sse_chunk(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"}}]}\n\n",
@@ -636,7 +638,7 @@ mod tests {
 
     #[test]
     fn sse_accumulator_keeps_partial_events_until_json_is_complete() {
-        let mut accumulator = OpenAiReplyAccumulator::new(small_config());
+        let mut accumulator = OpenAiReplyAccumulator::new(small_budget());
 
         accumulator
             .observe_sse_chunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he");
@@ -648,7 +650,7 @@ mod tests {
 
     #[test]
     fn json_accumulator_counts_non_streaming_tool_calls_without_raw_arguments() {
-        let mut accumulator = OpenAiReplyAccumulator::new(small_config());
+        let mut accumulator = OpenAiReplyAccumulator::new(small_budget());
 
         accumulator.observe_json_response(&json!({
             "choices": [{

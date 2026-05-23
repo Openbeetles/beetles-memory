@@ -6,6 +6,12 @@ mod ops;
 mod runtime;
 
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ForegroundWorkStatus};
+pub use bm_core::budget::{
+    compile_runtime_budget, AdapterRuntimeBudget, LlmGatewayBudget, MaintenanceBudget,
+    MemoryCoreBudget, ProjectionRenderBudget, ProjectionSourceBudget, ProviderModelContextLimit,
+    RuntimeBudgetInput, RuntimeBudgetReport, RuntimeDeploymentRole, RuntimeJobBudget,
+    StaticPlatformManifest, StoreRuntimeBudget,
+};
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, StopReason, ToolChoicePolicy,
@@ -29,6 +35,11 @@ pub use bm_core::memory::{
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;
 pub use bm_core::platform::{MemoryOperatorSurfaceSummary, ResponseBody};
+pub use bm_core::resource::{
+    probe_host_runtime_resource, HostRuntimeResourceProbe, RuntimeResourceProbe,
+    RuntimeResourceProbeSource, RuntimeResourceSnapshot, RuntimeResourceSnapshotCache,
+    RuntimeResourceUnavailableReason, StaticRuntimeResourceProbe, UnavailableRuntimeResourceProbe,
+};
 pub use bm_core::runtime::{
     ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, RuntimeLifecycleAdmission,
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleDisposition, RuntimeLifecycleModeInput,

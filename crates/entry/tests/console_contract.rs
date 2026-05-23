@@ -96,8 +96,12 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
     assert_eq!(overview.writes_today.value, "1");
     assert_eq!(overview.recall.value, "100.0%");
     assert_eq!(overview.recall.desc, "1 recall requests / 1 with hits");
-    assert_eq!(overview.projection.desc, "1 projection requests served");
+    assert!(overview
+        .projection
+        .desc
+        .starts_with("1 projection requests served"));
     assert_ne!(overview.projection.value, "0");
+    assert!(overview.runtime_budget.projection_render_max_chars > 0);
 }
 
 #[test]

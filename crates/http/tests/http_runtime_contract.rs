@@ -92,6 +92,19 @@ fn http_runtime_decodes_declared_memory_routes_through_entry_runtime() {
 }
 
 #[test]
+fn http_runtime_body_limit_comes_from_runtime_budget_report() {
+    let runtime = runtime();
+    let over_budget = "x".repeat(runtime.runtime_budget().adapter_budget.http_body_max_bytes + 1);
+    let error = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json("/memory/recall", &over_budget),
+    )
+    .expect_err("runtime budget must reject oversized body before decode");
+
+    assert_eq!(error.stage(), "http_body");
+}
+
+#[test]
 fn http_runtime_runs_maintenance_when_llm_services_are_injected() {
     let runtime = runtime();
     let mut http = StaticHttpClient;

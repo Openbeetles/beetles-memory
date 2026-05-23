@@ -18,20 +18,12 @@ fn gateway_config_defaults_are_loopback_memory_required_and_bounded() {
     assert_eq!(
         config.projection,
         GatewayProjectionConfig {
-            system_max_len: 8192,
-            recent_messages_limit: 32,
             pressure: PressureLevel::Normal,
         }
     );
     assert_eq!(
         config.maintenance,
-        GatewayMaintenanceConfig {
-            enabled: true,
-            user_max_chars: 8192,
-            user_max_bytes: 16 * 1024,
-            reply_max_chars: 8192,
-            reply_max_bytes: 16 * 1024,
-        }
+        GatewayMaintenanceConfig { enabled: true }
     );
     assert!(!config.audit.record_raw_projection);
     assert!(!config.audit.record_full_request_body);
@@ -52,19 +44,7 @@ fn gateway_config_rejects_zero_runtime_cache_and_missing_default_provider() {
         .expect_err("default provider must exist in provider map");
     assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
 
-    let mut config = GatewayConfig::default_for_local_dev();
-    config.projection.recent_messages_limit = 0;
-    let error = config
-        .validate()
-        .expect_err("zero projection recent messages limit must fail");
-    assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
-
-    let mut config = GatewayConfig::default_for_local_dev();
-    config.maintenance.reply_max_bytes = 0;
-    let error = config
-        .validate()
-        .expect_err("zero maintenance reply byte limit must fail");
-    assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
+    assert!(GatewayConfig::default_for_local_dev().validate().is_ok());
 }
 
 #[test]
@@ -93,6 +73,7 @@ fn provider_config_uses_secret_env_not_plaintext_api_key() {
         openai_embeddings_supported: true,
         openai_tools_supported: true,
         openai_streaming_supported: true,
+        max_prompt_chars: Some(8192),
     };
 
     assert_eq!(provider.secret_env_name(), Some("VLLM_API_KEY"));

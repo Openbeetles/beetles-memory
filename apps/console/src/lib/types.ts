@@ -278,6 +278,7 @@ export type SkillForm = {
 export type ConsoleApiOverview = {
   runtimeShape: ConsoleApiRuntimeShape;
   systemInfo: ConsoleApiSystemInfo;
+  runtimeBudget: ConsoleApiRuntimeBudget;
   storage: ConsoleApiMetric;
   writesToday: ConsoleApiMetric;
   recall: ConsoleApiMetric;
@@ -288,6 +289,22 @@ export type ConsoleApiOverview = {
   kernel: KVRow[];
   session: KVRow[];
   memoryContext: KVRow[];
+};
+
+export type ConsoleApiRuntimeBudget = {
+  reportId: string;
+  profile: string;
+  resourceSource: string;
+  stale: boolean;
+  limitedBy: string[];
+  unavailableReasons: string[];
+  storeSnapshotMaxBytes: number;
+  httpBodyMaxBytes: number;
+  wssFrameMaxBytes: number;
+  projectionSourceMaxChars: number;
+  projectionRenderMaxChars: number;
+  maintenanceUserMaxChars: number;
+  maintenanceReplyMaxChars: number;
 };
 
 export type StaticDeviceId = "bm-linux-core-01" | "bm-desktop-mac-studio" | "bm-esp-memory-7f2" | "legacy-lab-device";

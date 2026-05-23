@@ -7,10 +7,11 @@ use bm_adapter::{
     AdapterResponse, AdapterRuntimeServices,
 };
 use bm_sdk::{
-    resolve_memory_capabilities, Error, MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity,
-    MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemorySkillDeleteRequest,
-    MemorySkillDetailRequest, MemorySkillListRequest, MemorySkillSetEnabledRequest,
-    MemorySkillUpsertRequest, NoopMemoryAuditSink, ProfileId, Result, StoreBackendConfig,
+    compile_runtime_budget, probe_host_runtime_resource, resolve_memory_capabilities, Error,
+    MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity, MemoryPrivacyPolicy, MemoryRuntime,
+    MemoryScope, MemorySkillDeleteRequest, MemorySkillDetailRequest, MemorySkillListRequest,
+    MemorySkillSetEnabledRequest, MemorySkillUpsertRequest, NoopMemoryAuditSink, ProfileId, Result,
+    RuntimeBudgetInput, RuntimeBudgetReport, StaticPlatformManifest, StoreBackendConfig,
     StoreBackendKind, StorePlatform,
 };
 
@@ -81,12 +82,18 @@ impl EntryRuntimeConfig {
 pub struct EntryRuntimeFactory {
     base: EntryRuntimeBaseConfig,
     store: StorePlatform,
+    runtime_budget: RuntimeBudgetReport,
 }
 
 impl EntryRuntimeFactory {
     pub fn open(base: EntryRuntimeBaseConfig) -> Result<Self> {
-        let store = open_store(&base.store, base.profile)?;
-        Ok(Self { base, store })
+        let runtime_budget = compile_entry_runtime_budget(base.profile);
+        let store = open_store(&base.store, base.profile, &runtime_budget)?;
+        Ok(Self {
+            base,
+            store,
+            runtime_budget,
+        })
     }
 
     pub fn runtime_for_scope(&self, scope: EntryRuntimeScope) -> Result<EntryRuntime> {
@@ -101,7 +108,7 @@ impl EntryRuntimeFactory {
             privacy: self.base.privacy.clone(),
             capability: self.base.capability.clone(),
         };
-        EntryRuntime::from_store_platform(config, self.store.clone())
+        EntryRuntime::from_store_platform(config, self.store.clone(), self.runtime_budget.clone())
     }
 }
 
@@ -198,6 +205,7 @@ pub struct EntryRuntime {
     config: EntryRuntimeConfig,
     store: StorePlatform,
     runtime: MemoryRuntime,
+    runtime_budget: RuntimeBudgetReport,
     capability: EntryCapabilityView,
     idempotency: EntryIdempotencyCache,
     console: EntryConsoleState,
@@ -209,7 +217,11 @@ impl EntryRuntime {
         factory.runtime_for_scope(config.runtime_scope())
     }
 
-    fn from_store_platform(config: EntryRuntimeConfig, store: StorePlatform) -> Result<Self> {
+    fn from_store_platform(
+        config: EntryRuntimeConfig,
+        store: StorePlatform,
+        runtime_budget: RuntimeBudgetReport,
+    ) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
         let privacy = privacy_policy(config.privacy.clone());
         let runtime = MemoryRuntime::builder()
@@ -223,6 +235,7 @@ impl EntryRuntime {
             )?)
             .profile(config.profile)
             .store_platform(store.clone())
+            .runtime_budget(runtime_budget.clone())
             .capability_policy(capability_policy.clone())
             .privacy_policy(privacy.clone())
             .audit_sink(Arc::new(NoopMemoryAuditSink))
@@ -239,6 +252,7 @@ impl EntryRuntime {
             config,
             store,
             runtime,
+            runtime_budget,
             capability,
             idempotency,
             console,
@@ -247,6 +261,10 @@ impl EntryRuntime {
 
     pub fn runtime(&self) -> &MemoryRuntime {
         &self.runtime
+    }
+
+    pub fn runtime_budget(&self) -> &RuntimeBudgetReport {
+        &self.runtime_budget
     }
 
     pub fn capability(&self) -> &EntryCapabilityView {
@@ -262,7 +280,8 @@ impl EntryRuntime {
         event_store_paths: &[PathBuf],
     ) -> EntryConsoleOverview {
         let telemetry = self.console_telemetry_snapshot(event_store_paths);
-        self.console.overview_with_telemetry(telemetry)
+        self.console
+            .overview_with_telemetry_and_budget(telemetry, &self.runtime_budget)
     }
 
     pub fn console_transports(&self) -> Vec<EntryConsoleTransport> {
@@ -510,7 +529,24 @@ pub fn entry_capability_view(
     ))
 }
 
-fn open_store(config: &EntryStoreConfig, profile: ProfileId) -> Result<StorePlatform> {
+fn compile_entry_runtime_budget(profile: ProfileId) -> RuntimeBudgetReport {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    compile_runtime_budget(RuntimeBudgetInput {
+        profile,
+        resource_snapshot: probe_host_runtime_resource(now_secs),
+        static_platform_manifest: StaticPlatformManifest::for_profile(profile),
+        provider_model_context_limit: None,
+    })
+}
+
+fn open_store(
+    config: &EntryStoreConfig,
+    profile: ProfileId,
+    runtime_budget: &RuntimeBudgetReport,
+) -> Result<StorePlatform> {
     let store_config = match config.backend {
         StoreBackendKind::InMemory => StoreBackendConfig::in_memory(profile)?,
         StoreBackendKind::Embedded => StoreBackendConfig::embedded(profile)?,
@@ -527,7 +563,8 @@ fn open_store(config: &EntryStoreConfig, profile: ProfileId) -> Result<StorePlat
             StoreBackendConfig::sqlite(path, profile)?
         }
     }
-    .with_fsync(config.fsync);
+    .with_fsync(config.fsync)
+    .with_runtime_store_budget(runtime_budget.store_budget);
     StorePlatform::open(store_config)
 }
 

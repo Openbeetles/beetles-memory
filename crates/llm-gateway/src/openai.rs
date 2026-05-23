@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use bm_sdk::{MemoryProjectionRequest, RuntimeLifecycleModeInput};
+use bm_sdk::{MemoryProjectionRequest, ProviderModelContextLimit, RuntimeLifecycleModeInput};
 use serde_json::{Map, Value};
 
 use crate::provider::select_provider_for_kind;
@@ -383,12 +383,17 @@ fn handle_chat_completion(
     let extracted_user_text = extract_messages_text(body_object.get("messages"))?;
     let external_content_used = request_uses_external_content(body_object.get("messages"))
         || body_object.get("tools").is_some();
+    let provider_limit = provider_model_context_limit(provider, model_alias);
+    let runtime_budget = runtime.runtime().runtime_budget();
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
             user_query: extracted_user_text.clone(),
-            system_max_len: config.projection.system_max_len,
-            recent_messages_limit: config.projection.recent_messages_limit,
+            system_max_len: runtime_budget
+                .projection_render_chars_for_request(usize::MAX, Some(&provider_limit)),
+            recent_messages_limit: runtime_budget
+                .projection_source_budget
+                .recent_messages_limit,
             pressure: config.projection.pressure,
             mode_input: RuntimeLifecycleModeInput::default(),
         })
@@ -487,12 +492,17 @@ fn handle_responses(
     let extracted_user_text = extract_response_input_text(body_object.get("input"));
     let external_content_used = response_input_uses_external_content(body_object.get("input"))
         || body_object.get("tools").is_some();
+    let provider_limit = provider_model_context_limit(provider, model_alias);
+    let runtime_budget = runtime.runtime().runtime_budget();
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
             user_query: extracted_user_text.clone(),
-            system_max_len: config.projection.system_max_len,
-            recent_messages_limit: config.projection.recent_messages_limit,
+            system_max_len: runtime_budget
+                .projection_render_chars_for_request(usize::MAX, Some(&provider_limit)),
+            recent_messages_limit: runtime_budget
+                .projection_source_budget
+                .recent_messages_limit,
             pressure: config.projection.pressure,
             mode_input: RuntimeLifecycleModeInput::default(),
         })
@@ -652,6 +662,18 @@ fn provider_model_name(provider: &GatewayProviderConfig, model_alias: &str) -> S
         .iter()
         .find_map(|(alias, model)| (alias == model_alias).then(|| model.clone()))
         .unwrap_or_else(|| model_alias.to_string())
+}
+
+fn provider_model_context_limit(
+    provider: &GatewayProviderConfig,
+    model_alias: &str,
+) -> ProviderModelContextLimit {
+    ProviderModelContextLimit {
+        provider: Some(provider.base_url.clone()),
+        model: Some(provider_model_name(provider, model_alias)),
+        max_context_tokens: None,
+        max_prompt_chars: provider.max_prompt_chars,
+    }
 }
 
 fn build_upstream_chat_body(

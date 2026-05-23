@@ -39,7 +39,7 @@ pub enum HttpMethod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteBodyMode {
     None,
-    Json { max_bytes: usize },
+    Json,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +65,6 @@ pub struct ConsoleRouteSpec {
     pub auth: RouteAuth,
 }
 
-const JSON_BODY_MAX_BYTES: usize = 64 * 1024;
 const CONSOLE_CAPABILITY_SCHEMA: &str = "beetle-memory.console.capabilities.v1";
 
 const ROUTES: &[RouteSpec] = &[
@@ -120,9 +119,7 @@ const fn memory_post(path: &'static str, operation: AdapterOperation) -> RouteSp
         path,
         transport: TransportKind::Http,
         operation,
-        body: RouteBodyMode::Json {
-            max_bytes: JSON_BODY_MAX_BYTES,
-        },
+        body: RouteBodyMode::Json,
         auth: RouteAuth::TokenOrLoopback,
         profile_gate_required: true,
     }
@@ -344,6 +341,17 @@ pub fn handle_http_request_with_console_services(
         .find(|route| route.method == request.method && route.path == request.path)
         .copied()
         .ok_or_else(|| bm_sdk::Error::config("http_runtime", "unknown route"))?;
+    let body_budget = runtime
+        .runtime()
+        .runtime_budget()
+        .adapter_budget
+        .http_body_max_bytes;
+    if matches!(route.body, RouteBodyMode::Json) && request.body.len() > body_budget {
+        return Err(bm_sdk::Error::config(
+            "http_body",
+            "HTTP body exceeds runtime adapter budget",
+        ));
+    }
     let command = decode_json_adapter_command(
         route.operation,
         &request.body,
@@ -405,7 +413,19 @@ pub fn serve_http_stream_with_console_services<S: Read + Write>(
     stream: &mut S,
     console_services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<()> {
-    let request = read_http_runtime_request(stream)?;
+    let request = read_http_runtime_request(
+        stream,
+        runtime
+            .runtime()
+            .runtime_budget()
+            .adapter_budget
+            .http_header_max_bytes,
+        runtime
+            .runtime()
+            .runtime_budget()
+            .adapter_budget
+            .http_body_max_bytes,
+    )?;
     let response = handle_http_request_with_console_services(
         runtime,
         request,
@@ -416,7 +436,11 @@ pub fn serve_http_stream_with_console_services<S: Read + Write>(
 }
 
 #[cfg(feature = "server-std")]
-fn read_http_runtime_request<S: Read>(stream: &mut S) -> bm_sdk::Result<HttpRuntimeRequest> {
+fn read_http_runtime_request<S: Read>(
+    stream: &mut S,
+    header_max_bytes: usize,
+    body_max_bytes: usize,
+) -> bm_sdk::Result<HttpRuntimeRequest> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
     let header_end = loop {
@@ -431,7 +455,7 @@ fn read_http_runtime_request<S: Read>(stream: &mut S) -> bm_sdk::Result<HttpRunt
         if let Some(pos) = find_header_end(&buffer) {
             break pos;
         }
-        if buffer.len() > JSON_BODY_MAX_BYTES + 8192 {
+        if buffer.len() > header_max_bytes {
             return Err(bm_sdk::Error::config("http_read", "HTTP request too large"));
         }
     };
@@ -475,10 +499,10 @@ fn read_http_runtime_request<S: Read>(stream: &mut S) -> bm_sdk::Result<HttpRunt
         .get("content-length")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
-    if content_length > JSON_BODY_MAX_BYTES {
+    if content_length > body_max_bytes {
         return Err(bm_sdk::Error::config(
             "http_body",
-            "HTTP body exceeds configured budget",
+            "HTTP body exceeds runtime adapter budget",
         ));
     }
 

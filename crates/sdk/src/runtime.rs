@@ -2,6 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bm_core::budget::{
+    compile_runtime_budget, ProviderModelContextLimit, RuntimeBudgetInput, RuntimeBudgetReport,
+    StaticPlatformManifest,
+};
 use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
@@ -13,6 +17,7 @@ use bm_core::memory::{
     PromptRecallIntent, WorkingRecallInspectionInput,
 };
 use bm_core::platform::Platform;
+use bm_core::resource::RuntimeResourceSnapshot;
 use bm_core::runtime::{
     build_runtime_lifecycle_diagnosis, ensure_platform_soul_kernel_recovery,
     RuntimeLifecycleDisposition, RuntimeLifecycleEffect, RuntimeLifecycleEngine,
@@ -133,6 +138,7 @@ pub struct MemoryRuntimeConfig {
     pub capability_policy: MemoryCapabilityPolicy,
     pub privacy_policy: MemoryPrivacyPolicy,
     pub audit_sink: Arc<dyn MemoryAuditSink>,
+    pub runtime_budget: RuntimeBudgetReport,
 }
 
 pub struct MemoryRuntime {
@@ -160,6 +166,10 @@ impl MemoryRuntime {
 
     pub fn capabilities(&self) -> &MemoryCapabilityCatalog {
         &self.capabilities
+    }
+
+    pub fn runtime_budget(&self) -> &RuntimeBudgetReport {
+        &self.config.runtime_budget
     }
 
     pub fn write(&self, request: MemoryWriteRequest) -> Result<MemoryWriteReport> {
@@ -532,12 +542,17 @@ impl MemoryRuntime {
             self.config.clock.now_secs(),
             request.limit.max(1),
         );
+        let source_max_chars = self
+            .config
+            .runtime_budget
+            .projection_source_budget
+            .context_assembly_max_chars;
         let working = inspect_working_recall(WorkingRecallInspectionInput {
             chat_id: &self.config.scope.chat_id,
             query: &request.query,
             summary_text: summary.as_deref(),
             recent: &recent,
-            system_max_len: 4096,
+            system_max_len: source_max_chars,
             profile: self.memory_profile(),
             current_channel: Some(&self.config.scope.channel),
             session_store: session_store.as_ref(),
@@ -556,6 +571,14 @@ impl MemoryRuntime {
         let telemetry_payload = [
             ("memory_hit", (hit_count > 0).to_string()),
             ("hit_count", hit_count.to_string()),
+            (
+                "budget_report_id",
+                self.config.runtime_budget.report_id.clone(),
+            ),
+            (
+                "budget_limited_by",
+                self.config.runtime_budget.limited_by.join(","),
+            ),
         ];
         self.audit("recall", true, "recall_completed");
         Ok(MemoryRecallReport {
@@ -581,13 +604,34 @@ impl MemoryRuntime {
             self.mode_input_for_request(request.mode_input, request.pressure),
         );
         let context = self.load_projection_context(&request, &lifecycle);
-        let system_memory_block = render_sdk_projection_block(&context, request.system_max_len);
+        let render_max_chars = self
+            .config
+            .runtime_budget
+            .projection_render_chars_for_request(request.system_max_len, None);
+        let system_memory_block = render_sdk_projection_block(&context, render_max_chars);
         let hit_count = prompt_context_hit_count(&context);
         let system_memory_chars = system_memory_block.chars().count();
         let telemetry_payload = [
             ("memory_hit", (hit_count > 0).to_string()),
             ("hit_count", hit_count.to_string()),
             ("system_memory_chars", system_memory_chars.to_string()),
+            (
+                "projection_source_max_chars",
+                self.config
+                    .runtime_budget
+                    .projection_source_budget
+                    .context_assembly_max_chars
+                    .to_string(),
+            ),
+            ("projection_render_max_chars", render_max_chars.to_string()),
+            (
+                "budget_report_id",
+                self.config.runtime_budget.report_id.clone(),
+            ),
+            (
+                "budget_limited_by",
+                self.config.runtime_budget.limited_by.join(","),
+            ),
             (
                 "projection_injected",
                 (!system_memory_block.trim().is_empty()).to_string(),
@@ -651,10 +695,19 @@ impl MemoryRuntime {
             current_channel: &self.config.scope.channel,
             user_query: &request.user_query,
             memory_system_kind,
-            system_max_len: request.system_max_len,
+            system_max_len: self
+                .config
+                .runtime_budget
+                .projection_source_budget
+                .context_assembly_max_chars,
             now_secs: self.config.clock.now_secs(),
             participation_plan: self.prompt_participation_plan(),
-            recent_messages_limit: request.recent_messages_limit,
+            recent_messages_limit: request.recent_messages_limit.min(
+                self.config
+                    .runtime_budget
+                    .projection_source_budget
+                    .recent_messages_limit,
+            ),
             load_long_term_memory: true,
             include_private_garden_projection: self
                 .config
@@ -735,6 +788,22 @@ impl MemoryRuntime {
         let task_run_store = platform.task_run_store();
         let task_artifact_store = platform.task_artifact_store();
         let task_learning_store = platform.task_learning_store();
+        let maintenance_budget = self.config.runtime_budget.maintenance_budget;
+        let user_content = bound_text_for_budget(
+            &request.user_content,
+            maintenance_budget.user_input_max_chars,
+            maintenance_budget.user_input_max_bytes,
+        );
+        let reply_content = bound_text_for_budget(
+            &request.reply_content,
+            maintenance_budget.reply_input_max_chars,
+            maintenance_budget.reply_input_max_bytes,
+        );
+        let reuse_outcome_note = bound_text_for_budget(
+            &request.reuse_outcome_note,
+            maintenance_budget.reply_input_max_chars.min(1024),
+            maintenance_budget.reply_input_max_bytes.min(2048),
+        );
         let ctx = PostReplyMemoryMaintenanceContext {
             session_store: session_store.as_ref(),
             memory_store: memory_store.as_ref(),
@@ -754,8 +823,8 @@ impl MemoryRuntime {
             chat_id: &self.config.scope.chat_id,
             ingress: request.ingress,
             channel: &self.config.scope.channel,
-            user_content: &request.user_content,
-            reply_content: &request.reply_content,
+            user_content: &user_content,
+            reply_content: &reply_content,
             pressure: request.pressure,
             memory_profile: self.memory_profile(),
             tool_calls: request.tool_calls,
@@ -764,7 +833,7 @@ impl MemoryRuntime {
             runtime_skill_selected_ids: request.runtime_skill_selected_ids,
             task_learning_selected_ids: request.task_learning_selected_ids,
             reuse_outcome: request.reuse_outcome,
-            reuse_outcome_note: &request.reuse_outcome_note,
+            reuse_outcome_note: &reuse_outcome_note,
             now_secs: self.config.clock.now_secs(),
         };
         let mut long_term_refresh_enqueued = false;
@@ -785,12 +854,31 @@ impl MemoryRuntime {
                 report.extraction_request_outcome,
                 bm_core::memory::LongTermMemoryRefreshRequestOutcome::NotRequested
             );
-        let lifecycle_report = self.finish_lifecycle_success(
+        let maintenance_payload = [
+            (
+                "budget_report_id",
+                self.config.runtime_budget.report_id.clone(),
+            ),
+            (
+                "budget_limited_by",
+                self.config.runtime_budget.limited_by.join(","),
+            ),
+            (
+                "maintenance_user_max_chars",
+                maintenance_budget.user_input_max_chars.to_string(),
+            ),
+            (
+                "maintenance_reply_max_chars",
+                maintenance_budget.reply_input_max_chars.to_string(),
+            ),
+        ];
+        let lifecycle_report = self.finish_lifecycle_success_with_payload(
             lifecycle,
             RuntimeLifecycleEventKind::RuntimeLifecycle,
             RuntimeLifecycleEffect::RunMaintenance,
             changed,
             "maintenance_completed",
+            &maintenance_payload,
         )?;
         Ok(MemoryMaintenanceReport {
             report: Some(report),
@@ -824,7 +912,11 @@ impl MemoryRuntime {
             query: &request.query,
             summary_text: summary.as_deref(),
             recent: &recent,
-            system_max_len: request.system_max_len,
+            system_max_len: self
+                .config
+                .runtime_budget
+                .projection_source_budget
+                .context_assembly_max_chars,
             profile: self.memory_profile(),
             current_channel: Some(&self.config.scope.channel),
             session_store: session_store.as_ref(),
@@ -1046,7 +1138,10 @@ impl MemoryRuntime {
         pressure: PressureLevel,
     ) -> RuntimeLifecycleModeInput {
         input.profile = self.config.profile;
-        input.pressure = pressure;
+        input.pressure = max_pressure(
+            pressure,
+            self.config.runtime_budget.resource_snapshot.pressure,
+        );
         input
     }
 
@@ -1113,6 +1208,38 @@ impl MemoryRuntime {
                 .with_payload(
                     "private_depth_allowed",
                     report.admission.private_depth_allowed.to_string(),
+                )
+                .with_payload(
+                    "budget_report_id",
+                    self.config.runtime_budget.report_id.clone(),
+                )
+                .with_payload(
+                    "resource_source",
+                    self.config.runtime_budget.resource_snapshot.source.as_str(),
+                )
+                .with_payload(
+                    "budget_limited_by",
+                    self.config.runtime_budget.limited_by.join(","),
+                )
+                .with_payload(
+                    "budget_unavailable_reasons",
+                    self.config.runtime_budget.unavailable_reasons.join(","),
+                )
+                .with_payload(
+                    "projection_source_max_chars",
+                    self.config
+                        .runtime_budget
+                        .projection_source_budget
+                        .context_assembly_max_chars
+                        .to_string(),
+                )
+                .with_payload(
+                    "projection_render_max_chars",
+                    self.config
+                        .runtime_budget
+                        .projection_render_budget
+                        .system_block_max_chars
+                        .to_string(),
                 );
         if kind == RuntimeLifecycleEventKind::OperatorAction {
             event = event
@@ -1281,6 +1408,22 @@ fn truncate_to_char_boundary(value: &str, max_len: usize) -> String {
         end -= 1;
     }
     value[..end].to_string()
+}
+
+fn bound_text_for_budget(value: &str, max_chars: usize, max_bytes: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if out.len() > max_bytes {
+        out = truncate_to_char_boundary(&out, max_bytes);
+    }
+    out
+}
+
+fn max_pressure(left: PressureLevel, right: PressureLevel) -> PressureLevel {
+    match (left, right) {
+        (PressureLevel::Critical, _) | (_, PressureLevel::Critical) => PressureLevel::Critical,
+        (PressureLevel::Cautious, _) | (_, PressureLevel::Cautious) => PressureLevel::Cautious,
+        _ => PressureLevel::Normal,
+    }
 }
 
 fn checked_non_empty<'a>(value: &'a str, stage: &'static str, message: &str) -> Result<&'a str> {
@@ -1475,6 +1618,10 @@ pub struct MemoryRuntimeBuilder {
     capability_policy: MemoryCapabilityPolicy,
     privacy_policy: MemoryPrivacyPolicy,
     audit_sink: Option<Arc<dyn MemoryAuditSink>>,
+    runtime_resource_snapshot: Option<RuntimeResourceSnapshot>,
+    static_platform_manifest: Option<StaticPlatformManifest>,
+    provider_model_context_limit: Option<ProviderModelContextLimit>,
+    runtime_budget: Option<RuntimeBudgetReport>,
 }
 
 impl Default for MemoryRuntimeBuilder {
@@ -1489,6 +1636,10 @@ impl Default for MemoryRuntimeBuilder {
             capability_policy: MemoryCapabilityPolicy::strict_profile(),
             privacy_policy: MemoryPrivacyPolicy::standard_private_boundary(),
             audit_sink: Some(Arc::new(NoopMemoryAuditSink)),
+            runtime_resource_snapshot: None,
+            static_platform_manifest: None,
+            provider_model_context_limit: None,
+            runtime_budget: None,
         }
     }
 }
@@ -1539,6 +1690,26 @@ impl MemoryRuntimeBuilder {
         self
     }
 
+    pub fn runtime_resource_snapshot(mut self, snapshot: RuntimeResourceSnapshot) -> Self {
+        self.runtime_resource_snapshot = Some(snapshot);
+        self
+    }
+
+    pub fn static_platform_manifest(mut self, manifest: StaticPlatformManifest) -> Self {
+        self.static_platform_manifest = Some(manifest);
+        self
+    }
+
+    pub fn provider_model_context_limit(mut self, limit: ProviderModelContextLimit) -> Self {
+        self.provider_model_context_limit = Some(limit);
+        self
+    }
+
+    pub fn runtime_budget(mut self, report: RuntimeBudgetReport) -> Self {
+        self.runtime_budget = Some(report);
+        self
+    }
+
     pub fn build(self) -> Result<MemoryRuntime> {
         let identity = self
             .identity
@@ -1560,6 +1731,24 @@ impl MemoryRuntimeBuilder {
             &self.capability_policy,
             &self.privacy_policy,
         )?;
+        let runtime_budget = match self.runtime_budget {
+            Some(report) => report,
+            None => {
+                let now_secs = clock.now_secs();
+                let resource_snapshot = match self.runtime_resource_snapshot {
+                    Some(snapshot) => snapshot,
+                    None => platform.runtime_resource_probe().probe(now_secs)?,
+                };
+                compile_runtime_budget(RuntimeBudgetInput {
+                    profile: self.profile,
+                    resource_snapshot,
+                    static_platform_manifest: self
+                        .static_platform_manifest
+                        .unwrap_or_else(|| StaticPlatformManifest::for_profile(self.profile)),
+                    provider_model_context_limit: self.provider_model_context_limit,
+                })
+            }
+        };
         let config = MemoryRuntimeConfig {
             identity,
             scope,
@@ -1570,6 +1759,7 @@ impl MemoryRuntimeBuilder {
             capability_policy: self.capability_policy,
             privacy_policy: self.privacy_policy,
             audit_sink,
+            runtime_budget,
         };
         let runtime = MemoryRuntime {
             config,
@@ -1581,12 +1771,33 @@ impl MemoryRuntimeBuilder {
             RuntimeLifecycleTrigger::SdkCall,
             RuntimeLifecycleModeInput::default(),
         );
-        runtime.finish_lifecycle_success(
+        let open_payload = [
+            (
+                "budget_report_id",
+                runtime.config.runtime_budget.report_id.clone(),
+            ),
+            (
+                "resource_source",
+                runtime
+                    .config
+                    .runtime_budget
+                    .resource_snapshot
+                    .source
+                    .as_str()
+                    .to_string(),
+            ),
+            (
+                "budget_limited_by",
+                runtime.config.runtime_budget.limited_by.join(","),
+            ),
+        ];
+        runtime.finish_lifecycle_success_with_payload(
             lifecycle,
             RuntimeLifecycleEventKind::RuntimeLifecycle,
             RuntimeLifecycleEffect::Noop,
             false,
             "runtime_opened",
+            &open_payload,
         )?;
         Ok(runtime)
     }

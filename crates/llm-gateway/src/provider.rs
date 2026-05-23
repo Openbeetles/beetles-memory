@@ -31,6 +31,8 @@ pub struct GatewayProviderConfig {
     pub openai_tools_supported: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub openai_streaming_supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prompt_chars: Option<usize>,
 }
 
 impl GatewayProviderConfig {
@@ -47,6 +49,7 @@ impl GatewayProviderConfig {
             openai_embeddings_supported: true,
             openai_tools_supported: true,
             openai_streaming_supported: true,
+            max_prompt_chars: None,
         }
     }
 
@@ -63,6 +66,7 @@ impl GatewayProviderConfig {
             openai_embeddings_supported: false,
             openai_tools_supported: false,
             openai_streaming_supported: true,
+            max_prompt_chars: None,
         }
     }
 
