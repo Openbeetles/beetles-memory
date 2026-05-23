@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use bm_entry::EntryRuntime;
 use bm_sdk::{
-    IngressKind, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MaintenanceBudget,
-    MemoryMaintenanceRequest, Message, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
-    StopReason, ToolChoicePolicy, ToolSpec,
+    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MaintenanceBudget,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnSource, Message,
+    RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
 };
 use serde_json::{json, Value};
 
@@ -44,6 +44,7 @@ impl Default for OpenAiGatewayServices<'_> {
 pub(crate) struct GatewayMaintenancePlan {
     runtime: Arc<EntryRuntime>,
     user_content: String,
+    turn_source: MemoryTurnSource,
     external_content_used: bool,
     runtime_skill_selected_ids: Vec<String>,
     task_learning_selected_ids: Vec<String>,
@@ -56,6 +57,7 @@ pub(crate) struct GatewayMaintenancePlan {
 pub(crate) struct GatewayMaintenancePlanInput {
     pub(crate) runtime: Arc<EntryRuntime>,
     pub(crate) user_content: String,
+    pub(crate) turn_source: MemoryTurnSource,
     pub(crate) external_content_used: bool,
     pub(crate) runtime_skill_selected_ids: Vec<String>,
     pub(crate) task_learning_selected_ids: Vec<String>,
@@ -74,6 +76,7 @@ impl GatewayMaintenancePlan {
                 budget.user_input_max_chars,
                 budget.user_input_max_bytes,
             ),
+            turn_source: input.turn_source,
             external_content_used: input.external_content_used,
             runtime_skill_selected_ids: input.runtime_skill_selected_ids,
             task_learning_selected_ids: input.task_learning_selected_ids,
@@ -91,15 +94,15 @@ impl GatewayMaintenancePlan {
     fn task_from_snapshot(&self, snapshot: MaintenanceSnapshot) -> GatewayMaintenanceTask {
         GatewayMaintenanceTask {
             runtime: Arc::clone(&self.runtime),
-            request: MemoryMaintenanceRequest {
-                ingress: IngressKind::User,
+            request: MemoryTurnFinalizeRequest {
+                delivery_status: snapshot.delivery_status,
+                source: self.turn_source.clone(),
                 user_content: self.user_content.clone(),
-                reply_content: snapshot.reply_content,
+                assistant_content: Some(snapshot.reply_content),
                 tool_calls: snapshot.tool_calls,
                 external_content_used: self.external_content_used || snapshot.tool_calls > 0,
                 runtime_skill_selected_ids: self.runtime_skill_selected_ids.clone(),
                 task_learning_selected_ids: self.task_learning_selected_ids.clone(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
                 reuse_outcome_note: snapshot.reuse_outcome_note,
                 pressure: self.pressure,
                 mode_input: self.mode_input,
@@ -122,7 +125,7 @@ impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {
 
 pub(crate) struct GatewayMaintenanceTask {
     runtime: Arc<EntryRuntime>,
-    request: MemoryMaintenanceRequest,
+    request: MemoryTurnFinalizeRequest,
     enabled: bool,
 }
 
@@ -139,17 +142,27 @@ impl GatewayMaintenanceTask {
         self,
         services: &mut OpenAiGatewayServices<'_>,
     ) -> GatewayMaintenanceRunOutcome {
-        if !self.enabled {
-            return GatewayMaintenanceRunOutcome::Skipped;
-        }
-        let Some(http) = services.maintenance_http.as_deref_mut() else {
-            return GatewayMaintenanceRunOutcome::NotExecuted;
+        let missing_services = self.enabled
+            && (services.maintenance_http.is_none() || services.maintenance_llm.is_none());
+        let http = if self.enabled {
+            services.maintenance_http.as_deref_mut()
+        } else {
+            None
         };
-        let Some(llm) = services.maintenance_llm else {
-            return GatewayMaintenanceRunOutcome::NotExecuted;
+        let llm = if self.enabled {
+            services.maintenance_llm
+        } else {
+            None
         };
-        match self.runtime.runtime().maintain(http, llm, self.request) {
-            Ok(_) => GatewayMaintenanceRunOutcome::Succeeded,
+        match self
+            .runtime
+            .runtime()
+            .finalize_turn_and_maintain(http, llm, self.request)
+        {
+            Ok(report) if report.maintenance.is_some() => GatewayMaintenanceRunOutcome::Succeeded,
+            Ok(_) if !self.enabled => GatewayMaintenanceRunOutcome::Skipped,
+            Ok(_) if missing_services => GatewayMaintenanceRunOutcome::NotExecuted,
+            Ok(_) => GatewayMaintenanceRunOutcome::Skipped,
             Err(_) => GatewayMaintenanceRunOutcome::Failed,
         }
     }
@@ -203,6 +216,7 @@ pub(crate) fn run_text_maintenance(
 ) -> GatewayMaintenanceRunOutcome {
     let budget = plan.budget;
     plan.task_from_snapshot(MaintenanceSnapshot {
+        delivery_status: MemoryTurnDeliveryStatus::Delivered,
         reply_content: bound_text(
             &reply_content,
             budget.reply_input_max_chars,
@@ -214,8 +228,9 @@ pub(crate) fn run_text_maintenance(
     .run(services)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct MaintenanceSnapshot {
+    delivery_status: MemoryTurnDeliveryStatus,
     reply_content: String,
     tool_calls: u32,
     reuse_outcome_note: String,
@@ -226,6 +241,8 @@ struct OpenAiReplyAccumulator {
     tool_calls: BTreeMap<(u64, u64), OpenAiToolCallParts>,
     sse_buffer: String,
     sse_event_parts: Vec<String>,
+    saw_sse_done: bool,
+    observed_sse: bool,
 }
 
 impl OpenAiReplyAccumulator {
@@ -235,6 +252,8 @@ impl OpenAiReplyAccumulator {
             tool_calls: BTreeMap::new(),
             sse_buffer: String::new(),
             sse_event_parts: Vec::new(),
+            saw_sse_done: false,
+            observed_sse: false,
         }
     }
 
@@ -286,6 +305,7 @@ impl OpenAiReplyAccumulator {
     }
 
     fn observe_sse_chunk(&mut self, chunk: &str) {
+        self.observed_sse = true;
         self.sse_buffer.push_str(chunk);
         while let Some(line_end) = self.sse_buffer.find('\n') {
             let line = self.sse_buffer[..line_end]
@@ -311,6 +331,7 @@ impl OpenAiReplyAccumulator {
         let data = self.sse_event_parts.join("\n");
         self.sse_event_parts.clear();
         if data.trim() == "[DONE]" {
+            self.saw_sse_done = true;
             return;
         }
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
@@ -379,6 +400,11 @@ impl OpenAiReplyAccumulator {
             )
         };
         MaintenanceSnapshot {
+            delivery_status: if self.observed_sse && !self.saw_sse_done {
+                MemoryTurnDeliveryStatus::IncompleteStream
+            } else {
+                MemoryTurnDeliveryStatus::Delivered
+            },
             reply_content: self.reply.into_string(),
             tool_calls,
             reuse_outcome_note,

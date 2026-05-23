@@ -1,12 +1,12 @@
 use bm_llm_gateway::{
     handle_openai_request_with_services, serve_openai_http_stream_with_services,
     GatewayAuditOutcome, GatewayAuditStage, GatewayConfig, GatewayRuntime, GatewayScopeRequest,
-    OpenAiCompatibleUpstream, OpenAiGatewayBody, OpenAiGatewayRequest, OpenAiGatewayServices,
-    OpenAiUpstreamRequest, OpenAiUpstreamResponse,
+    GatewayScopeResolver, OpenAiCompatibleUpstream, OpenAiGatewayBody, OpenAiGatewayRequest,
+    OpenAiGatewayServices, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, ResponseBody, StopReason,
-    ToolChoicePolicy, ToolSpec,
+    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryProjectionRequest, Message,
+    PressureLevel, ResponseBody, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
 };
 use serde_json::json;
 use std::io::{Cursor, Read, Write};
@@ -150,6 +150,62 @@ fn non_streaming_response_runs_post_reply_maintenance_when_services_are_injected
 }
 
 #[test]
+fn non_streaming_response_finalizes_turn_into_session_store() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
+    let mut upstream = MockOpenAiUpstream::default();
+    let mut http = StaticHttpClient;
+    let llm = StaticLlmClient;
+    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
+
+    let response = handle_openai_request_with_services(
+        &gateway,
+        &config,
+        OpenAiGatewayRequest::post_json(
+            "/v1/chat/completions",
+            scope_request(),
+            json!({
+                "model": "local",
+                "messages": [{ "role": "user", "content": "remember release guard" }]
+            }),
+        ),
+        &mut upstream,
+        &mut services,
+    )
+    .expect("chat response");
+
+    assert_eq!(response.status_code, 200);
+
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope_request())
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "what did I ask?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+
+    assert!(projection
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "remember release guard"));
+    assert!(projection
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "I will verify artifacts first."));
+}
+
+#[test]
 fn missing_maintenance_services_skip_without_polluting_successful_response() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
@@ -181,10 +237,37 @@ fn missing_maintenance_services_skip_without_polluting_successful_response() {
         stage.stage == GatewayAuditStage::Maintenance
             && stage.outcome == GatewayAuditOutcome::NotExecuted
     }));
+
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope_request())
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "what did I ask?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+    assert!(projection
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "remember release guard"));
+    assert!(projection
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "I will verify artifacts first."));
 }
 
 #[test]
-fn maintenance_failure_records_failed_without_polluting_successful_response() {
+fn maintenance_hidden_records_skipped_without_blocking_turn_commit() {
     let mut config = gateway_config();
     config.entry.capability.maintenance_enabled = false;
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
@@ -216,8 +299,30 @@ fn maintenance_failure_records_failed_without_polluting_successful_response() {
     );
     assert!(response.audit.stages.iter().any(|stage| {
         stage.stage == GatewayAuditStage::Maintenance
-            && stage.outcome == GatewayAuditOutcome::Failed
+            && stage.outcome == GatewayAuditOutcome::Skipped
     }));
+
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope_request())
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "what did I ask?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+    assert!(projection
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "remember release guard"));
 }
 
 #[test]
@@ -268,6 +373,65 @@ fn streaming_response_records_maintenance_after_body_is_drained() {
         stage.stage == GatewayAuditStage::Maintenance
             && stage.outcome == GatewayAuditOutcome::Succeeded
     }));
+}
+
+#[test]
+fn streaming_response_without_done_does_not_commit_partial_assistant() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
+    let mut upstream = MockOpenAiUpstream::with_response(OpenAiUpstreamResponse::sse(
+        200,
+        vec!["data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n".to_string()],
+    ));
+    let mut http = StaticHttpClient;
+    let llm = StaticLlmClient;
+    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
+
+    let mut response = handle_openai_request_with_services(
+        &gateway,
+        &config,
+        OpenAiGatewayRequest::post_json(
+            "/v1/chat/completions",
+            scope_request(),
+            json!({
+                "model": "local",
+                "stream": true,
+                "messages": [{ "role": "user", "content": "stream this" }]
+            }),
+        ),
+        &mut upstream,
+        &mut services,
+    )
+    .expect("stream response");
+
+    match &mut response.body {
+        OpenAiGatewayBody::Sse(body) => while body.next_chunk().expect("sse chunk").is_some() {},
+        OpenAiGatewayBody::Json(_) => panic!("expected sse body"),
+    }
+    response.finish_deferred_maintenance(&mut services);
+
+    assert!(response.audit.stages.iter().any(|stage| {
+        stage.stage == GatewayAuditStage::Maintenance
+            && stage.outcome == GatewayAuditOutcome::Skipped
+    }));
+
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope_request())
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "what was streamed?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+    assert!(projection.context.recent_messages.is_empty());
 }
 
 struct MemoryStream {

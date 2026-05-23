@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_persists_unrequested_extraction_state_without_enqueue() {
+    fn maintenance_requests_extraction_for_eligible_delivered_turn() {
         let session_store = StubSessionStore {
             recent: vec![],
             count: 8,
@@ -1262,6 +1262,7 @@ mod tests {
         let turn_ledger_store = StubTurnLedgerStore;
         let skill_storage = StubSkillStorage::default();
         let mut http = DummyHttpClient;
+        let mut enqueue_count = 0;
         let outcome = run_post_reply_memory_maintenance(
             &mut http,
             &FixedLlmClient,
@@ -1297,7 +1298,10 @@ mod tests {
                 reuse_outcome_note: "",
                 now_secs: 20,
             },
-            || panic!("enqueue should not be called"),
+            || {
+                enqueue_count += 1;
+                true
+            },
         );
 
         assert!(matches!(
@@ -1310,13 +1314,18 @@ mod tests {
         ));
         assert_eq!(
             outcome.extraction_request_outcome,
-            LongTermMemoryRefreshRequestOutcome::NotRequested
+            LongTermMemoryRefreshRequestOutcome::Requested
         );
-        assert!(extraction_state_store
+        assert_eq!(enqueue_count, 1);
+        let state = extraction_state_store
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .is_none());
+            .clone()
+            .unwrap();
+        assert!(state.pending);
+        assert_eq!(state.dirty_turns, 1);
+        assert_eq!(state.last_requested_at_count, 8);
     }
 
     #[test]

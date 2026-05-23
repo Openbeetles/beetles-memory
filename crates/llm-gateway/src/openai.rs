@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use bm_sdk::{MemoryProjectionRequest, ProviderModelContextLimit, RuntimeLifecycleModeInput};
+use bm_sdk::{
+    MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource, ProviderModelContextLimit,
+    RuntimeLifecycleModeInput,
+};
 use serde_json::{Map, Value};
 
 use crate::provider::select_provider_for_kind;
@@ -416,6 +419,17 @@ fn handle_chat_completion(
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
+        turn_source: MemoryTurnSource {
+            ingress: bm_sdk::IngressKind::User,
+            channel: scope.channel.clone(),
+            provider: Some(format!("{:?}", provider.kind)),
+            protocol: MemoryTurnProtocol::OpenAiChat,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            model_alias: Some(model_alias.to_string()),
+            model_resolved: Some(model.clone()),
+            request_id: request.scope.request_id_hint.clone(),
+            client_conversation_hint: request.scope.client_conversation_hint.clone(),
+        },
         external_content_used,
         runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
         task_learning_selected_ids: carry.task_recall_selected_ids,
@@ -526,6 +540,17 @@ fn handle_responses(
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
+        turn_source: MemoryTurnSource {
+            ingress: bm_sdk::IngressKind::User,
+            channel: scope.channel.clone(),
+            provider: Some(format!("{:?}", provider.kind)),
+            protocol: MemoryTurnProtocol::OpenAiResponses,
+            endpoint: Some("/v1/responses".to_string()),
+            model_alias: Some(model_alias.to_string()),
+            model_resolved: Some(model.clone()),
+            request_id: request.scope.request_id_hint.clone(),
+            client_conversation_hint: request.scope.client_conversation_hint.clone(),
+        },
         external_content_used,
         runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
         task_learning_selected_ids: carry.task_recall_selected_ids,

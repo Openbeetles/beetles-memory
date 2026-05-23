@@ -32,6 +32,13 @@ pub use bm_core::memory::{
     PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, RecallCandidate,
     RecallPlane, RecallQuery, RecallSelectionReport, WorkingRecallInspection,
 };
+pub use bm_core::memory::{
+    CommittedSessionMessage, GovernedWriteDecision, MemoryPlaneGovernanceReport,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority,
+    MemoryWriteDomain, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PrivateGardenAdmissionDecision, SessionTurnCommitReport, SoulCandidateDisposition,
+    SoulCandidateHandoffReport,
+};
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;
 pub use bm_core::platform::{MemoryOperatorSurfaceSummary, ResponseBody};
@@ -79,8 +86,9 @@ pub use ops::{
     MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
     MemorySkillDeleteRequest, MemorySkillDetailReport, MemorySkillDetailRequest, MemorySkillKind,
     MemorySkillListReport, MemorySkillListRequest, MemorySkillMutationReport, MemorySkillOrigin,
-    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest, MemoryWriteReport,
-    MemoryWriteRequest, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest,
+    MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
+    RuntimeOperatorAction, RuntimeOperatorActionReport,
 };
 pub use runtime::{
     MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,

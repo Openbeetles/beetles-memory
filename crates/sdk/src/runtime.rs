@@ -9,12 +9,18 @@ use bm_core::budget::{
 use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
-    apply_long_term_memory_extraction, export_continuity_snapshot, import_continuity_snapshot,
-    inspect_intelligence_replay, inspect_working_recall, load_prompt_memory_context,
-    run_post_reply_memory_maintenance, ContinuitySnapshotExportContext,
-    ContinuitySnapshotImportContext, ContinuitySnapshotMode, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PromptMemoryContextParams, PromptParticipationPlan,
-    PromptRecallIntent, WorkingRecallInspectionInput,
+    apply_long_term_memory_extraction, commit_session_turn, export_continuity_snapshot,
+    import_continuity_snapshot, inspect_intelligence_replay, inspect_working_recall,
+    load_prompt_memory_context, run_long_term_memory_refresh, run_post_reply_memory_maintenance,
+    run_private_garden_governance, ContinuitySnapshotExportContext,
+    ContinuitySnapshotImportContext, ContinuitySnapshotMode, GovernedWriteDecision, IngressKind,
+    LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    LongTermMemoryRefreshRequestOutcome, MemoryPlaneGovernanceReport, MemoryWriteAuthority,
+    MemoryWriteDomain, PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateGardenGovernanceContext,
+    PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome, PromptMemoryContextParams,
+    PromptParticipationPlan, PromptRecallIntent, SessionTurnCommitInput,
+    WorkingRecallInspectionInput,
 };
 use bm_core::platform::Platform;
 use bm_core::resource::RuntimeResourceSnapshot;
@@ -43,9 +49,10 @@ use crate::{
     MemoryReplayReport, MemoryReplayRequest, MemoryRuntimeSystemKind, MemorySkillDeleteRequest,
     MemorySkillDetailReport, MemorySkillDetailRequest, MemorySkillKind, MemorySkillListReport,
     MemorySkillListRequest, MemorySkillMutationReport, MemorySkillOrigin,
-    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest, MemoryWriteReport,
-    MemoryWriteRequest, PressureLevel, Result, RuntimeOperatorAction, RuntimeOperatorActionReport,
-    RuntimeSkillWrite, RuntimeSkillWriteSource,
+    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest,
+    MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
+    PressureLevel, Result, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -887,6 +894,221 @@ impl MemoryRuntime {
         })
     }
 
+    pub fn finalize_turn_and_maintain(
+        &self,
+        http: Option<&mut (dyn LlmHttpClient + '_)>,
+        llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
+        request: MemoryTurnFinalizeRequest,
+    ) -> Result<MemoryTurnFinalizeReport> {
+        self.ensure_visible("write.turn", self.capabilities.write)?;
+        let platform = self.config.platform.as_ref();
+        let session_store = platform.session_store();
+        let session_commit = commit_session_turn(
+            session_store.as_ref(),
+            &self.config.scope.chat_id,
+            SessionTurnCommitInput {
+                delivery_status: request.delivery_status,
+                source: request.source.clone(),
+                user_content: request.user_content.clone(),
+                assistant_content: request.assistant_content.clone(),
+            },
+        )?;
+
+        if !session_commit.committed {
+            let lifecycle = self.start_lifecycle(
+                RuntimeLifecycleOperation::Maintain,
+                RuntimeLifecycleTrigger::PostReply,
+                self.mode_input_for_request(request.mode_input, request.pressure),
+            );
+            let lifecycle_report = self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::Noop,
+                false,
+                session_commit
+                    .skipped_reason
+                    .as_deref()
+                    .unwrap_or("turn_not_committed"),
+            )?;
+            return Ok(MemoryTurnFinalizeReport {
+                session_commit,
+                maintenance: None,
+                private_garden_self_work: PostTurnPrivateGardenReport::skipped(
+                    "turn_not_committed",
+                ),
+                semantic_governance: PostTurnSemanticGovernanceReport::skipped(
+                    "turn_not_committed",
+                ),
+                lifecycle_report,
+            });
+        }
+
+        let Some(http) = http else {
+            return self.finalize_turn_without_maintenance(
+                session_commit,
+                request.mode_input,
+                request.pressure,
+                "maintenance_http_unavailable",
+            );
+        };
+        let governance_llm: &(dyn CoreLlmClient + Send + Sync) =
+            if let Some(config_llm) = self.config.llm.as_deref() {
+                config_llm
+            } else if let Some(llm) = llm {
+                llm
+            } else {
+                return self.finalize_turn_without_maintenance(
+                    session_commit,
+                    request.mode_input,
+                    request.pressure,
+                    "maintenance_llm_unavailable",
+                );
+            };
+        if !self.capabilities.maintenance.visible {
+            return self.finalize_turn_without_maintenance(
+                session_commit,
+                request.mode_input,
+                request.pressure,
+                "maintenance_not_visible",
+            );
+        }
+
+        let session_summary_store = platform.session_summary_store();
+        let finalize_user_content = request.user_content.clone();
+        let finalize_assistant_content = request.assistant_content.clone();
+        let turn_ingress = request.source.ingress;
+        let turn_channel = request.source.channel.clone();
+        let external_content_used = request.external_content_used;
+        let pressure = request.pressure;
+
+        let maintenance = self.maintain(
+            http,
+            governance_llm,
+            MemoryMaintenanceRequest {
+                ingress: request.source.ingress,
+                user_content: request.user_content,
+                reply_content: request.assistant_content.unwrap_or_default(),
+                tool_calls: request.tool_calls,
+                external_content_used: request.external_content_used,
+                runtime_skill_selected_ids: request.runtime_skill_selected_ids,
+                task_learning_selected_ids: request.task_learning_selected_ids,
+                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
+                reuse_outcome_note: request.reuse_outcome_note,
+                pressure: request.pressure,
+                mode_input: request.mode_input,
+            },
+        )?;
+        let execution_state_store = platform.execution_state_store();
+        let self_model_store = platform.self_model_store();
+        let private_doc_store = platform.private_doc_store();
+        let private_garden_store = platform.private_garden_store();
+        let private_garden_self_work = match run_private_garden_governance(
+            http,
+            governance_llm,
+            PrivateGardenGovernanceContext {
+                session_store: session_store.as_ref(),
+                session_summary_store: session_summary_store.as_ref(),
+                execution_state_store: execution_state_store.as_ref(),
+                self_model_store: self_model_store.as_ref(),
+                private_doc_store: private_doc_store.as_ref(),
+                private_garden_store: private_garden_store.as_ref(),
+            },
+            PrivateGardenGovernanceInput {
+                chat_id: &self.config.scope.chat_id,
+                ingress: turn_ingress,
+                channel: &turn_channel,
+                user_content: &finalize_user_content,
+                reply_content: finalize_assistant_content.as_deref().unwrap_or_default(),
+                pressure,
+                tool_calls: request.tool_calls,
+                now_secs: self.config.clock.now_secs(),
+            },
+            self.memory_profile(),
+        )? {
+            PrivateGardenGovernanceOutcome::Skipped => {
+                PostTurnPrivateGardenReport::no_change("policy_skipped_or_no_private_change")
+            }
+            PrivateGardenGovernanceOutcome::Updated {
+                writes,
+                moves,
+                deletes,
+            } => PostTurnPrivateGardenReport::applied(writes, moves, deletes),
+        };
+        let memory_store = platform.memory_store();
+        let long_term_memory_store = platform.long_term_memory_store();
+        let extraction_state_store = platform.long_term_memory_extraction_state_store();
+        let turn_ledger_store = platform.turn_ledger_store();
+        let skill_storage = platform.skill_storage();
+        let semantic_refresh_allowed = turn_ingress == IngressKind::User
+            && turn_channel != "cron"
+            && !external_content_used
+            && maintenance.long_term_refresh_enqueued
+            && !finalize_user_content.trim().is_empty()
+            && finalize_assistant_content
+                .as_deref()
+                .is_some_and(|content| !content.trim().is_empty());
+        let long_term_refresh = if semantic_refresh_allowed {
+            let outcome = run_long_term_memory_refresh(
+                http,
+                governance_llm,
+                LongTermMemoryRefreshContext {
+                    memory_store: memory_store.as_ref(),
+                    session_store: session_store.as_ref(),
+                    session_summary_store: session_summary_store.as_ref(),
+                    long_term_memory_store: long_term_memory_store.as_ref(),
+                    extraction_state_store: extraction_state_store.as_ref(),
+                    turn_ledger_store: turn_ledger_store.as_ref(),
+                    skill_storage: skill_storage.as_ref(),
+                },
+                &self.config.scope.chat_id,
+                pressure,
+                self.memory_profile(),
+            );
+            outcome.persist(extraction_state_store.as_ref(), &self.config.scope.chat_id);
+            Some(outcome)
+        } else {
+            None
+        };
+        let semantic_governance =
+            semantic_report_from_maintenance(&maintenance, long_term_refresh.as_ref());
+        let lifecycle_report = maintenance.lifecycle_report.clone();
+        Ok(MemoryTurnFinalizeReport {
+            session_commit,
+            maintenance: Some(maintenance),
+            private_garden_self_work,
+            semantic_governance,
+            lifecycle_report,
+        })
+    }
+
+    fn finalize_turn_without_maintenance(
+        &self,
+        session_commit: bm_core::memory::SessionTurnCommitReport,
+        mode_input: RuntimeLifecycleModeInput,
+        pressure: PressureLevel,
+        reason: &'static str,
+    ) -> Result<MemoryTurnFinalizeReport> {
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::PostReply,
+            self.mode_input_for_request(mode_input, pressure),
+        );
+        let lifecycle_report = self.finish_lifecycle_success(
+            lifecycle,
+            RuntimeLifecycleEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEffect::Noop,
+            session_commit.committed,
+            reason,
+        )?;
+        Ok(MemoryTurnFinalizeReport {
+            session_commit,
+            maintenance: None,
+            private_garden_self_work: PostTurnPrivateGardenReport::skipped(reason),
+            semantic_governance: PostTurnSemanticGovernanceReport::skipped(reason),
+            lifecycle_report,
+        })
+    }
+
     pub fn inspect(&self, request: MemoryInspectionRequest) -> Result<MemoryInspectionReport> {
         self.ensure_visible("inspect", self.capabilities.inspection)?;
         let lifecycle = self.start_lifecycle(
@@ -1408,6 +1630,135 @@ fn truncate_to_char_boundary(value: &str, max_len: usize) -> String {
         end -= 1;
     }
     value[..end].to_string()
+}
+
+fn semantic_report_from_maintenance(
+    maintenance: &MemoryMaintenanceReport,
+    long_term_refresh: Option<&LongTermMemoryRefreshOutcome>,
+) -> PostTurnSemanticGovernanceReport {
+    let Some(report) = maintenance.report.as_ref() else {
+        return PostTurnSemanticGovernanceReport::skipped("maintenance_report_unavailable");
+    };
+    let extraction_requested = matches!(
+        report.extraction_request_outcome,
+        LongTermMemoryRefreshRequestOutcome::Requested
+    );
+    let extraction_failed = matches!(
+        report.extraction_request_outcome,
+        LongTermMemoryRefreshRequestOutcome::RequestFailed
+    );
+    let factual_signal = report.factual_refresh_suggested
+        || extraction_requested
+        || extraction_failed
+        || report.factual_coordination_summary.is_some();
+    let mut plane_reports = Vec::new();
+    if factual_signal || long_term_refresh.is_some() {
+        let (decision, authority, accepted_count, reason) = match long_term_refresh {
+            Some(LongTermMemoryRefreshOutcome::Processed { changed_count, .. })
+                if *changed_count > 0 =>
+            {
+                (
+                    GovernedWriteDecision::Accepted,
+                    MemoryWriteAuthority::LlmGovernedSemantic,
+                    *changed_count,
+                    "long_term_extraction_applied".to_string(),
+                )
+            }
+            Some(LongTermMemoryRefreshOutcome::Processed { .. }) => (
+                GovernedWriteDecision::NotApplicable,
+                MemoryWriteAuthority::LlmGovernedSemantic,
+                0,
+                "long_term_extraction_noop".to_string(),
+            ),
+            Some(LongTermMemoryRefreshOutcome::Deferred { .. }) => (
+                GovernedWriteDecision::Deferred,
+                MemoryWriteAuthority::RuntimeDeterministic,
+                0,
+                "long_term_extraction_deferred".to_string(),
+            ),
+            Some(LongTermMemoryRefreshOutcome::Failed { .. }) => (
+                GovernedWriteDecision::Rejected,
+                MemoryWriteAuthority::LlmGovernedSemantic,
+                0,
+                "long_term_extraction_failed".to_string(),
+            ),
+            None if extraction_requested || report.factual_refresh_suggested => (
+                GovernedWriteDecision::Deferred,
+                MemoryWriteAuthority::RuntimeDeterministic,
+                0,
+                if extraction_requested {
+                    "long_term_extraction_requested".to_string()
+                } else {
+                    "factual_refresh_suggested".to_string()
+                },
+            ),
+            None if extraction_failed => (
+                GovernedWriteDecision::Rejected,
+                MemoryWriteAuthority::RuntimeDeterministic,
+                0,
+                "long_term_extraction_request_failed".to_string(),
+            ),
+            None => (
+                GovernedWriteDecision::NotApplicable,
+                MemoryWriteAuthority::RuntimeDeterministic,
+                0,
+                "factual_plane_checked".to_string(),
+            ),
+        };
+        plane_reports.push(MemoryPlaneGovernanceReport {
+            domain: MemoryWriteDomain::Program,
+            plane: "long_term_memory".to_string(),
+            authority,
+            decision,
+            reason,
+            evidence_refs: Vec::new(),
+            privacy_decision: "runtime_policy".to_string(),
+            profile_decision: "profile_capability_checked".to_string(),
+        });
+        let proposal_count = if accepted_count > 0 {
+            accepted_count
+        } else if plane_reports
+            .last()
+            .is_some_and(|plane| plane.decision != GovernedWriteDecision::NotApplicable)
+        {
+            1
+        } else {
+            0
+        };
+        let rejected_count = usize::from(
+            plane_reports
+                .last()
+                .is_some_and(|plane| plane.decision == GovernedWriteDecision::Rejected),
+        );
+        let deferred_count = usize::from(
+            plane_reports
+                .last()
+                .is_some_and(|plane| plane.decision == GovernedWriteDecision::Deferred),
+        );
+        return PostTurnSemanticGovernanceReport {
+            attempted: true,
+            executed: true,
+            skipped_reason: None,
+            proposal_count,
+            accepted_count,
+            rejected_count,
+            deferred_count,
+            plane_reports,
+            soul_candidate_handoffs: Vec::new(),
+        };
+    }
+
+    PostTurnSemanticGovernanceReport {
+        attempted: true,
+        executed: true,
+        skipped_reason: None,
+        proposal_count: 0,
+        accepted_count: 0,
+        rejected_count: 0,
+        deferred_count: 0,
+        plane_reports,
+        soul_candidate_handoffs: Vec::new(),
+    }
 }
 
 fn bound_text_for_budget(value: &str, max_chars: usize, max_bytes: usize) -> String {

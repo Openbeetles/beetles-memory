@@ -98,55 +98,6 @@ impl LongTermExtractionPolicy {
         }
         !input.user_content.trim().is_empty() && !input.reply_content.trim().is_empty()
     }
-
-    fn marks_dirty(self, user_content: &str, reply_content: &str) -> bool {
-        let user = user_content.trim();
-        let reply = reply_content.trim();
-        if user.is_empty() || reply.is_empty() {
-            return false;
-        }
-
-        let user_chars = user.chars().count();
-        let reply_chars = reply.chars().count();
-        let user_words = user.split_whitespace().count();
-        let combined_chars = user_chars.saturating_add(reply_chars);
-
-        if user_chars <= self.low_signal_user_chars
-            && user_words <= self.low_signal_user_words
-            && reply_chars <= self.low_signal_reply_chars
-            && !reply.contains('\n')
-        {
-            return false;
-        }
-
-        user_chars >= self.substantive_user_chars
-            || reply_chars >= self.substantive_reply_chars
-            || combined_chars >= self.substantive_combined_chars
-            || user.contains('\n')
-            || reply.contains('\n')
-    }
-
-    fn cooldown_ready(self, state: &LongTermMemoryExtractionState, after_count: usize) -> bool {
-        after_count.saturating_sub(state.last_requested_at_count)
-            >= self.min_messages_between_requests
-    }
-
-    fn should_process_dirty_work(
-        self,
-        state: &LongTermMemoryExtractionState,
-        after_count: usize,
-    ) -> bool {
-        if !state.has_dirty_work() {
-            return false;
-        }
-        if state.dirty_turns >= 2 {
-            return true;
-        }
-        if state.last_processed_at_count == 0 && after_count >= self.first_process_min_messages {
-            return true;
-        }
-        after_count.saturating_sub(state.dirty_since_count) >= self.force_process_after_messages
-    }
 }
 
 pub fn evaluate_long_term_memory_extraction_turn(
@@ -162,12 +113,8 @@ pub fn evaluate_long_term_memory_extraction_turn(
             should_enqueue: false,
         };
     }
-    if policy.marks_dirty(input.user_content, input.reply_content) {
-        next_state.mark_dirty(input.after_count);
-    }
-    let should_enqueue = !next_state.pending
-        && policy.cooldown_ready(&next_state, input.after_count)
-        && policy.should_process_dirty_work(&next_state, input.after_count);
+    next_state.mark_dirty(input.after_count);
+    let should_enqueue = !next_state.pending && next_state.has_dirty_work();
     LongTermMemoryExtractionTurnDecision {
         next_state,
         should_enqueue,
@@ -1771,7 +1718,7 @@ mod tests {
         }
     }
 
-    fn substantive_turn_input(after_count: usize) -> LongTermMemoryExtractionTurnInput<'static> {
+    fn eligible_turn_input(after_count: usize) -> LongTermMemoryExtractionTurnInput<'static> {
         LongTermMemoryExtractionTurnInput {
             ingress: IngressKind::User,
             channel: "chat_channel",
@@ -1863,7 +1810,7 @@ mod tests {
     }
 
     #[test]
-    fn short_ack_turn_does_not_mark_dirty() {
+    fn eligible_turn_enqueues_for_llm_semantic_governance() {
         let decision = evaluate_long_term_memory_extraction_turn(
             LongTermMemoryExtractionTurnInput {
                 ingress: IngressKind::User,
@@ -1877,6 +1824,63 @@ mod tests {
             None,
             MemoryProfile::Embedded,
         );
+        assert!(decision.should_enqueue);
+        assert_eq!(decision.next_state.dirty_turns, 1);
+    }
+
+    #[test]
+    fn short_profile_turn_enqueues_for_llm_semantic_decision() {
+        let decision = evaluate_long_term_memory_extraction_turn(
+            LongTermMemoryExtractionTurnInput {
+                ingress: IngressKind::User,
+                channel: "chat_channel",
+                user_content: "以后叫我青川",
+                reply_content: "好的，青川。",
+                after_count: 2,
+                pressure: PressureLevel::Normal,
+                external_content_used: false,
+            },
+            None,
+            MemoryProfile::Standard,
+        );
+        assert!(decision.should_enqueue);
+        assert_eq!(decision.next_state.dirty_turns, 1);
+    }
+
+    #[test]
+    fn generic_preference_turn_enqueues_for_llm_semantic_decision() {
+        let decision = evaluate_long_term_memory_extraction_turn(
+            LongTermMemoryExtractionTurnInput {
+                ingress: IngressKind::User,
+                channel: "chat_channel",
+                user_content: "记住：以后默认用中文简洁回答",
+                reply_content: "好的，我会默认用中文并保持简洁。",
+                after_count: 2,
+                pressure: PressureLevel::Normal,
+                external_content_used: false,
+            },
+            None,
+            MemoryProfile::Standard,
+        );
+        assert!(decision.should_enqueue);
+        assert_eq!(decision.next_state.dirty_turns, 1);
+    }
+
+    #[test]
+    fn extraction_admission_still_respects_external_content_gate() {
+        let decision = evaluate_long_term_memory_extraction_turn(
+            LongTermMemoryExtractionTurnInput {
+                ingress: IngressKind::User,
+                channel: "chat_channel",
+                user_content: "记住外部资料里的这个结论",
+                reply_content: "外部资料里的结论是稳定事实。",
+                after_count: 2,
+                pressure: PressureLevel::Normal,
+                external_content_used: true,
+            },
+            None,
+            MemoryProfile::Standard,
+        );
         assert!(!decision.should_enqueue);
         assert_eq!(
             decision.next_state,
@@ -1885,17 +1889,17 @@ mod tests {
     }
 
     #[test]
-    fn substantive_turn_eventually_enqueues_and_sets_pending() {
+    fn eligible_turn_enqueues_and_sets_pending() {
         let first = evaluate_long_term_memory_extraction_turn(
-            substantive_turn_input(4),
+            eligible_turn_input(4),
             None,
             MemoryProfile::Embedded,
         );
-        assert!(!first.should_enqueue);
+        assert!(first.should_enqueue);
         assert_eq!(first.next_state.dirty_turns, 1);
 
         let second = evaluate_long_term_memory_extraction_turn(
-            substantive_turn_input(10),
+            eligible_turn_input(10),
             Some(&first.next_state),
             MemoryProfile::Embedded,
         );
@@ -1917,7 +1921,7 @@ mod tests {
             pending: true,
         };
         let decision = evaluate_long_term_memory_extraction_turn(
-            substantive_turn_input(16),
+            eligible_turn_input(16),
             Some(&state),
             MemoryProfile::Embedded,
         );

@@ -9,8 +9,9 @@ use bm_llm_gateway::{
 };
 use bm_sdk::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy,
-    MemoryWriteRequest, Message, ResponseBody, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StopReason, ToolChoicePolicy, ToolSpec,
+    MemoryProjectionRequest, MemoryWriteRequest, Message, PressureLevel, ResponseBody,
+    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StopReason,
+    ToolChoicePolicy, ToolSpec,
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -251,6 +252,39 @@ impl LlmClient for StaticLlmClient {
     }
 }
 
+struct LongTermExtractionLlmClient;
+
+impl LlmClient for LongTermExtractionLlmClient {
+    fn model_compat(&self) -> LlmModelCompat {
+        LlmModelCompat::default()
+    }
+
+    fn chat(
+        &self,
+        _http: &mut dyn LlmHttpClient,
+        _system: &str,
+        _messages: &[Message],
+        _tools: Option<&[ToolSpec]>,
+        _tool_choice: ToolChoicePolicy,
+    ) -> bm_sdk::Result<LlmResponse> {
+        Ok(LlmResponse {
+            content: r#"[
+                {
+                    "plane": "factual",
+                    "op": "upsert",
+                    "kind": "profile",
+                    "topic": "preferred_name",
+                    "content": "The user asked to be called Qingchuan.",
+                    "keywords": ["Qingchuan", "preferred name"]
+                }
+            ]"#
+            .to_string(),
+            stop_reason: StopReason::EndTurn,
+            tool_calls: None,
+        })
+    }
+}
+
 #[test]
 fn tags_and_version_proxy_without_projection_or_maintenance() {
     let config = gateway_config();
@@ -343,6 +377,127 @@ fn chat_non_streaming_injects_memory_into_existing_system_and_preserves_native_s
     assert!(system.contains("Beetle Memory context:"));
     assert_eq!(sent.body["messages"].as_array().expect("messages").len(), 2);
     assert_eq!(response.body.json()["message"]["content"], "ok");
+}
+
+#[test]
+fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
+    let mut upstream = MockOllamaUpstream::default();
+    let mut http = StaticHttpClient;
+    let llm = StaticLlmClient;
+    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
+
+    let response = handle_ollama_request_with_services(
+        &gateway,
+        &config,
+        OllamaGatewayRequest::post_json(
+            "/api/chat",
+            scope_request(),
+            json!({
+                "model": "local",
+                "stream": false,
+                "messages": [{ "role": "user", "content": "call me Qingchuan" }]
+            }),
+        ),
+        &mut upstream,
+        &mut services,
+    )
+    .expect("chat response");
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body.json()["message"]["content"], "ok");
+    assert!(response.audit.stages.iter().any(|stage| {
+        stage.stage == GatewayAuditStage::Maintenance
+            && stage.outcome == GatewayAuditOutcome::Succeeded
+    }));
+
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope_request())
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "what should you call me?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+
+    assert!(projection
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "call me Qingchuan"));
+    assert!(projection
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "ok"));
+}
+
+#[test]
+fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
+    let mut upstream = MockOllamaUpstream::default();
+    let mut http = StaticHttpClient;
+    let llm = LongTermExtractionLlmClient;
+    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
+
+    let response = handle_ollama_request_with_services(
+        &gateway,
+        &config,
+        OllamaGatewayRequest::post_json(
+            "/api/chat",
+            scope_request(),
+            json!({
+                "model": "local",
+                "stream": false,
+                "messages": [{ "role": "user", "content": "以后叫我青川" }]
+            }),
+        ),
+        &mut upstream,
+        &mut services,
+    )
+    .expect("chat response");
+
+    assert_eq!(response.status_code, 200);
+    assert!(response.audit.stages.iter().any(|stage| {
+        stage.stage == GatewayAuditStage::Maintenance
+            && stage.outcome == GatewayAuditOutcome::Succeeded
+    }));
+
+    let mut next_chat_scope = scope_request();
+    next_chat_scope.client_conversation_hint = Some("thread-ollama-new".to_string());
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&next_chat_scope)
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "我叫什么？".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+
+    assert!(projection
+        .context
+        .long_term_memory_text
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Qingchuan"));
 }
 
 #[test]

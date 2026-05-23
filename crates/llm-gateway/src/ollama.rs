@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryProjectionRequest, Message,
-    ProviderModelContextLimit, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
+    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryProjectionRequest,
+    MemoryTurnProtocol, MemoryTurnSource, Message, ProviderModelContextLimit,
+    RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
 };
 use serde_json::{json, Map, Value};
 
@@ -514,7 +515,7 @@ fn handle_chat(
         model_alias,
         scope.clone(),
     );
-    let runtime = gateway.runtime_for_scope(scope.entry_scope)?;
+    let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
     let extracted_user_text = extract_chat_messages_text(body_object.get("messages"))?;
     let external_content_used = chat_uses_external_content(body_object.get("messages"))
         || body_object.get("tools").is_some();
@@ -555,6 +556,17 @@ fn handle_chat(
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
+        turn_source: MemoryTurnSource {
+            ingress: bm_sdk::IngressKind::User,
+            channel: scope.channel.clone(),
+            provider: Some(format!("{:?}", provider.kind)),
+            protocol: MemoryTurnProtocol::OllamaChat,
+            endpoint: Some("/api/chat".to_string()),
+            model_alias: Some(model_alias.to_string()),
+            model_resolved: Some(model.clone()),
+            request_id: request.scope.request_id_hint.clone(),
+            client_conversation_hint: request.scope.client_conversation_hint.clone(),
+        },
         external_content_used,
         runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
         task_learning_selected_ids: carry.task_recall_selected_ids,
@@ -616,7 +628,7 @@ fn handle_generate(
         model_alias,
         scope.clone(),
     );
-    let runtime = gateway.runtime_for_scope(scope.entry_scope)?;
+    let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
     let extracted_user_text = body_object
         .get("prompt")
         .and_then(Value::as_str)
@@ -668,6 +680,17 @@ fn handle_generate(
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
+        turn_source: MemoryTurnSource {
+            ingress: bm_sdk::IngressKind::User,
+            channel: scope.channel.clone(),
+            provider: Some(format!("{:?}", provider.kind)),
+            protocol: MemoryTurnProtocol::OllamaGenerate,
+            endpoint: Some("/api/generate".to_string()),
+            model_alias: Some(model_alias.to_string()),
+            model_resolved: Some(model.clone()),
+            request_id: request.scope.request_id_hint.clone(),
+            client_conversation_hint: request.scope.client_conversation_hint.clone(),
+        },
         external_content_used,
         runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
         task_learning_selected_ids: carry.task_recall_selected_ids,
