@@ -94,6 +94,19 @@ export type ConsoleApiLlmGateway = {
   ruleExports: ConsoleApiLlmGatewayRuleExport[];
   smokeChecks: ConsoleApiLlmGatewaySmokeCheck[];
 };
+export type ConsoleApiCapabilityFeatureId = "ollamaTransparentApp" | string;
+export type ConsoleApiCapabilityFeature = {
+  id: ConsoleApiCapabilityFeatureId;
+  visible: boolean;
+  available: boolean;
+  owner: string;
+  reason: string | null;
+  routes: Record<string, string>;
+};
+export type ConsoleApiCapabilities = {
+  schema: string;
+  features: Record<ConsoleApiCapabilityFeatureId, ConsoleApiCapabilityFeature | undefined>;
+};
 export type ConsoleApiOllamaTransparentState =
   | "Disabled"
   | "PreflightFailed"

@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 #[cfg(feature = "server-std")]
 use std::net::TcpListener;
+#[cfg(feature = "server-std")]
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -64,6 +66,7 @@ pub struct ConsoleRouteSpec {
 }
 
 const JSON_BODY_MAX_BYTES: usize = 64 * 1024;
+const CONSOLE_CAPABILITY_SCHEMA: &str = "beetle-memory.console.capabilities.v1";
 
 const ROUTES: &[RouteSpec] = &[
     RouteSpec {
@@ -88,6 +91,7 @@ const ROUTES: &[RouteSpec] = &[
 
 const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_get("/console/overview"),
+    console_get("/console/capabilities"),
     console_get("/console/skills"),
     console_get("/console/skills/{name}"),
     console_post("/console/skills"),
@@ -254,6 +258,7 @@ pub struct HttpRuntimeResponse {
 #[derive(Clone, Copy, Default)]
 pub struct HttpConsoleServices<'a> {
     pub ollama_transparent: Option<&'a dyn OllamaTransparentController>,
+    pub memory_event_store_paths: &'a [PathBuf],
 }
 
 #[cfg(feature = "server-std")]
@@ -261,6 +266,7 @@ impl<'a> HttpConsoleServices<'a> {
     pub const fn none() -> Self {
         Self {
             ollama_transparent: None,
+            memory_event_store_paths: &[],
         }
     }
 
@@ -269,7 +275,16 @@ impl<'a> HttpConsoleServices<'a> {
     ) -> Self {
         Self {
             ollama_transparent: Some(ollama_transparent),
+            memory_event_store_paths: &[],
         }
+    }
+
+    pub const fn with_memory_event_store_paths(
+        mut self,
+        memory_event_store_paths: &'a [PathBuf],
+    ) -> Self {
+        self.memory_event_store_paths = memory_event_store_paths;
+        self
     }
 }
 
@@ -564,7 +579,16 @@ fn handle_console_request(
             200,
             json!({
                 "status": "accepted",
-                "overview": runtime.console_overview(),
+                "overview": runtime.console_overview_with_event_store_paths(
+                    services.memory_event_store_paths,
+                ),
+            }),
+        )),
+        (HttpMethod::Get, "/console/capabilities") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "capabilities": console_capabilities(services),
             }),
         )),
         (HttpMethod::Get, "/console/transports") => Ok(json_response(
@@ -848,6 +872,33 @@ fn parse_console_json<T: serde::de::DeserializeOwned>(body: &str) -> bm_sdk::Res
 }
 
 #[cfg(feature = "server-std")]
+fn console_capabilities(services: HttpConsoleServices<'_>) -> serde_json::Value {
+    let ollama_transparent_app_visible = services.ollama_transparent.is_some();
+    json!({
+        "schema": CONSOLE_CAPABILITY_SCHEMA,
+        "features": {
+            "ollamaTransparentApp": {
+                "id": "ollamaTransparentApp",
+                "visible": ollama_transparent_app_visible,
+                "available": ollama_transparent_app_visible,
+                "owner": if ollama_transparent_app_visible { "desktop-shell" } else { "unsupported-shell" },
+                "reason": if ollama_transparent_app_visible { serde_json::Value::Null } else { json!("DesktopShellOnly") },
+                "routes": if ollama_transparent_app_visible {
+                    json!({
+                        "status": "/console/ollama-transparent/status",
+                        "enable": "/console/ollama-transparent/enable",
+                        "disable": "/console/ollama-transparent/disable",
+                        "openApp": "/console/ollama-transparent/open-app"
+                    })
+                } else {
+                    json!({})
+                }
+            }
+        }
+    })
+}
+
+#[cfg(feature = "server-std")]
 fn require_ollama_transparent_controller(
     services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<&dyn OllamaTransparentController> {
@@ -893,6 +944,7 @@ fn is_known_console_path(path: &str) -> bool {
     matches!(
         path,
         "/console/overview"
+            | "/console/capabilities"
             | "/console/skills"
             | "/console/llm-gateway"
             | "/console/ollama-transparent/status"

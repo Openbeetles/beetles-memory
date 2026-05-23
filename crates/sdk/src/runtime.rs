@@ -183,12 +183,13 @@ impl MemoryRuntime {
                         "submitted={}, accepted={}, rejected={}",
                         outcome.submitted, outcome.accepted, outcome.rejected
                     ),
-                    lifecycle_report: self.finish_lifecycle_success(
+                    lifecycle_report: self.finish_lifecycle_success_with_payload(
                         lifecycle,
                         RuntimeLifecycleEventKind::RuntimeLifecycle,
                         RuntimeLifecycleEffect::RunMaintenance,
                         outcome.changed > 0,
                         "write.procedural",
+                        &[("changed_count", outcome.changed.to_string())],
                     )?,
                 }
             }
@@ -206,12 +207,13 @@ impl MemoryRuntime {
                     changed,
                     operation: "write.long_term_extraction",
                     reason: "long_term_extraction_applied".to_string(),
-                    lifecycle_report: self.finish_lifecycle_success(
+                    lifecycle_report: self.finish_lifecycle_success_with_payload(
                         lifecycle,
                         RuntimeLifecycleEventKind::RuntimeLifecycle,
                         RuntimeLifecycleEffect::RequestLongTermRefresh,
                         changed > 0,
                         "write.long_term_extraction",
+                        &[("changed_count", changed.to_string())],
                     )?,
                 }
             }
@@ -548,17 +550,25 @@ impl MemoryRuntime {
             task_run_store: Some(task_run_store.as_ref()),
             task_learning_store: Some(task_learning_store.as_ref()),
         });
+        let hit_count = procedural_hits
+            .len()
+            .saturating_add(working_recall_hit_count(&working));
+        let telemetry_payload = [
+            ("memory_hit", (hit_count > 0).to_string()),
+            ("hit_count", hit_count.to_string()),
+        ];
         self.audit("recall", true, "recall_completed");
         Ok(MemoryRecallReport {
             query: request.query,
             procedural_hits,
             working,
-            lifecycle_report: self.finish_lifecycle_success(
+            lifecycle_report: self.finish_lifecycle_success_with_payload(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
                 RuntimeLifecycleEffect::Inspect,
                 false,
                 "recall_completed",
+                &telemetry_payload,
             )?,
         })
     }
@@ -572,16 +582,28 @@ impl MemoryRuntime {
         );
         let context = self.load_projection_context(&request, &lifecycle);
         let system_memory_block = render_sdk_projection_block(&context, request.system_max_len);
+        let hit_count = prompt_context_hit_count(&context);
+        let system_memory_chars = system_memory_block.chars().count();
+        let telemetry_payload = [
+            ("memory_hit", (hit_count > 0).to_string()),
+            ("hit_count", hit_count.to_string()),
+            ("system_memory_chars", system_memory_chars.to_string()),
+            (
+                "projection_injected",
+                (!system_memory_block.trim().is_empty()).to_string(),
+            ),
+        ];
         self.audit("project", true, "projection_completed");
         Ok(MemoryProjectionReport {
             system_memory_block,
             context,
-            lifecycle_report: self.finish_lifecycle_success(
+            lifecycle_report: self.finish_lifecycle_success_with_payload(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
                 RuntimeLifecycleEffect::RefreshProjection,
                 false,
                 "projection_completed",
+                &telemetry_payload,
             )?,
         })
     }
@@ -1047,8 +1069,20 @@ impl MemoryRuntime {
         changed: bool,
         summary: impl Into<String>,
     ) -> Result<RuntimeLifecycleReport> {
+        self.finish_lifecycle_success_with_payload(report, kind, effect, changed, summary, &[])
+    }
+
+    fn finish_lifecycle_success_with_payload(
+        &self,
+        report: RuntimeLifecycleReport,
+        kind: RuntimeLifecycleEventKind,
+        effect: RuntimeLifecycleEffect,
+        changed: bool,
+        summary: impl Into<String>,
+        extra_payload: &[(&str, String)],
+    ) -> Result<RuntimeLifecycleReport> {
         let finished = report.finish_success(self.config.clock.now_secs(), changed, summary);
-        self.record_lifecycle_event(kind, effect, &finished)?;
+        self.record_lifecycle_event(kind, effect, &finished, extra_payload)?;
         Ok(finished)
     }
 
@@ -1057,6 +1091,7 @@ impl MemoryRuntime {
         kind: RuntimeLifecycleEventKind,
         effect: RuntimeLifecycleEffect,
         report: &RuntimeLifecycleReport,
+        extra_payload: &[(&str, String)],
     ) -> Result<()> {
         let mut event =
             RuntimeLifecycleEvent::from_report(kind, effect, report, self.config.clock.now_secs())
@@ -1086,6 +1121,9 @@ impl MemoryRuntime {
                     RuntimeOperatorAction::InspectMemoryStatus.as_str(),
                 )
                 .with_payload("accepted", report.success.to_string());
+        }
+        for (key, value) in extra_payload {
+            event = event.with_payload(*key, value.clone());
         }
         self.config
             .platform
@@ -1147,6 +1185,48 @@ fn render_sdk_projection_block(context: &crate::PromptMemoryContext, max_len: us
     }
     let joined = parts.join("\n\n");
     truncate_to_char_boundary(&joined, max_len)
+}
+
+fn prompt_context_hit_count(context: &crate::PromptMemoryContext) -> usize {
+    context
+        .shared_factual_recall_report
+        .selected_count
+        .saturating_add(context.continuity_capsule_report.selected_count)
+        .saturating_add(context.archive_recall_report.selected_count)
+        .saturating_add(context.runtime_skill_recall_report.selected_count)
+        .saturating_add(
+            context
+                .task_recall_report
+                .as_ref()
+                .map(|report| report.selected_count)
+                .unwrap_or(0),
+        )
+        .saturating_add(usize::from(context.long_term_memory_text.is_some()))
+        .saturating_add(usize::from(context.continuity_capsule_text.is_some()))
+        .saturating_add(usize::from(context.archive_evidence_text.is_some()))
+        .saturating_add(usize::from(context.runtime_skill_text.is_some()))
+        .saturating_add(usize::from(context.task_recall_text.is_some()))
+}
+
+fn working_recall_hit_count(working: &crate::WorkingRecallInspection) -> usize {
+    working
+        .shared_factual_report
+        .selected_count
+        .saturating_add(working.continuity_capsule_report.selected_count)
+        .saturating_add(working.archive_recall_report.selected_count)
+        .saturating_add(working.runtime_skill_report.selected_count)
+        .saturating_add(
+            working
+                .task_recall_report
+                .as_ref()
+                .map(|report| report.selected_count)
+                .unwrap_or(0),
+        )
+        .saturating_add(usize::from(working.long_term_memory_text.is_some()))
+        .saturating_add(usize::from(working.continuity_capsule_text.is_some()))
+        .saturating_add(usize::from(working.archive_evidence_text.is_some()))
+        .saturating_add(usize::from(working.runtime_skill_text.is_some()))
+        .saturating_add(usize::from(working.task_recall_text.is_some()))
 }
 
 fn sdk_projection_text_parts(context: &crate::PromptMemoryContext) -> [Option<&str>; 28] {

@@ -1,6 +1,8 @@
 #![cfg(feature = "server-std")]
 
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
@@ -17,7 +19,11 @@ use bm_ollama_transparent::{
     OllamaTransparentTransitionReport, PortBindingReport, PortOwnerKind, ProcessActionReport,
     TransitionOutcome, TransitionStep, TransitionStepReport,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_sdk::{
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendKind,
+};
 use serde_json::Value;
 
 fn runtime() -> EntryRuntime {
@@ -45,6 +51,73 @@ fn runtime() -> EntryRuntime {
         capability,
     })
     .expect("entry runtime")
+}
+
+fn runtime_with_file_store(path: &Path) -> EntryRuntime {
+    let mut capability = MemoryCapabilityPolicy::strict_profile();
+    capability.communication_adapter_enabled = true;
+    EntryRuntime::open(EntryRuntimeConfig {
+        profile: ProfileId::ServerLinuxDevFull,
+        identity: EntryIdentity {
+            agent_id: "http-console-agent".to_string(),
+            owner_id: "owner-default".to_string(),
+        },
+        scope: EntryScope {
+            channel: "console".to_string(),
+            chat_id: "chat-1".to_string(),
+        },
+        store: EntryStoreConfig {
+            backend: StoreBackendKind::File,
+            data_path: Some(path.to_path_buf()),
+            fsync: false,
+        },
+        transports: EntryTransportConfig::all_disabled(),
+        auth: EntryAuthConfig::disabled_for_local(),
+        idempotency: EntryIdempotencyConfig { max_keys: 32 },
+        privacy: MemoryPrivacyPolicy::standard_private_boundary(),
+        capability,
+    })
+    .expect("entry runtime")
+}
+
+fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
+    runtime
+        .runtime()
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![RuntimeSkillWrite {
+                name: "transparent_ollama_metrics".to_string(),
+                topic: "transparent ollama metrics".to_string(),
+                title: "Transparent Ollama metrics".to_string(),
+                summary: "Transparent Ollama memory activity must be visible in overview."
+                    .to_string(),
+                content:
+                    "1. read transparent Ollama store events\n2. merge them into Console Overview\n3. report writes and projection hits from the shared telemetry stream"
+                        .to_string(),
+                citations: vec!["http console overview contract".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("write");
+    runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "How should transparent Ollama metrics appear?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("project");
+}
+
+fn test_store_dir(label: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("bm-http-{label}-{nanos}"))
 }
 
 #[derive(Default)]
@@ -180,6 +253,7 @@ fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
     let routes = console_route_specs();
 
     for (method, path) in [
+        (HttpMethod::Get, "/console/capabilities"),
         (HttpMethod::Get, "/console/ollama-transparent/status"),
         (HttpMethod::Post, "/console/ollama-transparent/preflight"),
         (HttpMethod::Post, "/console/ollama-transparent/enable"),
@@ -200,6 +274,32 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
     let runtime = runtime();
     let controller = MockOllamaTransparentController::default();
     let services = HttpConsoleServices::with_ollama_transparent(&controller);
+
+    let capabilities = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/capabilities"),
+        services,
+    )
+    .expect("capabilities");
+    assert_eq!(capabilities.status_code, 200, "{}", capabilities.body);
+    let capabilities: Value = serde_json::from_str(&capabilities.body).expect("capabilities json");
+    assert_eq!(capabilities["status"], "accepted");
+    assert_eq!(
+        capabilities["capabilities"]["schema"],
+        "beetle-memory.console.capabilities.v1"
+    );
+    assert_eq!(
+        capabilities["capabilities"]["features"]["ollamaTransparentApp"]["visible"],
+        true
+    );
+    assert_eq!(
+        capabilities["capabilities"]["features"]["ollamaTransparentApp"]["owner"],
+        "desktop-shell"
+    );
+    assert_eq!(
+        capabilities["capabilities"]["features"]["ollamaTransparentApp"]["routes"]["status"],
+        "/console/ollama-transparent/status"
+    );
 
     let status = handle_http_request_with_console(
         &runtime,
@@ -279,20 +379,57 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
 }
 
 #[test]
-fn console_ollama_transparent_routes_fail_when_controller_is_not_wired() {
+fn console_capabilities_hide_ollama_transparent_when_controller_is_not_wired() {
     let runtime = runtime();
-    let error = handle_http_request(
-        &runtime,
-        HttpRuntimeRequest::get("/console/ollama-transparent/status"),
-    )
-    .expect_err("missing controller should be a configuration error");
+    let response = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/capabilities"))
+        .expect("capabilities should be available");
 
-    assert!(
-        error
-            .to_string()
-            .contains("ollama transparent controller is not configured"),
-        "{error}"
+    assert_eq!(response.status_code, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("capabilities json");
+    assert_eq!(body["status"], "accepted");
+    assert_eq!(
+        body["capabilities"]["features"]["ollamaTransparentApp"]["visible"],
+        false
     );
+    assert_eq!(
+        body["capabilities"]["features"]["ollamaTransparentApp"]["reason"],
+        "DesktopShellOnly"
+    );
+    assert!(
+        body["capabilities"]["features"]["ollamaTransparentApp"]["routes"]
+            .as_object()
+            .is_some_and(|routes| routes.is_empty()),
+        "{}",
+        response.body
+    );
+}
+
+#[test]
+fn console_ollama_transparent_status_and_actions_fail_when_controller_is_not_wired() {
+    let runtime = runtime();
+
+    for request in [
+        HttpRuntimeRequest::get("/console/ollama-transparent/status"),
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/preflight", "{}"),
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/enable",
+            r#"{"openApp":false,"allowStopOfficialOllama":true}"#,
+        ),
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/disable",
+            r#"{"restoreOfficialApp":false}"#,
+        ),
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/open-app", "{}"),
+    ] {
+        let error = handle_http_request(&runtime, request)
+            .expect_err("missing controller should reject mutating transparent routes");
+        assert!(
+            error
+                .to_string()
+                .contains("ollama transparent controller is not configured"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -522,6 +659,16 @@ fn console_overview_reflects_real_memory_operations() {
     .expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);
 
+    let duplicate_write = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/write",
+            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"task_learning"}"#,
+        ),
+    )
+    .expect("duplicate write");
+    assert_eq!(duplicate_write.status_code, 200, "{}", duplicate_write.body);
+
     let recall = handle_http_request(
         &runtime,
         HttpRuntimeRequest::post_json(
@@ -544,6 +691,38 @@ fn console_overview_reflects_real_memory_operations() {
         .any(|event| event["text"]
             .as_str()
             .is_some_and(|text| text.contains("Memory write accepted"))));
+}
+
+#[test]
+fn console_overview_aggregates_extra_memory_event_store_paths() {
+    let transparent_store_path = test_store_dir("transparent-ollama-events");
+    let transparent_runtime = runtime_with_file_store(&transparent_store_path);
+    seed_memory_runtime_activity(&transparent_runtime);
+
+    let runtime = runtime();
+    let event_store_paths = vec![transparent_store_path];
+    let services = HttpConsoleServices::none().with_memory_event_store_paths(&event_store_paths);
+
+    let overview = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/overview"),
+        services,
+    )
+    .expect("overview");
+
+    assert_eq!(overview.status_code, 200, "{}", overview.body);
+    let body: Value = serde_json::from_str(&overview.body).expect("overview json");
+    assert_eq!(body["overview"]["writesToday"]["value"], "1");
+    assert_eq!(body["overview"]["recall"]["value"], "100.0%");
+    assert_eq!(
+        body["overview"]["recall"]["desc"],
+        "1 recall requests / 1 with hits"
+    );
+    assert_eq!(
+        body["overview"]["projection"]["desc"],
+        "1 projection requests served"
+    );
+    assert_ne!(body["overview"]["projection"]["value"], "0");
 }
 
 #[test]

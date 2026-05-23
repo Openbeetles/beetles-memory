@@ -3,7 +3,11 @@ use bm_entry::{
     EntryConsoleTransportUpdate, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
     EntryRuntimeConfig, EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_sdk::{
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendKind,
+};
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -52,6 +56,48 @@ fn console_surface_exposes_process_config_without_app_key_plaintext() {
     assert_eq!(devices[0].device_id, "console-agent");
     assert!(devices[0].app_key_fingerprint.starts_with("fp:"));
     assert!(!devices[0].app_key_fingerprint.contains("owner-default"));
+}
+
+#[test]
+fn console_overview_aggregates_memory_runtime_events_from_the_store() {
+    let runtime = EntryRuntime::open(config()).expect("runtime");
+
+    runtime
+        .runtime()
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![RuntimeSkillWrite {
+                name: "console_system_metrics".to_string(),
+                topic: "console metrics".to_string(),
+                title: "Console system metrics".to_string(),
+                summary: "Overview metrics must come from the unified runtime event stream."
+                    .to_string(),
+                content: "1. record MemoryRuntime write events\n2. aggregate projection lifecycle hits\n3. expose the shared counts in Console Overview"
+                    .to_string(),
+                citations: vec!["console overview contract".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("write");
+    runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "How should console system metrics work?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("project");
+
+    let overview = runtime.console_overview();
+
+    assert_eq!(overview.writes_today.value, "1");
+    assert_eq!(overview.recall.value, "100.0%");
+    assert_eq!(overview.recall.desc, "1 recall requests / 1 with hits");
+    assert_eq!(overview.projection.desc, "1 projection requests served");
+    assert_ne!(overview.projection.value, "0");
 }
 
 #[test]

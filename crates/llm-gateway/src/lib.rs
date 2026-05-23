@@ -53,8 +53,8 @@ pub use provider_probe::{
 };
 pub use runtime::GatewayRuntime;
 pub use scope::{
-    GatewayScopeRequest, GatewayScopeResolution, GatewayScopeResolver, GatewayScopeResolverConfig,
-    GatewayTrustedHeaders,
+    GatewayOllamaAppScopeConfig, GatewayScopeRequest, GatewayScopeResolution, GatewayScopeResolver,
+    GatewayScopeResolverConfig, GatewayTrustedHeaders,
 };
 pub use server::{
     serve_llm_gateway_http_stream, serve_llm_gateway_http_stream_with_services,

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_entry::{EntryIdentity, EntryRuntimeScope, EntryScope};
 
@@ -11,6 +12,8 @@ pub struct GatewayScopeRequest {
     pub workspace_root_digest: Option<String>,
     pub workspace_root_path: Option<String>,
     pub client_conversation_hint: Option<String>,
+    pub request_id_hint: Option<String>,
+    pub body_conversation_hint: Option<String>,
     pub model_alias: Option<String>,
 }
 
@@ -22,6 +25,7 @@ pub struct GatewayScopeResolverConfig {
     pub default_channel: String,
     pub default_chat_id: Option<String>,
     pub trusted_headers: GatewayTrustedHeaders,
+    pub ollama_app: GatewayOllamaAppScopeConfig,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -29,6 +33,12 @@ pub struct GatewayTrustedHeaders {
     pub agent_id: Option<String>,
     pub channel: Option<String>,
     pub chat_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GatewayOllamaAppScopeConfig {
+    pub enabled: bool,
+    pub local_app_identity: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -52,6 +62,15 @@ impl GatewayTrustedHeaders {
     }
 }
 
+impl GatewayOllamaAppScopeConfig {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            local_app_identity: String::new(),
+        }
+    }
+}
+
 impl GatewayScopeResolverConfig {
     pub fn default_for_local_dev() -> Self {
         Self {
@@ -61,6 +80,7 @@ impl GatewayScopeResolverConfig {
             default_channel: "llm.gateway".to_string(),
             default_chat_id: None,
             trusted_headers: GatewayTrustedHeaders::none(),
+            ollama_app: GatewayOllamaAppScopeConfig::disabled(),
         }
     }
 }
@@ -101,17 +121,61 @@ impl GatewayScopeResolver {
             self.config.default_chat_id.as_deref(),
         ])
         .map(str::to_string)
-        .unwrap_or_else(|| stable_chat_id(owner_id, agent_id, channel, request));
+        .map(|chat_id| ChatIdResolution {
+            chat_id,
+            ollama_app_hint_source: None,
+        })
+        .unwrap_or_else(|| self.stable_chat_id_resolution(owner_id, agent_id, channel, request));
 
-        Ok(GatewayScopeResolution::from_parts(
+        let mut resolution = GatewayScopeResolution::from_parts(
             owner_id,
             agent_id,
             channel,
-            &chat_id,
+            &chat_id.chat_id,
             request.workspace_root_digest.as_deref(),
             request.model_alias.as_deref(),
-        ))
+        );
+        if let Some(source) = chat_id.ollama_app_hint_source {
+            resolution
+                .audit_safe_summary
+                .push_str(&format!(" ollama_app_hint_source={source}"));
+        }
+        Ok(resolution)
     }
+
+    fn stable_chat_id_resolution(
+        &self,
+        owner_id: &str,
+        agent_id: &str,
+        channel: &str,
+        request: &GatewayScopeRequest,
+    ) -> ChatIdResolution {
+        if self.config.ollama_app.enabled {
+            let hint = ollama_app_conversation_hint(request, &self.config.ollama_app);
+            return ChatIdResolution {
+                chat_id: stable_chat_id(owner_id, agent_id, channel, request, Some(&hint.value)),
+                ollama_app_hint_source: Some(hint.source),
+            };
+        }
+        let hint = first_non_empty([
+            request.client_conversation_hint.as_deref(),
+            request.request_id_hint.as_deref(),
+        ]);
+        ChatIdResolution {
+            chat_id: stable_chat_id(owner_id, agent_id, channel, request, hint),
+            ollama_app_hint_source: None,
+        }
+    }
+}
+
+struct ChatIdResolution {
+    chat_id: String,
+    ollama_app_hint_source: Option<&'static str>,
+}
+
+struct OllamaAppConversationHint {
+    value: String,
+    source: &'static str,
 }
 
 impl GatewayScopeResolution {
@@ -182,6 +246,7 @@ fn stable_chat_id(
     agent_id: &str,
     channel: &str,
     request: &GatewayScopeRequest,
+    conversation_hint: Option<&str>,
 ) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     hash_field(&mut hash, owner_id);
@@ -191,12 +256,79 @@ fn stable_chat_id(
         &mut hash,
         request.workspace_root_digest.as_deref().unwrap_or(""),
     );
-    hash_field(
-        &mut hash,
-        request.client_conversation_hint.as_deref().unwrap_or(""),
-    );
+    hash_field(&mut hash, conversation_hint.unwrap_or(""));
     hash_field(&mut hash, request.model_alias.as_deref().unwrap_or(""));
     format!("chat_{hash:016x}")
+}
+
+fn ollama_app_conversation_hint(
+    request: &GatewayScopeRequest,
+    config: &GatewayOllamaAppScopeConfig,
+) -> OllamaAppConversationHint {
+    if let Some(value) = first_non_empty([request.client_conversation_hint.as_deref()]) {
+        return OllamaAppConversationHint {
+            value: format!("explicit:{value}"),
+            source: "explicit_conversation_id",
+        };
+    }
+    if let Some(value) = referer_chat_path(&request.headers) {
+        return OllamaAppConversationHint {
+            value: format!("referer:{value}"),
+            source: "referer_chat_path",
+        };
+    }
+    if let Some(value) = first_non_empty([request.body_conversation_hint.as_deref()]) {
+        return OllamaAppConversationHint {
+            value: format!("body:{value}"),
+            source: "body_conversation_hint",
+        };
+    }
+    OllamaAppConversationHint {
+        value: format!(
+            "local-app:{}:day-{}",
+            non_empty_or_default(&config.local_app_identity, "ollama-app"),
+            current_unix_day()
+        ),
+        source: "local_app_daily_bucket",
+    }
+}
+
+fn referer_chat_path(headers: &BTreeMap<String, String>) -> Option<String> {
+    let referer = headers
+        .get("referer")
+        .or_else(|| headers.get("referrer"))?
+        .trim();
+    let (_, after_marker) = referer.split_once("/c/")?;
+    let chat_id = after_marker
+        .split(|ch: char| matches!(ch, '/' | '?' | '#' | '&') || ch.is_whitespace())
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let sanitized = chat_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .collect::<String>();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn current_unix_day() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / 86_400)
+        .unwrap_or(0)
+}
+
+fn non_empty_or_default<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    }
 }
 
 fn hash_field(hash: &mut u64, value: &str) {

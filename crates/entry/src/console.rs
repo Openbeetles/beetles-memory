@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_sdk::{
     MemorySkillDetailReport, MemorySkillKind, MemorySkillListReport, MemorySkillMutationReport,
-    MemorySkillOrigin, MemorySkillSummary, StoreBackendKind,
+    MemorySkillOrigin, MemorySkillSummary, MemoryStoreEvent, StoreBackendKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -272,6 +272,97 @@ pub struct EntryConsoleState {
     inner: Mutex<EntryConsoleInner>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EntryConsoleTelemetrySnapshot {
+    pub writes_today: u64,
+    pub recall_requests: u64,
+    pub recall_hits: u64,
+    pub projection_requests: u64,
+    pub last_projection_chars: usize,
+}
+
+impl EntryConsoleTelemetrySnapshot {
+    pub fn from_events(events: &[MemoryStoreEvent]) -> Self {
+        let today_start = today_start_unix_secs();
+        let mut snapshot = Self::default();
+        let mut lifecycle_writes_today = 0_u64;
+        let mut lifecycle_write_timestamps = Vec::new();
+        let mut raw_write_timestamps = Vec::new();
+        let mut latest_projection_timestamp = 0;
+        for event in events {
+            if event.kind_name == "memory.write" && event.timestamp_unix_secs >= today_start {
+                raw_write_timestamps.push(event.timestamp_unix_secs);
+                continue;
+            }
+            if event.kind_name != "runtime.lifecycle" {
+                continue;
+            }
+            let Some(operation) = event.payload.get("operation").map(String::as_str) else {
+                continue;
+            };
+            let result_summary = event
+                .payload
+                .get("result_summary")
+                .map(String::as_str)
+                .unwrap_or_default();
+            if result_summary.starts_with("write.")
+                && event.timestamp_unix_secs >= today_start
+                && event_payload_bool(event, "success")
+            {
+                let changed_count = event_payload_u64(event, "changed_count").unwrap_or(1);
+                lifecycle_writes_today = lifecycle_writes_today.saturating_add(changed_count);
+                if changed_count > 0 {
+                    lifecycle_write_timestamps.push(event.timestamp_unix_secs);
+                }
+            }
+            if operation == "project" && result_summary == "projection_completed" {
+                snapshot.projection_requests = snapshot.projection_requests.saturating_add(1);
+                if event.timestamp_unix_secs >= latest_projection_timestamp {
+                    latest_projection_timestamp = event.timestamp_unix_secs;
+                    snapshot.last_projection_chars =
+                        event_payload_usize(event, "system_memory_chars").unwrap_or(0);
+                }
+            }
+            let has_hit_telemetry =
+                event.payload.contains_key("memory_hit") || event.payload.contains_key("hit_count");
+            let counts_as_recall_request = has_hit_telemetry
+                && ((operation == "project" && result_summary == "projection_completed")
+                    || (operation == "inspect" && result_summary == "recall_completed"));
+            if counts_as_recall_request {
+                snapshot.recall_requests = snapshot.recall_requests.saturating_add(1);
+                if event_payload_bool(event, "memory_hit")
+                    || event_payload_usize(event, "hit_count").unwrap_or(0) > 0
+                {
+                    snapshot.recall_hits = snapshot.recall_hits.saturating_add(1);
+                }
+            }
+        }
+        let raw_writes_without_write_lifecycle = raw_write_timestamps
+            .into_iter()
+            .filter(|timestamp| {
+                !lifecycle_write_timestamps
+                    .iter()
+                    .any(|candidate| candidate.abs_diff(*timestamp) <= 5)
+            })
+            .count() as u64;
+        snapshot.writes_today =
+            lifecycle_writes_today.saturating_add(raw_writes_without_write_lifecycle);
+        snapshot
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.writes_today = self.writes_today.saturating_add(other.writes_today);
+        self.recall_requests = self.recall_requests.saturating_add(other.recall_requests);
+        self.recall_hits = self.recall_hits.saturating_add(other.recall_hits);
+        self.projection_requests = self
+            .projection_requests
+            .saturating_add(other.projection_requests);
+        if other.last_projection_chars > 0 {
+            self.last_projection_chars = other.last_projection_chars;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct EntryConsoleInner {
     runtime_shape: EntryConsoleRuntimeShape,
@@ -322,6 +413,13 @@ impl EntryConsoleState {
     }
 
     pub fn overview(&self) -> EntryConsoleOverview {
+        self.overview_with_telemetry(EntryConsoleTelemetrySnapshot::default())
+    }
+
+    pub fn overview_with_telemetry(
+        &self,
+        telemetry: EntryConsoleTelemetrySnapshot,
+    ) -> EntryConsoleOverview {
         let inner = self.inner.lock().expect("console state lock");
         let active_devices = inner
             .devices
@@ -333,30 +431,40 @@ impl EntryConsoleState {
             .iter()
             .filter(|transport| transport.enabled)
             .count();
+        let writes_today = inner.writes_today.max(telemetry.writes_today);
+        let recall_requests = inner.recall_requests.max(telemetry.recall_requests);
+        let recall_hits = inner.recall_hits.max(telemetry.recall_hits);
+        let projection_requests = inner.projection_requests.max(telemetry.projection_requests);
+        let last_projection_chars = if telemetry.last_projection_chars > 0 {
+            telemetry.last_projection_chars
+        } else {
+            inner.last_projection_chars
+        };
+        let recall_rate = percentage_value(recall_hits, recall_requests);
         EntryConsoleOverview {
             runtime_shape: inner.runtime_shape.clone(),
             system_info: system_info(),
             storage: storage_metric(&inner),
             writes_today: EntryConsoleMetric {
-                value: inner.writes_today.to_string(),
-                desc: "Accepted memory writes recorded by this runtime".to_string(),
+                value: writes_today.to_string(),
+                desc: "Accepted memory writes recorded by the runtime event stream".to_string(),
                 progress: None,
             },
             recall: EntryConsoleMetric {
-                value: format!("{:.1}%", recall_rate(&inner)),
+                value: format!("{recall_rate:.1}%"),
                 desc: format!(
                     "{} recall requests / {} with hits",
-                    inner.recall_requests, inner.recall_hits
+                    recall_requests, recall_hits
                 ),
-                progress: Some(recall_rate(&inner)),
+                progress: Some(recall_rate),
             },
             projection: EntryConsoleMetric {
-                value: if inner.projection_requests == 0 {
+                value: if projection_requests == 0 {
                     "0".to_string()
                 } else {
-                    format!("{} chars", inner.last_projection_chars)
+                    format!("{last_projection_chars} chars")
                 },
-                desc: format!("{} projection requests served", inner.projection_requests),
+                desc: format!("{projection_requests} projection requests served"),
                 progress: None,
             },
             devices: EntryConsoleMetric {
@@ -689,9 +797,7 @@ impl EntryConsoleState {
         match (operation, report) {
             (AdapterOperation::Write, AdapterSdkReport::Write(report)) => {
                 if report.accepted {
-                    inner.writes_today = inner
-                        .writes_today
-                        .saturating_add(report.changed.max(1) as u64);
+                    inner.writes_today = inner.writes_today.saturating_add(report.changed as u64);
                 }
                 push_event(
                     &mut inner,
@@ -1388,11 +1494,32 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn recall_rate(inner: &EntryConsoleInner) -> f32 {
-    if inner.recall_requests == 0 {
+fn today_start_unix_secs() -> u64 {
+    const SECS_PER_DAY: u64 = 24 * 60 * 60;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    (now / SECS_PER_DAY) * SECS_PER_DAY
+}
+
+fn event_payload_usize(event: &MemoryStoreEvent, key: &str) -> Option<usize> {
+    event.payload.get(key)?.parse().ok()
+}
+
+fn event_payload_u64(event: &MemoryStoreEvent, key: &str) -> Option<u64> {
+    event.payload.get(key)?.parse().ok()
+}
+
+fn event_payload_bool(event: &MemoryStoreEvent, key: &str) -> bool {
+    matches!(event.payload.get(key).map(String::as_str), Some("true"))
+}
+
+fn percentage_value(value: u64, total: u64) -> f32 {
+    if total == 0 {
         0.0
     } else {
-        (inner.recall_hits as f32 / inner.recall_requests as f32) * 100.0
+        (value as f32 / total as f32) * 100.0
     }
 }
 

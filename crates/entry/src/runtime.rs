@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use bm_adapter::{
@@ -14,6 +15,7 @@ use bm_sdk::{
 };
 
 use crate::config::{enabled_capability_policy, privacy_policy};
+use crate::console::EntryConsoleTelemetrySnapshot;
 use crate::{
     EntryAuthConfig, EntryCapabilityView, EntryConsoleDevice, EntryConsoleDeviceCreate,
     EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleOverview,
@@ -194,6 +196,7 @@ impl EntryRuntimeManagerState {
 
 pub struct EntryRuntime {
     config: EntryRuntimeConfig,
+    store: StorePlatform,
     runtime: MemoryRuntime,
     capability: EntryCapabilityView,
     idempotency: EntryIdempotencyCache,
@@ -219,7 +222,7 @@ impl EntryRuntime {
                 config.scope.chat_id.clone(),
             )?)
             .profile(config.profile)
-            .store_platform(store)
+            .store_platform(store.clone())
             .capability_policy(capability_policy.clone())
             .privacy_policy(privacy.clone())
             .audit_sink(Arc::new(NoopMemoryAuditSink))
@@ -234,6 +237,7 @@ impl EntryRuntime {
         let console = EntryConsoleState::new(&config);
         Ok(Self {
             config,
+            store,
             runtime,
             capability,
             idempotency,
@@ -250,7 +254,15 @@ impl EntryRuntime {
     }
 
     pub fn console_overview(&self) -> EntryConsoleOverview {
-        self.console.overview()
+        self.console_overview_with_event_store_paths(&[])
+    }
+
+    pub fn console_overview_with_event_store_paths(
+        &self,
+        event_store_paths: &[PathBuf],
+    ) -> EntryConsoleOverview {
+        let telemetry = self.console_telemetry_snapshot(event_store_paths);
+        self.console.overview_with_telemetry(telemetry)
     }
 
     pub fn console_transports(&self) -> Vec<EntryConsoleTransport> {
@@ -455,6 +467,27 @@ impl EntryRuntime {
         self.console
             .record_adapter_response(operation, &response.adapter);
         Ok(response)
+    }
+
+    fn console_telemetry_snapshot(
+        &self,
+        event_store_paths: &[PathBuf],
+    ) -> EntryConsoleTelemetrySnapshot {
+        let mut events = Vec::new();
+        let mut seen = HashSet::new();
+        for event in self.store.read_events().unwrap_or_default() {
+            if seen.insert(event.event_id.clone()) {
+                events.push(event);
+            }
+        }
+        for path in event_store_paths {
+            for event in StorePlatform::read_file_store_events(path).unwrap_or_default() {
+                if seen.insert(event.event_id.clone()) {
+                    events.push(event);
+                }
+            }
+        }
+        EntryConsoleTelemetrySnapshot::from_events(&events)
     }
 }
 

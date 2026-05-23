@@ -15,6 +15,7 @@
   } from "./lib/console-api";
   import { copy, readLang, readTheme, STORAGE_KEYS, writeStorage } from "./lib/i18n";
   import type {
+    ConsoleApiCapabilities,
     ConsoleApiDevice,
     ConsoleApiLlmGateway,
     ConsoleApiOllamaTransparentStatus,
@@ -64,6 +65,7 @@
   let consoleLoadSeq = 0;
 
   let overviewData: ConsoleApiOverview | null = $state(null);
+  let consoleCapabilities: ConsoleApiCapabilities | null = $state(null);
   let llmGateway: ConsoleApiLlmGateway | null = $state(null);
   let ollamaTransparent: ConsoleApiOllamaTransparentStatus | null = $state(null);
   let sessionData: ConsoleApiSession | null = $state(null);
@@ -124,6 +126,7 @@
     consoleLoading = true;
     try {
       const snapshot = await loadConsoleSnapshot();
+      consoleCapabilities = snapshot.capabilities;
       overviewData = snapshot.overview;
       llmGateway = snapshot.llmGateway;
       ollamaTransparent = snapshot.ollamaTransparent;
@@ -135,6 +138,7 @@
       backendConnected = true;
     } catch {
       overviewData = null;
+      consoleCapabilities = null;
       llmGateway = null;
       ollamaTransparent = null;
       skillReport = null;
@@ -366,6 +370,7 @@
         <LlmGatewayPage
           {t}
           {llmGateway}
+          {consoleCapabilities}
           {ollamaTransparent}
           {backendConnected}
           onRefresh={loadConsoleData}

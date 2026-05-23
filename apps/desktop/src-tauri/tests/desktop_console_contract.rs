@@ -1,6 +1,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_desktop::{DesktopConsoleRequest, DesktopConsoleState};
+use bm_entry::{
+    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
+    EntryScope, EntryStoreConfig, EntryTransportConfig,
+};
+use bm_sdk::{
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendKind,
+};
 use serde_json::Value;
 
 #[test]
@@ -20,6 +29,16 @@ fn desktop_console_serves_skills_without_http_listener() {
 fn desktop_console_serves_ollama_transparent_status_without_404() {
     let state = DesktopConsoleState::open_for_data_dir(test_store_dir("ollama-transparent-status"))
         .unwrap();
+
+    let capabilities = state
+        .handle_console_request(DesktopConsoleRequest::get("/console/capabilities"))
+        .unwrap();
+    assert_eq!(capabilities.status_code, 200, "{}", capabilities.body);
+    let capabilities: Value = serde_json::from_str(&capabilities.body).expect("capabilities json");
+    assert_eq!(
+        capabilities["capabilities"]["features"]["ollamaTransparentApp"]["visible"],
+        true
+    );
 
     let response = state
         .handle_console_request(DesktopConsoleRequest::get(
@@ -64,10 +83,89 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
     assert!(list.body.contains(r#""userProvided":1"#));
 }
 
+#[test]
+fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
+    let data_dir = test_store_dir("ollama-transparent-overview");
+    let transparent_runtime = runtime_for_store(data_dir.join("ollama").join("memory-store"));
+    seed_memory_runtime_activity(&transparent_runtime);
+    let state = DesktopConsoleState::open_for_data_dir(&data_dir).unwrap();
+
+    let response = state
+        .handle_console_request(DesktopConsoleRequest::get("/console/overview"))
+        .unwrap();
+
+    assert_eq!(response.status_code, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("overview json");
+    assert_eq!(body["overview"]["writesToday"]["value"], "1");
+    assert_eq!(body["overview"]["recall"]["value"], "100.0%");
+    assert_eq!(
+        body["overview"]["projection"]["desc"],
+        "1 projection requests served"
+    );
+}
+
 fn test_store_dir(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("bm-desktop-{label}-{nanos}"))
+}
+
+fn runtime_for_store(path: std::path::PathBuf) -> EntryRuntime {
+    let mut capability = MemoryCapabilityPolicy::strict_profile();
+    capability.communication_adapter_enabled = true;
+    EntryRuntime::open(EntryRuntimeConfig {
+        profile: ProfileId::DesktopMacosStandaloneMemory,
+        identity: EntryIdentity {
+            agent_id: "bm-desktop".to_string(),
+            owner_id: "local-owner".to_string(),
+        },
+        scope: EntryScope {
+            channel: "desktop".to_string(),
+            chat_id: "local-desktop".to_string(),
+        },
+        store: EntryStoreConfig {
+            backend: StoreBackendKind::File,
+            data_path: Some(path),
+            fsync: false,
+        },
+        transports: EntryTransportConfig::all_disabled(),
+        auth: EntryAuthConfig::disabled_for_local(),
+        idempotency: EntryIdempotencyConfig { max_keys: 128 },
+        privacy: MemoryPrivacyPolicy::standard_private_boundary(),
+        capability,
+    })
+    .expect("entry runtime")
+}
+
+fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
+    runtime
+        .runtime()
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![RuntimeSkillWrite {
+                name: "desktop_ollama_overview".to_string(),
+                topic: "desktop ollama overview".to_string(),
+                title: "Desktop Ollama overview".to_string(),
+                summary: "Desktop overview must include transparent Ollama memory events."
+                    .to_string(),
+                content: "1. read the transparent Ollama memory store\n2. merge store events into the Desktop overview\n3. keep writes and projection hits on the shared metrics path"
+                    .to_string(),
+                citations: vec!["desktop console overview contract".to_string()],
+                source_chat_id: Some("local-desktop".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("write");
+    runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "How should Desktop overview count transparent Ollama?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("project");
 }

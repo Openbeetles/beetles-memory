@@ -1,6 +1,6 @@
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::Platform;
-use bm_store::{StoreBackendConfig, StoreEventLog, StorePlatform};
+use bm_store::{StoreBackendConfig, StorePlatform};
 
 #[test]
 fn embedded_store_uses_bounded_event_ring_without_sqlite() {

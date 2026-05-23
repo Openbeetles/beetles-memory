@@ -23,6 +23,7 @@ pub struct DesktopConsoleState {
         FileSystemRunnerInstaller,
         SystemProcessManager,
     >,
+    memory_event_store_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +93,7 @@ impl DesktopConsoleState {
         let transparent_config = OllamaTransparentConfig::for_data_dir(&data_dir);
         let transparent_ports =
             SystemPortOwnerObserver::new(transparent_config.port_owner_classifier());
+        let memory_event_store_paths = vec![transparent_config.memory_store_path.clone()];
         let ollama_transparent = TransparentController::new(
             transparent_config,
             transparent_ports,
@@ -102,6 +104,7 @@ impl DesktopConsoleState {
         Ok(Self {
             runtime,
             ollama_transparent,
+            memory_event_store_paths,
         })
     }
 
@@ -112,7 +115,8 @@ impl DesktopConsoleState {
         let response = handle_http_request_with_console(
             &self.runtime,
             request.into_http_runtime_request(),
-            HttpConsoleServices::with_ollama_transparent(&self.ollama_transparent),
+            HttpConsoleServices::with_ollama_transparent(&self.ollama_transparent)
+                .with_memory_event_store_paths(&self.memory_event_store_paths),
         )?;
         Ok(DesktopConsoleResponse {
             status_code: response.status_code,

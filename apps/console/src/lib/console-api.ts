@@ -1,5 +1,6 @@
 import { apiJson } from "../api";
 import type {
+  ConsoleApiCapabilities,
   ConsoleApiDevice,
   ConsoleApiLlmGateway,
   ConsoleApiLlmGatewaySmokeRunReport,
@@ -19,10 +20,11 @@ import type {
 import { fromApiDevice, fromApiTransport } from "./view-model";
 
 export type ConsoleSnapshot = {
+  capabilities: ConsoleApiCapabilities;
   overview: ConsoleApiOverview;
   skills: ConsoleApiSkillList;
   llmGateway: ConsoleApiLlmGateway;
-  ollamaTransparent: ConsoleApiOllamaTransparentStatus;
+  ollamaTransparent: ConsoleApiOllamaTransparentStatus | null;
   transports: Transport[];
   devices: Device[];
   session: ConsoleApiSession;
@@ -37,6 +39,9 @@ export type SkillUpsertInput = {
 };
 
 export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
+  const capabilitiesResponse = await apiJson<{ capabilities: ConsoleApiCapabilities }>("/console/capabilities");
+  const ollamaTransparentAppVisible =
+    capabilitiesResponse.capabilities.features.ollamaTransparentApp?.visible === true;
   const [
     overviewResponse,
     skillResponse,
@@ -49,12 +54,15 @@ export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
     apiJson<{ overview: ConsoleApiOverview }>("/console/overview"),
     apiJson<{ skills: ConsoleApiSkillList }>("/console/skills"),
     apiJson<{ llmGateway: ConsoleApiLlmGateway }>("/console/llm-gateway"),
-    apiJson<{ ollamaTransparent: ConsoleApiOllamaTransparentStatus }>("/console/ollama-transparent/status"),
+    ollamaTransparentAppVisible
+      ? apiJson<{ ollamaTransparent: ConsoleApiOllamaTransparentStatus }>("/console/ollama-transparent/status")
+      : Promise.resolve({ ollamaTransparent: null }),
     apiJson<{ transports: ConsoleApiTransport[] }>("/console/transports"),
     apiJson<{ devices: ConsoleApiDevice[] }>("/console/devices"),
     apiJson<{ session: ConsoleApiSession }>("/console/session"),
   ]);
   return {
+    capabilities: capabilitiesResponse.capabilities,
     overview: overviewResponse.overview,
     skills: skillResponse.skills,
     llmGateway: llmGatewayResponse.llmGateway,

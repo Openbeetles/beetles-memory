@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,6 +88,14 @@ impl StorePlatform {
         };
         platform.emit_runtime_event("open")?;
         Ok((platform, report))
+    }
+
+    pub fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
+        self.engine.read_events()
+    }
+
+    pub fn read_file_store_events(root: impl AsRef<Path>) -> Result<Vec<MemoryStoreEvent>> {
+        crate::file::read_events_from_root(root.as_ref())
     }
 
     pub fn open_in_memory(config: StoreBackendConfig) -> Result<Self> {

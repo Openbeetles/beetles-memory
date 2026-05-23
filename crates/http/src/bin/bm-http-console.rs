@@ -6,16 +6,11 @@ use bm_entry::{
     EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
 use bm_http::{serve_http_listener_once_with_console_services, HttpConsoleServices};
-use bm_ollama_transparent::{
-    FileSystemRunnerInstaller, OllamaTransparentConfig, SystemPortOwnerObserver,
-    SystemProcessManager, TransparentController,
-};
 use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
 
 fn main() -> bm_sdk::Result<()> {
     let options = ConsoleServerOptions::from_args(std::env::args().skip(1))?;
     let runtime = EntryRuntime::open(options.runtime_config())?;
-    let ollama_transparent = options.ollama_transparent_controller()?;
     let listener = TcpListener::bind(&options.addr)
         .map_err(|err| bm_sdk::Error::config("http_console_bind", err.to_string()))?;
     println!(
@@ -32,7 +27,7 @@ fn main() -> bm_sdk::Result<()> {
         if let Err(err) = serve_http_listener_once_with_console_services(
             &runtime,
             &listener,
-            HttpConsoleServices::with_ollama_transparent(&ollama_transparent),
+            HttpConsoleServices::none(),
         ) {
             eprintln!("http console request failed: {err}");
         }
@@ -121,41 +116,6 @@ impl ConsoleServerOptions {
             idempotency: EntryIdempotencyConfig { max_keys: 4096 },
             privacy: MemoryPrivacyPolicy::standard_private_boundary(),
             capability,
-        }
-    }
-
-    fn ollama_transparent_controller(
-        &self,
-    ) -> bm_sdk::Result<
-        TransparentController<
-            SystemPortOwnerObserver,
-            FileSystemRunnerInstaller,
-            SystemProcessManager,
-        >,
-    > {
-        let config = OllamaTransparentConfig::for_data_dir(self.ollama_data_dir());
-        let ports = SystemPortOwnerObserver::new(config.port_owner_classifier());
-        TransparentController::new(
-            config,
-            ports,
-            FileSystemRunnerInstaller,
-            SystemProcessManager::default(),
-        )
-        .map_err(|error| {
-            bm_sdk::Error::config(
-                "ollama_transparent",
-                format!("controller init failed: {error}"),
-            )
-        })
-    }
-
-    fn ollama_data_dir(&self) -> PathBuf {
-        match &self.store {
-            ConsoleStore::File(path) => path
-                .parent()
-                .map(|parent| parent.join("ollama-transparent"))
-                .unwrap_or_else(|| PathBuf::from("target/bm-http-console-ollama")),
-            ConsoleStore::InMemory => PathBuf::from("target/bm-http-console-ollama"),
         }
     }
 }

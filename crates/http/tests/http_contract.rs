@@ -33,6 +33,7 @@ fn console_route_catalog_is_separate_from_memory_operations() {
         route.method == HttpMethod::Patch && route.path == "/console/transports/{id}"
     }));
     for (method, path) in [
+        (HttpMethod::Get, "/console/capabilities"),
         (HttpMethod::Get, "/console/ollama-transparent/status"),
         (HttpMethod::Post, "/console/ollama-transparent/preflight"),
         (HttpMethod::Post, "/console/ollama-transparent/enable"),

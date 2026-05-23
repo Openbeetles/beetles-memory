@@ -10,6 +10,7 @@
   } from "../lib/console-api";
   import type { ConsoleCopy } from "../lib/i18n";
   import type {
+    ConsoleApiCapabilities,
     ConsoleApiLlmGateway,
     ConsoleApiLlmGatewaySmokeCheck,
     ConsoleApiLlmGatewaySmokeRunReport,
@@ -26,6 +27,7 @@
   let {
     t,
     llmGateway,
+    consoleCapabilities,
     ollamaTransparent,
     backendConnected,
     onRefresh,
@@ -33,6 +35,7 @@
   }: {
     t: ConsoleCopy;
     llmGateway: ConsoleApiLlmGateway | null;
+    consoleCapabilities: ConsoleApiCapabilities | null;
     ollamaTransparent: ConsoleApiOllamaTransparentStatus | null;
     backendConnected: boolean;
     onRefresh: () => void | Promise<void>;
@@ -53,16 +56,28 @@
   let transparentEnableConfirmOpen = $state(false);
   let transparentDisableConfirmOpen = $state(false);
 
+  const transparentFeature = $derived(consoleCapabilities?.features.ollamaTransparentApp ?? null);
+  const transparentAvailable = $derived(transparentFeature?.visible === true && ollamaTransparent != null);
   const transparentState = $derived(ollamaTransparent?.state ?? "Disabled");
   const transparentStatus = $derived(transparentStateToStatus(transparentState, backendConnected));
   const transparentShowsDisable = $derived(["Active", "Degraded", "Disabling", "RollingBack"].includes(transparentState));
   const transparentDisabled = $derived(
-    !backendConnected || transparentBusy !== null || ["Enabling", "Disabling", "RollingBack"].includes(transparentState),
+    !transparentAvailable || !backendConnected || transparentBusy !== null || ["Enabling", "Disabling", "RollingBack"].includes(transparentState),
   );
   const transparentReportLine = $derived(visibleTransparentReportLine());
   const transparentReportStatus = $derived(visibleTransparentReportStatus());
   const memoryFlow = $derived(memoryFlowCard());
   const appUse = $derived(appUseCard());
+
+  $effect(() => {
+    if (!transparentAvailable) {
+      transparentEnableConfirmOpen = false;
+      transparentDisableConfirmOpen = false;
+      transparentBusy = null;
+      transparentTransition = null;
+      transparentError = "";
+    }
+  });
 
   type TransparentUserCard = {
     label: string;
@@ -244,7 +259,7 @@
   }
 
   function openTransparentEnableConfirm() {
-    if (transparentDisabled || transparentState === "Active") return;
+    if (!transparentAvailable || transparentDisabled || transparentState === "Active") return;
     transparentError = "";
     transparentEnableConfirmOpen = true;
   }
@@ -254,7 +269,7 @@
   }
 
   function openTransparentDisableConfirm() {
-    if (transparentDisabled || !transparentShowsDisable) return;
+    if (!transparentAvailable || transparentDisabled || !transparentShowsDisable) return;
     transparentError = "";
     transparentDisableConfirmOpen = true;
   }
@@ -264,7 +279,7 @@
   }
 
   async function runTransparentEnable() {
-    if (transparentBusy !== null) return;
+    if (!transparentAvailable || transparentBusy !== null) return;
     if (!backendConnected) {
       transparentError = t.labels.backendOffline;
       return;
@@ -283,7 +298,7 @@
   }
 
   async function runTransparentDisable() {
-    if (transparentBusy !== null) return;
+    if (!transparentAvailable || transparentBusy !== null) return;
     if (!backendConnected) {
       transparentError = t.labels.backendOffline;
       return;
@@ -292,7 +307,7 @@
   }
 
   async function runTransparentAction(action: "disable" | "open"): Promise<boolean> {
-    if (!backendConnected || transparentBusy !== null) return false;
+    if (!transparentAvailable || !backendConnected || transparentBusy !== null) return false;
     transparentBusy = action;
     transparentError = "";
     try {
@@ -414,97 +429,99 @@
     </section>
   </div>
 
-  <section class="panel gateway-transparent-panel">
-    <PanelHeader
-      label={t.llmGatewayPanel.transparent.label}
-      title={t.llmGatewayPanel.transparent.title}
-      icon={Rocket}
-    />
+  {#if transparentAvailable}
+    <section class="panel gateway-transparent-panel">
+      <PanelHeader
+        label={t.llmGatewayPanel.transparent.label}
+        title={t.llmGatewayPanel.transparent.title}
+        icon={Rocket}
+      />
 
-    <div class="gateway-transparent-grid user-facing">
-      <div class={`gateway-transparent-kv ${memoryFlow.status}`}>
-        <span>{memoryFlow.label}</span>
-        <strong>{memoryFlow.value}</strong>
-        <small>{memoryFlow.detail}</small>
-      </div>
-      <div class={`gateway-transparent-kv ${appUse.status}`}>
-        <span>{appUse.label}</span>
-        <strong>{appUse.value}</strong>
-        <small>{appUse.detail}</small>
-      </div>
-    </div>
-
-    <details class="gateway-transparent-diagnostics">
-      <summary>
-        <span>{t.llmGatewayPanel.transparent.diagnostics}</span>
-        <ChevronDown class="diagnostic-chevron" size={14} />
-      </summary>
-      <div class="gateway-transparent-grid diagnostic-grid">
-        <div class="gateway-transparent-kv">
-          <span>{t.llmGatewayPanel.transparent.publicPort}</span>
-          <strong>{ollamaTransparent?.publicPort.bind ?? "127.0.0.1:11434"}</strong>
-          <small>{ownerLabel(ollamaTransparent?.publicPort.owner)} · {portDetail(ollamaTransparent?.publicPort)}</small>
+      <div class="gateway-transparent-grid user-facing">
+        <div class={`gateway-transparent-kv ${memoryFlow.status}`}>
+          <span>{memoryFlow.label}</span>
+          <strong>{memoryFlow.value}</strong>
+          <small>{memoryFlow.detail}</small>
         </div>
-        <div class="gateway-transparent-kv">
-          <span>{t.llmGatewayPanel.transparent.upstreamPort}</span>
-          <strong>{ollamaTransparent?.upstreamPort.bind ?? "127.0.0.1:11435"}</strong>
-          <small>{ownerLabel(ollamaTransparent?.upstreamPort.owner)} · {portDetail(ollamaTransparent?.upstreamPort)}</small>
-        </div>
-        <div class="gateway-transparent-kv">
-          <span>{t.llmGatewayPanel.transparent.managedRunner}</span>
-          <strong>{ollamaTransparent?.managedRunner.installed ? t.llmGatewayPanel.transparent.installed : t.llmGatewayPanel.transparent.notInstalled}</strong>
-          <code title={ollamaTransparent?.managedRunner.managedPath ?? ""}>{ollamaTransparent?.managedRunner.managedPath ?? "—"}</code>
-        </div>
-        <div class="gateway-transparent-kv">
-          <span>{t.llmGatewayPanel.transparent.appBundle}</span>
-          <strong>{ollamaTransparent?.app.openAppAfterEnable ? t.llmGatewayPanel.transparent.openAfterEnable : t.llmGatewayPanel.transparent.openManual}</strong>
-          <code title={ollamaTransparent?.app.bundlePath ?? ""}>{ollamaTransparent?.app.bundlePath ?? "—"}</code>
+        <div class={`gateway-transparent-kv ${appUse.status}`}>
+          <span>{appUse.label}</span>
+          <strong>{appUse.value}</strong>
+          <small>{appUse.detail}</small>
         </div>
       </div>
-    </details>
 
-    <div class="gateway-transparent-actions">
-      {#if transparentShowsDisable}
+      <details class="gateway-transparent-diagnostics">
+        <summary>
+          <span>{t.llmGatewayPanel.transparent.diagnostics}</span>
+          <ChevronDown class="diagnostic-chevron" size={14} />
+        </summary>
+        <div class="gateway-transparent-grid diagnostic-grid">
+          <div class="gateway-transparent-kv">
+            <span>{t.llmGatewayPanel.transparent.publicPort}</span>
+            <strong>{ollamaTransparent?.publicPort.bind ?? "127.0.0.1:11434"}</strong>
+            <small>{ownerLabel(ollamaTransparent?.publicPort.owner)} · {portDetail(ollamaTransparent?.publicPort)}</small>
+          </div>
+          <div class="gateway-transparent-kv">
+            <span>{t.llmGatewayPanel.transparent.upstreamPort}</span>
+            <strong>{ollamaTransparent?.upstreamPort.bind ?? "127.0.0.1:11435"}</strong>
+            <small>{ownerLabel(ollamaTransparent?.upstreamPort.owner)} · {portDetail(ollamaTransparent?.upstreamPort)}</small>
+          </div>
+          <div class="gateway-transparent-kv">
+            <span>{t.llmGatewayPanel.transparent.managedRunner}</span>
+            <strong>{ollamaTransparent?.managedRunner.installed ? t.llmGatewayPanel.transparent.installed : t.llmGatewayPanel.transparent.notInstalled}</strong>
+            <code title={ollamaTransparent?.managedRunner.managedPath ?? ""}>{ollamaTransparent?.managedRunner.managedPath ?? "—"}</code>
+          </div>
+          <div class="gateway-transparent-kv">
+            <span>{t.llmGatewayPanel.transparent.appBundle}</span>
+            <strong>{ollamaTransparent?.app.openAppAfterEnable ? t.llmGatewayPanel.transparent.openAfterEnable : t.llmGatewayPanel.transparent.openManual}</strong>
+            <code title={ollamaTransparent?.app.bundlePath ?? ""}>{ollamaTransparent?.app.bundlePath ?? "—"}</code>
+          </div>
+        </div>
+      </details>
+
+      <div class="gateway-transparent-actions">
+        {#if transparentShowsDisable}
+          <button
+            class="primary-button danger-primary"
+            type="button"
+            disabled={transparentDisabled}
+            onclick={openTransparentDisableConfirm}
+          >
+            {#if transparentBusy === "disable"}<LoaderCircle class="spin-icon" size={14} />{:else}<Power size={14} />{/if}
+            {t.llmGatewayPanel.transparent.disable}
+          </button>
+        {:else}
+          <button
+            class="primary-button success-primary"
+            type="button"
+            disabled={transparentDisabled}
+            onclick={openTransparentEnableConfirm}
+          >
+            {#if transparentBusy === "enable"}<LoaderCircle class="spin-icon" size={14} />{:else}<Power size={14} />{/if}
+            {t.llmGatewayPanel.transparent.enable}
+          </button>
+        {/if}
         <button
-          class="primary-button danger-primary"
+          class="ghost-button"
           type="button"
           disabled={transparentDisabled}
-          onclick={openTransparentDisableConfirm}
+          onclick={() => void runTransparentAction("open")}
         >
-          {#if transparentBusy === "disable"}<LoaderCircle class="spin-icon" size={14} />{:else}<Power size={14} />{/if}
-          {t.llmGatewayPanel.transparent.disable}
+          {#if transparentBusy === "open"}<LoaderCircle class="spin-icon" size={14} />{:else}<ExternalLink size={14} />{/if}
+          {t.llmGatewayPanel.transparent.openApp}
         </button>
-      {:else}
-        <button
-          class="primary-button success-primary"
-          type="button"
-          disabled={transparentDisabled}
-          onclick={openTransparentEnableConfirm}
-        >
-          {#if transparentBusy === "enable"}<LoaderCircle class="spin-icon" size={14} />{:else}<Power size={14} />{/if}
-          {t.llmGatewayPanel.transparent.enable}
-        </button>
+      </div>
+
+      {#if transparentReportLine}
+        <div class={`gateway-transparent-report ${transparentReportStatus}`}>
+          <span class={`badge ${transparentReportStatus}`}>
+            {statusLabel(t, transparentReportStatus)}
+          </span>
+          <p>{transparentReportLine}</p>
+        </div>
       {/if}
-      <button
-        class="ghost-button"
-        type="button"
-        disabled={transparentDisabled}
-        onclick={() => void runTransparentAction("open")}
-      >
-        {#if transparentBusy === "open"}<LoaderCircle class="spin-icon" size={14} />{:else}<ExternalLink size={14} />{/if}
-        {t.llmGatewayPanel.transparent.openApp}
-      </button>
-    </div>
-
-    {#if transparentReportLine}
-      <div class={`gateway-transparent-report ${transparentReportStatus}`}>
-        <span class={`badge ${transparentReportStatus}`}>
-          {statusLabel(t, transparentReportStatus)}
-        </span>
-        <p>{transparentReportLine}</p>
-      </div>
-    {/if}
-  </section>
+    </section>
+  {/if}
 
   <!-- ④ 规则导出：2 列卡片网格，每张卡片充分展示命令 -->
   {#if ruleExports.length > 0}
@@ -537,7 +554,7 @@
     </section>
   {/if}
 
-  {#if transparentEnableConfirmOpen}
+  {#if transparentAvailable && transparentEnableConfirmOpen}
     <ConfirmActionModal
       title={t.llmGatewayPanel.transparent.confirmTitle}
       description={t.llmGatewayPanel.transparent.notice}
@@ -554,7 +571,7 @@
     />
   {/if}
 
-  {#if transparentDisableConfirmOpen}
+  {#if transparentAvailable && transparentDisableConfirmOpen}
     <ConfirmActionModal
       title={t.llmGatewayPanel.transparent.disableConfirmTitle}
       description={t.llmGatewayPanel.transparent.disableNotice}

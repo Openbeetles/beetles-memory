@@ -239,18 +239,7 @@ impl ProcessManager for SystemProcessManager {
         let stdout = log_stdio(config, "transparent-front.stdout.log")?;
         let stderr = log_stdio(config, "transparent-front.stderr.log")?;
         let child = Command::new(&config.gateway_binary_path)
-            .env("BM_LLM_GATEWAY_BIND", config.public_bind.to_string())
-            .env(
-                "BM_LLM_GATEWAY_OLLAMA_BASE_URL",
-                format!("http://{}/api", config.upstream_bind),
-            )
-            .env("BM_LLM_GATEWAY_DEFAULT_PROVIDER", "ollama")
-            .env("BM_LLM_GATEWAY_MAINTENANCE_PROVIDER", "ollama")
-            .env(
-                "BM_LLM_GATEWAY_MAINTENANCE_MODEL",
-                config.maintenance_model.trim(),
-            )
-            .env("BM_MEMORY_STORE_FILE", &config.memory_store_path)
+            .envs(transparent_front_env(config))
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr)
@@ -643,6 +632,51 @@ fn log_stdio(config: &OllamaTransparentConfig, name: &str) -> Result<Stdio> {
         })
 }
 
+fn transparent_front_env(config: &OllamaTransparentConfig) -> Vec<(String, String)> {
+    vec![
+        (
+            "BM_LLM_GATEWAY_BIND".to_string(),
+            config.public_bind.to_string(),
+        ),
+        (
+            "BM_LLM_GATEWAY_OLLAMA_BASE_URL".to_string(),
+            format!("http://{}/api", config.upstream_bind),
+        ),
+        (
+            "BM_LLM_GATEWAY_DEFAULT_PROVIDER".to_string(),
+            "ollama".to_string(),
+        ),
+        (
+            "BM_LLM_GATEWAY_MAINTENANCE_PROVIDER".to_string(),
+            "ollama".to_string(),
+        ),
+        (
+            "BM_LLM_GATEWAY_MAINTENANCE_MODEL".to_string(),
+            config.maintenance_model.trim().to_string(),
+        ),
+        (
+            "BM_MEMORY_STORE_FILE".to_string(),
+            config.memory_store_path.display().to_string(),
+        ),
+        (
+            "BM_LLM_GATEWAY_SCOPE_PROFILE".to_string(),
+            "ollama_app".to_string(),
+        ),
+        (
+            "BM_LLM_GATEWAY_OLLAMA_APP_ID".to_string(),
+            "ollama-app".to_string(),
+        ),
+        // Chat identity stays resolver-owned; setting BM_MEMORY_CHAT_ID here
+        // would collapse every Ollama App conversation into one permanent scope.
+        (
+            "BM_MEMORY_OWNER_ID".to_string(),
+            "owner-default".to_string(),
+        ),
+        ("BM_MEMORY_AGENT_ID".to_string(), "agent-main".to_string()),
+        ("BM_MEMORY_CHANNEL".to_string(), "llm.gateway".to_string()),
+    ]
+}
+
 fn read_log_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
@@ -730,4 +764,32 @@ fn probe_ollama_http_with_retry(
             "timed out probing {target} at {bind}"
         ))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transparent_front_env_enables_ollama_app_scope_with_stable_local_identity() {
+        let config = OllamaTransparentConfig::for_data_dir("/tmp/beetle-memory-test-data");
+
+        let env = transparent_front_env(&config);
+
+        assert!(env.contains(&(
+            "BM_LLM_GATEWAY_SCOPE_PROFILE".to_string(),
+            "ollama_app".to_string()
+        )));
+        assert!(env.contains(&(
+            "BM_LLM_GATEWAY_OLLAMA_APP_ID".to_string(),
+            "ollama-app".to_string()
+        )));
+        assert!(env.contains(&(
+            "BM_MEMORY_OWNER_ID".to_string(),
+            "owner-default".to_string()
+        )));
+        assert!(env.contains(&("BM_MEMORY_AGENT_ID".to_string(), "agent-main".to_string())));
+        assert!(env.contains(&("BM_MEMORY_CHANNEL".to_string(), "llm.gateway".to_string())));
+        assert!(!env.iter().any(|(name, _)| name == "BM_MEMORY_CHAT_ID"));
+    }
 }

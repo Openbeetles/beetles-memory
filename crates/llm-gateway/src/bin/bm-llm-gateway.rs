@@ -138,6 +138,17 @@ fn apply_shared_memory_runtime_env(config: &mut GatewayConfig) {
     if let Ok(chat_id) = std::env::var("BM_MEMORY_CHAT_ID") {
         config.scope.default_chat_id = Some(chat_id);
     }
+    if matches!(
+        std::env::var("BM_LLM_GATEWAY_SCOPE_PROFILE").as_deref(),
+        Ok("ollama_app")
+    ) {
+        config.scope.ollama_app.enabled = true;
+        if let Ok(identity) = std::env::var("BM_LLM_GATEWAY_OLLAMA_APP_ID") {
+            config.scope.ollama_app.local_app_identity = identity;
+        } else {
+            config.scope.ollama_app.local_app_identity = "ollama-app".to_string();
+        }
+    }
 }
 
 fn env_truthy(name: &str) -> bool {

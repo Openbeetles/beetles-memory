@@ -43,8 +43,9 @@ pub use bm_core::skills::{
 pub use bm_core::task::{TaskItem, TaskPriority, TaskQuery, TaskStatus};
 pub use bm_core::{Error, Result};
 pub use bm_store::{
-    profile_memory_system_kind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget,
-    StoreOpenReport, StorePlatform, StoreRepairPolicy, StoreRepairReport,
+    profile_memory_system_kind, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
+    StoreBackendKind, StoreCapacityBudget, StoreEventLog, StoreEventScope, StoreOpenReport,
+    StorePlatform, StoreRepairPolicy, StoreRepairReport,
 };
 pub use capability::{
     resolve_memory_capabilities, AdapterTransportVisibility, MemoryAdapterCapabilityCatalog,

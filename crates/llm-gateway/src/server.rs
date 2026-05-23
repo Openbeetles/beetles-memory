@@ -242,10 +242,9 @@ fn read_http_gateway_request(stream: &mut impl Read) -> Result<HttpGatewayReques
     let scope = GatewayScopeRequest {
         headers: headers.clone(),
         workspace_root_digest: headers.get("x-bm-workspace-digest").cloned(),
-        client_conversation_hint: headers
-            .get("x-bm-conversation-id")
-            .or_else(|| headers.get("x-request-id"))
-            .cloned(),
+        client_conversation_hint: headers.get("x-bm-conversation-id").cloned(),
+        request_id_hint: headers.get("x-request-id").cloned(),
+        body_conversation_hint: body.as_ref().and_then(extract_body_conversation_hint),
         ..GatewayScopeRequest::default()
     };
     let provider_name = headers.get("x-bm-provider").cloned();
@@ -256,6 +255,27 @@ fn read_http_gateway_request(stream: &mut impl Read) -> Result<HttpGatewayReques
         body,
         scope,
         provider_name,
+    })
+}
+
+fn extract_body_conversation_hint(body: &serde_json::Value) -> Option<String> {
+    let object = body.as_object()?;
+    [
+        "conversation_id",
+        "conversationId",
+        "chat_id",
+        "chatId",
+        "session_id",
+        "sessionId",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     })
 }
 

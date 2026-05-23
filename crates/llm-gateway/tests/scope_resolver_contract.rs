@@ -1,5 +1,6 @@
 use bm_llm_gateway::{
-    GatewayScopeRequest, GatewayScopeResolver, GatewayScopeResolverConfig, GatewayTrustedHeaders,
+    GatewayOllamaAppScopeConfig, GatewayScopeRequest, GatewayScopeResolver,
+    GatewayScopeResolverConfig, GatewayTrustedHeaders,
 };
 
 #[test]
@@ -11,6 +12,7 @@ fn scope_resolver_never_accepts_owner_from_untrusted_headers() {
         default_channel: "llm.gateway".to_string(),
         default_chat_id: None,
         trusted_headers: GatewayTrustedHeaders::none(),
+        ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
     let mut request = GatewayScopeRequest::default();
     request.headers.insert(
@@ -35,6 +37,7 @@ fn scope_resolver_owner_source_order_uses_auth_then_local_then_first_run() {
         default_channel: "llm.gateway".to_string(),
         default_chat_id: None,
         trusted_headers: GatewayTrustedHeaders::none(),
+        ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
     let resolved = resolver
         .resolve(&GatewayScopeRequest {
@@ -51,6 +54,7 @@ fn scope_resolver_owner_source_order_uses_auth_then_local_then_first_run() {
         default_channel: "llm.gateway".to_string(),
         default_chat_id: None,
         trusted_headers: GatewayTrustedHeaders::none(),
+        ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
     let resolved = resolver
         .resolve(&GatewayScopeRequest::default())
@@ -71,6 +75,7 @@ fn scope_resolver_uses_trusted_agent_channel_chat_headers_and_auth_owner_first()
             channel: Some("x-bm-channel".to_string()),
             chat_id: Some("x-bm-chat-id".to_string()),
         },
+        ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
     let mut request = GatewayScopeRequest {
         auth_subject: Some("token-owner".to_string()),
@@ -103,6 +108,7 @@ fn scope_resolver_can_use_configured_default_chat_id_for_local_gateway_and_mcp_p
         default_channel: "llm.gateway".to_string(),
         default_chat_id: Some("chat-shared".to_string()),
         trusted_headers: GatewayTrustedHeaders::none(),
+        ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
 
     let resolved = resolver
@@ -139,4 +145,87 @@ fn scope_resolver_stable_hash_changes_by_workspace_digest_without_leaking_path()
         resolved_right.entry_scope.scope.chat_id
     );
     assert!(!resolved_left_a.audit_safe_summary.contains("/Users/alice"));
+}
+
+#[test]
+fn non_ollama_app_scope_preserves_request_id_fallback() {
+    let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig::default_for_local_dev());
+    let base = GatewayScopeRequest {
+        model_alias: Some("local-model".to_string()),
+        ..GatewayScopeRequest::default()
+    };
+    let mut first = base.clone();
+    first.request_id_hint = Some("request-a".to_string());
+    let mut second = base;
+    second.request_id_hint = Some("request-b".to_string());
+
+    let resolved_first = resolver.resolve(&first).expect("resolve first");
+    let resolved_second = resolver.resolve(&second).expect("resolve second");
+
+    assert_ne!(
+        resolved_first.entry_scope.scope.chat_id,
+        resolved_second.entry_scope.scope.chat_id
+    );
+}
+
+#[test]
+fn ollama_app_scope_ignores_transient_request_id_for_internal_new_chat_requests() {
+    let mut config = GatewayScopeResolverConfig::default_for_local_dev();
+    config.ollama_app = GatewayOllamaAppScopeConfig {
+        enabled: true,
+        local_app_identity: "ollama-app".to_string(),
+    };
+    let resolver = GatewayScopeResolver::new(config);
+    let base = GatewayScopeRequest {
+        model_alias: Some("qwen3.5:0.8b".to_string()),
+        ..GatewayScopeRequest::default()
+    };
+    let mut first = base.clone();
+    first.request_id_hint = Some("request-a".to_string());
+    let mut second = base;
+    second.request_id_hint = Some("request-b".to_string());
+
+    let resolved_first = resolver.resolve(&first).expect("resolve first");
+    let resolved_second = resolver.resolve(&second).expect("resolve second");
+
+    assert_eq!(
+        resolved_first.entry_scope.scope.chat_id,
+        resolved_second.entry_scope.scope.chat_id
+    );
+    assert!(resolved_first
+        .audit_safe_summary
+        .contains("ollama_app_hint_source=local_app_daily_bucket"));
+    assert!(!resolved_first.audit_safe_summary.contains("request-a"));
+}
+
+#[test]
+fn ollama_app_scope_prefers_referer_chat_path_over_daily_bucket() {
+    let mut config = GatewayScopeResolverConfig::default_for_local_dev();
+    config.ollama_app = GatewayOllamaAppScopeConfig {
+        enabled: true,
+        local_app_identity: "ollama-app".to_string(),
+    };
+    let resolver = GatewayScopeResolver::new(config);
+    let mut request = GatewayScopeRequest {
+        model_alias: Some("qwen3.5:0.8b".to_string()),
+        ..GatewayScopeRequest::default()
+    };
+    request.headers.insert(
+        "referer".to_string(),
+        "app://ollama/c/chat-from-ollama-ui".to_string(),
+    );
+    request.request_id_hint = Some("transient-request".to_string());
+
+    let resolved_a = resolver.resolve(&request).expect("resolve a");
+    request.request_id_hint = Some("another-transient-request".to_string());
+    let resolved_b = resolver.resolve(&request).expect("resolve b");
+
+    assert_eq!(
+        resolved_a.entry_scope.scope.chat_id,
+        resolved_b.entry_scope.scope.chat_id
+    );
+    assert!(resolved_a
+        .audit_safe_summary
+        .contains("ollama_app_hint_source=referer_chat_path"));
+    assert!(!resolved_a.audit_safe_summary.contains("transient-request"));
 }
