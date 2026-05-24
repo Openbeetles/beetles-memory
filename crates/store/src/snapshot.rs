@@ -77,6 +77,9 @@ impl StoreSnapshot {
             event.kind_name.hash(&mut hasher);
             event.scope.agent_id.hash(&mut hasher);
             event.scope.owner_id.hash(&mut hasher);
+            event.scope.memory_space_id.hash(&mut hasher);
+            event.scope.subject_id.hash(&mut hasher);
+            event.scope.conversation_id.hash(&mut hasher);
             event.scope.channel.hash(&mut hasher);
             event.scope.chat_id.hash(&mut hasher);
             event.plane.hash(&mut hasher);

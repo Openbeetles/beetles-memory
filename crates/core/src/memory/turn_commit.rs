@@ -132,6 +132,26 @@ pub struct MemoryTurnSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationScope {
+    pub channel: String,
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalTurnDelta {
+    pub turn_id: String,
+    pub conversation: ConversationScope,
+    pub delivery_status: MemoryTurnDeliveryStatus,
+    pub source: MemoryTurnSource,
+    #[serde(default)]
+    pub input_messages: Vec<TranscriptInputMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<TranscriptInputMessage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTurnCommitInput {
     pub delivery_status: MemoryTurnDeliveryStatus,
     pub source: MemoryTurnSource,
@@ -224,6 +244,58 @@ pub fn commit_session_turn(
         committed_messages,
         skipped_reason: None,
     })
+}
+
+pub fn commit_canonical_turn_delta(
+    session_store: &dyn SessionStore,
+    delta: &CanonicalTurnDelta,
+) -> Result<SessionTurnCommitReport> {
+    let chat_id = delta.conversation.chat_id.as_str();
+    let before_count = session_store.message_count(chat_id)?;
+    let recent_records = session_store.load_recent_records(chat_id, MAX_SESSION_ENTRIES)?;
+    let user_delta = canonical_user_delta(&recent_records, &delta.input_messages);
+    let assistant_content = delta
+        .assistant_message
+        .as_ref()
+        .filter(|message| message.is_role("assistant"))
+        .map(|message| message.content.trim())
+        .filter(|content| !content.is_empty());
+    let assistant_already_committed = assistant_content.is_some_and(|content| {
+        recent_records
+            .iter()
+            .rev()
+            .find(|record| record.role.eq_ignore_ascii_case("assistant"))
+            .is_some_and(|record| record.content.trim() == content)
+    });
+    if user_delta.is_empty() && assistant_already_committed {
+        return Ok(SessionTurnCommitReport {
+            attempted: true,
+            committed: false,
+            chat_id: chat_id.to_string(),
+            before_count,
+            after_count: before_count,
+            committed_messages: Vec::new(),
+            skipped_reason: Some("canonical_turn_delta_already_committed".to_string()),
+        });
+    }
+
+    commit_session_turn(
+        session_store,
+        chat_id,
+        SessionTurnCommitInput {
+            delivery_status: delta.delivery_status,
+            source: delta.source.clone(),
+            user_content: user_delta
+                .last()
+                .map(|message| message.content.clone())
+                .unwrap_or_default(),
+            input_messages: delta.input_messages.clone(),
+            assistant_content: delta
+                .assistant_message
+                .as_ref()
+                .map(|message| message.content.clone()),
+        },
+    )
 }
 
 fn push_user_delta(

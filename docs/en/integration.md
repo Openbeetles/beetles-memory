@@ -142,11 +142,50 @@ if capabilities.lifecycle.maintain_lightweight.visible {
 }
 ```
 
-## 8. Export, Import, And Replay
+## 8. Submit Memory Candidates, Not Store Mutations
+
+Hosts should submit candidate facts or procedures and let Beetle Memory decide
+which memory plane may change. This keeps SDK, HTTP, gateway, and future hosts
+on the same memory-governance contract.
 
 ```rust
 use bm_sdk::{
-    ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest, MemoryReplayRequest,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryWriteCandidate,
+    MemoryWriteRequest,
+};
+
+runtime.write(MemoryWriteRequest::Candidates {
+    candidates: vec![MemoryWriteCandidate {
+        candidate_id: "turn-1:preferred-name".to_string(),
+        authority: MemoryEvidenceAuthority::UserAsserted,
+        target: MemoryCandidateTarget::LongTermMemory {
+            kind: LongTermMemoryKind::Profile,
+            topic: "preferred_name".to_string(),
+        },
+        privacy: MemoryPrivacyClass::SharedWithSubject,
+        content: MemoryCandidateContent::Text {
+            topic: "preferred_name".to_string(),
+            body: "The user prefers to be called Qingchuan.".to_string(),
+            keywords: vec!["name".to_string()],
+        },
+        evidence_refs: vec!["chat-1:turn-1".to_string()],
+    }],
+})?;
+```
+
+If post-turn LLM services are unavailable, `finalize_turn_and_maintain` still
+commits the transcript and writes a deferred governance job under
+`memory/governance_jobs/pending.json`; hosts must not reimplement this queue.
+
+## 9. Export, Import, And Replay
+
+```rust
+use bm_sdk::{
+    apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
+    ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest,
+    MemoryReplayRequest, MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest,
+    MemorySpaceMigratePreviewRequest,
 };
 
 let exported = runtime.export(MemoryExportRequest {
@@ -163,11 +202,34 @@ let replay = runtime.replay(MemoryReplayRequest {
     chat_id: "chat-2".to_string(),
     limit: 32,
 })?;
+
+let space = export_memory_space(
+    &store_platform,
+    MemorySpaceExportRequest {
+        memory_space_id: "space-main".to_string(),
+        include_private: true,
+    },
+)?;
+let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
+    source_memory_space_id: "space-main".to_string(),
+    target_memory_space_id: "space-copy".to_string(),
+    snapshot: space.snapshot.clone(),
+});
+if !preview.loss_risk {
+    apply_memory_space_migration(
+        &target_store_platform,
+        MemorySpaceMigrateApplyRequest {
+            target_memory_space_id: "space-copy".to_string(),
+            snapshot: space.snapshot,
+        },
+    )?;
+}
 ```
 
 Use `BootstrapImport` for limited bootstrap migration and `FullRestore` when restoring full continuity state.
+Use memory-space export/preview/apply when replacing a host memory implementation or moving a configured SDK store.
 
-## 9. Check Capabilities Before Exposing UI Or Tools
+## 10. Check Capabilities Before Exposing UI Or Tools
 
 ```rust
 let catalog = runtime.capabilities();
@@ -178,13 +240,14 @@ if catalog.adapter.http.visible {
 
 Do not expose a protocol or operation just because the crate compiles. The capability catalog is the runtime truth.
 
-## 10. Suggested Host Tests
+## 11. Suggested Host Tests
 
 Add a smoke test in the integrating project that:
 
 1. Opens the selected store backend.
 2. Builds `MemoryRuntime`.
-3. Writes one procedural memory item.
-4. Recalls it by query.
-5. Projects a memory block under the host's expected context budget.
-6. Exports and imports a snapshot if migration is part of the product.
+3. Injects `Arc<dyn Platform>` into `MemoryRuntime`.
+4. Writes one `MemoryWriteCandidate` and checks the governance report.
+5. Finalizes one turn with maintenance unavailable and verifies a deferred job.
+6. Recalls or projects the candidate-backed memory from a different chat.
+7. Exports and imports a snapshot if migration is part of the product.

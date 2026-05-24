@@ -1,7 +1,7 @@
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
     MemoryHygieneInspection, MemoryTurnDeliveryStatus, MemoryTurnSource,
-    PostTurnMemoryGovernanceReport, TranscriptInputMessage,
+    PostTurnMemoryGovernanceReport, PostTurnSemanticGovernanceReport, TranscriptInputMessage,
 };
 
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     IntelligenceReplayInspection, MemoryCapabilityCatalog, ParsedLongTermMemoryExtraction,
     PostReplyMemoryMaintenanceOutcome, PromptMemoryContext, RuntimeSkillHit,
     RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteOutcome, RuntimeSkillWriteSource,
-    WorkingRecallInspection,
+    StoreSnapshot, StoreSnapshotExportReport, StoreSnapshotImportReport, WorkingRecallInspection,
 };
 use crate::{
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleModeInput, RuntimeLifecycleReport,
@@ -123,6 +123,9 @@ pub enum MemoryWriteRequest {
     LongTermExtraction {
         extraction: ParsedLongTermMemoryExtraction,
     },
+    Candidates {
+        candidates: Vec<bm_core::memory::MemoryWriteCandidate>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +135,7 @@ pub struct MemoryWriteReport {
     pub operation: &'static str,
     pub reason: String,
     pub lifecycle_report: RuntimeLifecycleReport,
+    pub semantic_governance: Option<PostTurnSemanticGovernanceReport>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +257,65 @@ pub struct MemoryImportRequest {
 pub struct MemoryImportReport {
     pub outcome: ContinuitySnapshotImportOutcome,
     pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceExportRequest {
+    pub memory_space_id: String,
+    pub include_private: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySpaceExportReport {
+    pub memory_space_id: String,
+    pub snapshot: StoreSnapshot,
+    pub export_report: StoreSnapshotExportReport,
+    pub privacy_redactions: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySpaceImportRequest {
+    pub memory_space_id: String,
+    pub snapshot: StoreSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceImportReport {
+    pub memory_space_id: String,
+    pub import_report: StoreSnapshotImportReport,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySpaceMigratePreviewRequest {
+    pub source_memory_space_id: String,
+    pub target_memory_space_id: String,
+    pub snapshot: StoreSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceMigratePreviewReport {
+    pub source_memory_space_id: String,
+    pub target_memory_space_id: String,
+    pub schema_id: String,
+    pub json_docs: usize,
+    pub blobs: usize,
+    pub events: usize,
+    pub state_fingerprint: String,
+    pub event_fingerprint: String,
+    pub privacy_redactions: usize,
+    pub loss_risk: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySpaceMigrateApplyRequest {
+    pub target_memory_space_id: String,
+    pub snapshot: StoreSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceMigrateApplyReport {
+    pub target_memory_space_id: String,
+    pub import_report: StoreSnapshotImportReport,
 }
 
 #[derive(Clone, Debug)]

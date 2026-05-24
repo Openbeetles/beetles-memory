@@ -10,17 +10,18 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
     apply_long_term_memory_extraction, commit_session_turn, export_continuity_snapshot,
-    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
-    inspect_working_recall, load_prompt_memory_context, run_long_term_memory_refresh,
-    run_post_reply_memory_maintenance, run_private_garden_governance,
-    ContinuitySnapshotExportContext, ContinuitySnapshotImportContext, ContinuitySnapshotMode,
+    govern_write_candidates, import_continuity_snapshot, inspect_intelligence_replay,
+    inspect_memory_hygiene, inspect_working_recall, load_prompt_memory_context,
+    run_long_term_memory_refresh, run_post_reply_memory_maintenance, run_private_garden_governance,
+    write_governed_shared_memory, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
+    ContinuitySnapshotMode, DeferredGovernanceJob, DeferredGovernanceJobStatus,
     GovernedWriteDecision, IngressKind, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
     LongTermMemoryRefreshRequestOutcome, MemoryHygieneContext, MemoryPlaneGovernanceReport,
     MemoryWriteAuthority, MemoryWriteDomain, PostReplyMemoryMaintenanceContext,
     PostReplyMemoryMaintenanceInput, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
     PrivateGardenGovernanceContext, PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome,
     PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, SessionTurnCommitInput,
-    WorkingRecallInspectionInput,
+    SharedMemoryWriteSource, WorkingRecallInspectionInput,
 };
 use bm_core::platform::Platform;
 use bm_core::resource::RuntimeResourceSnapshot;
@@ -208,6 +209,7 @@ impl MemoryRuntime {
                         "write.procedural",
                         &[("changed_count", outcome.changed.to_string())],
                     )?,
+                    semantic_governance: None,
                 }
             }
             MemoryWriteRequest::LongTermExtraction { extraction } => {
@@ -232,6 +234,86 @@ impl MemoryRuntime {
                         "write.long_term_extraction",
                         &[("changed_count", changed.to_string())],
                     )?,
+                    semantic_governance: None,
+                }
+            }
+            MemoryWriteRequest::Candidates { candidates } => {
+                let semantic_governance = govern_write_candidates(&candidates);
+                let accepted_drafts = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        semantic_governance.plane_reports.iter().any(|report| {
+                            report.decision == GovernedWriteDecision::Accepted
+                                && report
+                                    .evidence_refs
+                                    .iter()
+                                    .any(|item| item == &candidate.candidate_id)
+                        })
+                    })
+                    .filter_map(|candidate| {
+                        candidate.to_long_term_draft(&self.config.scope.chat_id, now_secs)
+                    })
+                    .collect::<Vec<_>>();
+                let accepted_skill_writes = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        semantic_governance.plane_reports.iter().any(|report| {
+                            report.decision == GovernedWriteDecision::Accepted
+                                && report
+                                    .evidence_refs
+                                    .iter()
+                                    .any(|item| item == &candidate.candidate_id)
+                        })
+                    })
+                    .filter_map(|candidate| {
+                        candidate.to_runtime_skill_write(&self.config.scope.chat_id, now_secs)
+                    })
+                    .collect::<Vec<_>>();
+                let long_term_changed = if accepted_drafts.is_empty() {
+                    0
+                } else {
+                    let store = self.config.platform.long_term_memory_store();
+                    let outcome = write_governed_shared_memory(
+                        store.as_ref(),
+                        &accepted_drafts,
+                        now_secs,
+                        SharedMemoryWriteSource::ManualTool,
+                    )?;
+                    outcome.changed
+                };
+                let skill_changed = if accepted_skill_writes.is_empty() {
+                    0
+                } else {
+                    let storage = self.config.platform.skill_storage();
+                    let writes = normalize_runtime_skill_write_names(accepted_skill_writes);
+                    write_governed_runtime_skills(
+                        storage.as_ref(),
+                        &writes,
+                        RuntimeSkillWriteSource::Manual,
+                    )?
+                    .changed
+                };
+                let changed = long_term_changed + skill_changed;
+                MemoryWriteReport {
+                    accepted: semantic_governance.rejected_count == 0,
+                    changed,
+                    operation: "write.candidates",
+                    reason: format!(
+                        "submitted={}, accepted={}, rejected={}, deferred={}",
+                        semantic_governance.proposal_count,
+                        semantic_governance.accepted_count,
+                        semantic_governance.rejected_count,
+                        semantic_governance.deferred_count
+                    ),
+                    lifecycle_report: self.finish_lifecycle_success_with_payload(
+                        lifecycle,
+                        RuntimeLifecycleEventKind::RuntimeLifecycle,
+                        RuntimeLifecycleEffect::RunMaintenance,
+                        changed > 0,
+                        "write.candidates",
+                        &[("changed_count", changed.to_string())],
+                    )?,
+                    semantic_governance: Some(semantic_governance),
                 }
             }
         };
@@ -1095,6 +1177,13 @@ impl MemoryRuntime {
         pressure: PressureLevel,
         reason: &'static str,
     ) -> Result<MemoryTurnFinalizeReport> {
+        enqueue_deferred_governance_job(
+            self.config.platform.as_ref(),
+            &self.config.scope,
+            &session_commit,
+            reason,
+            self.config.clock.now_secs(),
+        )?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::PostReply,
@@ -1111,7 +1200,10 @@ impl MemoryRuntime {
             session_commit,
             maintenance: None,
             private_garden_self_work: PostTurnPrivateGardenReport::skipped(reason),
-            semantic_governance: PostTurnSemanticGovernanceReport::skipped(reason),
+            semantic_governance: PostTurnSemanticGovernanceReport::deferred(
+                reason,
+                "post_turn_governance",
+            ),
             lifecycle_report,
         })
     }
@@ -1821,6 +1913,61 @@ fn semantic_report_from_maintenance(
     }
 }
 
+const REL_PATH_DEFERRED_GOVERNANCE_JOBS: &str = "memory/governance_jobs/pending.json";
+
+fn enqueue_deferred_governance_job(
+    platform: &dyn Platform,
+    scope: &MemoryScope,
+    session_commit: &bm_core::memory::SessionTurnCommitReport,
+    reason: &'static str,
+    now_secs: u64,
+) -> Result<()> {
+    if !session_commit.committed {
+        return Ok(());
+    }
+    let state_fs = platform.state_fs();
+    let mut jobs = match state_fs.read(REL_PATH_DEFERRED_GOVERNANCE_JOBS)? {
+        Some(bytes) if !bytes.is_empty() => {
+            serde_json::from_slice::<Vec<DeferredGovernanceJob>>(&bytes)
+                .map_err(|error| Error::config("deferred_governance_jobs", error.to_string()))?
+        }
+        _ => Vec::new(),
+    };
+    let idempotency_key = format!(
+        "{}:{}:{}",
+        scope.channel, session_commit.chat_id, session_commit.after_count
+    );
+    if jobs
+        .iter()
+        .any(|job| job.idempotency_key == idempotency_key)
+    {
+        return Ok(());
+    }
+    jobs.push(DeferredGovernanceJob {
+        job_id: format!("governance-{:016x}", fnv1a64(idempotency_key.as_bytes())),
+        idempotency_key,
+        status: DeferredGovernanceJobStatus::Pending,
+        chat_id: session_commit.chat_id.clone(),
+        conversation_id: None,
+        reason: reason.to_string(),
+        created_at: now_secs,
+        attempts: 0,
+    });
+    let bytes = serde_json::to_vec_pretty(&jobs)
+        .map_err(|error| Error::config("deferred_governance_jobs", error.to_string()))?;
+    state_fs.write(REL_PATH_DEFERRED_GOVERNANCE_JOBS, &bytes)?;
+    Ok(())
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 fn bound_text_for_budget(value: &str, max_chars: usize, max_bytes: usize) -> String {
     let mut out = value.chars().take(max_chars).collect::<String>();
     if out.len() > max_bytes {
@@ -2073,6 +2220,11 @@ impl MemoryRuntimeBuilder {
 
     pub fn store_platform(mut self, platform: StorePlatform) -> Self {
         self.platform = Some(platform.into_arc());
+        self
+    }
+
+    pub fn platform(mut self, platform: Arc<dyn Platform>) -> Self {
+        self.platform = Some(platform);
         self
     }
 

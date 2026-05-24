@@ -88,6 +88,7 @@ mod turn_continuity_evidence;
 mod turn_ledger;
 mod work_continuity;
 mod world_sense;
+mod write_candidate;
 mod write_coordination;
 
 #[cfg(all(
@@ -296,7 +297,8 @@ pub use personality_closure::{
     PersonalityGovernanceRepairPlan, PersonalityRuntimeGovernanceGate,
 };
 pub use post_turn_governance::{
-    GovernedWriteDecision, MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
+    DeferredGovernanceJob, DeferredGovernanceJobStatus, GovernedWriteDecision,
+    MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
     PostTurnMemoryGovernanceReport, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
     PrivateGardenAdmissionDecision, SoulCandidateDisposition, SoulCandidateHandoffReport,
 };
@@ -457,9 +459,10 @@ pub use temperament_continuity::{
     TEMPERAMENT_CONTINUITY_TOTAL_CHAR_LIMIT,
 };
 pub use turn_commit::{
-    canonical_user_delta, commit_session_turn, CommittedSessionMessage, MemoryEvidenceAuthority,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitInput,
-    SessionTurnCommitReport, TranscriptInputMessage,
+    canonical_user_delta, commit_canonical_turn_delta, commit_session_turn, CanonicalTurnDelta,
+    CommittedSessionMessage, ConversationScope, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
+    MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitInput, SessionTurnCommitReport,
+    TranscriptInputMessage,
 };
 pub use turn_continuity_evidence::{
     TurnContinuityEvidence, TurnContinuityEvidenceStore, REL_PATH_TURN_CONTINUITY_EVIDENCE,
@@ -496,6 +499,10 @@ pub use world_sense::{
 };
 pub(crate) use world_sense::{
     build_world_snapshot_from_commitments, load_world_snapshot_reminders, load_world_snapshot_tasks,
+};
+pub use write_candidate::{
+    govern_write_candidates, MemoryCandidateContent, MemoryCandidateTarget, MemoryPrivacyClass,
+    MemoryWriteCandidate,
 };
 pub(crate) use write_coordination::whole_record_lease_advanced;
 

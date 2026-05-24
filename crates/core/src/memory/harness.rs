@@ -866,6 +866,7 @@ impl LlmClient for DeterministicReplayLlm {
                     "keywords": ["Chinese", "engineering", "review"],
                     "source_type": "conversation",
                     "source_scope": "user",
+                    "source_authority": "user_asserted",
                     "confidence": "high",
                     "freshness": "stable",
                     "stale_hint": "none"

@@ -149,6 +149,52 @@ impl PostTurnSemanticGovernanceReport {
             soul_candidate_handoffs: Vec::new(),
         }
     }
+
+    pub fn deferred(reason: impl Into<String>, plane: impl Into<String>) -> Self {
+        let reason = reason.into();
+        Self {
+            attempted: true,
+            executed: false,
+            skipped_reason: Some(reason.clone()),
+            proposal_count: 1,
+            accepted_count: 0,
+            rejected_count: 0,
+            deferred_count: 1,
+            plane_reports: vec![MemoryPlaneGovernanceReport {
+                domain: MemoryWriteDomain::Program,
+                plane: plane.into(),
+                authority: MemoryWriteAuthority::RuntimeDeterministic,
+                decision: GovernedWriteDecision::Deferred,
+                reason,
+                evidence_refs: Vec::new(),
+                privacy_decision: "deferred_without_semantic_mutation".to_string(),
+                profile_decision: "runtime_admission_or_service_unavailable".to_string(),
+            }],
+            soul_candidate_handoffs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredGovernanceJobStatus {
+    Pending,
+    Retrying,
+    Failed,
+    Terminal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredGovernanceJob {
+    pub job_id: String,
+    pub idempotency_key: String,
+    pub status: DeferredGovernanceJobStatus,
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub reason: String,
+    pub created_at: u64,
+    pub attempts: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

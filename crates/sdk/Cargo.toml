@@ -60,6 +60,4 @@ profile-server-linux-dev-full = [
 bm-core.workspace = true
 bm-store.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

@@ -2052,8 +2052,8 @@ mod tests {
         assert!(input.contains("## Shared factual reconcile"));
         assert!(input.contains("## Archive evidence"));
         assert!(input.contains("## Recent conversation"));
-        assert!(input.contains("USER: 最近我们在做长期记忆重构。"));
-        assert!(input.contains("ASSISTANT: 这轮先把提取输入和解析从 agent loop 里拆出去。"));
+        assert!(input.contains("USER [source_authority=user_asserted]: 最近我们在做长期记忆重构。"));
+        assert!(input.contains("ASSISTANT [source_authority=assistant_utterance]: 这轮先把提取输入和解析从 agent loop 里拆出去。"));
     }
 
     #[test]
@@ -2151,10 +2151,10 @@ mod tests {
     fn parse_extraction_response_skips_invalid_items_but_keeps_valid_ones() {
         let raw = r#"
         [
-          {"op":"upsert","kind":"preference","topic":"response_style","content":"User prefers concise answers.","keywords":["concise"]},
+          {"op":"upsert","kind":"preference","topic":"response_style","content":"User prefers concise answers.","keywords":["concise"],"source_authority":"user_asserted"},
           {"op":"upsert","kind":"preference","content":"missing topic should be ignored"},
           {"op":"delete","kind":"task","topic":"current_focus"},
-          {"op":"upsert","kind":"task","topic":"current_focus","content":"Continue memory redesign","keywords":["memory"]}
+          {"op":"upsert","kind":"task","topic":"current_focus","content":"Continue memory redesign","keywords":["memory"],"source_authority":"user_asserted"}
         ]
         "#;
         let parsed = parse_long_term_memory_extraction_response(raw, "chat-1");
@@ -2169,8 +2169,8 @@ mod tests {
         let raw = r#"
         [
           {"op":"delete","kind":"task","topic":"current_focus"},
-          {"op":"upsert","kind":"task","topic":"current_focus","content":"Continue memory redesign","keywords":["memory"]},
-          {"op":"upsert","kind":"profile","topic":"user_name","content":"甲壳虫"},
+          {"op":"upsert","kind":"task","topic":"current_focus","content":"Continue memory redesign","keywords":["memory"],"source_authority":"user_asserted"},
+          {"op":"upsert","kind":"profile","topic":"user_name","content":"甲壳虫","source_authority":"user_asserted"},
           {"op":"delete","kind":"profile","topic":"user_name"}
         ]
         "#;

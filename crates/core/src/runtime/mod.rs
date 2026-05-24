@@ -158,7 +158,87 @@ impl Default for RuntimeModeActionBudget {
 pub enum RuntimeForegroundSource {
     #[default]
     User,
+    ExternalUserMessage,
+    LocalAppChat,
+    RealtimeVoiceSession,
+    VoiceFallbackInteraction,
+    ManualOperatorAction,
     System,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeObservation {
+    #[serde(default)]
+    pub foreground_source: Option<RuntimeForegroundSource>,
+    #[serde(default)]
+    pub streaming_response: bool,
+    #[serde(default)]
+    pub critical_turn: bool,
+    #[serde(default)]
+    pub network_recovery_active: bool,
+    #[serde(default)]
+    pub body_pressure_bytes: Option<u64>,
+    #[serde(default)]
+    pub queue_pressure_items: Option<u64>,
+    #[serde(default)]
+    pub pressure: crate::orchestrator::PressureLevel,
+}
+
+impl RuntimeObservation {
+    pub fn foreground(source: RuntimeForegroundSource) -> Self {
+        Self {
+            foreground_source: Some(source),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_streaming_response(mut self, streaming_response: bool) -> Self {
+        self.streaming_response = streaming_response;
+        self
+    }
+
+    pub fn with_critical_turn(mut self, critical_turn: bool) -> Self {
+        self.critical_turn = critical_turn;
+        self
+    }
+
+    pub fn with_pressure(mut self, pressure: crate::orchestrator::PressureLevel) -> Self {
+        self.pressure = pressure;
+        self
+    }
+
+    pub fn to_mode_input(self) -> RuntimeLifecycleModeInput {
+        let mut input = RuntimeLifecycleModeInput::default();
+        input.pressure = if self.critical_turn {
+            crate::orchestrator::PressureLevel::Critical
+        } else {
+            self.pressure
+        };
+        if let Some(source) = self.foreground_source {
+            input.foreground = RuntimeForegroundOverlay {
+                active: true,
+                active_count: 1,
+                primary_source: Some(source),
+                ..RuntimeForegroundOverlay::default()
+            };
+            input.voice_exclusive_active = matches!(
+                source,
+                RuntimeForegroundSource::RealtimeVoiceSession
+                    | RuntimeForegroundSource::VoiceFallbackInteraction
+            );
+        }
+        if self.network_recovery_active {
+            input.foreground.recovery_active = true;
+            input.foreground.recovery_source = self.foreground_source;
+        }
+        input
+    }
+}
+
+impl RuntimeLifecycleModeInput {
+    pub fn from_observation(observation: RuntimeObservation) -> Self {
+        observation.to_mode_input()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

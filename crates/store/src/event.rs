@@ -37,6 +37,12 @@ pub struct StoreEventScope {
     pub owner_id: String,
     pub channel: String,
     pub chat_id: String,
+    #[serde(default)]
+    pub memory_space_id: String,
+    #[serde(default)]
+    pub subject_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
 }
 
 impl StoreEventScope {
@@ -46,11 +52,15 @@ impl StoreEventScope {
         channel: impl Into<String>,
         chat_id: impl Into<String>,
     ) -> Self {
+        let owner_id = owner_id.into();
         Self {
             agent_id: agent_id.into(),
-            owner_id: owner_id.into(),
+            memory_space_id: owner_id.clone(),
+            subject_id: owner_id.clone(),
+            owner_id,
             channel: channel.into(),
             chat_id: chat_id.into(),
+            conversation_id: None,
         }
     }
 
@@ -60,7 +70,25 @@ impl StoreEventScope {
             owner_id: "system".to_string(),
             channel: "runtime".to_string(),
             chat_id: operation.into(),
+            memory_space_id: "system".to_string(),
+            subject_id: "system".to_string(),
+            conversation_id: None,
         }
+    }
+
+    pub fn with_memory_space(mut self, memory_space_id: impl Into<String>) -> Self {
+        self.memory_space_id = memory_space_id.into();
+        self
+    }
+
+    pub fn with_subject(mut self, subject_id: impl Into<String>) -> Self {
+        self.subject_id = subject_id.into();
+        self
+    }
+
+    pub fn with_conversation(mut self, conversation_id: impl Into<String>) -> Self {
+        self.conversation_id = Some(conversation_id.into());
+        self
     }
 }
 

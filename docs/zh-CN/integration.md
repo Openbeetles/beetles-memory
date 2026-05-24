@@ -142,11 +142,48 @@ if capabilities.lifecycle.maintain_lightweight.visible {
 }
 ```
 
-## 8. Export、Import、Replay
+## 8. 提交记忆候选，不直接改存储面
+
+宿主应该提交候选事实或流程，由 Beetle Memory 判断能不能写、写到哪个记忆面。
+这样 SDK、HTTP、gateway、后续任意宿主都会走同一套记忆治理合同。
 
 ```rust
 use bm_sdk::{
-    ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest, MemoryReplayRequest,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryWriteCandidate,
+    MemoryWriteRequest,
+};
+
+runtime.write(MemoryWriteRequest::Candidates {
+    candidates: vec![MemoryWriteCandidate {
+        candidate_id: "turn-1:preferred-name".to_string(),
+        authority: MemoryEvidenceAuthority::UserAsserted,
+        target: MemoryCandidateTarget::LongTermMemory {
+            kind: LongTermMemoryKind::Profile,
+            topic: "preferred_name".to_string(),
+        },
+        privacy: MemoryPrivacyClass::SharedWithSubject,
+        content: MemoryCandidateContent::Text {
+            topic: "preferred_name".to_string(),
+            body: "The user prefers to be called Qingchuan.".to_string(),
+            keywords: vec!["name".to_string()],
+        },
+        evidence_refs: vec!["chat-1:turn-1".to_string()],
+    }],
+})?;
+```
+
+如果 post-turn LLM 服务暂时不可用，`finalize_turn_and_maintain` 仍会先提交会话，
+并在 `memory/governance_jobs/pending.json` 写入待恢复治理任务；宿主不能自己重做这条队列。
+
+## 9. Export、Import、Replay
+
+```rust
+use bm_sdk::{
+    apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
+    ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest,
+    MemoryReplayRequest, MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest,
+    MemorySpaceMigratePreviewRequest,
 };
 
 let exported = runtime.export(MemoryExportRequest {
@@ -163,11 +200,34 @@ let replay = runtime.replay(MemoryReplayRequest {
     chat_id: "chat-2".to_string(),
     limit: 32,
 })?;
+
+let space = export_memory_space(
+    &store_platform,
+    MemorySpaceExportRequest {
+        memory_space_id: "space-main".to_string(),
+        include_private: true,
+    },
+)?;
+let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
+    source_memory_space_id: "space-main".to_string(),
+    target_memory_space_id: "space-copy".to_string(),
+    snapshot: space.snapshot.clone(),
+});
+if !preview.loss_risk {
+    apply_memory_space_migration(
+        &target_store_platform,
+        MemorySpaceMigrateApplyRequest {
+            target_memory_space_id: "space-copy".to_string(),
+            snapshot: space.snapshot,
+        },
+    )?;
+}
 ```
 
 有限启动迁移使用 `BootstrapImport`，完整连续性恢复使用 `FullRestore`。
+替换宿主记忆实现或迁移一份已配置 SDK store 时，使用 memory-space export/preview/apply。
 
-## 9. 暴露 UI 或工具前检查能力
+## 10. 暴露 UI 或工具前检查能力
 
 ```rust
 let catalog = runtime.capabilities();
@@ -178,13 +238,14 @@ if catalog.adapter.http.visible {
 
 不要因为 crate 能编译就暴露某个协议或操作。Capability catalog 才是运行时真相。
 
-## 10. 建议宿主测试
+## 11. 建议宿主测试
 
 集成项目至少增加一个 smoke test：
 
 1. 打开选定 store backend。
 2. 构建 `MemoryRuntime`。
-3. 写入一条 procedural memory。
-4. 按 query 召回它。
-5. 按宿主上下文预算生成 memory block。
-6. 如果产品包含迁移，测试 snapshot export/import。
+3. 把 `Arc<dyn Platform>` 注入 `MemoryRuntime`。
+4. 写入一条 `MemoryWriteCandidate`，检查 governance report。
+5. 在维护不可用时 finalize 一轮 turn，验证 deferred job。
+6. 从另一个 chat 召回或投影 candidate 写入的记忆。
+7. 如果产品包含迁移，测试 snapshot export/import。
