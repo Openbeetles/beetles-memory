@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BookOpen, Pencil, Plus, Search, Trash2, Upload } from "lucide-svelte";
+  import { BookOpen, LoaderCircle, Pencil, Plus, Search, Trash2, Upload } from "lucide-svelte";
   import SkillDeleteModal from "../components/SkillDeleteModal.svelte";
   import SkillEditorModal from "../components/SkillEditorModal.svelte";
   import { deleteSkill, fetchSkill, setSkillEnabled, upsertSkill } from "../lib/console-api";
@@ -48,9 +48,17 @@
   let skillSearch = $state("");
   let skillStatusFilter: "all" | "active" | "disabled" | "retired" = $state("all");
   let skillOriginFilter: "all" | "user_provided" | "runtime_learned" = $state("all");
+  let selectingSkillName: string | null = $state(null);
+  let skillFormSubmitting = $state(false);
+  let skillToggleBusyName: string | null = $state(null);
+  let skillDeleting = $state(false);
+  let skillFileReading = $state(false);
 
   const selectedSkillSummary = $derived(skills.find((skill) => skill.name === selectedSkillName) ?? selectedSkill?.summary ?? null);
   const filteredSkills = $derived(filterSkills(skills, skillSearch, skillStatusFilter, skillOriginFilter));
+  const skillOperationBusy = $derived(
+    selectingSkillName !== null || skillFormSubmitting || skillToggleBusyName !== null || skillDeleting || skillFileReading,
+  );
 
   $effect(() => {
     if (selectedSkillName && !skills.some((skill) => skill.name === selectedSkillName)) {
@@ -69,17 +77,19 @@
   }
 
   function openSkillCreate() {
+    if (skillOperationBusy) return;
     resetSkillForm();
     skillModal = "create";
   }
 
   function openSkillImport() {
+    if (skillOperationBusy) return;
     resetSkillForm();
     skillModal = "import";
   }
 
   function openSkillEdit() {
-    if (!selectedSkill) return;
+    if (!selectedSkill || skillOperationBusy) return;
     skillForm = {
       title: selectedSkill.summary.title,
       topic: selectedSkill.summary.topic,
@@ -92,29 +102,40 @@
   }
 
   function openSkillDelete() {
-    if (!selectedSkillSummary) return;
+    if (!selectedSkillSummary || skillOperationBusy) return;
     skillError = "";
     skillModal = "delete";
   }
 
   function closeSkillModal() {
+    if (skillFormSubmitting || skillDeleting || skillFileReading) return;
+    resetSkillModal();
+  }
+
+  function resetSkillModal() {
     skillModal = null;
     skillError = "";
   }
 
   async function selectSkill(name: string) {
+    if (selectingSkillName !== null) return;
     selectedSkillName = name;
+    selectedSkill = null;
     if (!backendConnected) return;
+    selectingSkillName = name;
     try {
       selectedSkill = await fetchSkill(name);
     } catch {
       selectedSkill = null;
       onBackendDisconnected();
+    } finally {
+      if (selectingSkillName === name) selectingSkillName = null;
     }
   }
 
   async function submitSkillForm(e: SubmitEvent) {
     e.preventDefault();
+    if (skillFormSubmitting) return;
     if (!backendConnected) {
       skillError = t.labels.backendOffline;
       return;
@@ -128,6 +149,7 @@
       return;
     }
     const name = skillModal === "edit" ? selectedSkill?.summary.name : undefined;
+    skillFormSubmitting = true;
     try {
       const mutation = await upsertSkill(name, {
         title,
@@ -136,52 +158,70 @@
         procedure,
         citations: parseCitations(skillForm.citations),
       });
-      closeSkillModal();
+      resetSkillModal();
       await onRefresh();
       await selectSkill(mutation.name);
     } catch (error) {
       skillError = error instanceof Error ? error.message : String(error);
       onBackendDisconnected();
+    } finally {
+      skillFormSubmitting = false;
     }
   }
 
   async function toggleSkillEnabled(skill: ConsoleApiSkillSummary) {
-    if (!backendConnected) return;
+    if (!backendConnected || skillToggleBusyName !== null) return;
+    skillToggleBusyName = skill.name;
     try {
       await setSkillEnabled(skill.name, !skill.enabled);
       await onRefresh();
       if (selectedSkillName === skill.name) await selectSkill(skill.name);
     } catch {
       onBackendDisconnected();
+    } finally {
+      if (skillToggleBusyName === skill.name) skillToggleBusyName = null;
     }
   }
 
-  async function deleteSelectedSkill() {
-    if (!selectedSkillSummary || !backendConnected) return;
+  async function runSkillDelete(skillName: string) {
+    if (skillDeleting) return;
+    if (!backendConnected) {
+      skillError = t.labels.backendOffline;
+      return;
+    }
+    skillDeleting = true;
     try {
-      await deleteSkill(selectedSkillSummary.name);
-      closeSkillModal();
+      await deleteSkill(skillName);
       selectedSkillName = null;
       selectedSkill = null;
       await onRefresh();
     } catch (error) {
       skillError = error instanceof Error ? error.message : String(error);
       onBackendDisconnected();
+    } finally {
+      skillDeleting = false;
     }
   }
 
   async function readSkillFile(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    skillForm = {
-      ...skillForm,
-      title: skillForm.title || file.name.replace(/\.[^.]+$/, ""),
-      procedure: text,
-      summary: skillForm.summary || text.trim().split(/\r?\n/).find(Boolean)?.slice(0, 180) || "",
-    };
-    input.value = "";
+    if (!file || skillFileReading) return;
+    skillFileReading = true;
+    try {
+      const text = await file.text();
+      skillForm = {
+        ...skillForm,
+        title: skillForm.title || file.name.replace(/\.[^.]+$/, ""),
+        procedure: text,
+        summary: skillForm.summary || text.trim().split(/\r?\n/).find(Boolean)?.slice(0, 180) || "",
+      };
+    } catch (error) {
+      skillError = error instanceof Error ? error.message : String(error);
+    } finally {
+      input.value = "";
+      skillFileReading = false;
+    }
   }
 </script>
 
@@ -192,10 +232,10 @@
       <h3>{t.skillsPanel.title}</h3>
     </div>
     <div class="panel-title-actions">
-      <button class="ghost-button" type="button" onclick={openSkillImport}>
+      <button class="ghost-button" type="button" onclick={openSkillImport} disabled={skillOperationBusy}>
         <Upload size={13} /> {t.actions.importSkill}
       </button>
-      <button class="primary-button" type="button" onclick={openSkillCreate}>
+      <button class="primary-button" type="button" onclick={openSkillCreate} disabled={skillOperationBusy}>
         <Plus size={13} /> {t.actions.createSkill}
       </button>
     </div>
@@ -208,10 +248,10 @@
     <div><span>{t.skillsPanel.userProvided}</span><strong>{skillReport?.userProvided ?? 0}</strong></div>
   </div>
   <div class="skill-toolbar">
-    <label class="skill-search">
-      <span><Search size={13} /> {t.skillsPanel.search}</span>
+    <div class="skill-search">
+      <span class="skill-search-icon-wrap"><Search size={13} /></span>
       <input value={skillSearch} placeholder={t.skillsPanel.search} oninput={(event) => (skillSearch = (event.currentTarget as HTMLInputElement).value)} />
-    </label>
+    </div>
     <div class="skill-filters">
       <select value={skillStatusFilter} onchange={(event) => (skillStatusFilter = (event.currentTarget as HTMLSelectElement).value as typeof skillStatusFilter)}>
         <option value="all">{t.skillsPanel.all}</option>
@@ -228,6 +268,10 @@
   </div>
 </div>
 
+{#if skillError && skillModal === null}
+  <p class="panel-action-error">{skillError}</p>
+{/if}
+
 <div class="skill-layout">
   <article class="panel skill-list-panel">
     <div class="skill-list">
@@ -239,6 +283,7 @@
             class:active={selectedSkillName === skill.name}
             class="skill-row"
             type="button"
+            disabled={selectingSkillName !== null}
             onclick={() => void selectSkill(skill.name)}
           >
             <span class="skill-row-main">
@@ -246,6 +291,7 @@
               <small>{skill.topic} · {skill.name}</small>
             </span>
             <span class="skill-row-meta">
+              {#if selectingSkillName === skill.name}<LoaderCircle class="spin-icon" size={12} />{/if}
               <span class={`badge ${skill.enabled ? skill.status : "disabled"}`}>{skill.enabled ? statusLabel(t, skill.status) : statusLabel(t, "disabled")}</span>
               <span>{skillOriginLabel(t, skill.origin)}</span>
               <span>{t.skillsPanel.quality}: {skillQuality(skill)}</span>
@@ -265,11 +311,15 @@
           <h3>{selectedSkillSummary.title}</h3>
         </div>
         <div class="panel-title-actions">
-          <button class="ghost-button" type="button" onclick={() => void toggleSkillEnabled(selectedSkillSummary)} disabled={!backendConnected}>
+          <button class="ghost-button" type="button" onclick={() => void toggleSkillEnabled(selectedSkillSummary)} disabled={!backendConnected || skillOperationBusy}>
+            {#if skillToggleBusyName === selectedSkillSummary.name}<LoaderCircle class="spin-icon" size={13} />{/if}
             {selectedSkillSummary.enabled ? t.actions.disable : t.actions.enable}
           </button>
-          <button class="ghost-button" type="button" onclick={openSkillEdit}><Pencil size={13} /> {t.actions.edit}</button>
-          <button class="ghost-button danger-button" type="button" onclick={openSkillDelete}><Trash2 size={13} /> {t.actions.delete}</button>
+          <button class="ghost-button" type="button" onclick={openSkillEdit} disabled={skillOperationBusy}><Pencil size={13} /> {t.actions.edit}</button>
+          <button class="ghost-button danger-button" type="button" onclick={openSkillDelete} disabled={skillOperationBusy}>
+            {#if skillDeleting}<LoaderCircle class="spin-icon" size={13} />{:else}<Trash2 size={13} />{/if}
+            {t.actions.delete}
+          </button>
         </div>
       </div>
 
@@ -333,6 +383,8 @@
     mode={skillModal}
     form={skillForm}
     error={skillError}
+    loading={skillFormSubmitting}
+    readFileLoading={skillFileReading}
     onClose={closeSkillModal}
     onSubmit={(event) => void submitSkillForm(event)}
     onReadFile={(event) => void readSkillFile(event)}
@@ -341,11 +393,11 @@
 {/if}
 
 {#if skillModal === "delete" && selectedSkillSummary}
+  {@const skillNameToDelete = selectedSkillSummary.name}
   <SkillDeleteModal
     {t}
     skill={selectedSkillSummary}
-    error={skillError}
     onClose={closeSkillModal}
-    onDelete={() => void deleteSelectedSkill()}
+    onDelete={() => void runSkillDelete(skillNameToDelete)}
   />
 {/if}

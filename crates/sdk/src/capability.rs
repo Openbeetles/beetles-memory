@@ -209,6 +209,7 @@ pub struct MemoryEntryRuntimeCapabilityCatalog {
     pub wss_server: AdapterTransportVisibility,
     pub mcp_server: AdapterTransportVisibility,
     pub a2a_bridge: AdapterTransportVisibility,
+    pub llm_gateway_server: AdapterTransportVisibility,
 }
 
 impl MemoryEntryRuntimeCapabilityCatalog {
@@ -220,6 +221,7 @@ impl MemoryEntryRuntimeCapabilityCatalog {
             wss_server: AdapterTransportVisibility::hidden(),
             mcp_server: AdapterTransportVisibility::hidden(),
             a2a_bridge: AdapterTransportVisibility::hidden(),
+            llm_gateway_server: AdapterTransportVisibility::hidden(),
         }
     }
 }
@@ -417,6 +419,10 @@ impl MemoryCapabilityCatalog {
                     entry.adapter.a2a,
                     policy.communication_adapter_enabled && policy.adapter.a2a_enabled,
                     EntryMode::Server,
+                ),
+                llm_gateway_server: entry_server_surface_visible(
+                    entry.llm_gateway_server_allowed,
+                    policy.communication_adapter_enabled,
                 ),
             },
             lifecycle: MemoryRuntimeLifecycleCapability {
@@ -653,6 +659,23 @@ fn entry_visible(
         server_allowed: matches!(mode, EntryMode::Server) && profile.server_allowed,
         private_data_allowed: profile.private_data_allowed,
         visible: profile.allowed && mode_allowed && config_enabled,
+    }
+}
+
+fn entry_server_surface_visible(
+    profile_allowed: bool,
+    config_enabled: bool,
+) -> AdapterTransportVisibility {
+    AdapterTransportVisibility {
+        profile_allowed,
+        compiled: true,
+        config_enabled,
+        permission_allowed: true,
+        privacy_allowed: true,
+        client_allowed: false,
+        server_allowed: profile_allowed,
+        private_data_allowed: false,
+        visible: profile_allowed && config_enabled,
     }
 }
 

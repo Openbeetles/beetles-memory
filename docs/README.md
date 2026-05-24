@@ -11,6 +11,7 @@ English topics:
 
 - [Architecture](en/architecture.md)
 - [Integration Guide](en/integration.md)
+- [LLM Gateway Integrations](en/llm-gateway-integrations.md)
 - [Deployment Guide](en/deployment.md)
 - [CLI Usage](en/cli-usage.md)
 - [Getting Started](en/getting-started.md)
@@ -26,6 +27,7 @@ English topics:
 
 - [架构文档](zh-CN/architecture.md)
 - [集成文档](zh-CN/integration.md)
+- [LLM Gateway 集成](zh-CN/llm-gateway-integrations.md)
 - [部署文档](zh-CN/deployment.md)
 - [CLI 使用](zh-CN/cli-usage.md)
 - [快速开始](zh-CN/getting-started.md)

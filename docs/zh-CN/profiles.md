@@ -12,8 +12,8 @@ Profile 把目标平台和运行角色绑定在一起。它控制 feature select
 | `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file 或 sqlite | in-process Tauri command surface 加可选本地 transport |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface |
-| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file | HTTP、WebSocket、MCP、A2A gateway surface |
-| `profile-server-linux-dev-full` | Linux server | development full profile | sqlite、file 或 in-memory | 完整 adapter 和 replay validation surface |
+| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file | 允许 HTTP、WebSocket、MCP、A2A 与 LLM gateway server surface；运行时 visible 仍取决于 capability policy 和 transport config |
+| `profile-server-linux-dev-full` | Linux server | development full profile | sqlite、file 或 in-memory | 允许完整 adapter、LLM gateway server 和 replay validation surface；运行时 visible 仍取决于 capability policy 和 transport config |
 
 ## 命名
 
@@ -34,10 +34,14 @@ cargo run -p bm-cli --bin bm -- \
 - ESP profile 会拒绝 `file` 和 `sqlite` store backend。
 - Linux device、desktop 和 server profile 在启用对应 profile/store feature 后可以使用 sqlite。
 - `profile-server-linux-dev-full` 是开发 profile，不能当成嵌入式默认 profile。
+- `llm_gateway_server` 只属于 server Linux memory gateway / dev-full profile；ESP、device 与 desktop embedded SDK profile 不暴露这个 entry surface。
+- Profile catalog 表达某个 surface 是否被该 profile 允许。运行时 `EntryCapabilityView.visible` 是 profile allowed、enabled capability policy 和 `EntryTransportConfig` 三者共同生效后的结果。
 
 ## Snapshot Fixtures
 
 Platform capability fixtures 位于 `fixtures/platform/capabilities/`。刷新或检查命令：
+
+这些 fixtures 是 strict policy snapshot；strict policy 默认关闭 communication adapter，因此 server profile 可以出现 `entry.llm_gateway_server.server_allowed=true` 但 `visible=false`。这表示 profile 允许该 server surface，但当前 snapshot policy 没有把它打开。
 
 ```bash
 bash scripts/emit_platform_capability_snapshots.sh --write

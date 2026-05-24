@@ -1,6 +1,6 @@
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::Platform;
-use bm_store::{StoreBackendConfig, StoreEventLog, StorePlatform};
+use bm_store::{StoreBackendConfig, StorePlatform};
 
 #[test]
 fn embedded_store_uses_bounded_event_ring_without_sqlite() {
@@ -40,7 +40,7 @@ fn embedded_sdk_store_keeps_lightweight_runtime_paths_available() {
 }
 
 #[test]
-fn embedded_store_enforces_snapshot_byte_budget() {
+fn embedded_store_enforces_snapshot_runtime_budget() {
     let mut config = StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory).unwrap();
     config.capacity.snapshot_max_bytes = 64;
 
@@ -57,7 +57,7 @@ fn embedded_store_enforces_snapshot_byte_budget() {
         .export_store_snapshot()
         .expect_err("oversized embedded snapshot must be rejected");
 
-    assert_eq!(err.stage(), "embedded_store_quota");
+    assert_eq!(err.stage(), "store_budget_exceeded");
     assert!(err.to_string().contains("snapshot"));
 }
 

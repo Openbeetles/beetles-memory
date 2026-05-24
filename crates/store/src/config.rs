@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use bm_core::budget::{RuntimeBudgetReport, StoreRuntimeBudget};
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::MemorySystemKind;
 use bm_core::{Error, Result};
@@ -41,6 +42,15 @@ pub struct StoreCapacityBudget {
 }
 
 impl StoreCapacityBudget {
+    pub const fn from_runtime_budget(budget: StoreRuntimeBudget) -> Self {
+        Self {
+            event_log_max_items: budget.event_log_max_items,
+            kv_max_entries: budget.kv_max_entries,
+            blob_max_bytes: budget.blob_max_bytes,
+            snapshot_max_bytes: budget.snapshot_max_bytes,
+        }
+    }
+
     pub const fn full() -> Self {
         Self {
             event_log_max_items: 20_000,
@@ -114,6 +124,11 @@ impl StoreBackendConfig {
         self
     }
 
+    pub fn with_runtime_store_budget(mut self, budget: StoreRuntimeBudget) -> Self {
+        self.capacity = StoreCapacityBudget::from_runtime_budget(budget);
+        self
+    }
+
     fn new(
         backend: StoreBackendKind,
         profile: ProfileId,
@@ -177,16 +192,8 @@ pub const fn profile_is_esp(profile: ProfileId) -> bool {
     )
 }
 
-fn default_capacity(backend: StoreBackendKind, profile: ProfileId) -> StoreCapacityBudget {
-    match (backend, profile) {
-        (StoreBackendKind::Embedded, ProfileId::EspStandaloneMemory) => {
-            StoreCapacityBudget::embedded_standalone()
-        }
-        (StoreBackendKind::Embedded, ProfileId::EspEmbeddedSdk) => {
-            StoreCapacityBudget::embedded_sdk()
-        }
-        (_, ProfileId::EspEmbeddedSdk) => StoreCapacityBudget::embedded_sdk(),
-        (_, ProfileId::EspStandaloneMemory) => StoreCapacityBudget::embedded_standalone(),
-        _ => StoreCapacityBudget::full(),
-    }
+fn default_capacity(_backend: StoreBackendKind, profile: ProfileId) -> StoreCapacityBudget {
+    StoreCapacityBudget::from_runtime_budget(
+        RuntimeBudgetReport::static_for_profile(profile).store_budget,
+    )
 }

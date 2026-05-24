@@ -38,6 +38,15 @@ for profile in "${profiles[@]}"; do
   cargo check -p bm-sdk --no-default-features --features "$profile"
 done
 
+gateway_profiles=(
+  profile-server-linux-memory-gateway
+  profile-server-linux-dev-full
+)
+
+for profile in "${gateway_profiles[@]}"; do
+  cargo check -p bm-llm-gateway --no-default-features --features "$profile"
+done
+
 if [[ "$mode" == "--host-only" ]]; then
   echo "OK: host platform compile gates passed"
   exit 0

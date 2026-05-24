@@ -17,13 +17,18 @@ pub use config::{
 pub use console::{
     EntryConsoleCapabilityRow, EntryConsoleDevice, EntryConsoleDeviceCreate,
     EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleEvent, EntryConsoleKv,
-    EntryConsoleMetric, EntryConsoleOverview, EntryConsoleRuntimeShape, EntryConsoleSession,
-    EntryConsoleSkillDetail, EntryConsoleSkillList, EntryConsoleSkillMutation,
-    EntryConsoleSkillSetEnabled, EntryConsoleSkillSummary, EntryConsoleSkillUpsert,
-    EntryConsoleState, EntryConsoleSystemInfo, EntryConsoleTransport, EntryConsoleTransportUpdate,
+    EntryConsoleLlmGateway, EntryConsoleLlmGatewayProtocol, EntryConsoleLlmGatewayRuleExport,
+    EntryConsoleLlmGatewaySmokeCheck, EntryConsoleLlmGatewaySmokeRunReport, EntryConsoleMetric,
+    EntryConsoleOverview, EntryConsoleRuntimeShape, EntryConsoleSession, EntryConsoleSkillDetail,
+    EntryConsoleSkillList, EntryConsoleSkillMutation, EntryConsoleSkillSetEnabled,
+    EntryConsoleSkillSummary, EntryConsoleSkillUpsert, EntryConsoleState, EntryConsoleSystemInfo,
+    EntryConsoleTransport, EntryConsoleTransportUpdate,
 };
 pub use error::EntryErrorKey;
 pub use idempotency::EntryIdempotencyCache;
 pub use response::{EntryResponse, EntryResponseStatus};
-pub use runtime::{entry_capability_view, EntryRuntime, EntryRuntimeConfig};
+pub use runtime::{
+    entry_capability_view, EntryRuntime, EntryRuntimeBaseConfig, EntryRuntimeConfig,
+    EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope,
+};
 pub use source::EntryTransportContext;

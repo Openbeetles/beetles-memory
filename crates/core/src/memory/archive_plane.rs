@@ -6,72 +6,47 @@ use crate::util::truncate_content_to_max;
 use super::{
     memory_capability_profile, render_turn_observation_ledger_block,
     search_archive_records_detailed, select_archive_hits_for_prompt_with_report,
-    ArchivePromptSelectionReport, ArchiveSearchQuery, ArchiveSearchQueryReport, MemoryProfile,
-    MAX_ARCHIVE_SEARCH_LIMIT,
+    ArchiveSearchQuery, MemoryProfile, MAX_ARCHIVE_SEARCH_LIMIT,
 };
 
 const MAX_ARCHIVE_EVIDENCE_BLOCK_LEN: usize = 768;
 const MIN_ARCHIVE_EVIDENCE_BLOCK_LEN: usize = 220;
 
-fn render_archive_trace_summary(hit: &super::ArchiveSearchHit) -> Option<String> {
-    let trace = hit.retrieval_trace.as_ref()?;
-    let mut parts = Vec::with_capacity(4);
-    if let Some(reason) = trace.ranking_reason.as_deref() {
-        parts.push(reason.to_string());
+fn archive_prompt_source_label(source: super::ArchiveRecordSource) -> &'static str {
+    match source {
+        super::ArchiveRecordSource::Transcript => "conversation record",
+        super::ArchiveRecordSource::DailyNote => "daily memory note",
+        super::ArchiveRecordSource::TurnLog => "turn record",
     }
-    if let Some(reason) = trace.source_reason.as_deref() {
-        parts.push(reason.to_string());
-    }
-    if let Some(reason) = trace.recency_reason.as_deref() {
-        parts.push(reason.to_string());
-    }
-    if let Some(reason) = trace.selector_reason.as_deref() {
-        parts.push(reason.to_string());
-    }
-    if parts.is_empty() {
-        None
+}
+
+fn archive_prompt_cues(hit: &super::ArchiveSearchHit) -> String {
+    let cues = hit
+        .cues
+        .iter()
+        .filter_map(|cue| {
+            let cue = cue.trim();
+            if cue.is_empty() || cue.starts_with("match:") || cue.starts_with("recent+") {
+                None
+            } else {
+                Some(cue)
+            }
+        })
+        .collect::<Vec<_>>();
+    if cues.is_empty() {
+        "supporting evidence".to_string()
     } else {
-        Some(truncate_content_to_max(&parts.join("; "), 180).into_owned())
+        cues.join(", ")
     }
 }
 
-fn render_archive_recall_note(
-    search_report: &ArchiveSearchQueryReport,
-    selector_report: Option<&ArchivePromptSelectionReport>,
-) -> Option<String> {
-    let mut parts = vec![
-        format!("backend={:?}", search_report.backend),
-        format!("candidates={}", search_report.candidate_count),
-        format!("hits={}", search_report.returned_hit_count),
-    ];
-    if let Some(selector_report) = selector_report {
-        parts.push(format!("selected={}", selector_report.selected_hits));
-    }
-    if let Some(reason) = search_report.miss_reason.as_deref() {
-        parts.push(format!("miss={reason}"));
-    }
-    if let Some(note) = selector_report.and_then(|report| report.selection_note.as_deref()) {
-        parts.push(format!("selector={note}"));
-    }
-    (!parts.is_empty()).then(|| format!("- recall trace: {}", parts.join("; ")))
-}
-
-fn prepend_archive_recall_note(
-    mut block: String,
-    search_report: &ArchiveSearchQueryReport,
-    selector_report: Option<&ArchivePromptSelectionReport>,
-    block_max_len: usize,
-) -> String {
-    let Some(note) = render_archive_recall_note(search_report, selector_report) else {
-        return block;
-    };
-    if let Some(insert_at) = block.find('\n') {
-        let insertion = format!("{note}\n");
-        if block.len().saturating_add(insertion.len()) <= block_max_len {
-            block.insert_str(insert_at.saturating_add(1), &insertion);
-        }
-    }
-    truncate_content_to_max(block.trim_end(), block_max_len).into_owned()
+fn render_archive_prompt_hit(hit: &super::ArchiveSearchHit) -> String {
+    format!(
+        "- [{}] {} ({})",
+        archive_prompt_source_label(hit.source),
+        hit.excerpt,
+        archive_prompt_cues(hit)
+    )
 }
 
 pub fn build_archive_evidence_block(
@@ -108,7 +83,6 @@ pub fn build_archive_evidence_block(
         profile,
         block_max_len.saturating_sub(128),
     );
-    let selection_report = selection.report.clone();
     let selected = selection.hits;
     if selected.is_empty() {
         return build_archive_fallback_block(
@@ -117,57 +91,15 @@ pub fn build_archive_evidence_block(
             turn_ledger_store,
             chat_id,
             block_max_len,
-        )
-        .map(|block| {
-            prepend_archive_recall_note(
-                block,
-                &search.report,
-                Some(&selection_report),
-                block_max_len,
-            )
-        })
-        .or_else(|| {
-            render_archive_recall_note(&search.report, Some(&selection_report)).map(|note| {
-                truncate_content_to_max(
-                    &format!(
-                        "## Archive evidence\nSupporting records only. These are evidence sources, not canonical shared memory. Use them to verify, cite, or distill factual memory updates.\n{}",
-                        note
-                    ),
-                    block_max_len,
-                )
-                .into_owned()
-            })
-        });
+        );
     }
 
     let mut out = String::from(
         "## Archive evidence\nSupporting records only. These are evidence sources, not canonical shared memory. Use them to verify, cite, or distill factual memory updates.\n",
     );
-    if let Some(note) = render_archive_recall_note(&search.report, Some(&selection_report)) {
-        if out.len().saturating_add(note.len()).saturating_add(1) <= block_max_len {
-            out.push_str(&note);
-            out.push('\n');
-        }
-    }
     let mut appended = 0usize;
     for hit in selected.into_iter().take(max_items) {
-        let cue_summary = if hit.cues.is_empty() {
-            "supporting evidence".to_string()
-        } else {
-            hit.cues.join(", ")
-        };
-        let trace_summary = render_archive_trace_summary(&hit);
-        let line = if let Some(trace_summary) = trace_summary {
-            format!(
-                "- [{}] {} (citation: {}; {}; why: {})",
-                hit.title, hit.excerpt, hit.citation, cue_summary, trace_summary
-            )
-        } else {
-            format!(
-                "- [{}] {} (citation: {}; {})",
-                hit.title, hit.excerpt, hit.citation, cue_summary
-            )
-        };
+        let line = render_archive_prompt_hit(&hit);
         if out.len().saturating_add(line.len()).saturating_add(1) > block_max_len {
             break;
         }
@@ -282,4 +214,124 @@ fn build_archive_fallback_block(
         }
     }
     (appended > 0).then(|| out.trim_end().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Result;
+    use crate::memory::{SessionMessage, TurnLedger};
+
+    struct StubSessionStore {
+        messages: Vec<SessionMessage>,
+    }
+
+    impl SessionStore for StubSessionStore {
+        fn append(&self, _chat_id: &str, _role: &str, _content: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_recent(&self, _chat_id: &str, n: usize) -> Result<Vec<SessionMessage>> {
+            let start = self.messages.len().saturating_sub(n);
+            Ok(self.messages[start..].to_vec())
+        }
+
+        fn clear(&self, _chat_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_chat_ids(&self) -> Result<Vec<String>> {
+            Ok(vec!["chat-1".to_string()])
+        }
+    }
+
+    struct StubMemoryStore {
+        note_name: String,
+        note: String,
+    }
+
+    impl MemoryStore for StubMemoryStore {
+        fn get_memory(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn set_memory(&self, _content: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_daily_note_names(&self, _recent_n: usize) -> Result<Vec<String>> {
+            Ok(vec![self.note_name.clone()])
+        }
+
+        fn get_daily_note(&self, _name: &str) -> Result<String> {
+            Ok(self.note.clone())
+        }
+
+        fn write_daily_note(&self, _name: &str, _content: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StubTurnLedgerStore;
+
+    impl TurnLedgerStore for StubTurnLedgerStore {
+        fn get(&self, _chat_id: &str) -> Result<Option<TurnLedger>> {
+            Ok(None)
+        }
+
+        fn set(&self, _chat_id: &str, _ledger: &TurnLedger) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear(&self, _chat_id: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn archive_evidence_prompt_hides_backend_trace_but_keeps_evidence() {
+        let session_store = StubSessionStore {
+            messages: vec![SessionMessage {
+                role: "user".to_string(),
+                content: "release patch verification succeeded after checklist review".to_string(),
+            }],
+        };
+        let memory_store = StubMemoryStore {
+            note_name: "2026-05-23.md".to_string(),
+            note: "Archive note: release patch verification succeeded after checklist review."
+                .to_string(),
+        };
+        let block = build_archive_evidence_block(
+            &session_store,
+            &memory_store,
+            &StubTurnLedgerStore,
+            "chat-1",
+            "release patch verification",
+            2048,
+            MemoryProfile::Standard,
+        )
+        .expect("archive evidence block");
+
+        assert!(block.contains("## Archive evidence"));
+        assert!(block.contains("release patch verification"));
+        for forbidden in [
+            "recall trace",
+            "backend=",
+            "IndexedHybrid",
+            "selector=",
+            "candidates=",
+            "hits=",
+            "why:",
+            "hybrid fuzzy match",
+            "primary quota pass",
+            "match:",
+            "recent+",
+            "transcript:chat-1",
+        ] {
+            assert!(
+                !block.contains(forbidden),
+                "archive prompt leaked diagnostic term {forbidden}: {block}"
+            );
+        }
+    }
 }

@@ -14,7 +14,9 @@ use bm_sdk::{
     RuntimeSkillWriteSource,
 };
 
-use support::{empty_store_platform, test_runtime, StaticHttpClient, StaticLlmClient};
+use support::{
+    empty_store_platform, test_runtime, test_runtime_with_scope, StaticHttpClient, StaticLlmClient,
+};
 
 #[test]
 fn runtime_write_recall_project_uses_sdk_entry_only() {
@@ -63,6 +65,121 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
         .expect("projection");
 
     assert!(projection.system_memory_block.len() <= 4096);
+}
+
+#[test]
+fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_platform() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    platform
+        .session_store()
+        .append("chat-a", "user", "chat-a-only-user")
+        .expect("seed chat-a user");
+    platform
+        .session_store()
+        .append("chat-a", "assistant", "chat-a-only-assistant")
+        .expect("seed chat-a assistant");
+    platform
+        .session_store()
+        .append("chat-b", "user", "chat-b-only-user")
+        .expect("seed chat-b user");
+    platform
+        .session_store()
+        .append("chat-b", "assistant", "chat-b-only-assistant")
+        .expect("seed chat-b assistant");
+    platform
+        .session_summary_store()
+        .set_with_count("chat-a", "chat-a-only-summary", 2)
+        .expect("seed chat-a summary");
+    platform
+        .session_summary_store()
+        .set_with_count("chat-b", "chat-b-only-summary", 2)
+        .expect("seed chat-b summary");
+
+    let runtime_a = test_runtime_with_scope(platform.clone(), profile, "local", "chat-a");
+    let runtime_b = test_runtime_with_scope(platform, profile, "local", "chat-b");
+
+    let project = |runtime: &MemoryRuntime, query: &str| {
+        runtime
+            .project(MemoryProjectionRequest {
+                user_query: query.to_string(),
+                system_max_len: 4096,
+                recent_messages_limit: 8,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+            })
+            .expect("projection")
+    };
+
+    let projection_a = project(&runtime_a, "what happened in chat a?");
+    assert!(projection_a
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "chat-a-only-user"));
+    assert!(projection_a
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "chat-a-only-assistant"));
+    assert!(!projection_a
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content.contains("chat-b-only")));
+    assert_eq!(
+        projection_a.context.message_summary_text.as_deref(),
+        Some("chat-a-only-summary")
+    );
+    assert!(
+        projection_a
+            .system_memory_block
+            .contains("chat-a-only-summary"),
+        "{}",
+        projection_a.system_memory_block
+    );
+    assert!(
+        !projection_a
+            .system_memory_block
+            .contains("chat-b-only-summary"),
+        "{}",
+        projection_a.system_memory_block
+    );
+
+    let projection_b = project(&runtime_b, "what happened in chat b?");
+    assert!(projection_b
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "chat-b-only-user"));
+    assert!(projection_b
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content == "chat-b-only-assistant"));
+    assert!(!projection_b
+        .context
+        .recent_messages
+        .iter()
+        .any(|message| message.content.contains("chat-a-only")));
+    assert_eq!(
+        projection_b.context.message_summary_text.as_deref(),
+        Some("chat-b-only-summary")
+    );
+    assert!(
+        projection_b
+            .system_memory_block
+            .contains("chat-b-only-summary"),
+        "{}",
+        projection_b.system_memory_block
+    );
+    assert!(
+        !projection_b
+            .system_memory_block
+            .contains("chat-a-only-summary"),
+        "{}",
+        projection_b.system_memory_block
+    );
 }
 
 #[test]

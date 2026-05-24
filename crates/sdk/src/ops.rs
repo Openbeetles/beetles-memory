@@ -1,4 +1,8 @@
 use bm_core::memory::IngressKind;
+use bm_core::memory::{
+    MemoryHygieneInspection, MemoryTurnDeliveryStatus, MemoryTurnSource,
+    PostTurnMemoryGovernanceReport, TranscriptInputMessage,
+};
 
 use crate::{
     ContinuitySnapshot, ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome,
@@ -181,6 +185,25 @@ pub struct MemoryMaintenanceReport {
 }
 
 #[derive(Clone, Debug)]
+pub struct MemoryTurnFinalizeRequest {
+    pub delivery_status: MemoryTurnDeliveryStatus,
+    pub source: MemoryTurnSource,
+    pub user_content: String,
+    pub input_messages: Vec<TranscriptInputMessage>,
+    pub assistant_content: Option<String>,
+    pub tool_calls: u32,
+    pub external_content_used: bool,
+    pub runtime_skill_selected_ids: Vec<String>,
+    pub task_learning_selected_ids: Vec<String>,
+    pub reuse_outcome_note: String,
+    pub pressure: crate::PressureLevel,
+    pub mode_input: RuntimeLifecycleModeInput,
+}
+
+pub type MemoryTurnFinalizeReport =
+    PostTurnMemoryGovernanceReport<MemoryMaintenanceReport, RuntimeLifecycleReport>;
+
+#[derive(Clone, Debug)]
 pub struct MemoryInspectionRequest {
     pub query: String,
     pub system_max_len: usize,
@@ -190,6 +213,7 @@ pub struct MemoryInspectionRequest {
 
 pub struct MemoryInspectionReport {
     pub working: WorkingRecallInspection,
+    pub hygiene: MemoryHygieneInspection,
     pub capabilities: MemoryCapabilityCatalog,
     pub operator_action_report: RuntimeOperatorActionReport,
     pub lifecycle_report: RuntimeLifecycleReport,

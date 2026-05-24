@@ -12,6 +12,8 @@ members = [
     "crates/wss",
     "crates/mcp",
     "crates/a2a",
+    "crates/llm-gateway",
+    "crates/ollama-transparent",
     "apps/desktop/src-tauri",
 ]
 resolver = "2"
@@ -27,6 +29,8 @@ bm-sdk = { version = "0.1.0", path = "crates/sdk" }
 bm-adapter = { version = "0.1.0", path = "crates/adapter" }
 bm-entry = { version = "0.1.0", path = "crates/entry" }
 bm-http = { version = "0.1.0", path = "crates/http" }
+bm-llm-gateway = { version = "0.1.0", path = "crates/llm-gateway" }
+bm-ollama-transparent = { version = "0.1.0", path = "crates/ollama-transparent" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"

@@ -63,10 +63,15 @@ pub fn seeded_store_platform(profile: ProfileId) -> StorePlatform {
     platform
 }
 
-pub fn test_runtime(platform: StorePlatform, profile: ProfileId) -> MemoryRuntime {
+pub fn test_runtime_with_scope(
+    platform: StorePlatform,
+    profile: ProfileId,
+    channel: &str,
+    chat_id: &str,
+) -> MemoryRuntime {
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
-        .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+        .scope(MemoryScope::new(channel, chat_id).expect("scope"))
         .profile(profile)
         .store_platform(platform)
         .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
@@ -75,6 +80,18 @@ pub fn test_runtime(platform: StorePlatform, profile: ProfileId) -> MemoryRuntim
         .audit_sink(Arc::new(NoopMemoryAuditSink))
         .build()
         .expect("runtime")
+}
+
+pub fn test_runtime_with_chat(
+    platform: StorePlatform,
+    profile: ProfileId,
+    chat_id: &str,
+) -> MemoryRuntime {
+    test_runtime_with_scope(platform, profile, "local", chat_id)
+}
+
+pub fn test_runtime(platform: StorePlatform, profile: ProfileId) -> MemoryRuntime {
+    test_runtime_with_chat(platform, profile, "chat-1")
 }
 
 #[derive(Default)]

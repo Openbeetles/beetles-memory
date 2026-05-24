@@ -63,17 +63,19 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 
 `bm-entry` 持有 console 状态，`bm-http` 只负责把 `/console/*` 请求路由到 entry console 操作。Console API 不写 memory plane，不实现第二套记忆语义，也不替代 `/memory/*`。
 
-`/console/overview` 的指标来自同一进程内的真实 runtime 状态：系统信息读取当前运行系统、CPU、内存和系统时间；存储占用读取当前 store 路径实际占用，并读取该路径所在系统磁盘当前可用容量；写入、召回、投影指标由 `/memory/*` 操作结果回写。配置台前端不得硬编码这些观测值，只能在后端不可达时使用本地占位数据。
+`/console/overview` 的指标来自同一进程内的真实 runtime 状态：系统信息读取当前运行系统、CPU、内存和系统时间；存储占用前半段读取当前 Beetle Memory store 路径实际占用，后半段读取当前系统总存储；写入、召回、投影指标由 `/memory/*` 操作结果回写。配置台前端不得硬编码这些观测值，只能在后端不可达时使用本地占位数据。
 
 | Route | Method | 用途 |
 | --- | --- | --- |
-| `/console/overview` | `GET` | 返回系统信息、运行形态、观测指标、内核摘要和 session 概览。 |
+| `/console/overview` | `GET` | 返回系统信息、运行形态、观测指标、内核摘要、session 概览和当前记忆上下文。 |
 | `/console/skills` | `GET` | 返回 Skill 记忆列表和统计。 |
 | `/console/skills/{name}` | `GET` | 返回单条 Skill 详情。 |
 | `/console/skills` | `POST` | 新建或导入 Skill，最终进入 `MemoryRuntime::upsert_skill`。 |
 | `/console/skills/{name}` | `PATCH` | 编辑 Skill，最终进入 `MemoryRuntime::upsert_skill`。 |
 | `/console/skills/{name}/enabled` | `PATCH` | 启用或停用 Skill。 |
 | `/console/skills/{name}` | `DELETE` | 删除 Skill 记忆。 |
+| `/console/llm-gateway` | `GET` | 返回 LLM Gateway 操作面：OpenAI/Ollama/MCP 端点、规则导出命令和 smoke checks。 |
+| `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | 运行后端白名单中的 LLM Gateway 验收项，并返回退出码、耗时和受限 stdout/stderr。 |
 | `/console/transports` | `GET` | 返回可配置通信入口。 |
 | `/console/transports/{id}` | `PATCH` | 更新通信入口开关或 endpoint。 |
 | `/console/devices` | `GET` | 返回允许访问设备列表，只包含 app_key 指纹。 |
@@ -88,6 +90,7 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 - 新增和轮换设备时，`appKeyOnce` 只在该次响应中返回。
 - 通信页的 HTTP 开关表示外部 memory HTTP API，不表示配置台自身的 HTTP console 入口。
 - Skill 管理页管理 procedural memory，不执行 skill，不提供 marketplace、executor 或 workflow runner。
+- LLM Gateway 验收运行接口只接受后端已知的 smoke check `id`，不执行前端传入的任意命令。
 
 ## Capability Catalog
 

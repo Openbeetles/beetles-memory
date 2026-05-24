@@ -29,6 +29,7 @@ profile-server-linux-dev-full = ["bm-adapter/profile-server-linux-dev-full"]
 [dependencies]
 bm-adapter.workspace = true
 bm-entry = { version = "0.1.0", path = "../entry", optional = true }
+bm-ollama-transparent.workspace = true
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

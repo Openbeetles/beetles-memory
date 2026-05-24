@@ -7,7 +7,6 @@ use bm_sdk::{
     RuntimeLifecycleOperation, RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome,
     RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
 };
-use bm_store::StoreEventLog;
 
 use support::{empty_store_platform, test_runtime, StaticHttpClient, StaticLlmClient};
 
@@ -67,6 +66,92 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
         RuntimeLifecycleOperation::Project
     );
     assert!(projection.lifecycle_report.success);
+}
+
+#[test]
+fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projection() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("config"),
+    )
+    .expect("store");
+    let event_reader = platform.clone();
+    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+
+    let write = runtime
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![RuntimeSkillWrite {
+                name: "ollama_memory_projection_hit".to_string(),
+                topic: "ollama transparent metrics".to_string(),
+                title: "Ollama transparent metrics".to_string(),
+                summary: "Ollama transparent projection must be counted as a memory hit."
+                    .to_string(),
+                content: "- When projection injects remembered context, record memory_hit=true.\n- Use hit_count to back UI metrics instead of fabricating counters."
+                    .to_string(),
+                citations: vec!["runtime lifecycle telemetry contract".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("write");
+    assert!(
+        write.accepted,
+        "telemetry fixture must seed recallable memory"
+    );
+
+    runtime
+        .recall(MemoryRecallRequest {
+            query: "ollama transparent metrics".to_string(),
+            limit: 4,
+        })
+        .expect("recall");
+    runtime
+        .project(MemoryProjectionRequest {
+            user_query: "How should Ollama transparent metrics be counted?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("project");
+
+    let events = event_reader.read_events().expect("events");
+    let recall_event = events
+        .iter()
+        .find(|event| {
+            event.payload.get("result_summary").map(String::as_str) == Some("recall_completed")
+        })
+        .expect("recall lifecycle event");
+    assert_eq!(
+        recall_event.payload.get("memory_hit").map(String::as_str),
+        Some("true")
+    );
+    assert!(recall_event
+        .payload
+        .get("hit_count")
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|count| count > 0));
+
+    let project_event = events
+        .iter()
+        .find(|event| {
+            event.payload.get("result_summary").map(String::as_str) == Some("projection_completed")
+        })
+        .expect("projection lifecycle event");
+    assert_eq!(
+        project_event.payload.get("memory_hit").map(String::as_str),
+        Some("true")
+    );
+    assert!(project_event
+        .payload
+        .get("hit_count")
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|count| count > 0));
+    assert!(project_event
+        .payload
+        .get("system_memory_chars")
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|chars| chars > 0));
 }
 
 #[test]

@@ -3,7 +3,7 @@
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind};
 use bm_core::platform::Platform;
-use bm_store::{StoreBackendConfig, StoreEventLog, StorePlatform};
+use bm_store::{StoreBackendConfig, StorePlatform};
 
 #[test]
 fn sqlite_store_persists_core_runtime_paths_across_reopen() {

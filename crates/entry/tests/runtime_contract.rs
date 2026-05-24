@@ -1,10 +1,12 @@
 use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_entry::{
     EntryAuthConfig, EntryAuthDecision, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
-    EntryRuntimeConfig, EntryScope, EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryRuntimeConfig, EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope, EntryScope,
+    EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, ProfileId, StoreBackendKind,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryWriteRequest,
+    ProfileId, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendKind,
 };
 
 fn config() -> EntryRuntimeConfig {
@@ -47,6 +49,29 @@ fn context(operation: AdapterOperation, idempotency_key: &str) -> EntryTransport
     }
 }
 
+fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
+    AdapterCommand::Write(MemoryWriteRequest::Procedural {
+        writes: vec![RuntimeSkillWrite {
+            name: name.to_string(),
+            topic: "entry-runtime".to_string(),
+            title: format!("Entry runtime {name}"),
+            summary: format!(
+                "Entry runtime factory shares one StorePlatform across scoped runtimes. {marker}"
+            ),
+            content: format!(
+                "1. Open EntryRuntimeFactory once for the base store config.\n\
+                 2. Resolve an EntryRuntimeScope before handling a gateway request.\n\
+                 3. Build the scoped EntryRuntime from the shared StorePlatform.\n\
+                 4. Keep identity and chat scope on the scoped runtime. Marker: {marker}."
+            ),
+            citations: vec!["entry runtime factory contract".to_string()],
+            source_chat_id: Some(chat_id.to_string()),
+            observed_at: 1_800_000_000,
+        }],
+        source: RuntimeSkillWriteSource::Manual,
+    })
+}
+
 #[test]
 fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
     let runtime = EntryRuntime::open(config()).expect("entry runtime");
@@ -73,6 +98,162 @@ fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
         }
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+#[test]
+fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
+    let config = config();
+    let factory = EntryRuntimeFactory::open(config.base_config()).expect("factory");
+    let runtime_a = factory
+        .runtime_for_scope(EntryRuntimeScope {
+            identity: config.identity.clone(),
+            scope: EntryScope {
+                channel: "local".to_string(),
+                chat_id: "chat-a".to_string(),
+            },
+        })
+        .expect("runtime a");
+    let runtime_b = factory
+        .runtime_for_scope(EntryRuntimeScope {
+            identity: config.identity.clone(),
+            scope: EntryScope {
+                channel: "local".to_string(),
+                chat_id: "chat-b".to_string(),
+            },
+        })
+        .expect("runtime b");
+
+    assert_eq!(runtime_a.runtime().scope().chat_id, "chat-a");
+    assert_eq!(runtime_b.runtime().scope().chat_id, "chat-b");
+
+    let write = runtime_a
+        .handle(
+            context(AdapterOperation::Write, "idem-factory-write"),
+            write_command("factory_shared_store", "chat-a", "FACTORY_SHARED_STORE"),
+        )
+        .expect("write through runtime a");
+    match write.adapter {
+        AdapterResponse::Accepted {
+            report: AdapterSdkReport::Write(report),
+            ..
+        } => assert!(report.accepted),
+        other => panic!("unexpected write: {other:?}"),
+    }
+
+    let recall = runtime_b
+        .handle(
+            context(AdapterOperation::Recall, "idem-factory-recall"),
+            AdapterCommand::Recall(MemoryRecallRequest {
+                query: "entry runtime".to_string(),
+                limit: 4,
+            }),
+        )
+        .expect("recall through runtime b");
+
+    match recall.adapter {
+        AdapterResponse::Accepted {
+            report: AdapterSdkReport::Recall(report),
+            ..
+        } => assert!(report
+            .procedural_hits
+            .iter()
+            .any(|hit| hit.record.name == "runtime_skill__factory_shared_store")),
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
+fn entry_runtime_manager_reuses_scoped_runtime_idempotency_cache() {
+    let config = config();
+    let manager = EntryRuntimeManager::open(config.base_config()).expect("manager");
+    let scope = config.runtime_scope();
+    let runtime_a = manager
+        .runtime_for_scope(scope.clone())
+        .expect("runtime first lookup");
+    let runtime_b = manager
+        .runtime_for_scope(scope)
+        .expect("runtime second lookup");
+
+    assert!(std::sync::Arc::ptr_eq(&runtime_a, &runtime_b));
+
+    let first = runtime_a
+        .handle(
+            context(AdapterOperation::Write, "idem-manager-write"),
+            write_command("manager_idempotency", "chat-1", "MANAGER_IDEMPOTENCY"),
+        )
+        .expect("first write");
+    let second = runtime_b
+        .handle(
+            context(AdapterOperation::Write, "idem-manager-write"),
+            write_command("manager_idempotency", "chat-1", "MANAGER_IDEMPOTENCY"),
+        )
+        .expect("second write");
+
+    assert!(matches!(first.adapter, AdapterResponse::Accepted { .. }));
+    match second.adapter {
+        AdapterResponse::Duplicated {
+            idempotency_key, ..
+        } => assert_eq!(idempotency_key, "idem-manager-write"),
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
+fn entry_runtime_manager_bounds_cache_without_splitting_active_scope() {
+    let config = config();
+    let manager = EntryRuntimeManager::with_max_runtimes(config.base_config(), 1).expect("manager");
+    let scope_a = config.runtime_scope();
+    let scope_b = EntryRuntimeScope {
+        identity: config.identity.clone(),
+        scope: EntryScope {
+            channel: "local".to_string(),
+            chat_id: "chat-b".to_string(),
+        },
+    };
+
+    let runtime_a_first = manager
+        .runtime_for_scope(scope_a.clone())
+        .expect("runtime a first");
+    let first_write = runtime_a_first
+        .handle(
+            context(AdapterOperation::Write, "idem-manager-active-evicted"),
+            write_command("manager_active_evicted", "chat-1", "MANAGER_ACTIVE_EVICTED"),
+        )
+        .expect("first write");
+    let _runtime_b = manager.runtime_for_scope(scope_b).expect("runtime b");
+    let runtime_a_second = manager
+        .runtime_for_scope(scope_a)
+        .expect("runtime a second");
+
+    assert!(std::sync::Arc::ptr_eq(&runtime_a_first, &runtime_a_second));
+    assert!(matches!(
+        first_write.adapter,
+        AdapterResponse::Accepted { .. }
+    ));
+
+    let second_write = runtime_a_second
+        .handle(
+            context(AdapterOperation::Write, "idem-manager-active-evicted"),
+            write_command("manager_active_evicted", "chat-1", "MANAGER_ACTIVE_EVICTED"),
+        )
+        .expect("second write");
+    match second_write.adapter {
+        AdapterResponse::Duplicated {
+            idempotency_key, ..
+        } => assert_eq!(idempotency_key, "idem-manager-active-evicted"),
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
+fn entry_runtime_manager_rejects_zero_cache_limit() {
+    let config = config();
+    let error = match EntryRuntimeManager::with_max_runtimes(config.base_config(), 0) {
+        Ok(_) => panic!("zero cache limit should fail"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.stage(), "entry_runtime_manager");
 }
 
 #[test]

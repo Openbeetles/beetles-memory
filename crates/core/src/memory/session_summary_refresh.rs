@@ -10,11 +10,11 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use super::{
-    memory_policy, MemoryProfile, SessionMessage, SessionStore, SessionSummaryPolicy,
-    SessionSummaryStore,
+    memory_policy, MemoryEvidenceAuthority, MemoryProfile, SessionMessage, SessionStore,
+    SessionSummaryPolicy, SessionSummaryStore,
 };
 
-const SESSION_SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Compress the following conversation into a concise summary (max 800 chars) preserving user intent, durable facts, preferences, active work, and pending tasks. Do not preserve secrets, credentials, raw tool payloads, copied document passages, verbose logs, or large quoted external content. Prefer the conversational state over reproducing retrieved material. Reply with the summary only.";
+const SESSION_SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Compress the following conversation into a concise summary (max 800 chars) preserving user intent, durable facts, preferences, active work, and pending tasks. Each transcript line includes source_authority; user_asserted evidence may become user facts, while assistant_utterance evidence is only the assistant's observed output and must not become user facts, soul identity, model identity, or durable memory provenance. Do not preserve secrets, credentials, raw tool payloads, copied document passages, verbose logs, or large quoted external content. Prefer the conversational state over reproducing retrieved material. Reply with the summary only.";
 
 impl SessionSummaryPolicy {
     fn should_refresh(self, current_count: usize, last_summary_count: usize) -> bool {
@@ -63,8 +63,9 @@ pub fn fallback_session_summary(recent: &[SessionMessage], profile: MemoryProfil
         }
         let _ = write!(
             fallback,
-            "{}: {}",
+            "{} [source_authority={}]: {}",
             message.role,
+            MemoryEvidenceAuthority::for_role(&message.role).label(),
             truncate_content_to_max(
                 &scrub_credentials(&message.content),
                 policy.fallback_preview_chars,
@@ -211,8 +212,9 @@ fn build_session_summary_transcript(
         let preview = truncate_content_to_max(&message.content, policy.transcript_preview_chars);
         let _ = writeln!(
             transcript,
-            "{}: {}",
+            "{} [source_authority={}]: {}",
             message.role.to_uppercase(),
+            MemoryEvidenceAuthority::for_role(&message.role).label(),
             scrub_credentials(preview.as_ref())
         );
     }
@@ -376,9 +378,9 @@ mod tests {
             },
         ];
         let summary = fallback_session_summary(&recent, MemoryProfile::Standard);
-        assert!(summary.contains("user: one"));
-        assert!(summary.contains("assistant: two"));
-        assert!(summary.contains("user: three"));
+        assert!(summary.contains("user [source_authority=user_asserted]: one"));
+        assert!(summary.contains("assistant [source_authority=assistant_utterance]: two"));
+        assert!(summary.contains("user [source_authority=user_asserted]: three"));
     }
 
     #[test]
@@ -513,8 +515,11 @@ mod tests {
             }
         );
         let stored = summary_store.get("chat-1").unwrap().unwrap();
-        assert!(stored.contains("user: 最近在做 memory maintenance 收口"));
-        assert!(stored.contains("assistant: 这轮会把 session summary 从 loop 拆走"));
+        assert!(stored
+            .contains("user [source_authority=user_asserted]: 最近在做 memory maintenance 收口"));
+        assert!(stored.contains(
+            "assistant [source_authority=assistant_utterance]: 这轮会把 session summary 从 loop 拆走"
+        ));
     }
 
     #[test]

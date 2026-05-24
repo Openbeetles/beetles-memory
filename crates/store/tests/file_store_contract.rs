@@ -1,7 +1,7 @@
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind};
 use bm_core::platform::Platform;
-use bm_store::{StoreBackendConfig, StoreEventLog, StorePlatform};
+use bm_store::{StoreBackendConfig, StorePlatform};
 
 fn temp_root(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(

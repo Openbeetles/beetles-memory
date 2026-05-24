@@ -6,6 +6,12 @@ mod ops;
 mod runtime;
 
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ForegroundWorkStatus};
+pub use bm_core::budget::{
+    compile_runtime_budget, AdapterRuntimeBudget, LlmGatewayBudget, MaintenanceBudget,
+    MemoryCoreBudget, ProjectionRenderBudget, ProjectionSourceBudget, ProviderModelContextLimit,
+    RuntimeBudgetInput, RuntimeBudgetReport, RuntimeDeploymentRole, RuntimeJobBudget,
+    StaticPlatformManifest, StoreRuntimeBudget,
+};
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, StopReason, ToolChoicePolicy,
@@ -20,15 +26,28 @@ pub use bm_core::memory::{
     search_archive_records_detailed, ContinuityCapsuleMaintenanceOutcome, ContinuitySnapshot,
     ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome, ContinuitySnapshotMode,
     IngressKind, IntelligenceReplayInspection, LongTermMemoryDraft, LongTermMemoryEntry,
-    LongTermMemoryQuery, MemoryProfile, MemorySystemKind as MemoryRuntimeSystemKind,
-    ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome, PromptMemoryContext,
-    PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, RecallCandidate,
-    RecallPlane, RecallQuery, RecallSelectionReport, WorkingRecallInspection,
+    LongTermMemoryQuery, MemoryHygieneInspection, MemoryProfile,
+    MemorySystemKind as MemoryRuntimeSystemKind, ParsedLongTermMemoryExtraction,
+    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostReplyMemoryMaintenanceOutcome, PromptMemoryContext, PromptMemoryContextParams,
+    PromptParticipationPlan, PromptRecallIntent, RecallCandidate, RecallPlane, RecallQuery,
+    RecallSelectionReport, WorkingRecallInspection,
+};
+pub use bm_core::memory::{
+    CommittedSessionMessage, GovernedWriteDecision, MemoryEvidenceAuthority,
+    MemoryPlaneGovernanceReport, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteAuthority, MemoryWriteDomain, PostTurnPrivateGardenReport,
+    PostTurnSemanticGovernanceReport, PrivateGardenAdmissionDecision, SessionTurnCommitReport,
+    SoulCandidateDisposition, SoulCandidateHandoffReport, TranscriptInputMessage,
 };
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;
 pub use bm_core::platform::{MemoryOperatorSurfaceSummary, ResponseBody};
+pub use bm_core::resource::{
+    probe_host_runtime_resource, HostRuntimeResourceProbe, RuntimeResourceProbe,
+    RuntimeResourceProbeSource, RuntimeResourceSnapshot, RuntimeResourceSnapshotCache,
+    RuntimeResourceUnavailableReason, StaticRuntimeResourceProbe, UnavailableRuntimeResourceProbe,
+};
 pub use bm_core::runtime::{
     ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, RuntimeLifecycleAdmission,
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleDisposition, RuntimeLifecycleModeInput,
@@ -43,8 +62,9 @@ pub use bm_core::skills::{
 pub use bm_core::task::{TaskItem, TaskPriority, TaskQuery, TaskStatus};
 pub use bm_core::{Error, Result};
 pub use bm_store::{
-    profile_memory_system_kind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget,
-    StoreOpenReport, StorePlatform, StoreRepairPolicy, StoreRepairReport,
+    profile_memory_system_kind, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
+    StoreBackendKind, StoreCapacityBudget, StoreEventLog, StoreEventScope, StoreOpenReport,
+    StorePlatform, StoreRepairPolicy, StoreRepairReport,
 };
 pub use capability::{
     resolve_memory_capabilities, AdapterTransportVisibility, MemoryAdapterCapabilityCatalog,
@@ -67,8 +87,9 @@ pub use ops::{
     MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
     MemorySkillDeleteRequest, MemorySkillDetailReport, MemorySkillDetailRequest, MemorySkillKind,
     MemorySkillListReport, MemorySkillListRequest, MemorySkillMutationReport, MemorySkillOrigin,
-    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest, MemoryWriteReport,
-    MemoryWriteRequest, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest,
+    MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
+    RuntimeOperatorAction, RuntimeOperatorActionReport,
 };
 pub use runtime::{
     MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,

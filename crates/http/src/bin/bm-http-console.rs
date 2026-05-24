@@ -5,7 +5,7 @@ use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
-use bm_http::serve_http_listener_once;
+use bm_http::{serve_http_listener_once_with_console_services, HttpConsoleServices};
 use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
 
 fn main() -> bm_sdk::Result<()> {
@@ -24,7 +24,11 @@ fn main() -> bm_sdk::Result<()> {
     );
 
     loop {
-        if let Err(err) = serve_http_listener_once(&runtime, &listener) {
+        if let Err(err) = serve_http_listener_once_with_console_services(
+            &runtime,
+            &listener,
+            HttpConsoleServices::none(),
+        ) {
             eprintln!("http console request failed: {err}");
         }
     }
@@ -106,6 +110,7 @@ impl ConsoleServerOptions {
                 wss_server: true,
                 mcp_server: true,
                 a2a_bridge: true,
+                llm_gateway_server: false,
             },
             auth: EntryAuthConfig::disabled_for_local(),
             idempotency: EntryIdempotencyConfig { max_keys: 4096 },

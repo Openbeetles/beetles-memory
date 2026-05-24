@@ -50,6 +50,7 @@ mod persona_priority;
 ))]
 mod persona_regression;
 mod personality_closure;
+mod post_turn_governance;
 mod private_docs;
 mod private_garden;
 mod private_garden_governance;
@@ -82,6 +83,7 @@ mod shared_memory_governance;
 mod skill_routing;
 mod subject_shell;
 mod temperament_continuity;
+mod turn_commit;
 mod turn_continuity_evidence;
 mod turn_ledger;
 mod work_continuity;
@@ -293,6 +295,11 @@ pub use personality_closure::{
     PersonalityGovernanceInspectionInput, PersonalityGovernanceRepairAction,
     PersonalityGovernanceRepairPlan, PersonalityRuntimeGovernanceGate,
 };
+pub use post_turn_governance::{
+    GovernedWriteDecision, MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
+    PostTurnMemoryGovernanceReport, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PrivateGardenAdmissionDecision, SoulCandidateDisposition, SoulCandidateHandoffReport,
+};
 pub(crate) use private_docs::estimate_private_doc_workspace_chars;
 pub(crate) use private_docs::run_private_doc_workspace_refresh_with_state;
 pub use private_docs::{
@@ -448,6 +455,11 @@ pub use temperament_continuity::{
     render_temperament_continuity_block, TemperamentContinuity,
     TemperamentContinuityRefreshOutcome, TEMPERAMENT_CONTINUITY_SYSTEM_CONTRACT,
     TEMPERAMENT_CONTINUITY_TOTAL_CHAR_LIMIT,
+};
+pub use turn_commit::{
+    canonical_user_delta, commit_session_turn, CommittedSessionMessage, MemoryEvidenceAuthority,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitInput,
+    SessionTurnCommitReport, TranscriptInputMessage,
 };
 pub use turn_continuity_evidence::{
     TurnContinuityEvidence, TurnContinuityEvidenceStore, REL_PATH_TURN_CONTINUITY_EVIDENCE,

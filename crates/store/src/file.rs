@@ -184,24 +184,31 @@ impl StoreEventLog for FileStoreEngine {
     }
 
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
-        let path = self.events_path();
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(Error::io("store_event_log", error)),
-        };
-        let mut events = Vec::new();
-        for raw in bytes.split(|byte| *byte == b'\n') {
-            if raw.iter().all(|byte| byte.is_ascii_whitespace()) {
-                continue;
-            }
-            events.push(
-                serde_json::from_slice(raw)
-                    .map_err(|error| Error::config("store_event_log", error.to_string()))?,
-            );
-        }
-        Ok(events)
+        read_events_jsonl(&self.events_path())
     }
+}
+
+pub(crate) fn read_events_from_root(root: &Path) -> Result<Vec<MemoryStoreEvent>> {
+    read_events_jsonl(&root.join("events").join("events.jsonl"))
+}
+
+fn read_events_jsonl(path: &Path) -> Result<Vec<MemoryStoreEvent>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(Error::io("store_event_log", error)),
+    };
+    let mut events = Vec::new();
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        if raw.iter().all(|byte| byte.is_ascii_whitespace()) {
+            continue;
+        }
+        events.push(
+            serde_json::from_slice(raw)
+                .map_err(|error| Error::config("store_event_log", error.to_string()))?,
+        );
+    }
+    Ok(events)
 }
 
 impl StoreEngine for FileStoreEngine {

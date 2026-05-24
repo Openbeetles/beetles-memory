@@ -41,16 +41,12 @@ fn runtime() -> EntryRuntime {
 #[test]
 fn websocket_backend_upgrades_and_dispatches_text_frame() {
     let runtime = runtime();
+    let budget = WssBudget::from_runtime_budget(runtime.runtime_budget());
     let (mut client, mut server_stream) = UnixStream::pair().expect("socket pair");
 
     let server = thread::spawn(move || {
-        serve_wss_stream(
-            &runtime,
-            &mut server_stream,
-            "wss-backend-session",
-            WssBudget::server_gateway(),
-        )
-        .expect("serve websocket stream");
+        serve_wss_stream(&runtime, &mut server_stream, "wss-backend-session", budget)
+            .expect("serve websocket stream");
     });
 
     client

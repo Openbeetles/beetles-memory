@@ -1,4 +1,4 @@
-export type PageId = "overview" | "skills" | "transports" | "devices" | "account";
+export type PageId = "overview" | "skills" | "llm-gateway" | "transports" | "devices" | "account";
 export type IconComponent = typeof import("lucide-svelte")["Activity"];
 export type StatusKind =
   | "ready"
@@ -14,7 +14,8 @@ export type StatusKind =
   | "retired";
 export type Lang = "zh-CN" | "en";
 export type Theme = "light" | "dark";
-export type TransportId = "http" | "wss" | "mcp" | "a2a";
+export type TransportId = "http" | "wss" | "mcp" | "a2a" | "llm-gateway";
+export type DeviceConfirmAction = "rotate_key" | "disable";
 export type SkillOrigin = "user_provided" | "runtime_learned";
 export type SkillKind = "runtime_skill" | "manual_document";
 export type SkillModal = "create" | "import" | "edit" | "delete" | null;
@@ -49,6 +50,152 @@ export type ConsoleApiTransport = {
   status: StatusKind;
   endpoint: string;
   editable: boolean;
+};
+export type ConsoleApiLlmGatewayProtocol = {
+  id: string;
+  title: string;
+  status: StatusKind;
+  endpoint: string;
+  detail: string;
+};
+export type ConsoleApiLlmGatewayRuleExport = {
+  target: string;
+  label: string;
+  command: string;
+};
+export type ConsoleApiLlmGatewaySmokeCheck = {
+  id: string;
+  label: string;
+  status: StatusKind;
+  command: string;
+};
+export type ConsoleApiLlmGatewaySmokeRunReport = {
+  id: string;
+  label: string;
+  status: StatusKind;
+  command: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+  startedAtUnixSecs: number;
+  cwd: string;
+};
+export type ConsoleApiLlmGateway = {
+  enabled: boolean;
+  status: StatusKind;
+  endpoint: string;
+  openaiBaseUrl: string;
+  ollamaBaseUrl: string;
+  providerCapabilitiesUrl: string;
+  mcpStreamableHttpUrl: string;
+  protocols: ConsoleApiLlmGatewayProtocol[];
+  ruleExports: ConsoleApiLlmGatewayRuleExport[];
+  smokeChecks: ConsoleApiLlmGatewaySmokeCheck[];
+};
+export type ConsoleApiCapabilityFeatureId = "ollamaTransparentApp" | string;
+export type ConsoleApiCapabilityFeature = {
+  id: ConsoleApiCapabilityFeatureId;
+  visible: boolean;
+  available: boolean;
+  owner: string;
+  reason: string | null;
+  routes: Record<string, string>;
+};
+export type ConsoleApiCapabilities = {
+  schema: string;
+  features: Record<ConsoleApiCapabilityFeatureId, ConsoleApiCapabilityFeature | undefined>;
+};
+export type ConsoleApiOllamaTransparentState =
+  | "Disabled"
+  | "PreflightFailed"
+  | "Enabling"
+  | "Active"
+  | "Degraded"
+  | "Disabling"
+  | "RollingBack";
+export type ConsoleApiPortOwnerKind =
+  | "NoListener"
+  | "OfficialOllama"
+  | "BeetleMemoryTransparentFront"
+  | "ManagedOllamaRunner"
+  | "Unknown";
+export type ConsoleApiObservedProcess = {
+  pid: number;
+  command: string;
+  executable: string;
+};
+export type ConsoleApiPortBindingReport = {
+  bind: string;
+  owner: ConsoleApiPortOwnerKind;
+  process: ConsoleApiObservedProcess | null;
+  detail: string | null;
+};
+export type ConsoleApiManagedRunnerReport = {
+  sourcePath: string;
+  managedPath: string;
+  sourceExists: boolean;
+  managedExists: boolean;
+  installed: boolean;
+  sourceDigest: string | null;
+  managedDigest: string | null;
+  copyDigest: string | null;
+  message: string | null;
+};
+export type ConsoleApiGatewayFrontReport = {
+  expectedOwner: ConsoleApiPortOwnerKind;
+  bind: string;
+  active: boolean;
+  message: string | null;
+};
+export type ConsoleApiOllamaAppReport = {
+  bundlePath: string;
+  allowStopOfficialOllama: boolean;
+  openAppAfterEnable: boolean;
+  restoreOfficialAfterDisable: boolean;
+  lastAction: unknown | null;
+};
+export type ConsoleApiTransitionStep = {
+  step: string;
+  ok: boolean;
+  message: string | null;
+};
+export type ConsoleApiTransitionOutcome = "Completed" | "Rejected" | "Failed" | "RolledBack";
+export type ConsoleApiRollbackReport = {
+  attempted: boolean;
+  completed: boolean;
+  steps: ConsoleApiTransitionStep[];
+};
+export type ConsoleApiOllamaTransition = {
+  fromState: ConsoleApiOllamaTransparentState;
+  toState: ConsoleApiOllamaTransparentState;
+  outcome: ConsoleApiTransitionOutcome;
+  steps: ConsoleApiTransitionStep[];
+  failingStep: ConsoleApiTransitionStep | null;
+  rollback: ConsoleApiRollbackReport | null;
+};
+export type ConsoleApiPreflightBlocker = {
+  code: string;
+  message: string;
+};
+export type ConsoleApiOllamaPreflight = {
+  accepted: boolean;
+  resultingState: ConsoleApiOllamaTransparentState;
+  publicPort: ConsoleApiPortBindingReport;
+  upstreamPort: ConsoleApiPortBindingReport;
+  managedRunner: ConsoleApiManagedRunnerReport;
+  stopPlan: unknown | null;
+  blockers: ConsoleApiPreflightBlocker[];
+};
+export type ConsoleApiOllamaTransparentStatus = {
+  state: ConsoleApiOllamaTransparentState;
+  publicPort: ConsoleApiPortBindingReport;
+  upstreamPort: ConsoleApiPortBindingReport;
+  app: ConsoleApiOllamaAppReport;
+  managedRunner: ConsoleApiManagedRunnerReport;
+  gatewayFront: ConsoleApiGatewayFrontReport;
+  lastTransition: ConsoleApiOllamaTransition | null;
 };
 export type ConsoleApiDevice = {
   deviceId: string;
@@ -131,6 +278,7 @@ export type SkillForm = {
 export type ConsoleApiOverview = {
   runtimeShape: ConsoleApiRuntimeShape;
   systemInfo: ConsoleApiSystemInfo;
+  runtimeBudget: ConsoleApiRuntimeBudget;
   storage: ConsoleApiMetric;
   writesToday: ConsoleApiMetric;
   recall: ConsoleApiMetric;
@@ -140,6 +288,23 @@ export type ConsoleApiOverview = {
   capabilities: CapRow[];
   kernel: KVRow[];
   session: KVRow[];
+  memoryContext: KVRow[];
+};
+
+export type ConsoleApiRuntimeBudget = {
+  reportId: string;
+  profile: string;
+  resourceSource: string;
+  stale: boolean;
+  limitedBy: string[];
+  unavailableReasons: string[];
+  storeSnapshotMaxBytes: number;
+  httpBodyMaxBytes: number;
+  wssFrameMaxBytes: number;
+  projectionSourceMaxChars: number;
+  projectionRenderMaxChars: number;
+  maintenanceUserMaxChars: number;
+  maintenanceReplyMaxChars: number;
 };
 
 export type StaticDeviceId = "bm-linux-core-01" | "bm-desktop-mac-studio" | "bm-esp-memory-7f2" | "legacy-lab-device";

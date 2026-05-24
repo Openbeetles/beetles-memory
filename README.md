@@ -33,7 +33,7 @@ The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-
 
 ## Console Preview
 
-Standalone deployments include a shared console UI that can run inside the macOS Tauri desktop app or the HTTP Console Shell. It includes Overview, Skill Memory, Communication, Devices, and Account pages. Skill Memory manages procedural memory records through the same `MemoryRuntime` governance path; it does not execute skills or install tools.
+Standalone deployments include a shared console UI that can run inside the macOS Tauri desktop app or the HTTP Console Shell. It includes Overview, Skill Memory, LLM Gateway, Communication, Devices, and Account pages. Skill Memory manages procedural memory records through the same `MemoryRuntime` governance path; it does not execute skills or install tools.
 
 | Runtime Status | Communication Setup |
 | --- | --- |
@@ -110,6 +110,7 @@ English documentation:
 
 - [Architecture](docs/en/architecture.md)
 - [Integration Guide](docs/en/integration.md)
+- [LLM Gateway Integrations](docs/en/llm-gateway-integrations.md)
 - [Deployment Guide](docs/en/deployment.md)
 - [CLI Usage](docs/en/cli-usage.md)
 - [Getting Started](docs/en/getting-started.md)
@@ -125,6 +126,7 @@ English documentation:
 
 - [架构文档](docs/zh-CN/architecture.md)
 - [集成文档](docs/zh-CN/integration.md)
+- [LLM Gateway 集成](docs/zh-CN/llm-gateway-integrations.md)
 - [部署文档](docs/zh-CN/deployment.md)
 - [CLI 使用](docs/zh-CN/cli-usage.md)
 - [快速开始](docs/zh-CN/getting-started.md)

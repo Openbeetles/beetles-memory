@@ -4,6 +4,7 @@ Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus
 
 - [Architecture](architecture.md)
 - [Integration Guide](integration.md)
+- [LLM Gateway Integrations](llm-gateway-integrations.md)
 - [Deployment Guide](deployment.md)
 - [CLI Usage](cli-usage.md)
 - [Getting Started](getting-started.md)

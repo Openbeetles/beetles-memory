@@ -5,7 +5,7 @@ use bm_core::runtime::{
     RuntimeLifecycleEventKind, RuntimeLifecycleEventSink, RuntimeLifecycleModeInput,
     RuntimeLifecycleOperation, RuntimeLifecycleReport, RuntimeLifecycleTrigger,
 };
-use bm_store::{StoreBackendConfig, StoreEventLog, StorePlatform};
+use bm_store::{StoreBackendConfig, StorePlatform};
 
 #[test]
 fn store_platform_persists_lifecycle_and_operator_events() {

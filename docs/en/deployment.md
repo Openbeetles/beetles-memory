@@ -7,7 +7,7 @@ Use `bm-entry` when Beetle Memory runs as a standalone process or protocol-facin
 | Shape | Profile | Entry surface |
 | --- | --- | --- |
 | Local CLI/operator process | `profile-server-linux-dev-full` or host profile | `bm-cli` |
-| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP, WebSocket, MCP, A2A |
+| Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP, WebSocket, MCP, A2A, LLM gateway server; concrete visibility depends on enabled capability policy and `EntryTransportConfig` |
 | Linux hardware device | `profile-linux-device-standalone-memory` | local CLI, loopback HTTP/WebSocket |
 | ESP standalone memory | `profile-esp-standalone-memory` | compact local/client surfaces with embedded store |
 
@@ -47,6 +47,8 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
     capability,
 })?;
 ```
+
+This runtime view can expose server entry surfaces because the example explicitly sets `capability.communication_adapter_enabled = true` and uses `EntryTransportConfig::all_enabled()` to enable transports. The profile only expresses allowance; strict capability snapshots can still show `server_allowed=true` while `visible=false`.
 
 For production, replace `disabled_for_local()` with an auth boundary owned by your process. The current crate exposes the config boundary; your deployment should enforce token, mTLS, or gateway authentication before requests are marked authenticated.
 
@@ -140,7 +142,9 @@ npm --prefix apps/console run dev
 
 | Route | Method | Notes |
 | --- | --- | --- |
-| `/console/overview` | `GET` | System info, runtime shape, observable metrics, capability summary, and kernel summary. |
+| `/console/overview` | `GET` | System info, runtime shape, observable metrics, capability summary, kernel summary, and current memory context. |
+| `/console/llm-gateway` | `GET` | LLM Gateway protocol endpoints, rule export commands, and smoke checks. |
+| `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | Run a backend-whitelisted LLM Gateway smoke check and return bounded output plus exit status. |
 | `/console/transports` | `GET` | Communication entry list. |
 | `/console/transports/{id}` | `PATCH` | Update a communication entry. |
 | `/console/devices` | `GET` | Allowed device list with app_key fingerprints only. |

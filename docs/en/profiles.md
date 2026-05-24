@@ -12,8 +12,8 @@ Profiles bind a target platform to a runtime role. They control feature selectio
 | `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file or sqlite | in-process Tauri command surface plus optional local transports |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
-| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file | HTTP, WebSocket, MCP, and A2A gateway surfaces |
-| `profile-server-linux-dev-full` | Linux server | development full profile | sqlite, file, or in-memory | full adapter and replay validation surface |
+| `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file | HTTP, WebSocket, MCP, A2A, and LLM gateway server surfaces are profile-allowed; runtime visibility still depends on capability policy and transport config |
+| `profile-server-linux-dev-full` | Linux server | development full profile | sqlite, file, or in-memory | full adapter, LLM gateway server, and replay validation surfaces are profile-allowed; runtime visibility still depends on capability policy and transport config |
 
 ## Naming
 
@@ -34,10 +34,14 @@ cargo run -p bm-cli --bin bm -- \
 - ESP profiles reject `file` and `sqlite` store backends.
 - Linux device, desktop, and server profiles can use sqlite when the matching profile/store features are enabled.
 - `profile-server-linux-dev-full` is a development profile, not an embedded default.
+- `llm_gateway_server` belongs only to server Linux memory gateway / dev-full profiles; ESP, device, and desktop embedded SDK profiles do not expose this entry surface.
+- The profile catalog answers whether a surface is allowed for a profile. Runtime `EntryCapabilityView.visible` is the intersection of profile allowance, enabled capability policy, and `EntryTransportConfig`.
 
 ## Snapshot Fixtures
 
 Platform capability fixtures live in `fixtures/platform/capabilities/`. Refresh or check them with:
+
+These fixtures are strict-policy snapshots. Strict policy keeps communication adapters disabled by default, so server profiles can report `entry.llm_gateway_server.server_allowed=true` while `visible=false`. That means the profile allows the server surface, but the snapshot policy has not enabled it.
 
 ```bash
 bash scripts/emit_platform_capability_snapshots.sh --write

@@ -1,11 +1,29 @@
 #![cfg(feature = "server-std")]
 
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryStoreConfig, EntryTransportConfig,
 };
-use bm_http::{handle_http_request, HttpMethod, HttpRuntimeRequest};
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_http::{
+    console_route_specs, handle_http_request, handle_http_request_with_console,
+    HttpConsoleServices, HttpMethod, HttpRuntimeRequest,
+};
+use bm_ollama_transparent::{
+    DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, GatewayFrontReport,
+    ManagedRunnerReport, OllamaAppReport, OllamaTransparentController,
+    OllamaTransparentPreflightReport, OllamaTransparentState, OllamaTransparentStatus,
+    OllamaTransparentTransitionReport, PortBindingReport, PortOwnerKind, ProcessActionReport,
+    TransitionOutcome, TransitionStep, TransitionStepReport,
+};
+use bm_sdk::{
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendKind,
+};
 use serde_json::Value;
 
 fn runtime() -> EntryRuntime {
@@ -33,6 +51,385 @@ fn runtime() -> EntryRuntime {
         capability,
     })
     .expect("entry runtime")
+}
+
+fn runtime_with_file_store(path: &Path) -> EntryRuntime {
+    let mut capability = MemoryCapabilityPolicy::strict_profile();
+    capability.communication_adapter_enabled = true;
+    EntryRuntime::open(EntryRuntimeConfig {
+        profile: ProfileId::ServerLinuxDevFull,
+        identity: EntryIdentity {
+            agent_id: "http-console-agent".to_string(),
+            owner_id: "owner-default".to_string(),
+        },
+        scope: EntryScope {
+            channel: "console".to_string(),
+            chat_id: "chat-1".to_string(),
+        },
+        store: EntryStoreConfig {
+            backend: StoreBackendKind::File,
+            data_path: Some(path.to_path_buf()),
+            fsync: false,
+        },
+        transports: EntryTransportConfig::all_disabled(),
+        auth: EntryAuthConfig::disabled_for_local(),
+        idempotency: EntryIdempotencyConfig { max_keys: 32 },
+        privacy: MemoryPrivacyPolicy::standard_private_boundary(),
+        capability,
+    })
+    .expect("entry runtime")
+}
+
+fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
+    runtime
+        .runtime()
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![RuntimeSkillWrite {
+                name: "transparent_ollama_metrics".to_string(),
+                topic: "transparent ollama metrics".to_string(),
+                title: "Transparent Ollama metrics".to_string(),
+                summary: "Transparent Ollama memory activity must be visible in overview."
+                    .to_string(),
+                content:
+                    "1. read transparent Ollama store events\n2. merge them into Console Overview\n3. report writes and projection hits from the shared telemetry stream"
+                        .to_string(),
+                citations: vec!["http console overview contract".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("write");
+    runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "How should transparent Ollama metrics appear?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("project");
+}
+
+fn test_store_dir(label: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("bm-http-{label}-{nanos}"))
+}
+
+#[derive(Default)]
+struct MockOllamaTransparentController {
+    calls: Mutex<Vec<String>>,
+}
+
+impl MockOllamaTransparentController {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("mock calls").clone()
+    }
+
+    fn record(&self, call: impl Into<String>) {
+        self.calls.lock().expect("mock calls").push(call.into());
+    }
+}
+
+impl OllamaTransparentController for MockOllamaTransparentController {
+    fn preflight(&self) -> bm_ollama_transparent::Result<OllamaTransparentPreflightReport> {
+        self.record("preflight");
+        Ok(mock_preflight_report())
+    }
+
+    fn enable(
+        &self,
+        request: EnableOllamaTransparentRequest,
+    ) -> bm_ollama_transparent::Result<OllamaTransparentTransitionReport> {
+        self.record(format!(
+            "enable:open_app={:?}:allow_stop={}",
+            request.open_app, request.allow_stop_official_ollama
+        ));
+        Ok(mock_transition_report(
+            OllamaTransparentState::Disabled,
+            OllamaTransparentState::Active,
+            TransitionStep::StartTransparentFront,
+        ))
+    }
+
+    fn disable(
+        &self,
+        request: DisableOllamaTransparentRequest,
+    ) -> bm_ollama_transparent::Result<OllamaTransparentTransitionReport> {
+        self.record(format!(
+            "disable:restore={:?}",
+            request.restore_official_app
+        ));
+        Ok(mock_transition_report(
+            OllamaTransparentState::Active,
+            OllamaTransparentState::Disabled,
+            TransitionStep::StopTransparentFront,
+        ))
+    }
+
+    fn status(&self) -> bm_ollama_transparent::Result<OllamaTransparentStatus> {
+        self.record("status");
+        Ok(mock_status_report())
+    }
+
+    fn open_app(&self) -> bm_ollama_transparent::Result<ProcessActionReport> {
+        self.record("open_app");
+        Ok(ProcessActionReport::ok("open_official_app"))
+    }
+}
+
+fn mock_status_report() -> OllamaTransparentStatus {
+    let public_port = PortBindingReport::owned(
+        "127.0.0.1:11434".parse().expect("public bind"),
+        PortOwnerKind::BeetleMemoryTransparentFront,
+        bm_ollama_transparent::ObservedProcess::new(11434, "bm-llm-gateway", "/tmp/bm-llm-gateway"),
+    );
+    OllamaTransparentStatus {
+        state: OllamaTransparentState::Active,
+        public_port: public_port.clone(),
+        upstream_port: PortBindingReport::owned(
+            "127.0.0.1:11435".parse().expect("upstream bind"),
+            PortOwnerKind::ManagedOllamaRunner,
+            bm_ollama_transparent::ObservedProcess::new(
+                11435,
+                "bm-real-ollama",
+                "/tmp/bm-real-ollama",
+            ),
+        ),
+        app: OllamaAppReport {
+            bundle_path: "/Applications/Ollama.app".into(),
+            allow_stop_official_ollama: false,
+            open_app_after_enable: true,
+            restore_official_after_disable: true,
+            last_action: None,
+        },
+        managed_runner: mock_runner_report(),
+        gateway_front: GatewayFrontReport::from_public_port(&public_port),
+        last_transition: None,
+    }
+}
+
+fn mock_preflight_report() -> OllamaTransparentPreflightReport {
+    OllamaTransparentPreflightReport {
+        accepted: true,
+        resulting_state: OllamaTransparentState::Disabled,
+        public_port: PortBindingReport::empty("127.0.0.1:11434".parse().expect("public bind")),
+        upstream_port: PortBindingReport::empty("127.0.0.1:11435".parse().expect("upstream bind")),
+        managed_runner: mock_runner_report(),
+        stop_plan: None,
+        blockers: Vec::new(),
+    }
+}
+
+fn mock_runner_report() -> ManagedRunnerReport {
+    ManagedRunnerReport::installed(
+        "/Applications/Ollama.app/Contents/Resources/ollama".into(),
+        "/tmp/beetle-memory/ollama-runner".into(),
+        Some("fnv1a64:test".to_string()),
+    )
+}
+
+fn mock_transition_report(
+    from_state: OllamaTransparentState,
+    to_state: OllamaTransparentState,
+    step: TransitionStep,
+) -> OllamaTransparentTransitionReport {
+    OllamaTransparentTransitionReport {
+        from_state,
+        to_state,
+        outcome: TransitionOutcome::Completed,
+        steps: vec![TransitionStepReport::ok(step)],
+        failing_step: None,
+        rollback: None,
+    }
+}
+
+#[test]
+fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
+    let routes = console_route_specs();
+
+    for (method, path) in [
+        (HttpMethod::Get, "/console/capabilities"),
+        (HttpMethod::Get, "/console/ollama-transparent/status"),
+        (HttpMethod::Post, "/console/ollama-transparent/preflight"),
+        (HttpMethod::Post, "/console/ollama-transparent/enable"),
+        (HttpMethod::Post, "/console/ollama-transparent/disable"),
+        (HttpMethod::Post, "/console/ollama-transparent/open-app"),
+    ] {
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.method == method && route.path == path),
+            "missing console route {method:?} {path}"
+        );
+    }
+}
+
+#[test]
+fn console_ollama_transparent_routes_delegate_to_controller_trait() {
+    let runtime = runtime();
+    let controller = MockOllamaTransparentController::default();
+    let services = HttpConsoleServices::with_ollama_transparent(&controller);
+
+    let capabilities = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/capabilities"),
+        services,
+    )
+    .expect("capabilities");
+    assert_eq!(capabilities.status_code, 200, "{}", capabilities.body);
+    let capabilities: Value = serde_json::from_str(&capabilities.body).expect("capabilities json");
+    assert_eq!(capabilities["status"], "accepted");
+    assert_eq!(
+        capabilities["capabilities"]["schema"],
+        "beetle-memory.console.capabilities.v1"
+    );
+    assert_eq!(
+        capabilities["capabilities"]["features"]["ollamaTransparentApp"]["visible"],
+        true
+    );
+    assert_eq!(
+        capabilities["capabilities"]["features"]["ollamaTransparentApp"]["owner"],
+        "desktop-shell"
+    );
+    assert_eq!(
+        capabilities["capabilities"]["features"]["ollamaTransparentApp"]["routes"]["status"],
+        "/console/ollama-transparent/status"
+    );
+
+    let status = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/ollama-transparent/status"),
+        services,
+    )
+    .expect("status");
+    assert_eq!(status.status_code, 200, "{}", status.body);
+    let status: Value = serde_json::from_str(&status.body).expect("status json");
+    assert_eq!(status["status"], "accepted");
+    assert_eq!(status["ollamaTransparent"]["state"], "Active");
+    assert_eq!(
+        status["ollamaTransparent"]["gatewayFront"]["expectedOwner"],
+        "BeetleMemoryTransparentFront"
+    );
+
+    let preflight = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/preflight", "{}"),
+        services,
+    )
+    .expect("preflight");
+    assert_eq!(preflight.status_code, 200, "{}", preflight.body);
+    let preflight: Value = serde_json::from_str(&preflight.body).expect("preflight json");
+    assert_eq!(preflight["status"], "accepted");
+    assert_eq!(preflight["preflight"]["accepted"], true);
+
+    let enable = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/enable",
+            r#"{"openApp":false,"allowStopOfficialOllama":true}"#,
+        ),
+        services,
+    )
+    .expect("enable");
+    assert_eq!(enable.status_code, 200, "{}", enable.body);
+    let enable: Value = serde_json::from_str(&enable.body).expect("enable json");
+    assert_eq!(enable["transition"]["outcome"], "Completed");
+    assert_eq!(enable["transition"]["toState"], "Active");
+
+    let disable = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/disable",
+            r#"{"restoreOfficialApp":false}"#,
+        ),
+        services,
+    )
+    .expect("disable");
+    assert_eq!(disable.status_code, 200, "{}", disable.body);
+    let disable: Value = serde_json::from_str(&disable.body).expect("disable json");
+    assert_eq!(disable["transition"]["outcome"], "Completed");
+    assert_eq!(disable["transition"]["toState"], "Disabled");
+
+    let open_app = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/open-app", "{}"),
+        services,
+    )
+    .expect("open app");
+    assert_eq!(open_app.status_code, 200, "{}", open_app.body);
+    let open_app: Value = serde_json::from_str(&open_app.body).expect("open app json");
+    assert_eq!(open_app["action"]["action"], "open_official_app");
+    assert_eq!(open_app["action"]["ok"], true);
+
+    assert_eq!(
+        controller.calls(),
+        vec![
+            "status",
+            "preflight",
+            "enable:open_app=Some(false):allow_stop=true",
+            "disable:restore=Some(false)",
+            "open_app",
+        ]
+    );
+}
+
+#[test]
+fn console_capabilities_hide_ollama_transparent_when_controller_is_not_wired() {
+    let runtime = runtime();
+    let response = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/capabilities"))
+        .expect("capabilities should be available");
+
+    assert_eq!(response.status_code, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("capabilities json");
+    assert_eq!(body["status"], "accepted");
+    assert_eq!(
+        body["capabilities"]["features"]["ollamaTransparentApp"]["visible"],
+        false
+    );
+    assert_eq!(
+        body["capabilities"]["features"]["ollamaTransparentApp"]["reason"],
+        "DesktopShellOnly"
+    );
+    assert!(
+        body["capabilities"]["features"]["ollamaTransparentApp"]["routes"]
+            .as_object()
+            .is_some_and(|routes| routes.is_empty()),
+        "{}",
+        response.body
+    );
+}
+
+#[test]
+fn console_ollama_transparent_status_and_actions_fail_when_controller_is_not_wired() {
+    let runtime = runtime();
+
+    for request in [
+        HttpRuntimeRequest::get("/console/ollama-transparent/status"),
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/preflight", "{}"),
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/enable",
+            r#"{"openApp":false,"allowStopOfficialOllama":true}"#,
+        ),
+        HttpRuntimeRequest::post_json(
+            "/console/ollama-transparent/disable",
+            r#"{"restoreOfficialApp":false}"#,
+        ),
+        HttpRuntimeRequest::post_json("/console/ollama-transparent/open-app", "{}"),
+    ] {
+        let error = handle_http_request(&runtime, request)
+            .expect_err("missing controller should reject mutating transparent routes");
+        assert!(
+            error
+                .to_string()
+                .contains("ollama transparent controller is not configured"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -79,11 +476,102 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
     assert!(kernel.iter().any(|row| row["label"] == "Profile"));
     assert!(kernel.iter().any(|row| row["label"] == "Store backend"));
     assert!(kernel.iter().any(|row| row["label"] == "Console shell"));
+    let memory_context = overview["overview"]["memoryContext"]
+        .as_array()
+        .expect("memory context");
+    assert!(memory_context
+        .iter()
+        .any(|row| row["label"] == "Owner" && row["value"] == "owner-default"));
+    assert!(memory_context
+        .iter()
+        .any(|row| row["label"] == "Chat" && row["value"] == "chat-1"));
 
     let transports = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/transports"))
         .expect("transports");
     assert_eq!(transports.status_code, 200);
     assert!(transports.body.contains("\"transports\""));
+
+    let llm_gateway =
+        handle_http_request(&runtime, HttpRuntimeRequest::get("/console/llm-gateway"))
+            .expect("llm gateway");
+    assert_eq!(llm_gateway.status_code, 200);
+    let llm_gateway: Value = serde_json::from_str(&llm_gateway.body).expect("llm gateway json");
+    assert_eq!(llm_gateway["status"], "accepted");
+    assert_eq!(
+        llm_gateway["llmGateway"]["openaiBaseUrl"],
+        "http://127.0.0.1:8787/v1"
+    );
+    assert_eq!(
+        llm_gateway["llmGateway"]["ollamaBaseUrl"],
+        "http://127.0.0.1:8787/api"
+    );
+    assert_eq!(
+        llm_gateway["llmGateway"]["providerCapabilitiesUrl"],
+        "http://127.0.0.1:8787/v1/bm/provider-capabilities"
+    );
+    assert_eq!(
+        llm_gateway["llmGateway"]["mcpStreamableHttpUrl"],
+        "http://127.0.0.1:8788/mcp"
+    );
+    assert!(llm_gateway["llmGateway"]
+        .as_object()
+        .expect("llm gateway object")
+        .get("sharedRuntime")
+        .is_none());
+    let protocols = llm_gateway["llmGateway"]["protocols"]
+        .as_array()
+        .expect("protocols");
+    assert!(protocols
+        .iter()
+        .any(|protocol| protocol["id"] == "openai-compatible"));
+    assert!(protocols
+        .iter()
+        .any(|protocol| protocol["id"] == "ollama-native"));
+    assert!(protocols
+        .iter()
+        .any(|protocol| protocol["id"] == "mcp-streamable-http"));
+    assert!(llm_gateway["llmGateway"]["ruleExports"]
+        .as_array()
+        .expect("rule exports")
+        .iter()
+        .any(|rule| rule["target"] == "continue"
+            && rule["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("--target continue"))));
+    assert!(llm_gateway["llmGateway"]["smokeChecks"]
+        .as_array()
+        .expect("smoke checks")
+        .iter()
+        .any(|check| check["id"] == "provider-capabilities"
+            && check["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("/v1/bm/provider-capabilities"))));
+
+    let smoke_run = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/llm-gateway/smoke-checks/provider-capabilities/run",
+            "{}",
+        ),
+    )
+    .expect("smoke run");
+    assert_eq!(smoke_run.status_code, 200);
+    let smoke_run: Value = serde_json::from_str(&smoke_run.body).expect("smoke run json");
+    assert_eq!(smoke_run["status"], "accepted");
+    assert_eq!(smoke_run["result"]["id"], "provider-capabilities");
+    assert!(smoke_run["result"]["command"]
+        .as_str()
+        .is_some_and(|command| command.contains("/v1/bm/provider-capabilities")));
+
+    let unknown_smoke = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/console/llm-gateway/smoke-checks/not-a-smoke-check/run",
+            "{}",
+        ),
+    )
+    .expect("unknown smoke");
+    assert_eq!(unknown_smoke.status_code, 404);
 }
 
 #[test]
@@ -171,6 +659,16 @@ fn console_overview_reflects_real_memory_operations() {
     .expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);
 
+    let duplicate_write = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/write",
+            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"task_learning"}"#,
+        ),
+    )
+    .expect("duplicate write");
+    assert_eq!(duplicate_write.status_code, 200, "{}", duplicate_write.body);
+
     let recall = handle_http_request(
         &runtime,
         HttpRuntimeRequest::post_json(
@@ -193,6 +691,44 @@ fn console_overview_reflects_real_memory_operations() {
         .any(|event| event["text"]
             .as_str()
             .is_some_and(|text| text.contains("Memory write accepted"))));
+}
+
+#[test]
+fn console_overview_aggregates_extra_memory_event_store_paths() {
+    let transparent_store_path = test_store_dir("transparent-ollama-events");
+    let transparent_runtime = runtime_with_file_store(&transparent_store_path);
+    seed_memory_runtime_activity(&transparent_runtime);
+
+    let runtime = runtime();
+    let event_store_paths = vec![transparent_store_path];
+    let services = HttpConsoleServices::none().with_memory_event_store_paths(&event_store_paths);
+
+    let overview = handle_http_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/overview"),
+        services,
+    )
+    .expect("overview");
+
+    assert_eq!(overview.status_code, 200, "{}", overview.body);
+    let body: Value = serde_json::from_str(&overview.body).expect("overview json");
+    assert_eq!(body["overview"]["writesToday"]["value"], "1");
+    assert_eq!(body["overview"]["recall"]["value"], "100.0%");
+    assert_eq!(
+        body["overview"]["recall"]["desc"],
+        "1 recall requests / 1 with hits"
+    );
+    assert!(body["overview"]["projection"]["desc"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("1 conversations received memory context"));
+    assert_ne!(body["overview"]["projection"]["value"], "0");
+    assert!(
+        body["overview"]["runtimeBudget"]["projectionRenderMaxChars"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
 }
 
 #[test]

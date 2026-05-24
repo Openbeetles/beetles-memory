@@ -21,14 +21,14 @@ use super::{
     ArchiveRecordSource, ArchiveSearchHit, ArchiveSearchQuery, LongTermExtractionPolicy,
     LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryFreshness,
     LongTermMemoryKind, LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, LongTermMemoryStore, MemoryGovernanceContext, MemoryGovernanceInput,
-    MemoryProfile, MemoryStore, SessionMessage, SessionStore, SessionSummaryStore,
-    SharedMemoryWriteSource, TurnLedgerStore, MAX_LONG_TERM_MEMORY_ITEMS,
+    LongTermMemoryStaleHint, LongTermMemoryStore, MemoryEvidenceAuthority, MemoryGovernanceContext,
+    MemoryGovernanceInput, MemoryProfile, MemoryStore, SessionMessage, SessionStore,
+    SessionSummaryStore, SharedMemoryWriteSource, TurnLedgerStore, MAX_LONG_TERM_MEMORY_ITEMS,
 };
 
 /// 长期记忆提取状态存储路径（相对状态根）。
 pub const REL_PATH_LONG_TERM_EXTRACTION_STATES: &str = "memory/long_term_extraction_states.json";
-pub const LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT: &str = "You extract durable memory updates for a personal AI assistant. Return JSON only: an array of objects. Each object must contain plane plus topic. plane must be factual, skill, or ignore. Use factual for canonical shared facts: durable user profile facts, stable preferences, durable constraints, ongoing project/task state, and durable external facts. Use skill for procedural experience, operating routines, tool-use know-how, setup playbooks, or reusable workflows that should not pollute canonical factual memory. Use ignore when nothing durable should be written. For plane=factual, also provide op, kind, and optionally content and keywords. op must be upsert or delete. kind must be one of preference, profile, relationship, project, task, constraint, fact. Reuse an existing factual topic whenever the same durable slot is being updated or corrected. For plane=skill, provide content and optional skill_summary; content should be a compact reusable procedure, not a transcript. For plane=ignore, no extra fields are needed. Do not store greetings, one-off troubleshooting steps as factual memory, short acknowledgements, temporary moods, assistant-only claims, secrets, credentials, raw tool payloads, copied log fragments, or long external document excerpts. Treat archive evidence sources as supporting records rather than canonical memory: they may justify a durable conclusion, but they are not themselves a fact slot. Prefer newer transcript evidence over older archive fragments when they disagree. When project/task context shifts, update the existing active factual slot instead of creating a parallel near-duplicate slot. Use the provided session summary, existing long-term memory, and archive evidence as grounding when deciding whether to upsert, delete, reroute to skill, or ignore. Keep only the highest-value durable changes, at most 4 items. If there is nothing durable to add, update, or delete, return [].";
+pub const LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT: &str = "You extract durable memory updates for a personal AI assistant. Return JSON only: an array of objects. Each object must contain plane plus topic. plane must be factual, skill, or ignore. Use factual for canonical shared facts: durable user profile facts, stable preferences, durable constraints, ongoing project/task state, and durable external facts. Use skill for procedural experience, operating routines, tool-use know-how, setup playbooks, or reusable workflows that should not pollute canonical factual memory. Use ignore when nothing durable should be written. For plane=factual, also provide op, kind, source_authority, and optionally content and keywords. source_authority must be one of user_asserted, runtime_observation, world_observation, program_memory_canonical, archive_evidence, assistant_utterance, assistant_self_claim, external_content, private_garden_internal, or legacy_transcript. op must be upsert or delete. kind must be one of preference, profile, relationship, project, task, constraint, fact. Reuse an existing factual topic whenever the same durable slot is being updated or corrected. For plane=skill, provide content and optional skill_summary; content should be a compact reusable procedure, not a transcript. For plane=ignore, no extra fields are needed. Do not store greetings, one-off troubleshooting steps as factual memory, short acknowledgements, temporary moods, assistant-only claims, secrets, credentials, raw tool payloads, copied log fragments, or long external document excerpts. Factual upserts from assistant_utterance, assistant_self_claim, private_garden_internal, external_content, or legacy_transcript will be rejected by policy; route user-granted relationship or naming preferences as user_asserted. Treat archive evidence sources as supporting records rather than canonical memory: they may justify a durable conclusion, but they are not themselves a fact slot. Prefer newer transcript evidence over older archive fragments when they disagree. When project/task context shifts, update the existing active factual slot instead of creating a parallel near-duplicate slot. Use the provided session summary, existing long-term memory, and archive evidence as grounding when deciding whether to upsert, delete, reroute to skill, or ignore. Keep only the highest-value durable changes, at most 4 items. If there is nothing durable to add, update, or delete, return [].";
 /// 共享策略允许的 recent 消息窗口上限；实际运行值由 MemoryProfile 决定。
 pub const LONG_TERM_MEMORY_EXTRACTION_RECENT_N: usize = 10;
 /// 单次提取允许的动作数上限；实际运行值由 MemoryProfile 决定。
@@ -98,55 +98,6 @@ impl LongTermExtractionPolicy {
         }
         !input.user_content.trim().is_empty() && !input.reply_content.trim().is_empty()
     }
-
-    fn marks_dirty(self, user_content: &str, reply_content: &str) -> bool {
-        let user = user_content.trim();
-        let reply = reply_content.trim();
-        if user.is_empty() || reply.is_empty() {
-            return false;
-        }
-
-        let user_chars = user.chars().count();
-        let reply_chars = reply.chars().count();
-        let user_words = user.split_whitespace().count();
-        let combined_chars = user_chars.saturating_add(reply_chars);
-
-        if user_chars <= self.low_signal_user_chars
-            && user_words <= self.low_signal_user_words
-            && reply_chars <= self.low_signal_reply_chars
-            && !reply.contains('\n')
-        {
-            return false;
-        }
-
-        user_chars >= self.substantive_user_chars
-            || reply_chars >= self.substantive_reply_chars
-            || combined_chars >= self.substantive_combined_chars
-            || user.contains('\n')
-            || reply.contains('\n')
-    }
-
-    fn cooldown_ready(self, state: &LongTermMemoryExtractionState, after_count: usize) -> bool {
-        after_count.saturating_sub(state.last_requested_at_count)
-            >= self.min_messages_between_requests
-    }
-
-    fn should_process_dirty_work(
-        self,
-        state: &LongTermMemoryExtractionState,
-        after_count: usize,
-    ) -> bool {
-        if !state.has_dirty_work() {
-            return false;
-        }
-        if state.dirty_turns >= 2 {
-            return true;
-        }
-        if state.last_processed_at_count == 0 && after_count >= self.first_process_min_messages {
-            return true;
-        }
-        after_count.saturating_sub(state.dirty_since_count) >= self.force_process_after_messages
-    }
 }
 
 pub fn evaluate_long_term_memory_extraction_turn(
@@ -162,12 +113,8 @@ pub fn evaluate_long_term_memory_extraction_turn(
             should_enqueue: false,
         };
     }
-    if policy.marks_dirty(input.user_content, input.reply_content) {
-        next_state.mark_dirty(input.after_count);
-    }
-    let should_enqueue = !next_state.pending
-        && policy.cooldown_ready(&next_state, input.after_count)
-        && policy.should_process_dirty_work(&next_state, input.after_count);
+    next_state.mark_dirty(input.after_count);
+    let should_enqueue = !next_state.pending && next_state.has_dirty_work();
     LongTermMemoryExtractionTurnDecision {
         next_state,
         should_enqueue,
@@ -238,6 +185,8 @@ struct LongTermMemoryExtractionItem {
     stale_hint: Option<LongTermMemoryStaleHint>,
     #[serde(default)]
     skill_summary: String,
+    #[serde(default)]
+    source_authority: Option<MemoryEvidenceAuthority>,
 }
 
 enum ParsedLongTermMemoryAction {
@@ -443,6 +392,9 @@ pub fn parse_long_term_memory_extraction_response(
                 let Some(kind) = parsed_item.kind else {
                     continue;
                 };
+                if !factual_source_authority_allows_upsert(parsed_item.source_authority) {
+                    continue;
+                }
                 if parsed_item.source_chat_id.is_none() {
                     parsed_item.source_chat_id = Some(chat_id.to_string());
                 }
@@ -501,6 +453,19 @@ pub fn parse_long_term_memory_extraction_response(
         deletes,
         skill_writes,
     }
+}
+
+fn factual_source_authority_allows_upsert(authority: Option<MemoryEvidenceAuthority>) -> bool {
+    matches!(
+        authority,
+        Some(
+            MemoryEvidenceAuthority::UserAsserted
+                | MemoryEvidenceAuthority::RuntimeObservation
+                | MemoryEvidenceAuthority::WorldObservation
+                | MemoryEvidenceAuthority::ProgramMemoryCanonical
+                | MemoryEvidenceAuthority::ArchiveEvidence
+        )
+    )
 }
 
 fn build_draft_archive_reconcile_query(
@@ -1352,10 +1317,12 @@ fn build_long_term_memory_extraction_transcript(
     for message in recent {
         let scrubbed = scrub_credentials(&message.content);
         let preview = truncate_content_to_max(&scrubbed, policy.transcript_preview_chars);
+        let authority = MemoryEvidenceAuthority::for_role(&message.role);
         let _ = writeln!(
             transcript,
-            "{}: {}",
+            "{} [source_authority={}]: {}",
             message.role.to_uppercase(),
+            authority.label(),
             preview.as_ref()
         );
     }
@@ -1771,7 +1738,7 @@ mod tests {
         }
     }
 
-    fn substantive_turn_input(after_count: usize) -> LongTermMemoryExtractionTurnInput<'static> {
+    fn eligible_turn_input(after_count: usize) -> LongTermMemoryExtractionTurnInput<'static> {
         LongTermMemoryExtractionTurnInput {
             ingress: IngressKind::User,
             channel: "chat_channel",
@@ -1863,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn short_ack_turn_does_not_mark_dirty() {
+    fn eligible_turn_enqueues_for_llm_semantic_governance() {
         let decision = evaluate_long_term_memory_extraction_turn(
             LongTermMemoryExtractionTurnInput {
                 ingress: IngressKind::User,
@@ -1877,6 +1844,63 @@ mod tests {
             None,
             MemoryProfile::Embedded,
         );
+        assert!(decision.should_enqueue);
+        assert_eq!(decision.next_state.dirty_turns, 1);
+    }
+
+    #[test]
+    fn short_profile_turn_enqueues_for_llm_semantic_decision() {
+        let decision = evaluate_long_term_memory_extraction_turn(
+            LongTermMemoryExtractionTurnInput {
+                ingress: IngressKind::User,
+                channel: "chat_channel",
+                user_content: "以后叫我青川",
+                reply_content: "好的，青川。",
+                after_count: 2,
+                pressure: PressureLevel::Normal,
+                external_content_used: false,
+            },
+            None,
+            MemoryProfile::Standard,
+        );
+        assert!(decision.should_enqueue);
+        assert_eq!(decision.next_state.dirty_turns, 1);
+    }
+
+    #[test]
+    fn generic_preference_turn_enqueues_for_llm_semantic_decision() {
+        let decision = evaluate_long_term_memory_extraction_turn(
+            LongTermMemoryExtractionTurnInput {
+                ingress: IngressKind::User,
+                channel: "chat_channel",
+                user_content: "记住：以后默认用中文简洁回答",
+                reply_content: "好的，我会默认用中文并保持简洁。",
+                after_count: 2,
+                pressure: PressureLevel::Normal,
+                external_content_used: false,
+            },
+            None,
+            MemoryProfile::Standard,
+        );
+        assert!(decision.should_enqueue);
+        assert_eq!(decision.next_state.dirty_turns, 1);
+    }
+
+    #[test]
+    fn extraction_admission_still_respects_external_content_gate() {
+        let decision = evaluate_long_term_memory_extraction_turn(
+            LongTermMemoryExtractionTurnInput {
+                ingress: IngressKind::User,
+                channel: "chat_channel",
+                user_content: "记住外部资料里的这个结论",
+                reply_content: "外部资料里的结论是稳定事实。",
+                after_count: 2,
+                pressure: PressureLevel::Normal,
+                external_content_used: true,
+            },
+            None,
+            MemoryProfile::Standard,
+        );
         assert!(!decision.should_enqueue);
         assert_eq!(
             decision.next_state,
@@ -1885,17 +1909,17 @@ mod tests {
     }
 
     #[test]
-    fn substantive_turn_eventually_enqueues_and_sets_pending() {
+    fn eligible_turn_enqueues_and_sets_pending() {
         let first = evaluate_long_term_memory_extraction_turn(
-            substantive_turn_input(4),
+            eligible_turn_input(4),
             None,
             MemoryProfile::Embedded,
         );
-        assert!(!first.should_enqueue);
+        assert!(first.should_enqueue);
         assert_eq!(first.next_state.dirty_turns, 1);
 
         let second = evaluate_long_term_memory_extraction_turn(
-            substantive_turn_input(10),
+            eligible_turn_input(10),
             Some(&first.next_state),
             MemoryProfile::Embedded,
         );
@@ -1917,7 +1941,7 @@ mod tests {
             pending: true,
         };
         let decision = evaluate_long_term_memory_extraction_turn(
-            substantive_turn_input(16),
+            eligible_turn_input(16),
             Some(&state),
             MemoryProfile::Embedded,
         );

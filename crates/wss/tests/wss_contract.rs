@@ -1,5 +1,8 @@
 use bm_adapter::AdapterOperation;
-use bm_sdk::{resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId};
+use bm_sdk::{
+    resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId,
+    RuntimeBudgetReport,
+};
 use bm_wss::{message_specs, WssBudget};
 
 #[test]
@@ -33,7 +36,9 @@ fn esp_standalone_wss_is_summary_only_with_bounded_frames() {
     assert!(!catalog.adapter.wss.private_data_allowed);
     assert!(catalog.adapter.wss.visible);
 
-    let budget = WssBudget::esp_standalone();
+    let budget = WssBudget::from_runtime_budget(&RuntimeBudgetReport::static_for_profile(
+        ProfileId::EspStandaloneMemory,
+    ));
     assert!(budget.max_frame_bytes <= 8 * 1024);
     assert!(budget.max_subscriptions <= 4);
 }

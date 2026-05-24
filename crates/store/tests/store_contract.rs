@@ -1,7 +1,7 @@
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind};
 use bm_core::platform::{MemorySystemKind, Platform};
-use bm_store::{StoreBackendConfig, StoreEventLog, StorePlatform};
+use bm_store::{StoreBackendConfig, StorePlatform};
 
 #[test]
 fn in_memory_store_platform_covers_core_runtime_paths() {

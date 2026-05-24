@@ -5,13 +5,13 @@ use bm_sdk::{
     StoreBackendKind,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EntryIdentity {
     pub agent_id: String,
     pub owner_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EntryScope {
     pub channel: String,
     pub chat_id: String,
@@ -32,6 +32,7 @@ pub struct EntryTransportConfig {
     pub wss_server: bool,
     pub mcp_server: bool,
     pub a2a_bridge: bool,
+    pub llm_gateway_server: bool,
 }
 
 impl EntryTransportConfig {
@@ -43,6 +44,7 @@ impl EntryTransportConfig {
             wss_server: false,
             mcp_server: false,
             a2a_bridge: false,
+            llm_gateway_server: false,
         }
     }
 
@@ -54,6 +56,7 @@ impl EntryTransportConfig {
             wss_server: true,
             mcp_server: true,
             a2a_bridge: true,
+            llm_gateway_server: true,
         }
     }
 
@@ -116,6 +119,7 @@ pub struct EntryCapabilityView {
     pub wss_server: EntryCapabilityItem,
     pub mcp_server: EntryCapabilityItem,
     pub a2a_bridge: EntryCapabilityItem,
+    pub llm_gateway_server: EntryCapabilityItem,
 }
 
 impl EntryCapabilityView {
@@ -150,6 +154,11 @@ impl EntryCapabilityView {
             a2a_bridge: EntryCapabilityItem::from_adapter(
                 catalog.adapter.a2a,
                 transports.a2a_bridge,
+                true,
+            ),
+            llm_gateway_server: EntryCapabilityItem::from_adapter(
+                catalog.entry.llm_gateway_server,
+                transports.llm_gateway_server,
                 true,
             ),
         }

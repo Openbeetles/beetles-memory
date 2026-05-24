@@ -17,6 +17,7 @@ fn esp_profiles_keep_sqlite_index_out_but_retain_fallback_recall() {
     assert!(!standalone.indexed_runtime_skill_recall_allowed);
     assert!(!standalone.indexed_task_learning_recall_allowed);
     assert!(standalone.communication_adapter_allowed);
+    assert!(!standalone.llm_gateway_server_allowed);
     assert!(standalone.adapter.cli.allowed);
     assert!(standalone.adapter.wss.client_allowed);
     assert!(!standalone.adapter.wss.server_allowed);
@@ -35,6 +36,7 @@ fn esp_profiles_keep_sqlite_index_out_but_retain_fallback_recall() {
     assert!(!embedded.indexed_runtime_skill_recall_allowed);
     assert!(!embedded.indexed_task_learning_recall_allowed);
     assert!(!embedded.communication_adapter_allowed);
+    assert!(!embedded.llm_gateway_server_allowed);
     assert!(!embedded.adapter.cli.allowed);
     assert!(!embedded.adapter.wss.allowed);
 }
@@ -56,6 +58,7 @@ fn server_gateway_profile_can_opt_into_sqlite_index_without_making_it_os_default
     assert!(server_gateway.indexed_runtime_skill_recall_allowed);
     assert!(server_gateway.indexed_task_learning_recall_allowed);
     assert!(server_gateway.communication_adapter_allowed);
+    assert!(server_gateway.llm_gateway_server_allowed);
     assert!(server_gateway.adapter.http.server_allowed);
     assert!(server_gateway.adapter.wss.client_allowed);
     assert!(server_gateway.adapter.wss.server_allowed);

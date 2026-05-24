@@ -7,6 +7,7 @@ required_docs=(
   "docs/README.md"
   "docs/en/api.md"
   "docs/en/getting-started.md"
+  "docs/en/llm-gateway-integrations.md"
   "docs/en/profiles.md"
   "docs/en/store-backends.md"
   "docs/en/replay-and-migration.md"
@@ -15,6 +16,7 @@ required_docs=(
   "docs/en/release-checklist.md"
   "docs/zh-CN/api.md"
   "docs/zh-CN/getting-started.md"
+  "docs/zh-CN/llm-gateway-integrations.md"
   "docs/zh-CN/profiles.md"
   "docs/zh-CN/store-backends.md"
   "docs/zh-CN/replay-and-migration.md"
@@ -68,6 +70,7 @@ publishable=(
   "bm-adapter"
   "bm-entry"
   "bm-cli"
+  "bm-llm-gateway"
   "bm-http"
   "bm-wss"
   "bm-mcp"
@@ -83,6 +86,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-adapter \
   -p bm-entry \
   -p bm-cli \
+  -p bm-llm-gateway \
   -p bm-http \
   -p bm-wss \
   -p bm-mcp \
@@ -127,7 +131,7 @@ publish_dry_run() {
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
       ;;
-    bm-cli|bm-http|bm-wss|bm-mcp|bm-a2a)
+    bm-cli|bm-llm-gateway|bm-http|bm-wss|bm-mcp|bm-a2a)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
       extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
