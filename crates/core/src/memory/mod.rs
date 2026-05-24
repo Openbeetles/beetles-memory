@@ -457,8 +457,9 @@ pub use temperament_continuity::{
     TEMPERAMENT_CONTINUITY_TOTAL_CHAR_LIMIT,
 };
 pub use turn_commit::{
-    commit_session_turn, CommittedSessionMessage, MemoryTurnDeliveryStatus, MemoryTurnProtocol,
-    MemoryTurnSource, SessionTurnCommitInput, SessionTurnCommitReport,
+    canonical_user_delta, commit_session_turn, CommittedSessionMessage, MemoryEvidenceAuthority,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitInput,
+    SessionTurnCommitReport, TranscriptInputMessage,
 };
 pub use turn_continuity_evidence::{
     TurnContinuityEvidence, TurnContinuityEvidenceStore, REL_PATH_TURN_CONTINUITY_EVIDENCE,

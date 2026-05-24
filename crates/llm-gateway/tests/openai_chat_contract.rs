@@ -191,6 +191,39 @@ fn chat_non_streaming_injects_memory_and_preserves_openai_payload_shape() {
 }
 
 #[test]
+fn chat_full_history_uses_latest_user_message_as_projection_query() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
+    let scope = scope_request();
+    let mut upstream = MockOpenAiUpstream::default();
+
+    handle_openai_request(
+        &gateway,
+        &config,
+        OpenAiGatewayRequest::post_json(
+            "/v1/chat/completions",
+            scope,
+            json!({
+                "model": "local",
+                "messages": [
+                    { "role": "user", "content": "call me Qingchuan" },
+                    { "role": "assistant", "content": "ok" },
+                    { "role": "user", "content": "I like cold brew" }
+                ]
+            }),
+        ),
+        &mut upstream,
+    )
+    .expect("chat response");
+
+    assert_eq!(upstream.chat_calls.len(), 1);
+    assert_eq!(
+        upstream.chat_calls[0].extracted_user_text,
+        "I like cold brew"
+    );
+}
+
+#[test]
 fn chat_streaming_passes_through_sse_chunks_without_json_buffering() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");

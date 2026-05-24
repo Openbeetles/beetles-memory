@@ -10,7 +10,8 @@ use std::fmt::Write as _;
 use super::{
     build_archive_reconcile_drafts, maintain_archive_search_backend, memory_capability_profile,
     write_governed_shared_memory, LongTermMemoryDraft, LongTermMemoryStore, MemoryProfile,
-    MemoryStore, SessionStore, SessionSummaryStore, SharedMemoryWriteSource, TurnLedgerStore,
+    MemoryStore, SessionMessage, SessionStore, SessionSummaryStore, SharedMemoryWriteSource,
+    TurnLedgerStore, MAX_SESSION_ENTRIES,
 };
 
 const DAILY_AGGREGATE_MARKER: &str = "<!-- beetle:hygiene:daily-aggregate -->";
@@ -52,6 +53,7 @@ pub struct MemoryHygieneInspection {
     pub transcript_rollup_candidates: Vec<String>,
     pub factual_reconcile_candidates: Vec<String>,
     pub factual_compaction_candidates: Vec<String>,
+    pub report_only_repair_candidates: Vec<String>,
     pub runtime_skill_records: usize,
     pub summary: String,
 }
@@ -176,6 +178,11 @@ pub fn inspect_memory_hygiene(
             .into_iter()
             .map(|draft| draft.topic)
             .collect::<Vec<_>>();
+    let report_only_repair_candidates = collect_report_only_repair_candidates(
+        ctx.session_store,
+        ctx.session_summary_store,
+        current_chat_id,
+    );
     let runtime_skill_records = ctx
         .skill_storage
         .list_names()
@@ -205,6 +212,13 @@ pub fn inspect_memory_hygiene(
         factual_compaction_candidates.len(),
         runtime_skill_records
     );
+    if !report_only_repair_candidates.is_empty() {
+        let _ = write!(
+            summary,
+            " | report_only_repair={}",
+            report_only_repair_candidates.len()
+        );
+    }
     MemoryHygieneInspection {
         profile: profile_label.to_string(),
         cadence: cadence.to_string(),
@@ -213,6 +227,7 @@ pub fn inspect_memory_hygiene(
         transcript_rollup_candidates,
         factual_reconcile_candidates,
         factual_compaction_candidates,
+        report_only_repair_candidates,
         runtime_skill_records,
         summary,
     }
@@ -244,6 +259,11 @@ pub fn render_memory_hygiene_inspection_markdown(inspection: &MemoryHygieneInspe
         &mut out,
         "Factual compaction candidates",
         &inspection.factual_compaction_candidates,
+    );
+    render_hygiene_list(
+        &mut out,
+        "Report-only repair candidates",
+        &inspection.report_only_repair_candidates,
     );
     let _ = writeln!(
         out,
@@ -459,6 +479,106 @@ fn collect_factual_compaction_candidates(
     Ok(compacted)
 }
 
+fn collect_report_only_repair_candidates(
+    session_store: &dyn SessionStore,
+    summary_store: &dyn SessionSummaryStore,
+    current_chat_id: &str,
+) -> Vec<String> {
+    let mut chat_ids = session_store.list_chat_ids().unwrap_or_default();
+    if !chat_ids.iter().any(|chat_id| chat_id == current_chat_id) {
+        chat_ids.push(current_chat_id.to_string());
+    }
+    chat_ids.sort();
+    chat_ids.dedup();
+    chat_ids.truncate(32);
+
+    let mut candidates = Vec::new();
+    for chat_id in chat_ids {
+        if let Ok(messages) = session_store.load_recent(&chat_id, MAX_SESSION_ENTRIES) {
+            collect_session_repair_candidates(&chat_id, &messages, &mut candidates);
+        }
+        if let Ok(Some(summary)) = summary_store.get(&chat_id) {
+            if looks_like_assistant_identity_self_claim(&summary) {
+                candidates.push(format!(
+                    "chat={} kind=summary_assistant_identity_self_claim evidence={}",
+                    chat_id,
+                    truncate_repair_evidence(&summary)
+                ));
+            }
+        }
+    }
+    candidates
+}
+
+fn collect_session_repair_candidates(
+    chat_id: &str,
+    messages: &[SessionMessage],
+    candidates: &mut Vec<String>,
+) {
+    let mut prior_user_messages = Vec::<&str>::new();
+    for (idx, message) in messages.iter().enumerate() {
+        if message.role.eq_ignore_ascii_case("assistant")
+            && looks_like_assistant_identity_self_claim(&message.content)
+        {
+            candidates.push(format!(
+                "chat={} message={} kind=assistant_identity_self_claim evidence={}",
+                chat_id,
+                idx,
+                truncate_repair_evidence(&message.content)
+            ));
+        }
+        if message.role.eq_ignore_ascii_case("user") {
+            if user_message_looks_like_full_history_duplicate(
+                &message.content,
+                &prior_user_messages,
+            ) {
+                candidates.push(format!(
+                    "chat={} message={} kind=full_history_user_duplicate evidence={}",
+                    chat_id,
+                    idx,
+                    truncate_repair_evidence(&message.content)
+                ));
+            }
+            prior_user_messages.push(message.content.as_str());
+        }
+    }
+}
+
+fn user_message_looks_like_full_history_duplicate(
+    content: &str,
+    prior_user_messages: &[&str],
+) -> bool {
+    if prior_user_messages.is_empty() || !content.contains('\n') {
+        return false;
+    }
+    let lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() < 2 {
+        return false;
+    }
+    prior_user_messages
+        .iter()
+        .map(|message| message.trim())
+        .filter(|message| !message.is_empty())
+        .any(|message| lines.iter().any(|line| *line == message))
+}
+
+fn looks_like_assistant_identity_self_claim(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("indexedhybrid")
+        || lower.contains("archive corpus")
+        || lower.contains("memory helper")
+        || lower.contains("beetle memory")
+        || content.contains("记忆助手")
+}
+
+fn truncate_repair_evidence(content: &str) -> String {
+    truncate_content_to_max(content.trim(), 120).into_owned()
+}
+
 fn render_hygiene_list(out: &mut String, title: &str, values: &[String]) {
     let _ = writeln!(out, "\n## {}", title);
     if values.is_empty() {
@@ -563,6 +683,93 @@ mod tests {
         }
         fn get_with_count(&self, _chat_id: &str) -> Result<Option<(String, usize)>> {
             Ok(Some(("summary".to_string(), 8)))
+        }
+    }
+
+    #[derive(Default)]
+    struct RepairSessionStore {
+        messages: Mutex<HashMap<String, Vec<SessionMessage>>>,
+    }
+
+    impl crate::memory::SessionStore for RepairSessionStore {
+        fn append(&self, chat_id: &str, role: &str, content: &str) -> Result<()> {
+            self.messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(chat_id.to_string())
+                .or_default()
+                .push(SessionMessage {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                });
+            Ok(())
+        }
+
+        fn load_recent(&self, chat_id: &str, n: usize) -> Result<Vec<SessionMessage>> {
+            let messages = self.messages.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(messages
+                .get(chat_id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .rev()
+                .take(n)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect())
+        }
+
+        fn message_count(&self, chat_id: &str) -> Result<usize> {
+            Ok(self
+                .messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(chat_id)
+                .map(Vec::len)
+                .unwrap_or(0))
+        }
+
+        fn clear(&self, chat_id: &str) -> Result<()> {
+            self.messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(chat_id);
+            Ok(())
+        }
+
+        fn list_chat_ids(&self) -> Result<Vec<String>> {
+            Ok(self
+                .messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[derive(Default)]
+    struct RepairSummaryStore {
+        summaries: Mutex<HashMap<String, String>>,
+    }
+
+    impl crate::memory::SessionSummaryStore for RepairSummaryStore {
+        fn get(&self, chat_id: &str) -> Result<Option<String>> {
+            Ok(self
+                .summaries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(chat_id)
+                .cloned())
+        }
+
+        fn set(&self, chat_id: &str, summary: &str) -> Result<()> {
+            self.summaries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(chat_id.to_string(), summary.to_string());
+            Ok(())
         }
     }
 
@@ -805,5 +1012,57 @@ probe"#,
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_empty());
+    }
+
+    #[test]
+    fn hygiene_inspection_reports_repair_candidates_without_mutating_store() {
+        let session_store = RepairSessionStore::default();
+        session_store
+            .append("chat-1", "user", "call me Qingchuan")
+            .unwrap();
+        session_store
+            .append("chat-1", "assistant", "我是 Beetle Memory 的记忆助手。")
+            .unwrap();
+        session_store
+            .append("chat-1", "user", "call me Qingchuan\nI like cold brew")
+            .unwrap();
+        let summary_store = RepairSummaryStore::default();
+        summary_store
+            .set("chat-1", "assistant: 我是记忆助手，基于 IndexedHybrid")
+            .unwrap();
+        let memory_store = StubMemoryStore::default();
+        let long_term_memory_store = StubLongTermMemoryStore::default();
+        let turn_ledger_store = StubTurnLedgerStore;
+        let skill_storage = StubSkillStorage::default();
+
+        let inspection = inspect_memory_hygiene(
+            MemoryHygieneContext {
+                session_store: &session_store,
+                session_summary_store: &summary_store,
+                memory_store: &memory_store,
+                turn_ledger_store: &turn_ledger_store,
+                long_term_memory_store: &long_term_memory_store,
+                skill_storage: &skill_storage,
+            },
+            "chat-1",
+            crate::memory::MemoryProfile::Standard,
+            90 * 86_400 + 10,
+        );
+
+        assert!(inspection
+            .report_only_repair_candidates
+            .iter()
+            .any(|candidate| candidate.contains("assistant_identity_self_claim")));
+        assert!(inspection
+            .report_only_repair_candidates
+            .iter()
+            .any(|candidate| candidate.contains("full_history_user_duplicate")));
+        assert!(inspection
+            .report_only_repair_candidates
+            .iter()
+            .any(|candidate| candidate.contains("summary_assistant_identity_self_claim")));
+        assert_eq!(session_store.message_count("chat-1").unwrap(), 3);
+        assert!(render_memory_hygiene_inspection_markdown(&inspection)
+            .contains("Report-only repair candidates"));
     }
 }

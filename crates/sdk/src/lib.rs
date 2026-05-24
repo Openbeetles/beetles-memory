@@ -26,18 +26,19 @@ pub use bm_core::memory::{
     search_archive_records_detailed, ContinuityCapsuleMaintenanceOutcome, ContinuitySnapshot,
     ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome, ContinuitySnapshotMode,
     IngressKind, IntelligenceReplayInspection, LongTermMemoryDraft, LongTermMemoryEntry,
-    LongTermMemoryQuery, MemoryProfile, MemorySystemKind as MemoryRuntimeSystemKind,
-    ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome, PromptMemoryContext,
-    PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, RecallCandidate,
-    RecallPlane, RecallQuery, RecallSelectionReport, WorkingRecallInspection,
+    LongTermMemoryQuery, MemoryHygieneInspection, MemoryProfile,
+    MemorySystemKind as MemoryRuntimeSystemKind, ParsedLongTermMemoryExtraction,
+    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostReplyMemoryMaintenanceOutcome, PromptMemoryContext, PromptMemoryContextParams,
+    PromptParticipationPlan, PromptRecallIntent, RecallCandidate, RecallPlane, RecallQuery,
+    RecallSelectionReport, WorkingRecallInspection,
 };
 pub use bm_core::memory::{
-    CommittedSessionMessage, GovernedWriteDecision, MemoryPlaneGovernanceReport,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority,
-    MemoryWriteDomain, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    PrivateGardenAdmissionDecision, SessionTurnCommitReport, SoulCandidateDisposition,
-    SoulCandidateHandoffReport,
+    CommittedSessionMessage, GovernedWriteDecision, MemoryEvidenceAuthority,
+    MemoryPlaneGovernanceReport, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteAuthority, MemoryWriteDomain, PostTurnPrivateGardenReport,
+    PostTurnSemanticGovernanceReport, PrivateGardenAdmissionDecision, SessionTurnCommitReport,
+    SoulCandidateDisposition, SoulCandidateHandoffReport, TranscriptInputMessage,
 };
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;

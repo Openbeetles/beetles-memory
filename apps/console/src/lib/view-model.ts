@@ -195,12 +195,28 @@ function metricCard(
 ): OverviewCard {
   return {
     title: fallback.title,
-    value: metric?.value ?? fallback.value,
+    value: metric ? localizedMetricValue(kind, metric.value, fallback.value, currentLang) : fallback.value,
     desc: metric ? localizedMetricDesc(kind, metric.desc, fallback.desc, currentLang) : fallback.desc,
     icon,
     tone,
     progress: metric?.progress ?? progressFallback,
   };
+}
+
+function localizedMetricValue(
+  kind: "storage" | "writes" | "recall" | "projection" | "devices",
+  value: string,
+  fallback: string,
+  currentLang: Lang,
+): string {
+  if (kind !== "projection") return value || fallback;
+  const match = /^(\d+)\s+(?:chars|characters)$/.exec(value.trim());
+  if (!match) return value || fallback;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return value || fallback;
+  return currentLang === "zh-CN"
+    ? `${amount.toLocaleString("zh-CN")} 字`
+    : `${amount.toLocaleString("en")} characters`;
 }
 
 function localizedMetricDesc(
@@ -209,13 +225,28 @@ function localizedMetricDesc(
   fallback: string,
   currentLang: Lang,
 ): string {
-  if (currentLang === "en") return desc || fallback;
+  if (currentLang === "en") {
+    if (kind === "projection") {
+      return (desc || fallback).replace("projection requests served / render budget", "conversations received memory context / current limit").replace(" chars", " characters");
+    }
+    return desc || fallback;
+  }
   if (kind === "storage") return "当前记忆系统占用 / 当前系统总存储";
   if (kind === "writes") return "当前运行时已接受的记忆写入";
   if (kind === "recall") return desc.replace(" recall requests / ", " 次召回请求 / ").replace(" with hits", " 次命中");
-  if (kind === "projection") return desc.replace(" projection requests served", " 次投影请求已服务");
+  if (kind === "projection") return localizedMemoryContextDesc(desc, fallback);
   if (kind === "devices") return "开放设备访问状态";
   return fallback;
+}
+
+function localizedMemoryContextDesc(desc: string, fallback: string): string {
+  const text = desc || fallback;
+  const match = /^(\d+)\s+(?:projection requests served|conversations received memory context)\s+\/\s+(?:render budget|max context|current limit)\s+(\d+)\s+(?:chars|characters)$/.exec(text.trim());
+  if (!match) return "为对话补充已记住的上下文";
+  const requests = Number(match[1]);
+  const limit = Number(match[2]);
+  if (!Number.isFinite(requests) || !Number.isFinite(limit)) return "为对话补充已记住的上下文";
+  return `${requests.toLocaleString("zh-CN")} 次对话已补充记忆 / 本次最多 ${limit.toLocaleString("zh-CN")} 字`;
 }
 
 export function localizedEvents(events: TimelineEvent[] | undefined, fallback: TimelineEvent[], currentLang: Lang): TimelineEvent[] {
@@ -242,7 +273,8 @@ function localizeEventText(text: string): string {
   }
   if (text.startsWith("Memory write accepted")) return text.replace("Memory write accepted, changed", "记忆写入已接受，变更");
   if (text.startsWith("Recall served for")) return text.replace("Recall served for", "召回已执行：").replace(" with ", "，命中 ").replace(" hits", " 条");
-  if (text.startsWith("Projection served")) return text.replace("Projection served,", "投影已生成，");
+  if (text.startsWith("Projection served")) return text.replace("Projection served,", "已为对话补充记忆，").replace(" chars", " 字");
+  if (text.startsWith("Memory context added")) return text.replace("Memory context added,", "已为对话补充记忆，").replace(" characters", " 字");
   if (text.endsWith("communication entries enabled")) return text.replace("communication entries enabled", "个通信入口已启用");
   if (text === "Console runtime opened") return "配置台运行时已打开";
   return text;

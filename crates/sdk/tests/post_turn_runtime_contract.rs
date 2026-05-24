@@ -4,6 +4,7 @@ use bm_core::platform::Platform as _;
 use bm_sdk::{
     MemoryProjectionRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
     MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    TranscriptInputMessage,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope, StaticHttpClient, StaticLlmClient};
@@ -38,6 +39,7 @@ fn finalize_turn_commits_before_maintenance() {
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "叫我青川".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("叫我青川")],
                 assistant_content: Some("你好，青川。".to_string()),
                 tool_calls: 0,
                 external_content_used: false,
@@ -72,6 +74,7 @@ fn finalize_turn_commits_transcript_and_reports_semantic_governance_boundary() {
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "叫我青川".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("叫我青川")],
                 assistant_content: Some("你好，青川。".to_string()),
                 tool_calls: 0,
                 external_content_used: false,
@@ -109,6 +112,7 @@ fn finalize_turn_commits_transcript_when_maintenance_services_are_unavailable() 
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "叫我青川".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("叫我青川")],
                 assistant_content: Some("你好，青川。".to_string()),
                 tool_calls: 0,
                 external_content_used: false,
@@ -146,6 +150,7 @@ fn finalize_turn_commits_transcript_when_profile_hides_maintenance() {
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "叫我青川".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("叫我青川")],
                 assistant_content: Some("你好，青川。".to_string()),
                 tool_calls: 0,
                 external_content_used: false,
@@ -185,6 +190,7 @@ fn finalize_turn_runs_private_garden_self_work_without_counting_it_as_semantic_m
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "叫我青川，后续称呼要自然一些".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("叫我青川，后续称呼要自然一些")],
                 assistant_content: Some("我会记住这个称呼。".to_string()),
                 tool_calls: 1,
                 external_content_used: false,
@@ -215,6 +221,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
                 "plane": "factual",
                 "op": "upsert",
                 "kind": "profile",
+                "source_authority": "user_asserted",
                 "topic": "preferred_name",
                 "content": "The user asked to be called Qingchuan.",
                 "keywords": ["Qingchuan", "preferred name"]
@@ -230,6 +237,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "以后叫我青川".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("以后叫我青川")],
                 assistant_content: Some("好的，青川。".to_string()),
                 tool_calls: 0,
                 external_content_used: false,
@@ -264,6 +272,68 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
 }
 
 #[test]
+fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let runtime_a = test_runtime_with_scope(platform.clone(), profile, "llm.gateway", "chat-a");
+    let mut http = StaticHttpClient;
+    let llm = StaticLlmClient::summary_response(
+        r#"[
+            {
+                "plane": "factual",
+                "op": "upsert",
+                "kind": "profile",
+                "source_authority": "assistant_utterance",
+                "topic": "agent_identity",
+                "content": "The assistant is Beetle Memory's memory helper.",
+                "keywords": ["Beetle Memory", "memory helper"]
+            }
+        ]"#,
+    );
+
+    let report = runtime_a
+        .finalize_turn_and_maintain(
+            Some(&mut http),
+            Some(&llm),
+            MemoryTurnFinalizeRequest {
+                delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                source: turn_source(),
+                user_content: "你叫什么？".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("你叫什么？")],
+                assistant_content: Some("我是 Beetle Memory 的记忆助手。".to_string()),
+                tool_calls: 0,
+                external_content_used: false,
+                runtime_skill_selected_ids: Vec::new(),
+                task_learning_selected_ids: Vec::new(),
+                reuse_outcome_note: String::new(),
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+            },
+        )
+        .expect("finalize turn");
+
+    assert_eq!(report.semantic_governance.accepted_count, 0);
+
+    let runtime_b = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-b");
+    let projection = runtime_b
+        .project(MemoryProjectionRequest {
+            user_query: "你是谁？".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+
+    assert!(!projection
+        .context
+        .long_term_memory_text
+        .as_deref()
+        .unwrap_or_default()
+        .contains("memory helper"));
+}
+
+#[test]
 fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
     let profile = ProfileId::ServerLinuxDevFull;
     let platform = empty_store_platform(profile);
@@ -275,6 +345,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
                 "plane": "factual",
                 "op": "upsert",
                 "kind": "preference",
+                "source_authority": "user_asserted",
                 "topic": "default_response_language_style",
                 "content": "The user prefers concise Chinese answers by default.",
                 "keywords": ["Chinese", "concise", "default style"]
@@ -290,6 +361,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "记住：以后默认用中文简洁回答".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("记住：以后默认用中文简洁回答")],
                 assistant_content: Some("好的，我会默认用中文并保持简洁。".to_string()),
                 tool_calls: 0,
                 external_content_used: false,
@@ -335,6 +407,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
                 "plane": "factual",
                 "op": "upsert",
                 "kind": "fact",
+                "source_authority": "external_content",
                 "topic": "external_claim",
                 "content": "External tool output claimed this should be durable.",
                 "keywords": ["external"]
@@ -350,6 +423,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
                 delivery_status: MemoryTurnDeliveryStatus::Delivered,
                 source: turn_source(),
                 user_content: "根据外部资料回答".to_string(),
+                input_messages: vec![TranscriptInputMessage::user("根据外部资料回答")],
                 assistant_content: Some("外部资料说这是真的。".to_string()),
                 tool_calls: 1,
                 external_content_used: true,

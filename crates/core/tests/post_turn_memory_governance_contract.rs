@@ -1,9 +1,9 @@
 use std::sync::Mutex;
 
 use bm_core::memory::{
-    commit_session_turn, GovernedWriteDecision, MemoryTurnDeliveryStatus, MemoryTurnProtocol,
-    MemoryTurnSource, MemoryWriteAuthority, PostTurnPrivateGardenReport,
-    PrivateGardenAdmissionDecision, SessionStore, SessionTurnCommitInput,
+    commit_session_turn, GovernedWriteDecision, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
+    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority, PostTurnPrivateGardenReport,
+    PrivateGardenAdmissionDecision, SessionStore, SessionTurnCommitInput, TranscriptInputMessage,
 };
 use bm_core::memory::{SessionMessage, SessionMessageRecord};
 use bm_core::Result;
@@ -95,6 +95,7 @@ fn delivered_turn_commits_user_and_assistant_messages() {
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
             source: turn_source(),
             user_content: "叫我青川".to_string(),
+            input_messages: vec![TranscriptInputMessage::user("叫我青川")],
             assistant_content: Some("你好，青川。".to_string()),
         },
     )
@@ -112,6 +113,91 @@ fn delivered_turn_commits_user_and_assistant_messages() {
 }
 
 #[test]
+fn full_history_turn_commits_only_new_user_delta_without_losing_latest_message() {
+    let store = InMemorySessionStore::default();
+    commit_session_turn(
+        &store,
+        "chat-a",
+        SessionTurnCommitInput {
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: turn_source(),
+            user_content: "我叫银二".to_string(),
+            assistant_content: Some("我记住了。".to_string()),
+            input_messages: vec![TranscriptInputMessage::user("我叫银二")],
+        },
+    )
+    .expect("first commit succeeds");
+
+    let report = commit_session_turn(
+        &store,
+        "chat-a",
+        SessionTurnCommitInput {
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: turn_source(),
+            user_content: "我叫银二\n我喜欢冷萃".to_string(),
+            assistant_content: Some("冷萃也记下了。".to_string()),
+            input_messages: vec![
+                TranscriptInputMessage::user("我叫银二"),
+                TranscriptInputMessage::assistant("我记住了。"),
+                TranscriptInputMessage::user("我喜欢冷萃"),
+            ],
+        },
+    )
+    .expect("second commit succeeds");
+
+    let recent = store.load_recent("chat-a", 10).expect("recent");
+    assert_eq!(report.before_count, 2);
+    assert_eq!(report.after_count, 4);
+    assert_eq!(report.committed_messages.len(), 2);
+    assert_eq!(report.committed_messages[0].role, "user");
+    assert_eq!(
+        report.committed_messages[0].authority,
+        MemoryEvidenceAuthority::UserAsserted
+    );
+    assert_eq!(report.committed_messages[1].role, "assistant");
+    assert_eq!(
+        report.committed_messages[1].authority,
+        MemoryEvidenceAuthority::AssistantUtterance
+    );
+    assert_eq!(recent[2].content, "我喜欢冷萃");
+    assert!(!recent
+        .iter()
+        .any(|message| { message.content == "我叫银二\n我喜欢冷萃" }));
+}
+
+#[test]
+fn assistant_self_description_is_committed_as_low_authority_evidence_not_identity_truth() {
+    let store = InMemorySessionStore::default();
+
+    let report = commit_session_turn(
+        &store,
+        "chat-a",
+        SessionTurnCommitInput {
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: turn_source(),
+            user_content: "你叫什么？".to_string(),
+            assistant_content: Some("我是 Beetle Memory 的记忆助手。".to_string()),
+            input_messages: vec![TranscriptInputMessage::user("你叫什么？")],
+        },
+    )
+    .expect("commit succeeds");
+
+    assert_eq!(report.committed_messages.len(), 2);
+    assert_eq!(
+        report.committed_messages[0].authority,
+        MemoryEvidenceAuthority::UserAsserted
+    );
+    assert_eq!(
+        report.committed_messages[1].authority,
+        MemoryEvidenceAuthority::AssistantUtterance
+    );
+    assert_ne!(
+        report.committed_messages[1].authority,
+        MemoryEvidenceAuthority::SoulGovernance
+    );
+}
+
+#[test]
 fn incomplete_stream_does_not_commit_partial_assistant() {
     let store = InMemorySessionStore::default();
 
@@ -122,6 +208,7 @@ fn incomplete_stream_does_not_commit_partial_assistant() {
             delivery_status: MemoryTurnDeliveryStatus::IncompleteStream,
             source: turn_source(),
             user_content: "叫我青川".to_string(),
+            input_messages: vec![TranscriptInputMessage::user("叫我青川")],
             assistant_content: Some("你好，青".to_string()),
         },
     )
@@ -145,6 +232,7 @@ fn user_only_turn_commits_user_without_assistant() {
             delivery_status: MemoryTurnDeliveryStatus::UserOnly,
             source: turn_source(),
             user_content: "叫我青川".to_string(),
+            input_messages: vec![TranscriptInputMessage::user("叫我青川")],
             assistant_content: None,
         },
     )

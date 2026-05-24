@@ -100,7 +100,7 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
     assert!(overview
         .projection
         .desc
-        .starts_with("1 projection requests served"));
+        .starts_with("1 conversations received memory context"));
     assert_ne!(overview.projection.value, "0");
     assert!(overview.runtime_budget.projection_render_max_chars > 0);
 }

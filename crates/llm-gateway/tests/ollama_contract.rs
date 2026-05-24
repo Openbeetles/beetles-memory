@@ -273,6 +273,7 @@ impl LlmClient for LongTermExtractionLlmClient {
                     "plane": "factual",
                     "op": "upsert",
                     "kind": "profile",
+                    "source_authority": "user_asserted",
                     "topic": "preferred_name",
                     "content": "The user asked to be called Qingchuan.",
                     "keywords": ["Qingchuan", "preferred name"]
@@ -439,6 +440,90 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
         .recent_messages
         .iter()
         .any(|message| message.content == "ok"));
+}
+
+#[test]
+fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
+    let mut upstream = MockOllamaUpstream::default();
+    let mut http = StaticHttpClient;
+    let llm = StaticLlmClient;
+    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
+    let scope = scope_request();
+
+    handle_ollama_request_with_services(
+        &gateway,
+        &config,
+        OllamaGatewayRequest::post_json(
+            "/api/chat",
+            scope.clone(),
+            json!({
+                "model": "local",
+                "stream": false,
+                "messages": [{ "role": "user", "content": "call me Qingchuan" }]
+            }),
+        ),
+        &mut upstream,
+        &mut services,
+    )
+    .expect("first chat response");
+
+    handle_ollama_request_with_services(
+        &gateway,
+        &config,
+        OllamaGatewayRequest::post_json(
+            "/api/chat",
+            scope.clone(),
+            json!({
+                "model": "local",
+                "stream": false,
+                "messages": [
+                    { "role": "user", "content": "call me Qingchuan" },
+                    { "role": "assistant", "content": "ok" },
+                    { "role": "user", "content": "I like cold brew" }
+                ]
+            }),
+        ),
+        &mut upstream,
+        &mut services,
+    )
+    .expect("second chat response");
+
+    assert_eq!(upstream.chat_calls.len(), 2);
+    assert_eq!(
+        upstream.chat_calls[1].extracted_user_text,
+        "I like cold brew"
+    );
+
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope)
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let projection = runtime
+        .runtime()
+        .project(MemoryProjectionRequest {
+            user_query: "what do you know?".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("projection");
+
+    let recent_contents = projection
+        .context
+        .recent_messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recent_contents,
+        vec!["call me Qingchuan", "ok", "I like cold brew", "ok"]
+    );
+    assert!(!recent_contents.contains(&"call me Qingchuan\nI like cold brew"));
 }
 
 #[test]

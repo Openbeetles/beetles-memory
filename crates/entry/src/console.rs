@@ -521,10 +521,10 @@ impl EntryConsoleState {
                 value: if projection_requests == 0 {
                     "0".to_string()
                 } else {
-                    format!("{last_projection_chars} chars")
+                    format!("{last_projection_chars} characters")
                 },
                 desc: format!(
-                    "{projection_requests} projection requests served / render budget {} chars",
+                    "{projection_requests} conversations received memory context / current limit {} characters",
                     runtime_budget
                         .projection_render_budget
                         .system_block_max_chars
@@ -894,7 +894,7 @@ impl EntryConsoleState {
                 let chars = inner.last_projection_chars;
                 push_event(
                     &mut inner,
-                    format!("Projection served, {chars} chars"),
+                    format!("Memory context added, {chars} characters"),
                     "ready",
                 );
             }

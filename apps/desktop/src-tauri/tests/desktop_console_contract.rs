@@ -101,7 +101,7 @@ fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
     assert!(body["overview"]["projection"]["desc"]
         .as_str()
         .unwrap_or_default()
-        .starts_with("1 projection requests served"));
+        .starts_with("1 conversations received memory context"));
     assert!(
         body["overview"]["runtimeBudget"]["projectionRenderMaxChars"]
             .as_u64()

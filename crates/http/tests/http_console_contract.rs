@@ -721,7 +721,7 @@ fn console_overview_aggregates_extra_memory_event_store_paths() {
     assert!(body["overview"]["projection"]["desc"]
         .as_str()
         .unwrap_or_default()
-        .starts_with("1 projection requests served"));
+        .starts_with("1 conversations received memory context"));
     assert_ne!(body["overview"]["projection"]["value"], "0");
     assert!(
         body["overview"]["runtimeBudget"]["projectionRenderMaxChars"]

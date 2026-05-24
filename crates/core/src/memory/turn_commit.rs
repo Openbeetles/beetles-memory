@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::bus::IngressKind;
 use crate::error::Result;
 
-use super::{SessionMessage, SessionStore};
+use super::{SessionMessage, SessionMessageRecord, SessionStore, MAX_SESSION_ENTRIES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +26,98 @@ pub enum MemoryTurnProtocol {
     Native,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEvidenceAuthority {
+    UserAsserted,
+    AssistantUtterance,
+    AssistantSelfClaim,
+    RuntimeObservation,
+    WorldObservation,
+    ProgramMemoryCanonical,
+    ArchiveEvidence,
+    SubjectProjection,
+    SoulGovernance,
+    PrivateGardenInternal,
+    OperatorDiagnostic,
+    ExternalContent,
+    LegacyTranscript,
+}
+
+impl MemoryEvidenceAuthority {
+    pub fn for_role(role: &str) -> Self {
+        if role.eq_ignore_ascii_case("user") {
+            Self::UserAsserted
+        } else if role.eq_ignore_ascii_case("assistant") {
+            Self::AssistantUtterance
+        } else {
+            Self::LegacyTranscript
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::UserAsserted => "user_asserted",
+            Self::AssistantUtterance => "assistant_utterance",
+            Self::AssistantSelfClaim => "assistant_self_claim",
+            Self::RuntimeObservation => "runtime_observation",
+            Self::WorldObservation => "world_observation",
+            Self::ProgramMemoryCanonical => "program_memory_canonical",
+            Self::ArchiveEvidence => "archive_evidence",
+            Self::SubjectProjection => "subject_projection",
+            Self::SoulGovernance => "soul_governance",
+            Self::PrivateGardenInternal => "private_garden_internal",
+            Self::OperatorDiagnostic => "operator_diagnostic",
+            Self::ExternalContent => "external_content",
+            Self::LegacyTranscript => "legacy_transcript",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptInputMessage {
+    pub role: String,
+    pub content: String,
+    pub authority: MemoryEvidenceAuthority,
+}
+
+impl TranscriptInputMessage {
+    pub fn new(
+        role: impl Into<String>,
+        content: impl Into<String>,
+        authority: MemoryEvidenceAuthority,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            authority,
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new("user", content, MemoryEvidenceAuthority::UserAsserted)
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(
+            "assistant",
+            content,
+            MemoryEvidenceAuthority::AssistantUtterance,
+        )
+    }
+
+    fn is_role(&self, role: &str) -> bool {
+        self.role.eq_ignore_ascii_case(role)
+    }
+
+    fn into_session_message(self) -> SessionMessage {
+        SessionMessage {
+            role: self.role,
+            content: self.content,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryTurnSource {
     pub ingress: IngressKind,
@@ -44,6 +136,7 @@ pub struct SessionTurnCommitInput {
     pub delivery_status: MemoryTurnDeliveryStatus,
     pub source: MemoryTurnSource,
     pub user_content: String,
+    pub input_messages: Vec<TranscriptInputMessage>,
     pub assistant_content: Option<String>,
 }
 
@@ -61,6 +154,7 @@ pub struct SessionTurnCommitReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedSessionMessage {
     pub role: String,
+    pub authority: MemoryEvidenceAuthority,
     pub content_chars: usize,
     pub content_bytes: usize,
 }
@@ -71,18 +165,24 @@ pub fn commit_session_turn(
     input: SessionTurnCommitInput,
 ) -> Result<SessionTurnCommitReport> {
     let before_count = session_store.message_count(chat_id)?;
+    let recent_records = session_store.load_recent_records(chat_id, MAX_SESSION_ENTRIES)?;
     let mut messages = Vec::new();
     match input.delivery_status {
         MemoryTurnDeliveryStatus::Delivered => {
-            push_if_not_empty(&mut messages, "user", &input.user_content);
+            push_user_delta(&mut messages, &recent_records, &input);
             if let Some(assistant_content) = input.assistant_content.as_deref() {
-                push_if_not_empty(&mut messages, "assistant", assistant_content);
+                push_if_not_empty(
+                    &mut messages,
+                    "assistant",
+                    assistant_content,
+                    MemoryEvidenceAuthority::AssistantUtterance,
+                );
             }
         }
         MemoryTurnDeliveryStatus::UserOnly
         | MemoryTurnDeliveryStatus::UpstreamFailed
         | MemoryTurnDeliveryStatus::Cancelled => {
-            push_if_not_empty(&mut messages, "user", &input.user_content);
+            push_user_delta(&mut messages, &recent_records, &input);
         }
         MemoryTurnDeliveryStatus::IncompleteStream | MemoryTurnDeliveryStatus::RejectedByPolicy => {
         }
@@ -104,11 +204,16 @@ pub fn commit_session_turn(
         .iter()
         .map(|message| CommittedSessionMessage {
             role: message.role.clone(),
+            authority: message.authority,
             content_chars: message.content.chars().count(),
             content_bytes: message.content.len(),
         })
         .collect::<Vec<_>>();
-    session_store.append_batch(chat_id, &messages)?;
+    let session_messages = messages
+        .into_iter()
+        .map(TranscriptInputMessage::into_session_message)
+        .collect::<Vec<_>>();
+    session_store.append_batch(chat_id, &session_messages)?;
     let after_count = session_store.message_count(chat_id)?;
     Ok(SessionTurnCommitReport {
         attempted: true,
@@ -121,14 +226,73 @@ pub fn commit_session_turn(
     })
 }
 
-fn push_if_not_empty(messages: &mut Vec<SessionMessage>, role: &str, content: &str) {
+fn push_user_delta(
+    messages: &mut Vec<TranscriptInputMessage>,
+    recent_records: &[SessionMessageRecord],
+    input: &SessionTurnCommitInput,
+) {
+    let deltas = if input.input_messages.is_empty() {
+        if input.user_content.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![TranscriptInputMessage::user(input.user_content.clone())]
+        }
+    } else {
+        canonical_user_delta(recent_records, &input.input_messages)
+    };
+    for message in deltas {
+        if !message.content.trim().is_empty() {
+            messages.push(message);
+        }
+    }
+}
+
+pub fn canonical_user_delta(
+    recent_records: &[SessionMessageRecord],
+    input_messages: &[TranscriptInputMessage],
+) -> Vec<TranscriptInputMessage> {
+    let user_messages = input_messages
+        .iter()
+        .filter(|message| message.is_role("user"))
+        .filter(|message| !message.content.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if user_messages.is_empty() {
+        return Vec::new();
+    }
+
+    let existing_users = recent_records
+        .iter()
+        .filter(|record| record.role.eq_ignore_ascii_case("user"))
+        .map(|record| record.content.trim())
+        .collect::<Vec<_>>();
+    let max_overlap = existing_users.len().min(user_messages.len());
+    let mut overlap = 0;
+    for size in 1..=max_overlap {
+        let input_prefix_matches_existing_tail = user_messages[..size]
+            .iter()
+            .map(|message| message.content.trim())
+            .eq(existing_users[existing_users.len() - size..]
+                .iter()
+                .copied());
+        if input_prefix_matches_existing_tail {
+            overlap = size;
+        }
+    }
+
+    user_messages[overlap..].to_vec()
+}
+
+fn push_if_not_empty(
+    messages: &mut Vec<TranscriptInputMessage>,
+    role: &str,
+    content: &str,
+    authority: MemoryEvidenceAuthority,
+) {
     if content.trim().is_empty() {
         return;
     }
-    messages.push(SessionMessage {
-        role: role.to_string(),
-        content: content.to_string(),
-    });
+    messages.push(TranscriptInputMessage::new(role, content, authority));
 }
 
 fn skipped_reason(status: MemoryTurnDeliveryStatus) -> &'static str {

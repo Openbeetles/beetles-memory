@@ -10,16 +10,16 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
     apply_long_term_memory_extraction, commit_session_turn, export_continuity_snapshot,
-    import_continuity_snapshot, inspect_intelligence_replay, inspect_working_recall,
-    load_prompt_memory_context, run_long_term_memory_refresh, run_post_reply_memory_maintenance,
-    run_private_garden_governance, ContinuitySnapshotExportContext,
-    ContinuitySnapshotImportContext, ContinuitySnapshotMode, GovernedWriteDecision, IngressKind,
-    LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
-    LongTermMemoryRefreshRequestOutcome, MemoryPlaneGovernanceReport, MemoryWriteAuthority,
-    MemoryWriteDomain, PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateGardenGovernanceContext,
-    PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome, PromptMemoryContextParams,
-    PromptParticipationPlan, PromptRecallIntent, SessionTurnCommitInput,
+    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
+    inspect_working_recall, load_prompt_memory_context, run_long_term_memory_refresh,
+    run_post_reply_memory_maintenance, run_private_garden_governance,
+    ContinuitySnapshotExportContext, ContinuitySnapshotImportContext, ContinuitySnapshotMode,
+    GovernedWriteDecision, IngressKind, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    LongTermMemoryRefreshRequestOutcome, MemoryHygieneContext, MemoryPlaneGovernanceReport,
+    MemoryWriteAuthority, MemoryWriteDomain, PostReplyMemoryMaintenanceContext,
+    PostReplyMemoryMaintenanceInput, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PrivateGardenGovernanceContext, PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome,
+    PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, SessionTurnCommitInput,
     WorkingRecallInspectionInput,
 };
 use bm_core::platform::Platform;
@@ -916,6 +916,7 @@ impl MemoryRuntime {
                 delivery_status: request.delivery_status,
                 source: request.source.clone(),
                 user_content: request.user_content.clone(),
+                input_messages: request.input_messages.clone(),
                 assistant_content: request.assistant_content.clone(),
             },
         )?;
@@ -1157,6 +1158,19 @@ impl MemoryRuntime {
             task_run_store: Some(task_run_store.as_ref()),
             task_learning_store: Some(task_learning_store.as_ref()),
         });
+        let hygiene = inspect_memory_hygiene(
+            MemoryHygieneContext {
+                session_store: session_store.as_ref(),
+                session_summary_store: session_summary_store.as_ref(),
+                memory_store: memory_store.as_ref(),
+                turn_ledger_store: turn_ledger_store.as_ref(),
+                long_term_memory_store: long_term_memory_store.as_ref(),
+                skill_storage: skill_storage.as_ref(),
+            },
+            &self.config.scope.chat_id,
+            self.memory_profile(),
+            self.config.clock.now_secs(),
+        );
         self.audit("inspect", true, "inspection_completed");
         let surface = bm_core::platform::build_memory_operator_surface_with_capabilities(
             platform,
@@ -1182,6 +1196,7 @@ impl MemoryRuntime {
         };
         Ok(MemoryInspectionReport {
             working,
+            hygiene,
             capabilities: self.capabilities.clone(),
             operator_action_report,
             lifecycle_report,
@@ -1554,7 +1569,7 @@ fn render_runtime_awareness_block(
 ) -> String {
     let pressure = max_pressure(request_pressure, observed_pressure);
     format!(
-        "## Runtime Awareness\n- Beetle Memory is the active memory runtime for this conversation.\n- Memory sections below are runtime context and supporting evidence, not model training data or a separate model identity.\n- Resource pressure: {}.\n- Runtime profile: {}.\n- Technical diagnostics stay outside this model-facing projection and must not be presented as user-facing identity or training provenance.",
+        "## Runtime Awareness\n- Beetle Memory supplies runtime context for this conversation.\n- Memory sections below are contextual evidence for the assistant to use, not model training data, a separate model identity, or a reason to describe itself as a memory helper.\n- Resource pressure: {}.\n- Runtime profile: {}.\n- Technical diagnostics stay outside this model-facing projection and must not be presented as user-facing identity or training provenance.",
         runtime_awareness_pressure_label(pressure),
         runtime_awareness_profile_label(profile),
     )

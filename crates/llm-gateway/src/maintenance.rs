@@ -5,11 +5,17 @@ use bm_entry::EntryRuntime;
 use bm_sdk::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MaintenanceBudget,
     MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnSource, Message,
-    RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
+    RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec, TranscriptInputMessage,
 };
 use serde_json::{json, Value};
 
 use crate::{GatewayAuditOutcome, GatewayMaintenanceConfig, GatewayProviderConfig};
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GatewayInputTranscript {
+    pub(crate) latest_user_text: String,
+    pub(crate) messages: Vec<TranscriptInputMessage>,
+}
 
 pub struct OpenAiGatewayServices<'a> {
     maintenance_http: Option<&'a mut dyn LlmHttpClient>,
@@ -44,6 +50,7 @@ impl Default for OpenAiGatewayServices<'_> {
 pub(crate) struct GatewayMaintenancePlan {
     runtime: Arc<EntryRuntime>,
     user_content: String,
+    input_messages: Vec<TranscriptInputMessage>,
     turn_source: MemoryTurnSource,
     external_content_used: bool,
     runtime_skill_selected_ids: Vec<String>,
@@ -57,6 +64,7 @@ pub(crate) struct GatewayMaintenancePlan {
 pub(crate) struct GatewayMaintenancePlanInput {
     pub(crate) runtime: Arc<EntryRuntime>,
     pub(crate) user_content: String,
+    pub(crate) input_messages: Vec<TranscriptInputMessage>,
     pub(crate) turn_source: MemoryTurnSource,
     pub(crate) external_content_used: bool,
     pub(crate) runtime_skill_selected_ids: Vec<String>,
@@ -76,6 +84,7 @@ impl GatewayMaintenancePlan {
                 budget.user_input_max_chars,
                 budget.user_input_max_bytes,
             ),
+            input_messages: input.input_messages,
             turn_source: input.turn_source,
             external_content_used: input.external_content_used,
             runtime_skill_selected_ids: input.runtime_skill_selected_ids,
@@ -98,6 +107,7 @@ impl GatewayMaintenancePlan {
                 delivery_status: snapshot.delivery_status,
                 source: self.turn_source.clone(),
                 user_content: self.user_content.clone(),
+                input_messages: self.input_messages.clone(),
                 assistant_content: Some(snapshot.reply_content),
                 tool_calls: snapshot.tool_calls,
                 external_content_used: self.external_content_used || snapshot.tool_calls > 0,

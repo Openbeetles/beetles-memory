@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bm_sdk::{
     MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource, ProviderModelContextLimit,
-    RuntimeLifecycleModeInput,
+    RuntimeLifecycleModeInput, TranscriptInputMessage,
 };
 use serde_json::{Map, Value};
 
@@ -10,8 +10,8 @@ use crate::projection::render_model_facing_projection;
 use crate::provider::select_provider_for_kind;
 use crate::{
     maintenance::{
-        run_json_maintenance, GatewayMaintenancePlan, GatewayMaintenancePlanInput,
-        GatewayMaintenanceRunOutcome, OpenAiDeferredMaintenance,
+        run_json_maintenance, GatewayInputTranscript, GatewayMaintenancePlan,
+        GatewayMaintenancePlanInput, GatewayMaintenanceRunOutcome, OpenAiDeferredMaintenance,
     },
     probe_openai_provider_capabilities, GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage,
     GatewayConfig, GatewayError, GatewayProviderConfig, GatewayProviderKind, GatewayRuntime,
@@ -384,7 +384,8 @@ fn handle_chat_completion(
         scope.clone(),
     );
     let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
-    let extracted_user_text = extract_messages_text(body_object.get("messages"))?;
+    let input_transcript = extract_chat_input_transcript(body_object.get("messages"))?;
+    let extracted_user_text = input_transcript.latest_user_text.clone();
     let external_content_used = request_uses_external_content(body_object.get("messages"))
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
@@ -420,6 +421,7 @@ fn handle_chat_completion(
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
+        input_messages: input_transcript.messages.clone(),
         turn_source: MemoryTurnSource {
             ingress: bm_sdk::IngressKind::User,
             channel: scope.channel.clone(),
@@ -505,6 +507,7 @@ fn handle_responses(
     }
     let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
     let extracted_user_text = extract_response_input_text(body_object.get("input"));
+    let input_transcript = input_transcript_from_user_text(&extracted_user_text);
     let external_content_used = response_input_uses_external_content(body_object.get("input"))
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
@@ -541,6 +544,7 @@ fn handle_responses(
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
+        input_messages: input_transcript.messages,
         turn_source: MemoryTurnSource {
             ingress: bm_sdk::IngressKind::User,
             channel: scope.channel.clone(),
@@ -795,18 +799,46 @@ fn build_upstream_passthrough_body(original_body: &Value, model: &str) -> Result
     Ok(Value::Object(object))
 }
 
-fn extract_messages_text(messages: Option<&Value>) -> Result<String> {
+fn extract_chat_input_transcript(messages: Option<&Value>) -> Result<GatewayInputTranscript> {
     let messages = messages.and_then(Value::as_array).ok_or_else(|| {
         GatewayError::invalid_request("chat completions messages must be an array")
     })?;
-    let mut parts = Vec::new();
+    let mut transcript = GatewayInputTranscript::default();
     for message in messages {
-        if message.get("role").and_then(Value::as_str) != Some("user") {
+        let Some(role) = message.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        extract_content_text(message.get("content"), &mut parts);
+        let content = parts.join("\n").trim().to_string();
+        if content.is_empty() {
             continue;
         }
-        extract_content_text(message.get("content"), &mut parts);
+        if role.eq_ignore_ascii_case("user") {
+            transcript.latest_user_text = content.clone();
+            transcript
+                .messages
+                .push(TranscriptInputMessage::user(content));
+        } else if role.eq_ignore_ascii_case("assistant") {
+            transcript
+                .messages
+                .push(TranscriptInputMessage::assistant(content));
+        }
     }
-    Ok(parts.join("\n").trim().to_string())
+    Ok(transcript)
+}
+
+fn input_transcript_from_user_text(text: &str) -> GatewayInputTranscript {
+    let latest_user_text = text.trim().to_string();
+    let messages = if latest_user_text.is_empty() {
+        Vec::new()
+    } else {
+        vec![TranscriptInputMessage::user(latest_user_text.clone())]
+    };
+    GatewayInputTranscript {
+        latest_user_text,
+        messages,
+    }
 }
 
 fn extract_response_input_text(input: Option<&Value>) -> String {
