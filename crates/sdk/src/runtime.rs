@@ -9,20 +9,23 @@ use bm_core::budget::{
 use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
-    apply_long_term_memory_extraction, commit_session_turn, export_continuity_snapshot,
-    govern_write_candidates, import_continuity_snapshot, inspect_intelligence_replay,
-    inspect_memory_hygiene, inspect_working_recall, load_prompt_memory_context,
-    run_long_term_memory_refresh, run_post_reply_memory_maintenance, run_private_garden_governance,
-    write_governed_shared_memory, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
-    ContinuitySnapshotMode, DeferredGovernanceJob, DeferredGovernanceJobStatus,
+    apply_long_term_memory_extraction, build_deferred_governance_queue_report,
+    commit_canonical_turn_delta, export_continuity_snapshot, govern_write_candidates,
+    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
+    inspect_working_recall, load_prompt_memory_context, run_long_term_memory_refresh,
+    run_memory_retention_compaction, run_post_reply_memory_maintenance,
+    run_private_garden_governance, write_governed_shared_memory, CanonicalTurnDelta,
+    ContinuitySnapshotExportContext, ContinuitySnapshotImportContext, ContinuitySnapshotMode,
+    DeferredGovernanceJob, DeferredGovernanceJobStatus, DeferredGovernanceQueueReport,
     GovernedWriteDecision, IngressKind, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
     LongTermMemoryRefreshRequestOutcome, MemoryHygieneContext, MemoryPlaneGovernanceReport,
     MemoryWriteAuthority, MemoryWriteDomain, PostReplyMemoryMaintenanceContext,
     PostReplyMemoryMaintenanceInput, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
     PrivateGardenGovernanceContext, PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome,
-    PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, SessionTurnCommitInput,
+    PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, RecallSelectionReport,
     SharedMemoryWriteSource, WorkingRecallInspectionInput,
 };
+use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
 use bm_core::platform::Platform;
 use bm_core::resource::RuntimeResourceSnapshot;
 use bm_core::runtime::{
@@ -38,22 +41,26 @@ use bm_core::skills::{
     write_governed_runtime_skills, RuntimeSkillOrigin as CoreRuntimeSkillOrigin,
     RuntimeSkillRecord, RuntimeSkillStatus,
 };
-use bm_store::StorePlatform;
+use bm_store::{MemoryStoreEvent, StorePlatform};
 
 use crate::{
     resolve_memory_capabilities, Error, LlmClient, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
-    MemoryCloseReport, MemoryCloseRequest, MemoryExportReport, MemoryExportRequest,
+    MemoryCloseReport, MemoryCloseRequest, MemoryDeferredGovernanceRunReport,
+    MemoryDeferredGovernanceRunRequest, MemoryExportReport, MemoryExportRequest,
     MemoryImportReport, MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
     MemoryMaintenanceReport, MemoryMaintenanceRequest, MemoryOperationVisibility,
-    MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionReport, MemoryProjectionRequest,
-    MemoryRecallReport, MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest,
-    MemoryReplayReport, MemoryReplayRequest, MemoryRuntimeSystemKind, MemorySkillDeleteRequest,
-    MemorySkillDetailReport, MemorySkillDetailRequest, MemorySkillKind, MemorySkillListReport,
-    MemorySkillListRequest, MemorySkillMutationReport, MemorySkillOrigin,
-    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest,
-    MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
-    PressureLevel, Result, RuntimeOperatorAction, RuntimeOperatorActionReport,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionAuditReport,
+    MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
+    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallReport,
+    MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport,
+    MemoryReplayRequest, MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest,
+    MemoryRuntimeSystemKind, MemorySkillDeleteRequest, MemorySkillDetailReport,
+    MemorySkillDetailRequest, MemorySkillKind, MemorySkillListReport, MemorySkillListRequest,
+    MemorySkillMutationReport, MemorySkillOrigin, MemorySkillSetEnabledRequest, MemorySkillSummary,
+    MemorySkillUpsertRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
+    MemoryWriteReport, MemoryWriteRequest, PressureLevel, Result, RuntimeOperatorAction,
+    RuntimeOperatorActionReport, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,9 +132,40 @@ pub trait MemoryAuditSink: Send + Sync {
 pub struct MemoryAuditEvent {
     pub operation: String,
     pub profile: ProfileId,
+    pub identity: MemoryIdentity,
     pub scope: MemoryScope,
+    pub memory_space_id: String,
+    pub subject_id: String,
+    pub conversation_id: Option<String>,
     pub allowed: bool,
     pub reason: String,
+}
+
+impl MemoryAuditEvent {
+    pub fn for_runtime_operation(
+        operation: impl Into<String>,
+        profile: ProfileId,
+        identity: MemoryIdentity,
+        scope: MemoryScope,
+        subject_id: impl Into<String>,
+        allowed: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        let memory_space_id = identity.owner_id.clone();
+        let subject_id = subject_id.into();
+        let conversation_id = Some(scope.chat_id.clone());
+        Self {
+            operation: operation.into(),
+            profile,
+            identity,
+            scope,
+            memory_space_id,
+            subject_id,
+            conversation_id,
+            allowed,
+            reason: reason.into(),
+        }
+    }
 }
 
 pub struct NoopMemoryAuditSink;
@@ -138,6 +176,7 @@ impl MemoryAuditSink for NoopMemoryAuditSink {
 
 pub struct MemoryRuntimeConfig {
     pub identity: MemoryIdentity,
+    pub subject_id: String,
     pub scope: MemoryScope,
     pub profile: ProfileId,
     pub(crate) platform: Arc<dyn Platform>,
@@ -168,6 +207,10 @@ impl MemoryRuntime {
         &self.config.identity
     }
 
+    pub fn subject_id(&self) -> &str {
+        &self.config.subject_id
+    }
+
     pub fn scope(&self) -> &MemoryScope {
         &self.config.scope
     }
@@ -178,6 +221,28 @@ impl MemoryRuntime {
 
     pub fn runtime_budget(&self) -> &RuntimeBudgetReport {
         &self.config.runtime_budget
+    }
+
+    pub fn runtime_metrics_report_from_events(
+        &self,
+        events: &[MemoryStoreEvent],
+    ) -> RuntimeMetricsReport {
+        bm_core::metrics::build_runtime_metrics_report(
+            events.iter().map(|event| RuntimeMetricEvent {
+                kind_name: event.kind_name.clone(),
+                timestamp_unix_secs: event.timestamp_unix_secs,
+                payload: event.payload.clone(),
+            }),
+            self.config.runtime_budget.report_id.clone(),
+        )
+    }
+
+    pub fn operator_readiness_report(&self) -> OperatorReadinessReport {
+        OperatorReadinessReport::sdk_ready(self.config.runtime_budget.unavailable_reasons.clone())
+    }
+
+    pub fn retention_quota_report(&self) -> bm_core::budget::RuntimeRetentionQuotaReport {
+        self.config.runtime_budget.retention_quota_report()
     }
 
     pub fn write(&self, request: MemoryWriteRequest) -> Result<MemoryWriteReport> {
@@ -251,7 +316,12 @@ impl MemoryRuntime {
                         })
                     })
                     .filter_map(|candidate| {
-                        candidate.to_long_term_draft(&self.config.scope.chat_id, now_secs)
+                        let target = candidate.governed_target().unwrap_or(&candidate.target);
+                        candidate.to_long_term_draft_for_target(
+                            target,
+                            &self.config.scope.chat_id,
+                            now_secs,
+                        )
                     })
                     .collect::<Vec<_>>();
                 let accepted_skill_writes = candidates
@@ -266,7 +336,12 @@ impl MemoryRuntime {
                         })
                     })
                     .filter_map(|candidate| {
-                        candidate.to_runtime_skill_write(&self.config.scope.chat_id, now_secs)
+                        let target = candidate.governed_target().unwrap_or(&candidate.target);
+                        candidate.to_runtime_skill_write_for_target(
+                            target,
+                            &self.config.scope.chat_id,
+                            now_secs,
+                        )
                     })
                     .collect::<Vec<_>>();
                 let long_term_changed = if accepted_drafts.is_empty() {
@@ -606,7 +681,7 @@ impl MemoryRuntime {
     pub fn recall(&self, request: MemoryRecallRequest) -> Result<MemoryRecallReport> {
         self.ensure_visible("recall", self.capabilities.recall)?;
         let lifecycle = self.start_lifecycle(
-            RuntimeLifecycleOperation::Inspect,
+            RuntimeLifecycleOperation::Recall,
             RuntimeLifecycleTrigger::SdkCall,
             RuntimeLifecycleModeInput::default(),
         );
@@ -706,6 +781,15 @@ impl MemoryRuntime {
             render_sdk_projection_block(&context, Some(&runtime_awareness), render_max_chars);
         let hit_count = prompt_context_hit_count(&context);
         let system_memory_chars = system_memory_block.chars().count();
+        let projection_audit = build_projection_audit(
+            self,
+            &context,
+            &request,
+            &lifecycle,
+            render_max_chars,
+            system_memory_chars,
+            !system_memory_block.trim().is_empty(),
+        );
         let telemetry_payload = [
             ("memory_hit", (hit_count > 0).to_string()),
             ("hit_count", hit_count.to_string()),
@@ -736,6 +820,7 @@ impl MemoryRuntime {
         Ok(MemoryProjectionReport {
             system_memory_block,
             context,
+            audit: projection_audit,
             lifecycle_report: self.finish_lifecycle_success_with_payload(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -989,19 +1074,10 @@ impl MemoryRuntime {
         request: MemoryTurnFinalizeRequest,
     ) -> Result<MemoryTurnFinalizeReport> {
         self.ensure_visible("write.turn", self.capabilities.write)?;
+        validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
-        let session_commit = commit_session_turn(
-            session_store.as_ref(),
-            &self.config.scope.chat_id,
-            SessionTurnCommitInput {
-                delivery_status: request.delivery_status,
-                source: request.source.clone(),
-                user_content: request.user_content.clone(),
-                input_messages: request.input_messages.clone(),
-                assistant_content: request.assistant_content.clone(),
-            },
-        )?;
+        let session_commit = commit_canonical_turn_delta(session_store.as_ref(), &request.turn)?;
 
         if !session_commit.committed {
             let lifecycle = self.start_lifecycle(
@@ -1035,8 +1111,7 @@ impl MemoryRuntime {
         let Some(http) = http else {
             return self.finalize_turn_without_maintenance(
                 session_commit,
-                request.mode_input,
-                request.pressure,
+                &request,
                 "maintenance_http_unavailable",
             );
         };
@@ -1048,41 +1123,68 @@ impl MemoryRuntime {
             } else {
                 return self.finalize_turn_without_maintenance(
                     session_commit,
-                    request.mode_input,
-                    request.pressure,
+                    &request,
                     "maintenance_llm_unavailable",
                 );
             };
         if !self.capabilities.maintenance.visible {
             return self.finalize_turn_without_maintenance(
                 session_commit,
-                request.mode_input,
-                request.pressure,
+                &request,
                 "maintenance_not_visible",
             );
         }
 
+        let (maintenance, private_garden_self_work, semantic_governance) =
+            self.run_post_turn_governance_after_commit(http, governance_llm, &request)?;
+        let lifecycle_report = maintenance.lifecycle_report.clone();
+        Ok(MemoryTurnFinalizeReport {
+            session_commit,
+            maintenance: Some(maintenance),
+            private_garden_self_work,
+            semantic_governance,
+            lifecycle_report,
+        })
+    }
+
+    fn run_post_turn_governance_after_commit(
+        &self,
+        http: &mut (dyn LlmHttpClient + '_),
+        governance_llm: &(dyn CoreLlmClient + Send + Sync + '_),
+        request: &MemoryTurnFinalizeRequest,
+    ) -> Result<(
+        MemoryMaintenanceReport,
+        PostTurnPrivateGardenReport,
+        PostTurnSemanticGovernanceReport,
+    )> {
+        let platform = self.config.platform.as_ref();
+        let session_store = platform.session_store();
         let session_summary_store = platform.session_summary_store();
-        let finalize_user_content = request.user_content.clone();
-        let finalize_assistant_content = request.assistant_content.clone();
-        let turn_ingress = request.source.ingress;
-        let turn_channel = request.source.channel.clone();
-        let external_content_used = request.external_content_used;
+        let finalize_user_content = latest_user_content(&request.turn);
+        let finalize_assistant_content = assistant_content(&request.turn);
+        let turn_ingress = request.turn.source.ingress;
+        let turn_channel = request.turn.source.channel.clone();
+        let external_content_used = request.turn.external_content_used
+            || request
+                .turn
+                .tool_observations
+                .iter()
+                .any(|observation| observation.external_content);
         let pressure = request.pressure;
 
         let maintenance = self.maintain(
             http,
             governance_llm,
             MemoryMaintenanceRequest {
-                ingress: request.source.ingress,
-                user_content: request.user_content,
-                reply_content: request.assistant_content.unwrap_or_default(),
+                ingress: request.turn.source.ingress,
+                user_content: finalize_user_content.clone(),
+                reply_content: finalize_assistant_content.clone().unwrap_or_default(),
                 tool_calls: request.tool_calls,
-                external_content_used: request.external_content_used,
-                runtime_skill_selected_ids: request.runtime_skill_selected_ids,
-                task_learning_selected_ids: request.task_learning_selected_ids,
+                external_content_used,
+                runtime_skill_selected_ids: request.runtime_skill_selected_ids.clone(),
+                task_learning_selected_ids: request.task_learning_selected_ids.clone(),
                 reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: request.reuse_outcome_note,
+                reuse_outcome_note: request.reuse_outcome_note.clone(),
                 pressure: request.pressure,
                 mode_input: request.mode_input,
             },
@@ -1160,41 +1262,40 @@ impl MemoryRuntime {
         };
         let semantic_governance =
             semantic_report_from_maintenance(&maintenance, long_term_refresh.as_ref());
-        let lifecycle_report = maintenance.lifecycle_report.clone();
-        Ok(MemoryTurnFinalizeReport {
-            session_commit,
-            maintenance: Some(maintenance),
-            private_garden_self_work,
-            semantic_governance,
-            lifecycle_report,
-        })
+        Ok((maintenance, private_garden_self_work, semantic_governance))
     }
 
     fn finalize_turn_without_maintenance(
         &self,
         session_commit: bm_core::memory::SessionTurnCommitReport,
-        mode_input: RuntimeLifecycleModeInput,
-        pressure: PressureLevel,
+        request: &MemoryTurnFinalizeRequest,
         reason: &'static str,
     ) -> Result<MemoryTurnFinalizeReport> {
         enqueue_deferred_governance_job(
             self.config.platform.as_ref(),
             &self.config.scope,
             &session_commit,
+            &self.config.identity.owner_id,
+            request,
             reason,
             self.config.clock.now_secs(),
         )?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::PostReply,
-            self.mode_input_for_request(mode_input, pressure),
+            self.mode_input_for_request(request.mode_input, request.pressure),
         );
-        let lifecycle_report = self.finish_lifecycle_success(
+        let lifecycle_report = self.finish_lifecycle_success_with_payload(
             lifecycle,
             RuntimeLifecycleEventKind::RuntimeLifecycle,
             RuntimeLifecycleEffect::Noop,
             session_commit.committed,
             reason,
+            &[
+                ("finalize_request", "true".to_string()),
+                ("finalize_committed", session_commit.committed.to_string()),
+                ("deferred_governance_job", "true".to_string()),
+            ],
         )?;
         Ok(MemoryTurnFinalizeReport {
             session_commit,
@@ -1204,6 +1305,217 @@ impl MemoryRuntime {
                 reason,
                 "post_turn_governance",
             ),
+            lifecycle_report,
+        })
+    }
+
+    pub fn run_due_governance(
+        &self,
+        http: &mut (dyn LlmHttpClient + '_),
+        llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
+        request: MemoryDeferredGovernanceRunRequest,
+    ) -> Result<MemoryDeferredGovernanceRunReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let governance_llm: &(dyn CoreLlmClient + Send + Sync) =
+            if let Some(config_llm) = self.config.llm.as_deref() {
+                config_llm
+            } else {
+                llm.ok_or_else(|| Error::config("deferred_governance", "llm_unavailable"))?
+            };
+        let limit = request.limit.max(1);
+        let mut jobs = read_deferred_governance_jobs(self.config.platform.as_ref())?;
+        let mut attempted = 0usize;
+        let mut succeeded = 0usize;
+        let mut failed = 0usize;
+
+        for job in jobs.iter_mut() {
+            if attempted >= limit {
+                break;
+            }
+            if !matches!(
+                job.status,
+                DeferredGovernanceJobStatus::Pending | DeferredGovernanceJobStatus::Retrying
+            ) || !deferred_governance_job_matches_runtime(job, &self.config)
+            {
+                continue;
+            }
+            attempted = attempted.saturating_add(1);
+            let Some(turn) = job.turn.clone() else {
+                failed = failed.saturating_add(1);
+                job.status = DeferredGovernanceJobStatus::Failed;
+                job.attempts = job.attempts.saturating_add(1);
+                job.last_error = Some("missing_canonical_turn_delta".to_string());
+                continue;
+            };
+            let finalize_request = MemoryTurnFinalizeRequest {
+                turn,
+                tool_calls: job.tool_calls,
+                runtime_skill_selected_ids: job.runtime_skill_selected_ids.clone(),
+                task_learning_selected_ids: job.task_learning_selected_ids.clone(),
+                reuse_outcome_note: job.reuse_outcome_note.clone(),
+                pressure: job.pressure,
+                mode_input: job.mode_input,
+            };
+            match self.run_post_turn_governance_after_commit(
+                http,
+                governance_llm,
+                &finalize_request,
+            ) {
+                Ok((_maintenance, _private_garden, _semantic)) => {
+                    succeeded = succeeded.saturating_add(1);
+                    job.status = DeferredGovernanceJobStatus::Terminal;
+                    job.attempts = job.attempts.saturating_add(1);
+                    job.last_error = None;
+                }
+                Err(error) => {
+                    failed = failed.saturating_add(1);
+                    job.status = DeferredGovernanceJobStatus::Retrying;
+                    job.attempts = job.attempts.saturating_add(1);
+                    job.last_error = Some(error.to_string());
+                }
+            }
+        }
+        let remaining_pending = jobs
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.status,
+                    DeferredGovernanceJobStatus::Pending | DeferredGovernanceJobStatus::Retrying
+                ) && deferred_governance_job_matches_runtime(job, &self.config)
+            })
+            .count();
+        write_deferred_governance_jobs(self.config.platform.as_ref(), &jobs)?;
+        let scoped_jobs = scoped_deferred_governance_jobs(&jobs, &self.config);
+        let queue = build_deferred_governance_queue_report(&scoped_jobs, 16);
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::DeferredDue,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let lifecycle_report = self.finish_lifecycle_success_with_payload(
+            lifecycle,
+            RuntimeLifecycleEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEffect::RunMaintenance,
+            attempted > 0,
+            "deferred_governance_completed",
+            &[
+                ("attempted", attempted.to_string()),
+                ("succeeded", succeeded.to_string()),
+                ("failed", failed.to_string()),
+                ("remaining_pending", remaining_pending.to_string()),
+            ],
+        )?;
+        Ok(MemoryDeferredGovernanceRunReport {
+            attempted,
+            succeeded,
+            failed,
+            remaining_pending,
+            queue,
+            lifecycle_report,
+        })
+    }
+
+    pub fn deferred_governance_report(&self) -> Result<DeferredGovernanceQueueReport> {
+        self.ensure_visible("inspect.deferred_governance", self.capabilities.inspection)?;
+        let jobs = read_deferred_governance_jobs(self.config.platform.as_ref())?;
+        let scoped_jobs = scoped_deferred_governance_jobs(&jobs, &self.config);
+        Ok(build_deferred_governance_queue_report(&scoped_jobs, 16))
+    }
+
+    pub fn run_retention_compaction(
+        &self,
+        request: MemoryRetentionCompactionRequest,
+    ) -> Result<MemoryRetentionCompactionReport> {
+        self.ensure_visible(
+            "maintain.retention_compaction",
+            self.capabilities.maintenance,
+        )?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::OperatorRequested,
+            self.mode_input_for_request(request.mode_input, request.pressure),
+        );
+        if lifecycle.admission.disposition != RuntimeLifecycleDisposition::ExecuteNow {
+            let lifecycle_report = self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::Noop,
+                false,
+                "retention_compaction_not_executed",
+            )?;
+            let retention_quota = self.retention_quota_report();
+            return Ok(MemoryRetentionCompactionReport {
+                owner: "sdk.runtime".to_string(),
+                executed: false,
+                hygiene: Default::default(),
+                long_term_records_before: 0,
+                long_term_records_after: 0,
+                destructive_deletes_performed: false,
+                host_direct_deletion_allowed: Some(false),
+                fail_closed_repair: retention_quota.fail_closed_repair,
+                retention_quota,
+                lifecycle_report,
+            });
+        }
+        let platform = self.config.platform.as_ref();
+        let session_store = platform.session_store();
+        let memory_store = platform.memory_store();
+        let session_summary_store = platform.session_summary_store();
+        let turn_ledger_store = platform.turn_ledger_store();
+        let long_term_memory_store = platform.long_term_memory_store();
+        let skill_storage = platform.skill_storage();
+        let before_count = long_term_memory_store.count().unwrap_or(0);
+        let hygiene = run_memory_retention_compaction(
+            MemoryHygieneContext {
+                session_store: session_store.as_ref(),
+                session_summary_store: session_summary_store.as_ref(),
+                memory_store: memory_store.as_ref(),
+                turn_ledger_store: turn_ledger_store.as_ref(),
+                long_term_memory_store: long_term_memory_store.as_ref(),
+                skill_storage: skill_storage.as_ref(),
+            },
+            &self.config.scope.chat_id,
+            self.memory_profile(),
+            self.config.clock.now_secs(),
+        );
+        let after_count = long_term_memory_store.count().unwrap_or(before_count);
+        let changed = hygiene.daily_notes_aggregated > 0
+            || hygiene.transcripts_rolled_up > 0
+            || hygiene.factual_metadata_updates > 0
+            || hygiene.factual_evidence_compacted > 0
+            || hygiene.archive_index_maintained
+            || hygiene.runtime_skill_governance.merged > 0
+            || hygiene.runtime_skill_governance.pruned > 0
+            || hygiene.runtime_skill_governance.stale_marked > 0
+            || hygiene.runtime_skill_governance.low_value_marked > 0
+            || hygiene.runtime_skill_governance.retired_marked > 0;
+        let lifecycle_report = self.finish_lifecycle_success_with_payload(
+            lifecycle,
+            RuntimeLifecycleEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEffect::RunMaintenance,
+            changed,
+            "retention_compaction_completed",
+            &[
+                ("long_term_records_before", before_count.to_string()),
+                ("long_term_records_after", after_count.to_string()),
+                (
+                    "factual_evidence_compacted",
+                    hygiene.factual_evidence_compacted.to_string(),
+                ),
+                ("host_direct_deletion_allowed", "false".to_string()),
+            ],
+        )?;
+        let retention_quota = self.retention_quota_report();
+        Ok(MemoryRetentionCompactionReport {
+            owner: "sdk.runtime".to_string(),
+            executed: true,
+            retention_quota: retention_quota.clone(),
+            hygiene,
+            long_term_records_before: before_count,
+            long_term_records_after: after_count,
+            destructive_deletes_performed: false,
+            host_direct_deletion_allowed: Some(false),
+            fail_closed_repair: retention_quota.fail_closed_repair,
             lifecycle_report,
         })
     }
@@ -1263,6 +1575,9 @@ impl MemoryRuntime {
             self.memory_profile(),
             self.config.clock.now_secs(),
         );
+        let deferred_jobs = read_deferred_governance_jobs(platform)?;
+        let scoped_deferred_jobs = scoped_deferred_governance_jobs(&deferred_jobs, &self.config);
+        let deferred_governance = build_deferred_governance_queue_report(&scoped_deferred_jobs, 16);
         self.audit("inspect", true, "inspection_completed");
         let surface = bm_core::platform::build_memory_operator_surface_with_capabilities(
             platform,
@@ -1289,6 +1604,7 @@ impl MemoryRuntime {
         Ok(MemoryInspectionReport {
             working,
             hygiene,
+            deferred_governance,
             capabilities: self.capabilities.clone(),
             operator_action_report,
             lifecycle_report,
@@ -1560,6 +1876,13 @@ impl MemoryRuntime {
                     "budget_unavailable_reasons",
                     self.config.runtime_budget.unavailable_reasons.join(","),
                 )
+                .with_payload("agent_id", self.config.identity.agent_id.clone())
+                .with_payload("owner_id", self.config.identity.owner_id.clone())
+                .with_payload("channel", self.config.scope.channel.clone())
+                .with_payload("chat_id", self.config.scope.chat_id.clone())
+                .with_payload("memory_space_id", self.config.identity.owner_id.clone())
+                .with_payload("subject_id", self.config.subject_id.clone())
+                .with_payload("conversation_id", self.config.scope.chat_id.clone())
                 .with_payload(
                     "projection_source_max_chars",
                     self.config
@@ -1609,13 +1932,17 @@ impl MemoryRuntime {
     }
 
     fn audit(&self, operation: &str, allowed: bool, reason: &str) {
-        self.config.audit_sink.record(MemoryAuditEvent {
-            operation: operation.to_string(),
-            profile: self.config.profile,
-            scope: self.config.scope.clone(),
-            allowed,
-            reason: reason.to_string(),
-        });
+        self.config
+            .audit_sink
+            .record(MemoryAuditEvent::for_runtime_operation(
+                operation,
+                self.config.profile,
+                self.config.identity.clone(),
+                self.config.scope.clone(),
+                self.config.subject_id.clone(),
+                allowed,
+                reason,
+            ));
     }
 
     fn memory_profile(&self) -> MemoryProfile {
@@ -1647,11 +1974,118 @@ fn render_sdk_projection_block(
 ) -> String {
     let mut parts = Vec::new();
     push_projection_part(&mut parts, runtime_awareness);
-    for value in sdk_projection_text_parts(context) {
+    for (_name, value) in sdk_projection_text_parts(context) {
         push_projection_part(&mut parts, value);
     }
     let joined = parts.join("\n\n");
     truncate_to_char_boundary(&joined, max_len)
+}
+
+fn build_projection_audit(
+    runtime: &MemoryRuntime,
+    context: &crate::PromptMemoryContext,
+    request: &MemoryProjectionRequest,
+    lifecycle: &RuntimeLifecycleReport,
+    render_budget_chars: usize,
+    system_memory_chars: usize,
+    injected: bool,
+) -> MemoryProjectionAuditReport {
+    let private_policy_allowed = runtime
+        .config
+        .privacy_policy
+        .private_plane_projection_allowed;
+    let private_depth_allowed = lifecycle.admission.private_depth_allowed;
+    let private_allowed = private_policy_allowed && private_depth_allowed;
+    let private_reason = if private_allowed {
+        "allowed"
+    } else if !private_policy_allowed {
+        "privacy_policy_denied"
+    } else {
+        "lifecycle_private_depth_denied"
+    };
+    let source_budget_chars = runtime
+        .config
+        .runtime_budget
+        .projection_source_budget
+        .context_assembly_max_chars;
+    MemoryProjectionAuditReport {
+        projection_id: projection_id(runtime, request),
+        operation: "project".to_string(),
+        profile: runtime.config.profile,
+        identity: runtime.config.identity.clone(),
+        scope: runtime.config.scope.clone(),
+        memory_space_id: runtime.config.identity.owner_id.clone(),
+        subject_id: runtime.config.subject_id.clone(),
+        conversation_id: Some(runtime.config.scope.chat_id.clone()),
+        source_budget_chars,
+        render_budget_chars,
+        system_memory_chars,
+        injected,
+        truncated: system_memory_chars >= render_budget_chars && render_budget_chars > 0,
+        private_gate: MemoryProjectionPrivateGateAudit {
+            allowed: private_allowed,
+            privacy_policy_allowed: private_policy_allowed,
+            lifecycle_private_depth_allowed: private_depth_allowed,
+            reason: private_reason.to_string(),
+        },
+        sources: projection_source_audits(context),
+        sections: projection_section_audits(context),
+    }
+}
+
+fn projection_id(runtime: &MemoryRuntime, request: &MemoryProjectionRequest) -> String {
+    let seed = format!(
+        "{}:{}:{}:{}",
+        runtime.config.identity.owner_id,
+        runtime.config.scope.channel,
+        runtime.config.scope.chat_id,
+        request.user_query
+    );
+    format!("projection-{:016x}", fnv1a64(seed.as_bytes()))
+}
+
+fn projection_source_audits(
+    context: &crate::PromptMemoryContext,
+) -> Vec<MemoryProjectionSourceAudit> {
+    let mut sources = vec![
+        projection_source_audit(&context.shared_factual_recall_report),
+        projection_source_audit(&context.continuity_capsule_report),
+        projection_source_audit(&context.archive_recall_report),
+        projection_source_audit(&context.runtime_skill_recall_report),
+    ];
+    if let Some(report) = context.task_recall_report.as_ref() {
+        sources.push(projection_source_audit(report));
+    }
+    sources
+}
+
+fn projection_source_audit(report: &RecallSelectionReport) -> MemoryProjectionSourceAudit {
+    MemoryProjectionSourceAudit {
+        plane: report.plane.label().to_string(),
+        backend: report.backend.clone(),
+        candidate_count: report.candidate_count,
+        selected_count: report.selected_count,
+        selected_ids: report.selected_ids.clone(),
+        miss_reason: report.miss_reason.clone(),
+    }
+}
+
+fn projection_section_audits(
+    context: &crate::PromptMemoryContext,
+) -> Vec<MemoryProjectionSectionAudit> {
+    sdk_projection_text_parts(context)
+        .into_iter()
+        .map(|(name, value)| {
+            let chars = value
+                .map(|content| content.trim().chars().count())
+                .unwrap_or(0);
+            MemoryProjectionSectionAudit {
+                name: name.to_string(),
+                chars,
+                included: chars > 0,
+            }
+        })
+        .collect()
 }
 
 fn render_runtime_awareness_block(
@@ -1730,36 +2164,65 @@ fn working_recall_hit_count(working: &crate::WorkingRecallInspection) -> usize {
         .saturating_add(usize::from(working.task_recall_text.is_some()))
 }
 
-fn sdk_projection_text_parts(context: &crate::PromptMemoryContext) -> [Option<&str>; 28] {
+fn sdk_projection_text_parts(
+    context: &crate::PromptMemoryContext,
+) -> [(&'static str, Option<&str>); 28] {
     [
-        context.summary_text.as_deref(),
-        context.message_summary_text.as_deref(),
-        context.personality_governance_gate_text.as_deref(),
-        context.self_authored_core_text.as_deref(),
-        context.relationship_constitution_text.as_deref(),
-        context.persona_priority_text.as_deref(),
-        context.long_term_memory_text.as_deref(),
-        context.continuity_capsule_text.as_deref(),
-        context.archive_evidence_text.as_deref(),
-        context.runtime_skill_text.as_deref(),
-        context.recent_turn_observation_text.as_deref(),
-        context.work_continuity_text.as_deref(),
-        context.execution_state_text.as_deref(),
-        context.task_workspace_text.as_deref(),
-        context.task_recall_text.as_deref(),
-        context.world_snapshot_text.as_deref(),
-        context.world_sense_text.as_deref(),
-        context.self_state_text.as_deref(),
-        context.relationship_portfolio_text.as_deref(),
-        context.self_model_text.as_deref(),
-        context.autonomy_strategy_text.as_deref(),
-        context.outer_voice_text.as_deref(),
-        context.inner_life_text.as_deref(),
-        context.self_continuity_text.as_deref(),
-        context.private_workspace_text.as_deref(),
-        context.private_garden_text.as_deref(),
-        context.mental_privacy_text.as_deref(),
-        context.mental_privacy_adjudication_text.as_deref(),
+        ("summary", context.summary_text.as_deref()),
+        ("message_summary", context.message_summary_text.as_deref()),
+        (
+            "personality_governance_gate",
+            context.personality_governance_gate_text.as_deref(),
+        ),
+        (
+            "self_authored_core",
+            context.self_authored_core_text.as_deref(),
+        ),
+        (
+            "relationship_constitution",
+            context.relationship_constitution_text.as_deref(),
+        ),
+        ("persona_priority", context.persona_priority_text.as_deref()),
+        ("long_term_memory", context.long_term_memory_text.as_deref()),
+        (
+            "continuity_capsule",
+            context.continuity_capsule_text.as_deref(),
+        ),
+        ("archive_evidence", context.archive_evidence_text.as_deref()),
+        ("runtime_skill", context.runtime_skill_text.as_deref()),
+        (
+            "recent_turn_observation",
+            context.recent_turn_observation_text.as_deref(),
+        ),
+        ("work_continuity", context.work_continuity_text.as_deref()),
+        ("execution_state", context.execution_state_text.as_deref()),
+        ("task_workspace", context.task_workspace_text.as_deref()),
+        ("task_recall", context.task_recall_text.as_deref()),
+        ("world_snapshot", context.world_snapshot_text.as_deref()),
+        ("world_sense", context.world_sense_text.as_deref()),
+        ("self_state", context.self_state_text.as_deref()),
+        (
+            "relationship_portfolio",
+            context.relationship_portfolio_text.as_deref(),
+        ),
+        ("self_model", context.self_model_text.as_deref()),
+        (
+            "autonomy_strategy",
+            context.autonomy_strategy_text.as_deref(),
+        ),
+        ("outer_voice", context.outer_voice_text.as_deref()),
+        ("inner_life", context.inner_life_text.as_deref()),
+        ("self_continuity", context.self_continuity_text.as_deref()),
+        (
+            "private_workspace",
+            context.private_workspace_text.as_deref(),
+        ),
+        ("private_garden", context.private_garden_text.as_deref()),
+        ("mental_privacy", context.mental_privacy_text.as_deref()),
+        (
+            "mental_privacy_adjudication",
+            context.mental_privacy_adjudication_text.as_deref(),
+        ),
     ]
 }
 
@@ -1782,6 +2245,63 @@ fn truncate_to_char_boundary(value: &str, max_len: usize) -> String {
         end -= 1;
     }
     value[..end].to_string()
+}
+
+fn validate_turn_scope(
+    scope: &MemoryScope,
+    subject_id: &str,
+    turn: &CanonicalTurnDelta,
+) -> Result<()> {
+    if turn.turn_id.trim().is_empty() {
+        return Err(Error::config(
+            "canonical_turn_delta",
+            "turn_id must not be empty",
+        ));
+    }
+    if turn.conversation.channel.trim() != scope.channel {
+        return Err(Error::config(
+            "canonical_turn_delta",
+            "turn conversation channel must match runtime scope",
+        ));
+    }
+    if turn.conversation.chat_id.trim() != scope.chat_id {
+        return Err(Error::config(
+            "canonical_turn_delta",
+            "turn conversation chat_id must match runtime scope",
+        ));
+    }
+    if turn.subject.trim().is_empty() {
+        return Err(Error::config(
+            "canonical_turn_delta",
+            "turn subject must not be empty",
+        ));
+    }
+    if turn.subject.trim() != subject_id {
+        return Err(Error::config(
+            "canonical_turn_delta",
+            "turn subject must match runtime subject",
+        ));
+    }
+    Ok(())
+}
+
+fn latest_user_content(turn: &CanonicalTurnDelta) -> String {
+    turn.input_messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role.eq_ignore_ascii_case("user") && !message.content.trim().is_empty()
+        })
+        .map(|message| message.content.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn assistant_content(turn: &CanonicalTurnDelta) -> Option<String> {
+    turn.assistant_message
+        .as_ref()
+        .filter(|message| message.role.eq_ignore_ascii_case("assistant"))
+        .map(|message| message.content.trim().to_string())
+        .filter(|content| !content.is_empty())
 }
 
 fn semantic_report_from_maintenance(
@@ -1919,23 +2439,28 @@ fn enqueue_deferred_governance_job(
     platform: &dyn Platform,
     scope: &MemoryScope,
     session_commit: &bm_core::memory::SessionTurnCommitReport,
+    memory_space_id: &str,
+    request: &MemoryTurnFinalizeRequest,
     reason: &'static str,
     now_secs: u64,
 ) -> Result<()> {
     if !session_commit.committed {
         return Ok(());
     }
-    let state_fs = platform.state_fs();
-    let mut jobs = match state_fs.read(REL_PATH_DEFERRED_GOVERNANCE_JOBS)? {
-        Some(bytes) if !bytes.is_empty() => {
-            serde_json::from_slice::<Vec<DeferredGovernanceJob>>(&bytes)
-                .map_err(|error| Error::config("deferred_governance_jobs", error.to_string()))?
-        }
-        _ => Vec::new(),
-    };
+    let mut jobs = read_deferred_governance_jobs(platform)?;
+    let memory_space_id = memory_space_id.trim();
+    let subject_id = request.turn.subject.trim();
     let idempotency_key = format!(
-        "{}:{}:{}",
-        scope.channel, session_commit.chat_id, session_commit.after_count
+        "{}:{}:{}:{}:{}",
+        memory_space_id,
+        subject_id,
+        scope.channel,
+        session_commit.chat_id,
+        if request.turn.turn_id.trim().is_empty() {
+            session_commit.after_count.to_string()
+        } else {
+            request.turn.turn_id.trim().to_string()
+        }
     );
     if jobs
         .iter()
@@ -1947,12 +2472,65 @@ fn enqueue_deferred_governance_job(
         job_id: format!("governance-{:016x}", fnv1a64(idempotency_key.as_bytes())),
         idempotency_key,
         status: DeferredGovernanceJobStatus::Pending,
+        memory_space_id: memory_space_id.to_string(),
+        subject_id: subject_id.to_string(),
+        channel: scope.channel.clone(),
         chat_id: session_commit.chat_id.clone(),
-        conversation_id: None,
+        conversation_id: request.turn.conversation.conversation_id.clone(),
+        turn_id: request.turn.turn_id.trim().to_string(),
+        candidate_ids: request.turn.candidate_ids.clone(),
         reason: reason.to_string(),
+        retry_policy: "standard_backoff".to_string(),
         created_at: now_secs,
         attempts: 0,
+        turn: Some(request.turn.clone()),
+        tool_calls: request.tool_calls,
+        runtime_skill_selected_ids: request.runtime_skill_selected_ids.clone(),
+        task_learning_selected_ids: request.task_learning_selected_ids.clone(),
+        reuse_outcome_note: request.reuse_outcome_note.clone(),
+        pressure: request.pressure,
+        mode_input: request.mode_input,
+        last_error: None,
     });
+    write_deferred_governance_jobs(platform, &jobs)
+}
+
+fn deferred_governance_job_matches_runtime(
+    job: &DeferredGovernanceJob,
+    config: &MemoryRuntimeConfig,
+) -> bool {
+    job.memory_space_id.trim() == config.identity.owner_id
+        && job.subject_id.trim() == config.subject_id
+        && job.channel.trim() == config.scope.channel
+        && job.chat_id.trim() == config.scope.chat_id
+}
+
+fn scoped_deferred_governance_jobs(
+    jobs: &[DeferredGovernanceJob],
+    config: &MemoryRuntimeConfig,
+) -> Vec<DeferredGovernanceJob> {
+    jobs.iter()
+        .filter(|job| deferred_governance_job_matches_runtime(job, config))
+        .cloned()
+        .collect()
+}
+
+fn read_deferred_governance_jobs(platform: &dyn Platform) -> Result<Vec<DeferredGovernanceJob>> {
+    let state_fs = platform.state_fs();
+    match state_fs.read(REL_PATH_DEFERRED_GOVERNANCE_JOBS)? {
+        Some(bytes) if !bytes.is_empty() => {
+            serde_json::from_slice::<Vec<DeferredGovernanceJob>>(&bytes)
+                .map_err(|error| Error::config("deferred_governance_jobs", error.to_string()))
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn write_deferred_governance_jobs(
+    platform: &dyn Platform,
+    jobs: &[DeferredGovernanceJob],
+) -> Result<()> {
+    let state_fs = platform.state_fs();
     let bytes = serde_json::to_vec_pretty(&jobs)
         .map_err(|error| Error::config("deferred_governance_jobs", error.to_string()))?;
     state_fs.write(REL_PATH_DEFERRED_GOVERNANCE_JOBS, &bytes)?;
@@ -2168,6 +2746,7 @@ fn sdk_runtime_skill_name(seed: &str) -> String {
 
 pub struct MemoryRuntimeBuilder {
     identity: Option<MemoryIdentity>,
+    subject_id: Option<String>,
     scope: Option<MemoryScope>,
     profile: ProfileId,
     platform: Option<Arc<dyn Platform>>,
@@ -2186,6 +2765,7 @@ impl Default for MemoryRuntimeBuilder {
     fn default() -> Self {
         Self {
             identity: None,
+            subject_id: None,
             scope: None,
             profile: ProfileId::ServerLinuxDevFull,
             platform: None,
@@ -2205,6 +2785,11 @@ impl Default for MemoryRuntimeBuilder {
 impl MemoryRuntimeBuilder {
     pub fn identity(mut self, identity: MemoryIdentity) -> Self {
         self.identity = Some(identity);
+        self
+    }
+
+    pub fn subject_id(mut self, subject_id: impl Into<String>) -> Self {
+        self.subject_id = Some(subject_id.into());
         self
     }
 
@@ -2277,6 +2862,17 @@ impl MemoryRuntimeBuilder {
         let identity = self
             .identity
             .ok_or_else(|| Error::config("memory_runtime_config", "identity must be configured"))?;
+        let subject_id = self
+            .subject_id
+            .unwrap_or_else(|| identity.owner_id.clone())
+            .trim()
+            .to_string();
+        if subject_id.is_empty() {
+            return Err(Error::config(
+                "memory_runtime_config",
+                "subject_id must not be empty",
+            ));
+        }
         let scope = self
             .scope
             .ok_or_else(|| Error::config("memory_runtime_config", "scope must be configured"))?;
@@ -2314,6 +2910,7 @@ impl MemoryRuntimeBuilder {
         };
         let config = MemoryRuntimeConfig {
             identity,
+            subject_id,
             scope,
             profile: self.profile,
             platform,

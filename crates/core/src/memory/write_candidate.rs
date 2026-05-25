@@ -136,6 +136,31 @@ impl MemoryCandidateContent {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySemanticJudgmentSource {
+    LlmGovernance,
+    RuntimeGate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCandidateSemanticDecision {
+    Accept,
+    Reject,
+    Defer,
+    HandoffToSoulGovernance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryCandidateSemanticJudgment {
+    pub source: MemorySemanticJudgmentSource,
+    pub decision: MemoryCandidateSemanticDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governed_target: Option<MemoryCandidateTarget>,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryWriteCandidate {
     pub candidate_id: String,
@@ -145,6 +170,8 @@ pub struct MemoryWriteCandidate {
     pub content: MemoryCandidateContent,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_judgment: Option<MemoryCandidateSemanticJudgment>,
 }
 
 impl MemoryWriteCandidate {
@@ -153,7 +180,16 @@ impl MemoryWriteCandidate {
         source_chat_id: &str,
         now_secs: u64,
     ) -> Option<LongTermMemoryDraft> {
-        let MemoryCandidateTarget::LongTermMemory { kind, topic } = &self.target else {
+        self.to_long_term_draft_for_target(&self.target, source_chat_id, now_secs)
+    }
+
+    pub fn to_long_term_draft_for_target(
+        &self,
+        target: &MemoryCandidateTarget,
+        source_chat_id: &str,
+        now_secs: u64,
+    ) -> Option<LongTermMemoryDraft> {
+        let MemoryCandidateTarget::LongTermMemory { kind, topic } = target else {
             return None;
         };
         if self.content.is_empty() {
@@ -206,7 +242,16 @@ impl MemoryWriteCandidate {
         source_chat_id: &str,
         now_secs: u64,
     ) -> Option<RuntimeSkillWrite> {
-        let MemoryCandidateTarget::ProceduralMemory { name, topic } = &self.target else {
+        self.to_runtime_skill_write_for_target(&self.target, source_chat_id, now_secs)
+    }
+
+    pub fn to_runtime_skill_write_for_target(
+        &self,
+        target: &MemoryCandidateTarget,
+        source_chat_id: &str,
+        now_secs: u64,
+    ) -> Option<RuntimeSkillWrite> {
+        let MemoryCandidateTarget::ProceduralMemory { name, topic } = target else {
             return None;
         };
         if self.content.is_empty() {
@@ -267,6 +312,12 @@ impl MemoryWriteCandidate {
             observed_at: now_secs,
         })
     }
+
+    pub fn governed_target(&self) -> Option<&MemoryCandidateTarget> {
+        self.semantic_judgment
+            .as_ref()
+            .and_then(|judgment| judgment.governed_target.as_ref())
+    }
 }
 
 pub fn govern_write_candidates(
@@ -287,12 +338,44 @@ pub fn govern_write_candidates(
         {
             evidence_refs.push(candidate.candidate_id.clone());
         }
-        if matches!(candidate.target, MemoryCandidateTarget::Soul { .. }) {
+        let governed_target = candidate.governed_target().unwrap_or(&candidate.target);
+        if matches!(
+            candidate.target,
+            MemoryCandidateTarget::PrivateGarden { .. }
+        ) || matches!(candidate.privacy, MemoryPrivacyClass::PrivateGarden)
+            || candidate.authority == MemoryEvidenceAuthority::PrivateGardenInternal
+        {
+            deferred_count += 1;
+            plane_reports.push(MemoryPlaneGovernanceReport {
+                domain: MemoryWriteDomain::Subject,
+                plane: "private_garden".to_string(),
+                authority: MemoryWriteAuthority::LlmPrivateGardenFreeform,
+                decision: GovernedWriteDecision::Deferred,
+                reason: "private_garden_uses_private_garden_governance_not_candidate_write"
+                    .to_string(),
+                evidence_refs,
+                privacy_decision: MemoryPrivacyClass::PrivateGarden.label().to_string(),
+                profile_decision: "private_garden_boundary".to_string(),
+            });
+            continue;
+        }
+
+        if matches!(governed_target, MemoryCandidateTarget::Soul { .. })
+            || matches!(candidate.target, MemoryCandidateTarget::Soul { .. })
+        {
+            let judgment_reason = candidate
+                .semantic_judgment
+                .as_ref()
+                .map(|judgment| judgment.reason.clone())
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or_else(|| {
+                    "soul_candidate_handed_off_without_memory_plane_mutation".to_string()
+                });
             soul_candidate_handoffs.push(SoulCandidateHandoffReport {
-                surface: candidate.target.topic().to_string(),
+                surface: governed_target.topic().to_string(),
                 disposition: SoulCandidateDisposition::HandedOff,
                 existing_gate: "soul_governance".to_string(),
-                reason: "soul_candidate_handed_off_without_memory_plane_mutation".to_string(),
+                reason: judgment_reason,
                 evidence_refs,
             });
             continue;
@@ -310,26 +393,60 @@ pub fn govern_write_candidates(
                 "assistant_self_claim_is_not_identity_memory".to_string(),
                 MemoryWriteAuthority::RuntimeDeterministic,
             )
-        } else if matches!(candidate.privacy, MemoryPrivacyClass::PrivateGarden) {
+        } else if candidate.semantic_judgment.is_none() {
             (
                 GovernedWriteDecision::Deferred,
-                "private_garden_candidate_requires_private_garden_governance".to_string(),
-                MemoryWriteAuthority::LlmPrivateGardenFreeform,
+                "llm_semantic_judgment_required_before_plane_mutation".to_string(),
+                MemoryWriteAuthority::RuntimeDeterministic,
             )
         } else {
-            (
-                GovernedWriteDecision::Accepted,
-                "candidate_accepted_by_sdk_governance".to_string(),
-                match candidate.authority {
-                    MemoryEvidenceAuthority::SoulGovernance => {
-                        MemoryWriteAuthority::SoulGovernedCore
-                    }
-                    MemoryEvidenceAuthority::AssistantUtterance => {
-                        MemoryWriteAuthority::LlmGovernedSemantic
-                    }
-                    _ => MemoryWriteAuthority::RuntimeDeterministic,
-                },
-            )
+            let judgment = candidate.semantic_judgment.as_ref().expect("checked above");
+            let authority = match judgment.source {
+                MemorySemanticJudgmentSource::LlmGovernance => {
+                    MemoryWriteAuthority::LlmGovernedSemantic
+                }
+                MemorySemanticJudgmentSource::RuntimeGate => {
+                    MemoryWriteAuthority::RuntimeDeterministic
+                }
+            };
+            match judgment.decision {
+                MemoryCandidateSemanticDecision::Accept => (
+                    GovernedWriteDecision::Accepted,
+                    if judgment.reason.trim().is_empty() {
+                        "llm_semantic_judgment_accepted".to_string()
+                    } else {
+                        judgment.reason.clone()
+                    },
+                    authority,
+                ),
+                MemoryCandidateSemanticDecision::Reject => (
+                    GovernedWriteDecision::Rejected,
+                    if judgment.reason.trim().is_empty() {
+                        "llm_semantic_judgment_rejected".to_string()
+                    } else {
+                        judgment.reason.clone()
+                    },
+                    authority,
+                ),
+                MemoryCandidateSemanticDecision::Defer => (
+                    GovernedWriteDecision::Deferred,
+                    if judgment.reason.trim().is_empty() {
+                        "llm_semantic_judgment_deferred".to_string()
+                    } else {
+                        judgment.reason.clone()
+                    },
+                    authority,
+                ),
+                MemoryCandidateSemanticDecision::HandoffToSoulGovernance => (
+                    GovernedWriteDecision::Deferred,
+                    if judgment.reason.trim().is_empty() {
+                        "soul_handoff_requires_soul_target".to_string()
+                    } else {
+                        judgment.reason.clone()
+                    },
+                    authority,
+                ),
+            }
         };
 
         match decision {
@@ -342,8 +459,8 @@ pub fn govern_write_candidates(
         }
 
         plane_reports.push(MemoryPlaneGovernanceReport {
-            domain: candidate.target.domain(),
-            plane: candidate.target.plane().to_string(),
+            domain: governed_target.domain(),
+            plane: governed_target.plane().to_string(),
             authority,
             decision,
             reason,

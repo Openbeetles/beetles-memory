@@ -169,10 +169,11 @@ impl McpToolServer {
             .into_iter()
             .find(|spec| spec.name == call.name)
             .ok_or_else(|| bm_sdk::Error::config("mcp_runtime", "unsupported tool"))?;
+        reject_missing_remote_source_scope(runtime, spec.operation, &call.arguments)?;
         let command = decode_json_adapter_command(
             spec.operation,
             &call.arguments,
-            &AdapterJsonCommandOptions::new("bm-mcp").with_default_source_chat_id("chat-1"),
+            &mcp_command_options(runtime),
         )?;
         let response = runtime.handle(
             EntryTransportContext {
@@ -237,7 +238,7 @@ impl McpToolServer {
         let command = decode_json_adapter_command(
             AdapterOperation::Project,
             r#"{"query":"projection preview","max_len":1200}"#,
-            &AdapterJsonCommandOptions::new("bm-mcp").with_default_source_chat_id("chat-1"),
+            &mcp_command_options(runtime),
         )?;
         runtime.handle(
             EntryTransportContext {
@@ -254,6 +255,40 @@ impl McpToolServer {
             command,
         )
     }
+}
+
+#[cfg(feature = "server-stdio")]
+fn mcp_command_options(runtime: &EntryRuntime) -> AdapterJsonCommandOptions {
+    let options = AdapterJsonCommandOptions::new("bm-mcp");
+    if runtime.uses_local_default_scope_policy() {
+        options.with_default_source_chat_id(runtime.runtime().scope().chat_id.clone())
+    } else {
+        options
+    }
+}
+
+#[cfg(feature = "server-stdio")]
+fn reject_missing_remote_source_scope(
+    runtime: &EntryRuntime,
+    operation: AdapterOperation,
+    body: &str,
+) -> bm_sdk::Result<()> {
+    if runtime.uses_local_default_scope_policy() || operation != AdapterOperation::Write {
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(body)
+        .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))?;
+    if value
+        .get("source_chat_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+    Err(bm_sdk::Error::config(
+        "adapter_json_command",
+        "remote adapter write payload missing source_chat_id; refusing implicit chat-1 scope",
+    ))
 }
 
 #[cfg(feature = "server-stdio")]

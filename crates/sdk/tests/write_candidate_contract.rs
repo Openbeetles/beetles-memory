@@ -1,8 +1,9 @@
 mod support;
 
 use bm_core::memory::{
-    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateTarget, MemoryEvidenceAuthority,
-    MemoryPrivacyClass, MemoryWriteCandidate,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemoryWriteCandidate,
 };
 use bm_sdk::{
     MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel, ProfileId,
@@ -10,6 +11,15 @@ use bm_sdk::{
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
+
+fn llm_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment {
+    MemoryCandidateSemanticJudgment {
+        source: MemorySemanticJudgmentSource::LlmGovernance,
+        decision: MemoryCandidateSemanticDecision::Accept,
+        governed_target: Some(target),
+        reason: "llm_semantic_judgment".to_string(),
+    }
+}
 
 #[test]
 fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
@@ -33,6 +43,10 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
                     keywords: vec!["name".to_string(), "qingchuan".to_string()],
                 },
                 evidence_refs: vec!["chat-a:turn-1".to_string()],
+                semantic_judgment: Some(llm_accept(MemoryCandidateTarget::LongTermMemory {
+                    kind: LongTermMemoryKind::Profile,
+                    topic: "preferred_name".to_string(),
+                })),
             }],
         })
         .expect("candidate write");
@@ -88,6 +102,10 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
                     citations: vec!["fixture:generic-rust-host".to_string()],
                 },
                 evidence_refs: vec!["chat-a:turn-2".to_string()],
+                semantic_judgment: Some(llm_accept(MemoryCandidateTarget::ProceduralMemory {
+                    name: String::new(),
+                    topic: "release_checklist".to_string(),
+                })),
             }],
         })
         .expect("candidate write");

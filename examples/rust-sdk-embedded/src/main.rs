@@ -1,18 +1,23 @@
 use bm_sdk::{
-    MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
+    apply_memory_space_migration, export_memory_space, import_memory_space,
+    preview_memory_space_migration, LongTermMemoryKind, MemoryCandidateContent,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryIdentity, MemoryInspectionRequest,
+    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemorySpaceExportRequest, MemorySpaceImportRequest, MemorySpaceMigrateApplyRequest,
+    MemorySpaceMigratePreviewRequest, MemoryWriteCandidate, MemoryWriteRequest, PressureLevel,
+    ProfileId, RuntimeLifecycleModeInput, StoreBackendConfig, StorePlatform,
 };
 
 fn main() -> bm_sdk::Result<()> {
-    let runtime = runtime(ProfileId::DesktopMacosEmbeddedSdk)?;
-    write_recall_project(&runtime)?;
-    println!("rust-sdk-embedded smoke passed");
+    let profile = ProfileId::DesktopMacosEmbeddedSdk;
+    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+    let runtime = runtime(profile, store.clone())?;
+    run_host_turn_lifecycle(&runtime, &store, profile)?;
+    println!("rust-sdk-embedded host lifecycle smoke passed");
     Ok(())
 }
 
-fn runtime(profile: ProfileId) -> bm_sdk::Result<MemoryRuntime> {
-    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+fn runtime(profile: ProfileId, store: StorePlatform) -> bm_sdk::Result<MemoryRuntime> {
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
         .scope(MemoryScope::new("local", "chat-1")?)
@@ -21,20 +26,47 @@ fn runtime(profile: ProfileId) -> bm_sdk::Result<MemoryRuntime> {
         .build()
 }
 
-fn write_recall_project(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
-    let write = runtime.write(MemoryWriteRequest::Procedural {
-        writes: vec![RuntimeSkillWrite {
-            name: "release_guard".to_string(),
-            topic: "release".to_string(),
-            title: "Release guard".to_string(),
-            summary: "Verify release artifacts before publishing.".to_string(),
-            content: "1. run docs and examples\n2. run platform gates\n3. run publish dry-run"
-                .to_string(),
-            citations: vec!["rust sdk embedded example".to_string()],
-            source_chat_id: Some("chat-1".to_string()),
-            observed_at: 1_800_000_000,
-        }],
-        source: RuntimeSkillWriteSource::Manual,
+fn run_host_turn_lifecycle(
+    runtime: &MemoryRuntime,
+    store: &StorePlatform,
+    profile: ProfileId,
+) -> bm_sdk::Result<()> {
+    let write = runtime.write(MemoryWriteRequest::Candidates {
+        candidates: vec![
+            MemoryWriteCandidate {
+                candidate_id: "turn-1:project-readiness".to_string(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: MemoryCandidateTarget::LongTermMemory {
+                    kind: LongTermMemoryKind::Project,
+                    topic: "sdk_host_readiness".to_string(),
+                },
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                content: MemoryCandidateContent::Text {
+                    topic: "sdk_host_readiness".to_string(),
+                    body: "SDK hosts validate migration through public export, dry-run, apply, inspect, and replay.".to_string(),
+                    keywords: vec!["sdk".to_string(), "migration".to_string()],
+                },
+                evidence_refs: vec!["rust-sdk-embedded:turn-1".to_string()],
+            },
+            MemoryWriteCandidate {
+                candidate_id: "turn-1:release-guard".to_string(),
+                authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                target: MemoryCandidateTarget::ProceduralMemory {
+                    name: "sdk_release_guard".to_string(),
+                    topic: "sdk_release".to_string(),
+                },
+                privacy: MemoryPrivacyClass::PublicRuntime,
+                content: MemoryCandidateContent::RuntimeSkill {
+                    name: "sdk_release_guard".to_string(),
+                    topic: "sdk_release".to_string(),
+                    title: "SDK release guard".to_string(),
+                    summary: "Validate SDK host lifecycle before release.".to_string(),
+                    content: "Run candidate governance, recall, projection, operator inspect, migration dry-run, and replay.".to_string(),
+                    citations: vec!["rust-sdk-embedded example".to_string()],
+                },
+                evidence_refs: vec!["rust-sdk-embedded:release-guard".to_string()],
+            },
+        ],
     })?;
     assert!(write.accepted);
 
@@ -44,6 +76,14 @@ fn write_recall_project(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     })?;
     assert!(!recall.procedural_hits.is_empty());
 
+    let inspect = runtime.inspect(MemoryInspectionRequest {
+        query: "release artifacts".to_string(),
+        system_max_len: 4096,
+        pressure: PressureLevel::Normal,
+        mode_input: RuntimeLifecycleModeInput::default(),
+    })?;
+    assert!(inspect.capabilities.inspection.visible);
+
     let projection = runtime.project(MemoryProjectionRequest {
         user_query: "How should this host release?".to_string(),
         system_max_len: 4096,
@@ -52,5 +92,44 @@ fn write_recall_project(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         mode_input: RuntimeLifecycleModeInput::default(),
     })?;
     assert!(projection.system_memory_block.len() <= 4096);
+
+    let exported = export_memory_space(
+        store,
+        MemorySpaceExportRequest {
+            memory_space_id: "space-main".to_string(),
+            include_private: true,
+        },
+    )?;
+    let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
+        source_memory_space_id: "space-main".to_string(),
+        target_memory_space_id: "space-copy".to_string(),
+        snapshot: exported.snapshot.clone(),
+    });
+    assert!(!preview.loss_risk);
+
+    let target_store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+    let apply = apply_memory_space_migration(
+        &target_store,
+        MemorySpaceMigrateApplyRequest {
+            target_memory_space_id: "space-copy".to_string(),
+            snapshot: exported.snapshot.clone(),
+        },
+    )?;
+    assert_eq!(
+        apply.import_report.state_fingerprint,
+        preview.state_fingerprint
+    );
+
+    let imported = import_memory_space(
+        &target_store,
+        MemorySpaceImportRequest {
+            memory_space_id: "space-copy".to_string(),
+            snapshot: exported.snapshot,
+        },
+    )?;
+    assert_eq!(
+        imported.import_report.state_fingerprint,
+        preview.state_fingerprint
+    );
     Ok(())
 }

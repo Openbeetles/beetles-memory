@@ -17,7 +17,11 @@ let report = runtime.inspect(MemoryInspectionRequest {
 assert!(report.capabilities.inspection.visible);
 ```
 
-`MemoryInspectionReport` includes working recall inspection, capability catalog data, operator action report, and lifecycle report.
+`MemoryInspectionReport` includes working recall inspection, capability catalog data, deferred governance queue state for the current runtime scope, operator action report, and lifecycle report.
+
+Use inspect after migration dry-run/apply to confirm selected ids, recall planes, deferred job status, lifecycle diagnosis, and safe recovery actions. Operator surfaces may show this report, but they must not read store internals or invent their own plane-count logic.
+
+Projection diagnostics come from `MemoryProjectionReport.audit`, including source planes, selected ids, section chars, budget, and private gate decisions. Conservative compaction comes from `MemoryRuntime::run_retention_compaction()`, whose report explicitly forbids host-side deletion of accepted memory.
 
 ## Skill Memory Management
 

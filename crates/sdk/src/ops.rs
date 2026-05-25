@@ -1,8 +1,9 @@
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
-    MemoryHygieneInspection, MemoryTurnDeliveryStatus, MemoryTurnSource,
-    PostTurnMemoryGovernanceReport, PostTurnSemanticGovernanceReport, TranscriptInputMessage,
+    CanonicalTurnDelta, DeferredGovernanceQueueReport, MemoryHygieneInspection,
+    MemoryHygieneOutcome, PostTurnMemoryGovernanceReport, PostTurnSemanticGovernanceReport,
 };
+use bm_core::{budget::RuntimeRetentionQuotaReport, feature_gate::ProfileId};
 
 use crate::{
     ContinuitySnapshot, ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome,
@@ -164,7 +165,53 @@ pub struct MemoryProjectionRequest {
 pub struct MemoryProjectionReport {
     pub system_memory_block: String,
     pub context: PromptMemoryContext,
+    pub audit: MemoryProjectionAuditReport,
     pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProjectionSourceAudit {
+    pub plane: String,
+    pub backend: String,
+    pub candidate_count: usize,
+    pub selected_count: usize,
+    pub selected_ids: Vec<String>,
+    pub miss_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProjectionSectionAudit {
+    pub name: String,
+    pub chars: usize,
+    pub included: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProjectionPrivateGateAudit {
+    pub allowed: bool,
+    pub privacy_policy_allowed: bool,
+    pub lifecycle_private_depth_allowed: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProjectionAuditReport {
+    pub projection_id: String,
+    pub operation: String,
+    pub profile: ProfileId,
+    pub identity: crate::MemoryIdentity,
+    pub scope: crate::MemoryScope,
+    pub memory_space_id: String,
+    pub subject_id: String,
+    pub conversation_id: Option<String>,
+    pub source_budget_chars: usize,
+    pub render_budget_chars: usize,
+    pub system_memory_chars: usize,
+    pub injected: bool,
+    pub truncated: bool,
+    pub private_gate: MemoryProjectionPrivateGateAudit,
+    pub sources: Vec<MemoryProjectionSourceAudit>,
+    pub sections: Vec<MemoryProjectionSectionAudit>,
 }
 
 #[derive(Clone, Debug)]
@@ -190,13 +237,8 @@ pub struct MemoryMaintenanceReport {
 
 #[derive(Clone, Debug)]
 pub struct MemoryTurnFinalizeRequest {
-    pub delivery_status: MemoryTurnDeliveryStatus,
-    pub source: MemoryTurnSource,
-    pub user_content: String,
-    pub input_messages: Vec<TranscriptInputMessage>,
-    pub assistant_content: Option<String>,
+    pub turn: CanonicalTurnDelta,
     pub tool_calls: u32,
-    pub external_content_used: bool,
     pub runtime_skill_selected_ids: Vec<String>,
     pub task_learning_selected_ids: Vec<String>,
     pub reuse_outcome_note: String,
@@ -206,6 +248,41 @@ pub struct MemoryTurnFinalizeRequest {
 
 pub type MemoryTurnFinalizeReport =
     PostTurnMemoryGovernanceReport<MemoryMaintenanceReport, RuntimeLifecycleReport>;
+
+#[derive(Clone, Debug)]
+pub struct MemoryDeferredGovernanceRunRequest {
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryDeferredGovernanceRunReport {
+    pub attempted: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub remaining_pending: usize,
+    pub queue: DeferredGovernanceQueueReport,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryRetentionCompactionRequest {
+    pub pressure: crate::PressureLevel,
+    pub mode_input: RuntimeLifecycleModeInput,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryRetentionCompactionReport {
+    pub owner: String,
+    pub executed: bool,
+    pub retention_quota: RuntimeRetentionQuotaReport,
+    pub hygiene: MemoryHygieneOutcome,
+    pub long_term_records_before: usize,
+    pub long_term_records_after: usize,
+    pub destructive_deletes_performed: bool,
+    pub host_direct_deletion_allowed: Option<bool>,
+    pub fail_closed_repair: bool,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
 
 #[derive(Clone, Debug)]
 pub struct MemoryInspectionRequest {
@@ -218,6 +295,7 @@ pub struct MemoryInspectionRequest {
 pub struct MemoryInspectionReport {
     pub working: WorkingRecallInspection,
     pub hygiene: MemoryHygieneInspection,
+    pub deferred_governance: DeferredGovernanceQueueReport,
     pub capabilities: MemoryCapabilityCatalog,
     pub operator_action_report: RuntimeOperatorActionReport,
     pub lifecycle_report: RuntimeLifecycleReport,
@@ -293,6 +371,38 @@ pub struct MemorySpaceMigratePreviewRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceMigrationPlaneReport {
+    pub plane: String,
+    pub records: usize,
+    pub privacy_class: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceMigrationPrivacyReport {
+    pub privacy_class: String,
+    pub records: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceSubjectRemapReport {
+    pub required: bool,
+    pub applied: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceMigrationManifest {
+    pub source_memory_space_id: String,
+    pub target_memory_space_id: String,
+    pub schema_id: String,
+    pub whole_space_snapshot: bool,
+    pub subject_remap: MemorySpaceSubjectRemapReport,
+    pub planes: Vec<MemorySpaceMigrationPlaneReport>,
+    pub privacy: Vec<MemorySpaceMigrationPrivacyReport>,
+    pub conflict_risk: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceMigratePreviewReport {
     pub source_memory_space_id: String,
     pub target_memory_space_id: String,
@@ -304,6 +414,7 @@ pub struct MemorySpaceMigratePreviewReport {
     pub event_fingerprint: String,
     pub privacy_redactions: usize,
     pub loss_risk: bool,
+    pub manifest: MemorySpaceMigrationManifest,
 }
 
 #[derive(Clone, Debug, PartialEq)]

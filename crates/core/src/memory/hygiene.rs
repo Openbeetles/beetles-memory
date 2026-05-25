@@ -138,6 +138,15 @@ pub fn run_memory_hygiene_jobs(
     outcome
 }
 
+pub fn run_memory_retention_compaction(
+    ctx: MemoryHygieneContext<'_>,
+    current_chat_id: &str,
+    profile: MemoryProfile,
+    now_secs: u64,
+) -> MemoryHygieneOutcome {
+    run_memory_hygiene_jobs(ctx, current_chat_id, profile, now_secs)
+}
+
 pub fn inspect_memory_hygiene(
     ctx: MemoryHygieneContext<'_>,
     current_chat_id: &str,

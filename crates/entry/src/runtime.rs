@@ -267,6 +267,10 @@ impl EntryRuntime {
         &self.runtime_budget
     }
 
+    pub fn uses_local_default_scope_policy(&self) -> bool {
+        !self.config.auth.require_auth
+    }
+
     pub fn capability(&self) -> &EntryCapabilityView {
         &self.capability
     }
@@ -280,8 +284,15 @@ impl EntryRuntime {
         event_store_paths: &[PathBuf],
     ) -> EntryConsoleOverview {
         let telemetry = self.console_telemetry_snapshot(event_store_paths);
-        self.console
-            .overview_with_telemetry_and_budget(telemetry, &self.runtime_budget)
+        let deferred_governance = self
+            .runtime
+            .deferred_governance_report()
+            .unwrap_or_default();
+        self.console.overview_with_telemetry_and_budget(
+            telemetry,
+            &self.runtime_budget,
+            deferred_governance,
+        )
     }
 
     pub fn console_transports(&self) -> Vec<EntryConsoleTransport> {
@@ -450,12 +461,12 @@ impl EntryRuntime {
         command: AdapterCommand,
         services: AdapterRuntimeServices<'_>,
     ) -> Result<EntryResponse> {
-        if self.config.auth.require_auth && !context.auth.authenticated {
+        if let Some(reason) = auth_rejection_reason(&self.config.auth, &context.auth) {
             return Ok(EntryResponse::from_adapter(AdapterResponse::Rejected {
                 request_id: context.request_id,
                 audit_id: context.audit_id,
                 error_key: AdapterErrorKey::Unauthorized,
-                reason: "entry auth rejected request".to_string(),
+                reason,
             }));
         }
         if is_mutation(command.operation()) && !self.idempotency.remember(&context.idempotency_key)
@@ -566,6 +577,33 @@ fn open_store(
     .with_fsync(config.fsync)
     .with_runtime_store_budget(runtime_budget.store_budget);
     StorePlatform::open(store_config)
+}
+
+fn auth_rejection_reason(
+    auth_config: &EntryAuthConfig,
+    decision: &crate::EntryAuthDecision,
+) -> Option<String> {
+    if !auth_config.require_auth {
+        return None;
+    }
+    if decision.local_loopback {
+        return Some("entry auth rejected loopback for remote/auth-required profile".to_string());
+    }
+    if !decision.authenticated {
+        return Some(format!(
+            "entry auth rejected request: {}",
+            decision
+                .rejection_reason
+                .as_deref()
+                .unwrap_or("unauthenticated")
+        ));
+    }
+    if let Some(expected) = auth_config.token_fingerprint() {
+        if decision.token_fingerprint.as_deref() != Some(expected.as_str()) {
+            return Some("entry auth rejected request: token_fingerprint mismatch".to_string());
+        }
+    }
+    None
 }
 
 const fn is_mutation(operation: bm_adapter::AdapterOperation) -> bool {

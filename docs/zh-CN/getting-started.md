@@ -31,6 +31,7 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
 
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
+        .subject_id("subject-default")
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
         .store_platform(store)

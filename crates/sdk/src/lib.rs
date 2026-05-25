@@ -5,6 +5,8 @@ mod capability_snapshot;
 mod ops;
 mod runtime;
 
+use std::collections::BTreeMap;
+
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ForegroundWorkStatus};
 pub use bm_core::budget::{
     compile_runtime_budget, AdapterRuntimeBudget, LlmGatewayBudget, MaintenanceBudget,
@@ -34,7 +36,8 @@ pub use bm_core::memory::{
     RecallSelectionReport, WorkingRecallInspection,
 };
 pub use bm_core::memory::{
-    CommittedSessionMessage, ConversationScope, DeferredGovernanceJob, DeferredGovernanceJobStatus,
+    CanonicalTurnDelta, CommittedSessionMessage, ConversationScope, DeferredGovernanceJob,
+    DeferredGovernanceJobStatus, DeferredGovernanceJobSummary, DeferredGovernanceQueueReport,
     GovernedWriteDecision, MemoryCandidateContent, MemoryCandidateTarget, MemoryEvidenceAuthority,
     MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemoryTurnDeliveryStatus, MemoryTurnProtocol,
     MemoryTurnSource, MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
@@ -84,19 +87,24 @@ pub use capability_snapshot::{
     PlatformValidationSnapshot, PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA,
 };
 pub use ops::{
-    MemoryCloseReport, MemoryCloseRequest, MemoryExportReport, MemoryExportRequest,
+    MemoryCloseReport, MemoryCloseRequest, MemoryDeferredGovernanceRunReport,
+    MemoryDeferredGovernanceRunRequest, MemoryExportReport, MemoryExportRequest,
     MemoryImportReport, MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
     MemoryMaintenanceReport, MemoryMaintenanceRequest, MemoryProceduralWriteReport,
-    MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
-    MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
-    MemorySkillDeleteRequest, MemorySkillDetailReport, MemorySkillDetailRequest, MemorySkillKind,
-    MemorySkillListReport, MemorySkillListRequest, MemorySkillMutationReport, MemorySkillOrigin,
-    MemorySkillSetEnabledRequest, MemorySkillSummary, MemorySkillUpsertRequest,
-    MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
-    MemorySpaceImportRequest, MemorySpaceMigrateApplyReport, MemorySpaceMigrateApplyRequest,
-    MemorySpaceMigratePreviewReport, MemorySpaceMigratePreviewRequest, MemoryTurnFinalizeReport,
-    MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, RuntimeOperatorAction,
-    RuntimeOperatorActionReport,
+    MemoryProjectionAuditReport, MemoryProjectionPrivateGateAudit, MemoryProjectionReport,
+    MemoryProjectionRequest, MemoryProjectionSectionAudit, MemoryProjectionSourceAudit,
+    MemoryRecallReport, MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest,
+    MemoryReplayReport, MemoryReplayRequest, MemoryRetentionCompactionReport,
+    MemoryRetentionCompactionRequest, MemorySkillDeleteRequest, MemorySkillDetailReport,
+    MemorySkillDetailRequest, MemorySkillKind, MemorySkillListReport, MemorySkillListRequest,
+    MemorySkillMutationReport, MemorySkillOrigin, MemorySkillSetEnabledRequest, MemorySkillSummary,
+    MemorySkillUpsertRequest, MemorySpaceExportReport, MemorySpaceExportRequest,
+    MemorySpaceImportReport, MemorySpaceImportRequest, MemorySpaceMigrateApplyReport,
+    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
+    MemorySpaceMigratePreviewRequest, MemorySpaceMigrationManifest,
+    MemorySpaceMigrationPlaneReport, MemorySpaceMigrationPrivacyReport,
+    MemorySpaceSubjectRemapReport, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
+    MemoryWriteReport, MemoryWriteRequest, RuntimeOperatorAction, RuntimeOperatorActionReport,
 };
 pub use runtime::{
     MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,
@@ -173,6 +181,12 @@ pub fn preview_memory_space_migration(
     let privacy_redactions = count_private_snapshot_entries(&request.snapshot);
     let loss_risk = request.snapshot.schema_id != bm_store::STORE_SCHEMA_ID;
     let report = request.snapshot.export_report();
+    let manifest = build_memory_space_migration_manifest(
+        &request.source_memory_space_id,
+        &request.target_memory_space_id,
+        &request.snapshot,
+        loss_risk,
+    );
     MemorySpaceMigratePreviewReport {
         source_memory_space_id: request.source_memory_space_id,
         target_memory_space_id: request.target_memory_space_id,
@@ -184,6 +198,7 @@ pub fn preview_memory_space_migration(
         event_fingerprint: report.event_fingerprint,
         privacy_redactions,
         loss_risk,
+        manifest,
     }
 }
 
@@ -232,6 +247,81 @@ fn count_private_snapshot_entries(snapshot: &StoreSnapshot) -> usize {
                     || is_private_snapshot_key(event.record_key.as_str())
             })
             .count()
+}
+
+fn build_memory_space_migration_manifest(
+    source_memory_space_id: &str,
+    target_memory_space_id: &str,
+    snapshot: &StoreSnapshot,
+    loss_risk: bool,
+) -> MemorySpaceMigrationManifest {
+    let mut plane_counts = BTreeMap::<String, (usize, String)>::new();
+    let mut privacy_counts = BTreeMap::<String, usize>::new();
+    for doc in &snapshot.json_docs {
+        accumulate_migration_record(&mut plane_counts, &mut privacy_counts, &doc.namespace);
+    }
+    for blob in &snapshot.blobs {
+        accumulate_migration_record(&mut plane_counts, &mut privacy_counts, &blob.namespace);
+    }
+    for event in &snapshot.events {
+        accumulate_migration_record(&mut plane_counts, &mut privacy_counts, &event.plane);
+    }
+    let planes = plane_counts
+        .into_iter()
+        .map(
+            |(plane, (records, privacy_class))| MemorySpaceMigrationPlaneReport {
+                plane,
+                records,
+                privacy_class,
+            },
+        )
+        .collect::<Vec<_>>();
+    let privacy = privacy_counts
+        .into_iter()
+        .map(
+            |(privacy_class, records)| MemorySpaceMigrationPrivacyReport {
+                privacy_class,
+                records,
+            },
+        )
+        .collect::<Vec<_>>();
+    let remap_required = source_memory_space_id != target_memory_space_id;
+    MemorySpaceMigrationManifest {
+        source_memory_space_id: source_memory_space_id.to_string(),
+        target_memory_space_id: target_memory_space_id.to_string(),
+        schema_id: snapshot.schema_id.clone(),
+        whole_space_snapshot: true,
+        subject_remap: MemorySpaceSubjectRemapReport {
+            required: remap_required,
+            applied: false,
+            reason: if remap_required {
+                "whole_space_snapshot_does_not_rewrite_subject_scope"
+            } else {
+                "source_and_target_space_match"
+            }
+            .to_string(),
+        },
+        planes,
+        privacy,
+        conflict_risk: loss_risk,
+    }
+}
+
+fn accumulate_migration_record(
+    plane_counts: &mut BTreeMap<String, (usize, String)>,
+    privacy_counts: &mut BTreeMap<String, usize>,
+    plane: &str,
+) {
+    let privacy_class = if is_private_snapshot_namespace(plane) {
+        "private"
+    } else {
+        "shared"
+    };
+    let entry = plane_counts
+        .entry(plane.to_string())
+        .or_insert_with(|| (0, privacy_class.to_string()));
+    entry.0 = entry.0.saturating_add(1);
+    *privacy_counts.entry(privacy_class.to_string()).or_insert(0) += 1;
 }
 
 fn is_private_snapshot_namespace(namespace: &str) -> bool {

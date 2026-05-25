@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::SessionTurnCommitReport;
+use crate::orchestrator::PressureLevel;
+use crate::runtime::RuntimeLifecycleModeInput;
+
+use super::{CanonicalTurnDelta, SessionTurnCommitReport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,12 +192,147 @@ pub struct DeferredGovernanceJob {
     pub job_id: String,
     pub idempotency_key: String,
     pub status: DeferredGovernanceJobStatus,
+    #[serde(default)]
+    pub memory_space_id: String,
+    #[serde(default)]
+    pub subject_id: String,
+    #[serde(default)]
+    pub channel: String,
     pub chat_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_ids: Vec<String>,
     pub reason: String,
+    #[serde(default)]
+    pub retry_policy: String,
     pub created_at: u64,
     pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<CanonicalTurnDelta>,
+    #[serde(default)]
+    pub tool_calls: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_skill_selected_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_learning_selected_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reuse_outcome_note: String,
+    #[serde(default)]
+    pub pressure: PressureLevel,
+    #[serde(default)]
+    pub mode_input: RuntimeLifecycleModeInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredGovernanceJobSummary {
+    pub job_id: String,
+    pub idempotency_key: String,
+    pub status: DeferredGovernanceJobStatus,
+    pub memory_space_id: String,
+    pub subject_id: String,
+    pub channel: String,
+    pub chat_id: String,
+    pub conversation_id: Option<String>,
+    pub turn_id: String,
+    pub candidate_ids: Vec<String>,
+    pub reason: String,
+    pub retry_policy: String,
+    pub created_at: u64,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+}
+
+impl DeferredGovernanceJobSummary {
+    pub fn from_job(job: &DeferredGovernanceJob) -> Self {
+        Self {
+            job_id: job.job_id.clone(),
+            idempotency_key: job.idempotency_key.clone(),
+            status: job.status,
+            memory_space_id: job.memory_space_id.clone(),
+            subject_id: job.subject_id.clone(),
+            channel: job.channel.clone(),
+            chat_id: job.chat_id.clone(),
+            conversation_id: job.conversation_id.clone(),
+            turn_id: job.turn_id.clone(),
+            candidate_ids: job.candidate_ids.clone(),
+            reason: job.reason.clone(),
+            retry_policy: job.retry_policy.clone(),
+            created_at: job.created_at,
+            attempts: job.attempts,
+            last_error: job.last_error.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredGovernanceQueueReport {
+    pub total: usize,
+    pub pending: usize,
+    pub retrying: usize,
+    pub failed: usize,
+    pub terminal: usize,
+    pub oldest_pending_at: Option<u64>,
+    pub newest_pending_at: Option<u64>,
+    pub recent_jobs: Vec<DeferredGovernanceJobSummary>,
+}
+
+pub fn build_deferred_governance_queue_report(
+    jobs: &[DeferredGovernanceJob],
+    recent_limit: usize,
+) -> DeferredGovernanceQueueReport {
+    let mut report = DeferredGovernanceQueueReport {
+        total: jobs.len(),
+        ..DeferredGovernanceQueueReport::default()
+    };
+    for job in jobs {
+        match job.status {
+            DeferredGovernanceJobStatus::Pending => {
+                report.pending = report.pending.saturating_add(1)
+            }
+            DeferredGovernanceJobStatus::Retrying => {
+                report.retrying = report.retrying.saturating_add(1)
+            }
+            DeferredGovernanceJobStatus::Failed => report.failed = report.failed.saturating_add(1),
+            DeferredGovernanceJobStatus::Terminal => {
+                report.terminal = report.terminal.saturating_add(1)
+            }
+        }
+        if matches!(
+            job.status,
+            DeferredGovernanceJobStatus::Pending | DeferredGovernanceJobStatus::Retrying
+        ) {
+            report.oldest_pending_at = Some(
+                report
+                    .oldest_pending_at
+                    .map_or(job.created_at, |value| value.min(job.created_at)),
+            );
+            report.newest_pending_at = Some(
+                report
+                    .newest_pending_at
+                    .map_or(job.created_at, |value| value.max(job.created_at)),
+            );
+        }
+    }
+    let mut recent_jobs = jobs
+        .iter()
+        .map(DeferredGovernanceJobSummary::from_job)
+        .collect::<Vec<_>>();
+    recent_jobs.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.job_id.cmp(&left.job_id))
+    });
+    recent_jobs.truncate(recent_limit.max(1));
+    report.recent_jobs = recent_jobs;
+    report
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

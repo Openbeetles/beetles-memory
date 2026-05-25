@@ -1,0 +1,149 @@
+{
+  "fixture_id": "beetle-derived-sdk-host-migration",
+  "source_memory_space_id": "beetle-derived-space",
+  "target_memory_space_id": "beetle-derived-space-copy",
+  "channel": "sdk-host",
+  "chat_id": "beetle-turn-1",
+  "recall_query": "defer background governance durable governance job",
+  "projection_query": "How should a voice realtime host avoid losing governance during migration?",
+  "expected_runtime_skill": "runtime_skill__beetle_voice_foreground_guard",
+  "expected_fragments": [
+    "voice realtime foreground"
+  ],
+  "expected_report_fragments": [
+    "procedural_hits=1",
+    "inspect query=defer background governance durable governance job",
+    "replay chat_id=beetle-turn-1"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "beetle-turn-1:preferred-name",
+      "authority": "user_asserted",
+      "target": {
+        "target": "long_term_memory",
+        "kind": "preference",
+        "topic": "preferred_name"
+      },
+      "privacy": "shared_with_subject",
+      "content": {
+        "kind": "text",
+        "topic": "preferred_name",
+        "body": "The subject prefers to be called Qingchuan during coaching sessions.",
+        "keywords": ["qingchuan", "name", "coaching"]
+      },
+      "evidence_refs": ["fixture:beetle-derived:turn-1"]
+      ,
+      "semantic_judgment": {
+        "source": "llm_governance",
+        "decision": "accept",
+        "governed_target": {
+          "target": "long_term_memory",
+          "kind": "preference",
+          "topic": "preferred_name"
+        },
+        "reason": "fixture_semantic_accept"
+      }
+    },
+    {
+      "candidate_id": "beetle-turn-1:voice-foreground-guard",
+      "authority": "user_asserted",
+      "target": {
+        "target": "procedural_memory",
+        "name": "",
+        "topic": "voice_realtime"
+      },
+      "privacy": "shared_with_subject",
+      "content": {
+        "kind": "runtime_skill",
+        "name": "runtime_skill__beetle_voice_foreground_guard",
+        "topic": "voice_realtime",
+        "title": "Voice realtime foreground guard",
+        "summary": "Protect voice realtime foreground work while keeping governance durable.",
+        "content": "- when voice realtime foreground is active, defer background governance\n- keep the durable governance job instead of dropping the candidate\n- inspect the deferred job before replay or migration acceptance\n- resume governance only after the foreground window is safe",
+        "citations": ["fixture:beetle-derived:voice-foreground"]
+      },
+      "evidence_refs": ["fixture:beetle-derived:voice-foreground"]
+      ,
+      "semantic_judgment": {
+        "source": "llm_governance",
+        "decision": "accept",
+        "governed_target": {
+          "target": "procedural_memory",
+          "name": "",
+          "topic": "voice_realtime"
+        },
+        "reason": "fixture_semantic_accept"
+      }
+    },
+    {
+      "candidate_id": "beetle-turn-1:operator-inspect-parity",
+      "authority": "runtime_observation",
+      "target": {
+        "target": "long_term_memory",
+        "kind": "task",
+        "topic": "operator_inspect_parity"
+      },
+      "privacy": "operator_diagnostic",
+      "content": {
+        "kind": "text",
+        "topic": "operator_inspect_parity",
+        "body": "Operator inspect selected id and plane parity must survive migration dry-run.",
+        "keywords": ["operator", "inspect", "migration"]
+      },
+      "evidence_refs": ["fixture:beetle-derived:operator-inspect"]
+      ,
+      "semantic_judgment": {
+        "source": "llm_governance",
+        "decision": "accept",
+        "governed_target": {
+          "target": "long_term_memory",
+          "kind": "task",
+          "topic": "operator_inspect_parity"
+        },
+        "reason": "fixture_semantic_accept"
+      }
+    },
+    {
+      "candidate_id": "beetle-turn-1:soul-teacher-handoff",
+      "authority": "soul_governance",
+      "target": {
+        "target": "soul",
+        "surface": "teacher_identity"
+      },
+      "privacy": "soul_private",
+      "content": {
+        "kind": "text",
+        "topic": "teacher_identity",
+        "body": "Teacher identity candidate is handed off to Soul Governance and never written directly into soul core.",
+        "keywords": ["soul", "teacher", "handoff"]
+      },
+      "evidence_refs": ["fixture:beetle-derived:soul-handoff"]
+      ,
+      "semantic_judgment": {
+        "source": "llm_governance",
+        "decision": "handoff_to_soul_governance",
+        "governed_target": {
+          "target": "soul",
+          "surface": "teacher_identity"
+        },
+        "reason": "fixture_soul_handoff"
+      }
+    },
+    {
+      "candidate_id": "beetle-turn-1:private-garden-note",
+      "authority": "private_garden_internal",
+      "target": {
+        "target": "private_garden",
+        "path": "voice-session/freeform.md"
+      },
+      "privacy": "private_garden",
+      "content": {
+        "kind": "text",
+        "topic": "private_garden",
+        "body": "Private freeform note stays behind private garden governance and is not projected by default.",
+        "keywords": ["private", "garden"]
+      },
+      "evidence_refs": ["fixture:beetle-derived:private-garden"]
+    }
+  ]
+}

@@ -112,11 +112,9 @@ impl WssRuntimeSession {
             .find(|spec| spec.name == frame.kind)
             .and_then(|spec| spec.inbound_operation)
             .ok_or_else(|| bm_sdk::Error::config("wss_runtime", "unsupported frame kind"))?;
-        let command = decode_json_adapter_command(
-            operation,
-            &frame.payload,
-            &AdapterJsonCommandOptions::new("bm-wss").with_default_source_chat_id("chat-1"),
-        )?;
+        reject_missing_remote_source_scope(runtime, operation, &frame.payload)?;
+        let command =
+            decode_json_adapter_command(operation, &frame.payload, &wss_command_options(runtime))?;
         let response = runtime.handle(
             EntryTransportContext {
                 request_id: format!("wss-{}-{operation:?}", self.session_id),
@@ -160,6 +158,40 @@ impl WssRuntimeSession {
             private_raw_allowed: false,
         }
     }
+}
+
+#[cfg(any(feature = "server-std", feature = "client-compact"))]
+fn wss_command_options(runtime: &EntryRuntime) -> AdapterJsonCommandOptions {
+    let options = AdapterJsonCommandOptions::new("bm-wss");
+    if runtime.uses_local_default_scope_policy() {
+        options.with_default_source_chat_id(runtime.runtime().scope().chat_id.clone())
+    } else {
+        options
+    }
+}
+
+#[cfg(any(feature = "server-std", feature = "client-compact"))]
+fn reject_missing_remote_source_scope(
+    runtime: &EntryRuntime,
+    operation: AdapterOperation,
+    body: &str,
+) -> bm_sdk::Result<()> {
+    if runtime.uses_local_default_scope_policy() || operation != AdapterOperation::Write {
+        return Ok(());
+    }
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))?;
+    if value
+        .get("source_chat_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+    Err(bm_sdk::Error::config(
+        "adapter_json_command",
+        "remote adapter write payload missing source_chat_id; refusing implicit chat-1 scope",
+    ))
 }
 
 #[cfg(feature = "server-std")]

@@ -115,10 +115,11 @@ impl A2aBridge {
         let operation = spec.operation.ok_or_else(|| {
             bm_sdk::Error::config("a2a_bridge", "message has no memory operation")
         })?;
+        reject_missing_remote_source_scope(runtime, operation, &message.payload)?;
         let command = decode_json_adapter_command(
             operation,
             &message.payload,
-            &AdapterJsonCommandOptions::new("bm-a2a").with_default_source_chat_id("chat-1"),
+            &a2a_command_options(runtime),
         )?;
         let response = runtime.handle(
             EntryTransportContext {
@@ -140,6 +141,40 @@ impl A2aBridge {
             permissions: vec![A2aPermission::MemoryReport],
         })
     }
+}
+
+#[cfg(feature = "bridge-http")]
+fn a2a_command_options(runtime: &EntryRuntime) -> AdapterJsonCommandOptions {
+    let options = AdapterJsonCommandOptions::new("bm-a2a");
+    if runtime.uses_local_default_scope_policy() {
+        options.with_default_source_chat_id(runtime.runtime().scope().chat_id.clone())
+    } else {
+        options
+    }
+}
+
+#[cfg(feature = "bridge-http")]
+fn reject_missing_remote_source_scope(
+    runtime: &EntryRuntime,
+    operation: AdapterOperation,
+    body: &str,
+) -> bm_sdk::Result<()> {
+    if runtime.uses_local_default_scope_policy() || operation != AdapterOperation::Write {
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(body)
+        .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))?;
+    if value
+        .get("source_chat_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+    Err(bm_sdk::Error::config(
+        "adapter_json_command",
+        "remote adapter write payload missing source_chat_id; refusing implicit chat-1 scope",
+    ))
 }
 
 #[cfg(feature = "bridge-http")]
@@ -236,6 +271,61 @@ fn write_a2a_http_response(
         .and_then(|_| stream.write_all(body.as_bytes()))
         .and_then(|_| stream.flush())
         .map_err(|err| bm_sdk::Error::config("a2a_http_write", err.to_string()))
+}
+
+#[cfg(all(test, feature = "bridge-http"))]
+mod scope_tests {
+    use super::*;
+    use bm_entry::{
+        EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
+        EntryScope, EntryStoreConfig, EntryTransportConfig,
+    };
+    use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+
+    fn remote_runtime() -> EntryRuntime {
+        let mut capability = MemoryCapabilityPolicy::strict_profile();
+        capability.communication_adapter_enabled = true;
+        EntryRuntime::open(EntryRuntimeConfig {
+            profile: ProfileId::ServerLinuxDevFull,
+            identity: EntryIdentity {
+                agent_id: "a2a-agent".to_string(),
+                owner_id: "owner-default".to_string(),
+            },
+            scope: EntryScope {
+                channel: "a2a.remote".to_string(),
+                chat_id: "chat-remote".to_string(),
+            },
+            store: EntryStoreConfig {
+                backend: StoreBackendKind::InMemory,
+                data_path: None,
+                fsync: false,
+            },
+            transports: EntryTransportConfig::all_enabled(),
+            auth: EntryAuthConfig::required_bearer_token("secret-token"),
+            idempotency: EntryIdempotencyConfig { max_keys: 64 },
+            privacy: MemoryPrivacyPolicy::standard_private_boundary(),
+            capability,
+        })
+        .expect("entry runtime")
+    }
+
+    #[test]
+    fn a2a_remote_write_without_explicit_source_scope_is_rejected() {
+        let runtime = remote_runtime();
+        let bridge = A2aBridge::new("remote-peer");
+        let error = bridge
+            .handle(
+                &runtime,
+                A2aRuntimeMessage::json(
+                    "memory_write_candidate",
+                    r#"{"name":"runtime_skill__a2a_remote","topic":"scope","title":"Remote","summary":"Remote","content":"must declare scope"}"#,
+                ),
+            )
+            .expect_err("remote A2A write must not silently fall back to chat-1");
+
+        assert_eq!(error.stage(), "adapter_json_command");
+        assert!(error.to_string().contains("source_chat_id"), "{error}");
+    }
 }
 
 #[cfg(feature = "bridge-http")]

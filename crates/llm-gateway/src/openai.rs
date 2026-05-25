@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource, ProviderModelContextLimit,
-    RuntimeLifecycleModeInput, TranscriptInputMessage,
+    ConversationScope, MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource,
+    ProviderModelContextLimit, RuntimeLifecycleModeInput, TranscriptInputMessage,
 };
 use serde_json::{Map, Value};
 
@@ -422,6 +422,15 @@ fn handle_chat_completion(
         runtime,
         user_content: extracted_user_text.clone(),
         input_messages: input_transcript.messages.clone(),
+        conversation: ConversationScope {
+            channel: scope.channel.clone(),
+            chat_id: scope.chat_id.clone(),
+            conversation_id: request
+                .scope
+                .client_conversation_hint
+                .clone()
+                .or_else(|| request.scope.body_conversation_hint.clone()),
+        },
         turn_source: MemoryTurnSource {
             ingress: bm_sdk::IngressKind::User,
             channel: scope.channel.clone(),
@@ -545,6 +554,15 @@ fn handle_responses(
         runtime,
         user_content: extracted_user_text.clone(),
         input_messages: input_transcript.messages,
+        conversation: ConversationScope {
+            channel: scope.channel.clone(),
+            chat_id: scope.chat_id.clone(),
+            conversation_id: request
+                .scope
+                .client_conversation_hint
+                .clone()
+                .or_else(|| request.scope.body_conversation_hint.clone()),
+        },
         turn_source: MemoryTurnSource {
             ingress: bm_sdk::IngressKind::User,
             channel: scope.channel.clone(),

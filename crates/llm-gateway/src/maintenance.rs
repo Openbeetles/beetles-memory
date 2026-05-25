@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use bm_entry::EntryRuntime;
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MaintenanceBudget,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnSource, Message,
-    RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec, TranscriptInputMessage,
+    CanonicalTurnDelta, ConversationScope, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse,
+    MaintenanceBudget, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnSource,
+    Message, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
+    TranscriptInputMessage,
 };
 use serde_json::{json, Value};
 
@@ -51,6 +52,7 @@ pub(crate) struct GatewayMaintenancePlan {
     runtime: Arc<EntryRuntime>,
     user_content: String,
     input_messages: Vec<TranscriptInputMessage>,
+    conversation: ConversationScope,
     turn_source: MemoryTurnSource,
     external_content_used: bool,
     runtime_skill_selected_ids: Vec<String>,
@@ -65,6 +67,7 @@ pub(crate) struct GatewayMaintenancePlanInput {
     pub(crate) runtime: Arc<EntryRuntime>,
     pub(crate) user_content: String,
     pub(crate) input_messages: Vec<TranscriptInputMessage>,
+    pub(crate) conversation: ConversationScope,
     pub(crate) turn_source: MemoryTurnSource,
     pub(crate) external_content_used: bool,
     pub(crate) runtime_skill_selected_ids: Vec<String>,
@@ -85,6 +88,7 @@ impl GatewayMaintenancePlan {
                 budget.user_input_max_bytes,
             ),
             input_messages: input.input_messages,
+            conversation: input.conversation,
             turn_source: input.turn_source,
             external_content_used: input.external_content_used,
             runtime_skill_selected_ids: input.runtime_skill_selected_ids,
@@ -104,13 +108,28 @@ impl GatewayMaintenancePlan {
         GatewayMaintenanceTask {
             runtime: Arc::clone(&self.runtime),
             request: MemoryTurnFinalizeRequest {
-                delivery_status: snapshot.delivery_status,
-                source: self.turn_source.clone(),
-                user_content: self.user_content.clone(),
-                input_messages: self.input_messages.clone(),
-                assistant_content: Some(snapshot.reply_content),
+                turn: CanonicalTurnDelta {
+                    turn_id: canonical_gateway_turn_id(
+                        &self.conversation,
+                        &self.turn_source,
+                        &self.user_content,
+                        &snapshot,
+                    ),
+                    conversation: self.conversation.clone(),
+                    subject: self.runtime.runtime().subject_id().to_string(),
+                    delivery_status: snapshot.delivery_status,
+                    source: self.turn_source.clone(),
+                    input_messages: self.input_messages.clone(),
+                    assistant_message: if snapshot.reply_content.trim().is_empty() {
+                        None
+                    } else {
+                        Some(TranscriptInputMessage::assistant(snapshot.reply_content))
+                    },
+                    tool_observations: Vec::new(),
+                    external_content_used: self.external_content_used || snapshot.tool_calls > 0,
+                    candidate_ids: Vec::new(),
+                },
                 tool_calls: snapshot.tool_calls,
-                external_content_used: self.external_content_used || snapshot.tool_calls > 0,
                 runtime_skill_selected_ids: self.runtime_skill_selected_ids.clone(),
                 task_learning_selected_ids: self.task_learning_selected_ids.clone(),
                 reuse_outcome_note: snapshot.reuse_outcome_note,
@@ -120,6 +139,43 @@ impl GatewayMaintenancePlan {
             enabled: self.config.enabled,
         }
     }
+}
+
+fn canonical_gateway_turn_id(
+    conversation: &ConversationScope,
+    source: &MemoryTurnSource,
+    user_content: &str,
+    snapshot: &MaintenanceSnapshot,
+) -> String {
+    if let Some(request_id) = source
+        .request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("gateway-request:{request_id}");
+    }
+    let seed = format!(
+        "{}\n{}\n{:?}\n{}\n{}\n{}\n{:?}\n{}",
+        conversation.channel,
+        conversation.chat_id,
+        source.protocol,
+        source.endpoint.as_deref().unwrap_or_default(),
+        source.model_alias.as_deref().unwrap_or_default(),
+        user_content.trim(),
+        snapshot.delivery_status,
+        snapshot.reply_content.trim()
+    );
+    format!("gateway-derived-{:016x}", fnv1a64(seed.as_bytes()))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {

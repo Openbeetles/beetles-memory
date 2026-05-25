@@ -17,7 +17,11 @@ let report = runtime.inspect(MemoryInspectionRequest {
 assert!(report.capabilities.inspection.visible);
 ```
 
-`MemoryInspectionReport` 包含 working recall inspection、capability catalog data、operator action report 和 lifecycle report。
+`MemoryInspectionReport` 包含 working recall inspection、capability catalog data、当前 runtime scope 的 deferred governance queue、operator action report 和 lifecycle report。
+
+迁移 dry-run/apply 后用 inspect 确认 selected id、recall plane、deferred job status、lifecycle diagnosis 和 safe recovery action。Operator surface 可以展示这个 report，但不能读取 store internal，也不能自造 plane count 逻辑。
+
+Projection 诊断来自 `MemoryProjectionReport.audit`，包括 source plane、selected ids、section chars、budget 和 private gate。保守压缩来自 `MemoryRuntime::run_retention_compaction()`，该 report 明确宿主不能直接删除已接受记忆。
 
 ## Skill 记忆管理
 

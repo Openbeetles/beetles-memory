@@ -1,9 +1,10 @@
 use std::sync::Mutex;
 
 use bm_core::memory::{
-    commit_session_turn, GovernedWriteDecision, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority, PostTurnPrivateGardenReport,
-    PrivateGardenAdmissionDecision, SessionStore, SessionTurnCommitInput, TranscriptInputMessage,
+    commit_canonical_turn_delta, CanonicalTurnDelta, ConversationScope, GovernedWriteDecision,
+    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteAuthority, PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision,
+    SessionStore, TranscriptInputMessage,
 };
 use bm_core::memory::{SessionMessage, SessionMessageRecord};
 use bm_core::Result;
@@ -84,20 +85,42 @@ fn turn_source() -> MemoryTurnSource {
     }
 }
 
+fn turn_delta(
+    turn_id: &str,
+    delivery_status: MemoryTurnDeliveryStatus,
+    input_messages: Vec<TranscriptInputMessage>,
+    assistant_message: Option<&str>,
+) -> CanonicalTurnDelta {
+    CanonicalTurnDelta {
+        turn_id: turn_id.to_string(),
+        conversation: ConversationScope {
+            channel: "llm.gateway".to_string(),
+            chat_id: "chat-a".to_string(),
+            conversation_id: Some("ollama-window".to_string()),
+        },
+        subject: "subject-default".to_string(),
+        delivery_status,
+        source: turn_source(),
+        input_messages,
+        assistant_message: assistant_message.map(TranscriptInputMessage::assistant),
+        tool_observations: Vec::new(),
+        external_content_used: false,
+        candidate_ids: Vec::new(),
+    }
+}
+
 #[test]
 fn delivered_turn_commits_user_and_assistant_messages() {
     let store = InMemorySessionStore::default();
 
-    let report = commit_session_turn(
+    let report = commit_canonical_turn_delta(
         &store,
-        "chat-a",
-        SessionTurnCommitInput {
-            delivery_status: MemoryTurnDeliveryStatus::Delivered,
-            source: turn_source(),
-            user_content: "叫我青川".to_string(),
-            input_messages: vec![TranscriptInputMessage::user("叫我青川")],
-            assistant_content: Some("你好，青川。".to_string()),
-        },
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![TranscriptInputMessage::user("叫我青川")],
+            Some("你好，青川。"),
+        ),
     )
     .expect("commit succeeds");
 
@@ -115,33 +138,29 @@ fn delivered_turn_commits_user_and_assistant_messages() {
 #[test]
 fn full_history_turn_commits_only_new_user_delta_without_losing_latest_message() {
     let store = InMemorySessionStore::default();
-    commit_session_turn(
+    commit_canonical_turn_delta(
         &store,
-        "chat-a",
-        SessionTurnCommitInput {
-            delivery_status: MemoryTurnDeliveryStatus::Delivered,
-            source: turn_source(),
-            user_content: "我叫银二".to_string(),
-            assistant_content: Some("我记住了。".to_string()),
-            input_messages: vec![TranscriptInputMessage::user("我叫银二")],
-        },
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![TranscriptInputMessage::user("我叫银二")],
+            Some("我记住了。"),
+        ),
     )
     .expect("first commit succeeds");
 
-    let report = commit_session_turn(
+    let report = commit_canonical_turn_delta(
         &store,
-        "chat-a",
-        SessionTurnCommitInput {
-            delivery_status: MemoryTurnDeliveryStatus::Delivered,
-            source: turn_source(),
-            user_content: "我叫银二\n我喜欢冷萃".to_string(),
-            assistant_content: Some("冷萃也记下了。".to_string()),
-            input_messages: vec![
+        &turn_delta(
+            "turn-2",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![
                 TranscriptInputMessage::user("我叫银二"),
                 TranscriptInputMessage::assistant("我记住了。"),
                 TranscriptInputMessage::user("我喜欢冷萃"),
             ],
-        },
+            Some("冷萃也记下了。"),
+        ),
     )
     .expect("second commit succeeds");
 
@@ -169,16 +188,14 @@ fn full_history_turn_commits_only_new_user_delta_without_losing_latest_message()
 fn assistant_self_description_is_committed_as_low_authority_evidence_not_identity_truth() {
     let store = InMemorySessionStore::default();
 
-    let report = commit_session_turn(
+    let report = commit_canonical_turn_delta(
         &store,
-        "chat-a",
-        SessionTurnCommitInput {
-            delivery_status: MemoryTurnDeliveryStatus::Delivered,
-            source: turn_source(),
-            user_content: "你叫什么？".to_string(),
-            assistant_content: Some("我是 Beetle Memory 的记忆助手。".to_string()),
-            input_messages: vec![TranscriptInputMessage::user("你叫什么？")],
-        },
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![TranscriptInputMessage::user("你叫什么？")],
+            Some("我是 Beetle Memory 的记忆助手。"),
+        ),
     )
     .expect("commit succeeds");
 
@@ -201,16 +218,14 @@ fn assistant_self_description_is_committed_as_low_authority_evidence_not_identit
 fn incomplete_stream_does_not_commit_partial_assistant() {
     let store = InMemorySessionStore::default();
 
-    let report = commit_session_turn(
+    let report = commit_canonical_turn_delta(
         &store,
-        "chat-a",
-        SessionTurnCommitInput {
-            delivery_status: MemoryTurnDeliveryStatus::IncompleteStream,
-            source: turn_source(),
-            user_content: "叫我青川".to_string(),
-            input_messages: vec![TranscriptInputMessage::user("叫我青川")],
-            assistant_content: Some("你好，青".to_string()),
-        },
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::IncompleteStream,
+            vec![TranscriptInputMessage::user("叫我青川")],
+            Some("你好，青"),
+        ),
     )
     .expect("commit succeeds");
 
@@ -225,16 +240,14 @@ fn incomplete_stream_does_not_commit_partial_assistant() {
 fn user_only_turn_commits_user_without_assistant() {
     let store = InMemorySessionStore::default();
 
-    let report = commit_session_turn(
+    let report = commit_canonical_turn_delta(
         &store,
-        "chat-a",
-        SessionTurnCommitInput {
-            delivery_status: MemoryTurnDeliveryStatus::UserOnly,
-            source: turn_source(),
-            user_content: "叫我青川".to_string(),
-            input_messages: vec![TranscriptInputMessage::user("叫我青川")],
-            assistant_content: None,
-        },
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::UserOnly,
+            vec![TranscriptInputMessage::user("叫我青川")],
+            None,
+        ),
     )
     .expect("commit succeeds");
 

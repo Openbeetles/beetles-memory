@@ -72,13 +72,14 @@ use bm_sdk::{MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId};
 
 let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
+    .subject_id("subject-default")
     .scope(MemoryScope::new("local", "chat-1")?)
     .profile(ProfileId::DesktopMacosEmbeddedSdk)
     .store_platform(store)
     .build()?;
 ```
 
-`agent_id` 标识 agent 实例。`owner_id` 标识 owner 或 tenant。`channel` 和 `chat_id` 定义 runtime 操作的默认 memory scope。
+`agent_id` 标识 agent 实例。`owner_id` 标识 owner 或 tenant。`subject_id` 标识当前 runtime 绑定的主体；如果不显式配置，SDK 会用 `owner_id` 初始化本地主体。`channel` 和 `chat_id` 定义 runtime 操作的默认 memory scope。
 
 ## 5. 写入记忆
 
@@ -174,9 +175,34 @@ runtime.write(MemoryWriteRequest::Candidates {
 ```
 
 如果 post-turn LLM 服务暂时不可用，`finalize_turn_and_maintain` 仍会先提交会话，
-并在 `memory/governance_jobs/pending.json` 写入待恢复治理任务；宿主不能自己重做这条队列。
+并在 `memory/governance_jobs/pending.json` 写入待恢复治理任务。服务恢复后调用
+`MemoryRuntime::run_due_governance` 继续治理；队列按 memory space / subject / channel / chat / turn 隔离，宿主不能自己重做这条队列，也不能用宿主语义重试。
+运维面使用 `MemoryRuntime::deferred_governance_report()` 或 `inspect.deferred_governance`
+查看当前 runtime scope 下的 pending / retrying / failed / terminal 计数、recent jobs、scope、subject、turn、reason 和 last error。
 
-## 9. Export、Import、Replay
+`project()` 返回的 `MemoryProjectionReport.audit` 是投影诊断真源，包含 source plane、selected ids、
+section chars、source/render budget、scope 和 private gate decision。宿主可以展示这些字段，
+但不能读取 store internals 后自行解释 projection。
+
+需要主动执行保守压缩时，调用 `MemoryRuntime::run_retention_compaction()`。该入口只运行 SDK-owned
+hygiene / factual evidence metadata compaction / runtime skill governance，并在 report 中声明
+`host_direct_deletion_allowed=false`；宿主不能因配额压力删除已接受记忆。
+
+## 9. 宿主回合生命周期
+
+完整 SDK 宿主回合只走一条 public path：
+
+1. 打开 `StorePlatform`，或把 `Arc<dyn Platform>` 注入 `MemoryRuntime`。
+2. 用稳定的 owner、agent、channel、conversation id 构建 `MemoryIdentity` 和 `MemoryScope`。
+3. 用 `MemoryWriteRequest::Candidates` 提交事实、偏好、流程、诊断、subject hint 和 soul candidate。
+4. 需要 transcript governance 时，通过 canonical turn 语义 finalize 当前回合。
+5. 用 `recall` 和 `project` 生成模型上下文；宿主不自己拼 memory plane。
+6. 用 `inspect` 提供运维可见性和安全恢复上下文。
+7. 替换或发布闸口走 memory-space export、迁移 dry-run、apply/import 和 replay。
+
+`fixtures/sdk-host-readiness/` 里的 generic host fixture 与 Beetle-derived fixture 走同一条路径。Beetle-derived 数据只是 legacy-shaped evidence，不是 SDK 特殊分支。
+
+## 10. 迁移 dry-run、Import、Replay
 
 ```rust
 use bm_sdk::{
@@ -227,7 +253,42 @@ if !preview.loss_risk {
 有限启动迁移使用 `BootstrapImport`，完整连续性恢复使用 `FullRestore`。
 替换宿主记忆实现或迁移一份已配置 SDK store 时，使用 memory-space export/preview/apply。
 
-## 10. 暴露 UI 或工具前检查能力
+apply 之前必须检查 dry-run report。`loss_risk`、schema id、record count、state fingerprint、event fingerprint 和 privacy redaction count 都属于发布证据。替换自有记忆实现的宿主应在 readiness gate 中保留一个 generic fixture 和一个 host-derived legacy fixture。
+`preview.manifest` 还会报告 whole-space snapshot、plane/privacy counts 和 subject remap 状态。
+当前 apply 仍是 whole-space snapshot 导入；当 source/target memory space 不同时，manifest 会标记
+`subject_remap.required=true` 且 `applied=false`，宿主不能把它误读成已经完成 subject key rewrite。
+
+## 11. Operator Inspect
+
+```rust
+use bm_sdk::{MemoryInspectionRequest, PressureLevel, RuntimeLifecycleModeInput};
+
+let inspect = runtime.inspect(MemoryInspectionRequest {
+    query: "migration readiness".to_string(),
+    system_max_len: 4096,
+    pressure: PressureLevel::Normal,
+    mode_input: RuntimeLifecycleModeInput::default(),
+})?;
+
+assert!(inspect.capabilities.inspection.visible);
+```
+
+Operator inspect 是 selected id、plane evidence、capability visibility、deferred governance queue、
+lifecycle diagnosis 和 safe action 的支持路径。宿主 UI 可以展示这个 report，但不能从私有 store 文件推断写入决策、replay 状态或 projection 内容。
+
+## 12. 宿主禁区
+
+宿主禁止：
+
+- 直接写 memory plane 文件；
+- 在 `MemoryRuntime` 外决定 plane routing；
+- 维护第二套 long-term extraction、subject、soul、private garden 或 procedural write policy；
+- 读取 store internals 后自己拼 memory projection；
+- 把 Beetle、IDE、Ollama 或设备通道当成内核 source kind；
+- 吞掉 deferred governance job，或用宿主自有语义重试；
+- 为兼容旧字段污染当前 SDK 合同。
+
+## 13. 暴露 UI 或工具前检查能力
 
 ```rust
 let catalog = runtime.capabilities();
@@ -238,7 +299,7 @@ if catalog.adapter.http.visible {
 
 不要因为 crate 能编译就暴露某个协议或操作。Capability catalog 才是运行时真相。
 
-## 11. 建议宿主测试
+## 14. 建议宿主测试
 
 集成项目至少增加一个 smoke test：
 
@@ -247,5 +308,8 @@ if catalog.adapter.http.visible {
 3. 把 `Arc<dyn Platform>` 注入 `MemoryRuntime`。
 4. 写入一条 `MemoryWriteCandidate`，检查 governance report。
 5. 在维护不可用时 finalize 一轮 turn，验证 deferred job。
-6. 从另一个 chat 召回或投影 candidate 写入的记忆。
-7. 如果产品包含迁移，测试 snapshot export/import。
+6. 检查 `deferred_governance_report()` 和 `inspect.deferred_governance`。
+7. 从另一个 chat 召回或投影 candidate 写入的记忆，并检查 `MemoryProjectionReport.audit`。
+8. 调用 `run_retention_compaction()`，确认不授权宿主删除已接受记忆。
+9. 通过 public memory-space migrator 跑 migration dry-run 和 apply/import，并检查 `preview.manifest`。
+10. 对迁移后的 store 运行 operator inspect 和 replay。

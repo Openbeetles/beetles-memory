@@ -69,8 +69,47 @@ pub fn test_runtime_with_scope(
     channel: &str,
     chat_id: &str,
 ) -> MemoryRuntime {
+    test_runtime_with_identity_scope_and_subject(
+        platform,
+        profile,
+        "agent-main",
+        "owner-default",
+        "owner-default",
+        channel,
+        chat_id,
+    )
+}
+
+pub fn test_runtime_with_scope_and_subject(
+    platform: StorePlatform,
+    profile: ProfileId,
+    channel: &str,
+    chat_id: &str,
+    subject_id: &str,
+) -> MemoryRuntime {
+    test_runtime_with_identity_scope_and_subject(
+        platform,
+        profile,
+        "agent-main",
+        "owner-default",
+        subject_id,
+        channel,
+        chat_id,
+    )
+}
+
+pub fn test_runtime_with_identity_scope_and_subject(
+    platform: StorePlatform,
+    profile: ProfileId,
+    agent_id: &str,
+    owner_id: &str,
+    subject_id: &str,
+    channel: &str,
+    chat_id: &str,
+) -> MemoryRuntime {
     MemoryRuntime::builder()
-        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .identity(MemoryIdentity::new(agent_id, owner_id).expect("identity"))
+        .subject_id(subject_id)
         .scope(MemoryScope::new(channel, chat_id).expect("scope"))
         .profile(profile)
         .store_platform(platform)

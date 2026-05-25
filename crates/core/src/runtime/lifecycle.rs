@@ -23,6 +23,7 @@ pub enum RuntimeLifecycleOperation {
     Close,
     Recover,
     Maintain,
+    Recall,
     Project,
     Inspect,
     Export,
@@ -37,6 +38,7 @@ impl RuntimeLifecycleOperation {
             Self::Close => "close",
             Self::Recover => "recover",
             Self::Maintain => "maintain",
+            Self::Recall => "recall",
             Self::Project => "project",
             Self::Inspect => "inspect",
             Self::Export => "export",
@@ -414,7 +416,7 @@ impl RuntimeLifecycleEngine {
             RuntimeLifecycleOperation::Recover => {
                 RuntimeLifecycleAdmission::admitted(operation, trigger, input, "recovery_admitted")
             }
-            RuntimeLifecycleOperation::Inspect => {
+            RuntimeLifecycleOperation::Recall | RuntimeLifecycleOperation::Inspect => {
                 let mode = input.runtime_mode_snapshot();
                 let reason = if mode.current_mode == RuntimeMode::RecoverySafeMode {
                     "safe_mode_inspection"

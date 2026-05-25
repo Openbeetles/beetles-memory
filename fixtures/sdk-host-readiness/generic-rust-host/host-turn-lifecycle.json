@@ -1,0 +1,79 @@
+{
+  "fixture_id": "generic-rust-host-sdk-host-migration",
+  "source_memory_space_id": "generic-rust-host-space",
+  "target_memory_space_id": "generic-rust-host-space-copy",
+  "channel": "sdk-host",
+  "chat_id": "generic-turn-1",
+  "recall_query": "public export preview apply import inspect replay",
+  "projection_query": "How should this SDK host validate migration dry-run before release?",
+  "expected_runtime_skill": "runtime_skill__sdk_release_guard",
+  "expected_fragments": [
+    "SDK host release migration dry-run"
+  ],
+  "expected_report_fragments": [
+    "procedural_hits=1",
+    "inspect query=public export preview apply import inspect replay",
+    "replay chat_id=generic-turn-1"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "generic-turn-1:project-readiness",
+      "authority": "user_asserted",
+      "target": {
+        "target": "long_term_memory",
+        "kind": "project",
+        "topic": "sdk_host_readiness"
+      },
+      "privacy": "shared_with_subject",
+      "content": {
+        "kind": "text",
+        "topic": "sdk_host_readiness",
+        "body": "Host turn lifecycle uses MemoryRuntime candidate governance before migration dry-run.",
+        "keywords": ["sdk", "host", "migration"]
+      },
+      "evidence_refs": ["fixture:generic-rust-host:turn-1"]
+      ,
+      "semantic_judgment": {
+        "source": "llm_governance",
+        "decision": "accept",
+        "governed_target": {
+          "target": "long_term_memory",
+          "kind": "project",
+          "topic": "sdk_host_readiness"
+        },
+        "reason": "fixture_semantic_accept"
+      }
+    },
+    {
+      "candidate_id": "generic-turn-1:sdk-release-guard",
+      "authority": "user_asserted",
+      "target": {
+        "target": "procedural_memory",
+        "name": "",
+        "topic": "sdk_release"
+      },
+      "privacy": "shared_with_subject",
+      "content": {
+        "kind": "runtime_skill",
+        "name": "runtime_skill__sdk_release_guard",
+        "topic": "sdk_release",
+        "title": "SDK release guard",
+        "summary": "Run the SDK host release migration dry-run before release.",
+        "content": "- export the source memory space through the public SDK\n- preview the migration and stop if loss risk is reported\n- apply and import the snapshot into a fresh target store\n- inspect, project, and replay the target before release",
+        "citations": ["fixture:generic-rust-host:release-guard"]
+      },
+      "evidence_refs": ["fixture:generic-rust-host:release-guard"]
+      ,
+      "semantic_judgment": {
+        "source": "llm_governance",
+        "decision": "accept",
+        "governed_target": {
+          "target": "procedural_memory",
+          "name": "",
+          "topic": "sdk_release"
+        },
+        "reason": "fixture_semantic_accept"
+      }
+    }
+  ]
+}

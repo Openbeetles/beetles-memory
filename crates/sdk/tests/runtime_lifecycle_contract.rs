@@ -48,7 +48,7 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
         .expect("recall");
     assert_eq!(
         recall.lifecycle_report.operation,
-        RuntimeLifecycleOperation::Inspect
+        RuntimeLifecycleOperation::Recall
     );
     assert!(recall.lifecycle_report.success);
 

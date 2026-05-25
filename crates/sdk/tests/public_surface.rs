@@ -45,6 +45,7 @@ fn sdk_runtime_uses_store_platform_as_public_store_entry() {
 
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").unwrap())
+        .subject_id("subject-default")
         .scope(MemoryScope::new("local", "chat-1").unwrap())
         .profile(ProfileId::ServerLinuxDevFull)
         .store_platform(store)
@@ -52,6 +53,7 @@ fn sdk_runtime_uses_store_platform_as_public_store_entry() {
         .unwrap();
 
     assert_eq!(runtime.identity().agent_id, "agent-main");
+    assert_eq!(runtime.subject_id(), "subject-default");
     assert_eq!(runtime.scope().chat_id, "chat-1");
     assert_eq!(
         runtime.capabilities().profile,

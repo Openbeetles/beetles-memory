@@ -1,7 +1,8 @@
 use bm_core::memory::{
     govern_write_candidates, GovernedWriteDecision, LongTermMemoryKind, MemoryCandidateContent,
-    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryWriteCandidate,
-    MemoryWriteDomain, SoulCandidateDisposition,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemorySemanticJudgmentSource,
+    MemoryWriteCandidate, MemoryWriteDomain, SoulCandidateDisposition,
 };
 
 fn text_candidate(
@@ -10,6 +11,16 @@ fn text_candidate(
     target: MemoryCandidateTarget,
     content: &str,
 ) -> MemoryWriteCandidate {
+    let semantic_judgment = Some(MemoryCandidateSemanticJudgment {
+        source: MemorySemanticJudgmentSource::LlmGovernance,
+        decision: if matches!(target, MemoryCandidateTarget::Soul { .. }) {
+            MemoryCandidateSemanticDecision::HandoffToSoulGovernance
+        } else {
+            MemoryCandidateSemanticDecision::Accept
+        },
+        governed_target: Some(target.clone()),
+        reason: "test_llm_judgment".to_string(),
+    });
     MemoryWriteCandidate {
         candidate_id: id.to_string(),
         authority,
@@ -21,6 +32,7 @@ fn text_candidate(
             keywords: vec!["name".to_string()],
         },
         evidence_refs: vec![format!("turn:{id}")],
+        semantic_judgment,
     }
 }
 

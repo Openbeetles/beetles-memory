@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::bus::IngressKind;
 use crate::error::Result;
 
-use super::{SessionMessage, SessionMessageRecord, SessionStore, MAX_SESSION_ENTRIES};
+use super::{
+    default_subject_id, SessionMessage, SessionMessageRecord, SessionStore, SubjectId,
+    MAX_SESSION_ENTRIES,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,24 +143,41 @@ pub struct ConversationScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolObservationDigest {
+    pub observation_id: String,
+    pub tool_name: String,
+    pub summary: String,
+    #[serde(default)]
+    pub external_content: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalTurnDelta {
     pub turn_id: String,
     pub conversation: ConversationScope,
+    #[serde(default = "default_subject_id")]
+    pub subject: SubjectId,
     pub delivery_status: MemoryTurnDeliveryStatus,
     pub source: MemoryTurnSource,
     #[serde(default)]
     pub input_messages: Vec<TranscriptInputMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_message: Option<TranscriptInputMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_observations: Vec<ToolObservationDigest>,
+    #[serde(default)]
+    pub external_content_used: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionTurnCommitInput {
-    pub delivery_status: MemoryTurnDeliveryStatus,
-    pub source: MemoryTurnSource,
-    pub user_content: String,
-    pub input_messages: Vec<TranscriptInputMessage>,
-    pub assistant_content: Option<String>,
+struct SessionTurnCommitInput {
+    delivery_status: MemoryTurnDeliveryStatus,
+    source: MemoryTurnSource,
+    user_content: String,
+    input_messages: Vec<TranscriptInputMessage>,
+    assistant_content: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +199,7 @@ pub struct CommittedSessionMessage {
     pub content_bytes: usize,
 }
 
-pub fn commit_session_turn(
+fn commit_session_turn(
     session_store: &dyn SessionStore,
     chat_id: &str,
     input: SessionTurnCommitInput,
@@ -293,6 +313,7 @@ pub fn commit_canonical_turn_delta(
             assistant_content: delta
                 .assistant_message
                 .as_ref()
+                .filter(|message| message.is_role("assistant"))
                 .map(|message| message.content.clone()),
         },
     )

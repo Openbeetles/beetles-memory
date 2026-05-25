@@ -173,8 +173,9 @@ pub use felt_significance::{
 };
 pub(crate) use hygiene::run_memory_hygiene_jobs;
 pub use hygiene::{
-    inspect_memory_hygiene, render_memory_hygiene_inspection_markdown, MemoryHygieneContext,
-    MemoryHygieneInspection, MemoryHygieneOutcome,
+    inspect_memory_hygiene, render_memory_hygiene_inspection_markdown,
+    run_memory_retention_compaction, MemoryHygieneContext, MemoryHygieneInspection,
+    MemoryHygieneOutcome,
 };
 pub(crate) use inner_conflict::{
     build_inner_conflict_refresh_input, run_inner_conflict_refresh_with_state,
@@ -297,7 +298,8 @@ pub use personality_closure::{
     PersonalityGovernanceRepairPlan, PersonalityRuntimeGovernanceGate,
 };
 pub use post_turn_governance::{
-    DeferredGovernanceJob, DeferredGovernanceJobStatus, GovernedWriteDecision,
+    build_deferred_governance_queue_report, DeferredGovernanceJob, DeferredGovernanceJobStatus,
+    DeferredGovernanceJobSummary, DeferredGovernanceQueueReport, GovernedWriteDecision,
     MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
     PostTurnMemoryGovernanceReport, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
     PrivateGardenAdmissionDecision, SoulCandidateDisposition, SoulCandidateHandoffReport,
@@ -423,8 +425,9 @@ pub use self_runtime::{
     SELF_RUNTIME_CHANNEL, SELF_RUNTIME_SYSTEM_PROMPT,
 };
 pub use self_scope::{
-    board_subject_scope_id, private_garden_scope_id, relationship_scope_id, BOARD_SUBJECT_SCOPE_ID,
-    PRIVATE_GARDEN_SCOPE_ID,
+    board_subject_scope_id, default_memory_space_id, default_subject_id, private_garden_scope_id,
+    relationship_scope, relationship_scope_id, MemorySpaceId, RelationshipId, RelationshipScope,
+    SubjectId, BOARD_SUBJECT_SCOPE_ID, PRIVATE_GARDEN_SCOPE_ID,
 };
 pub use self_state::{
     build_self_state, render_self_state_block, SelfAutonomyState, SelfAutonomyStatus,
@@ -459,10 +462,9 @@ pub use temperament_continuity::{
     TEMPERAMENT_CONTINUITY_TOTAL_CHAR_LIMIT,
 };
 pub use turn_commit::{
-    canonical_user_delta, commit_canonical_turn_delta, commit_session_turn, CanonicalTurnDelta,
-    CommittedSessionMessage, ConversationScope, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitInput, SessionTurnCommitReport,
-    TranscriptInputMessage,
+    canonical_user_delta, commit_canonical_turn_delta, CanonicalTurnDelta, CommittedSessionMessage,
+    ConversationScope, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol,
+    MemoryTurnSource, SessionTurnCommitReport, ToolObservationDigest, TranscriptInputMessage,
 };
 pub use turn_continuity_evidence::{
     TurnContinuityEvidence, TurnContinuityEvidenceStore, REL_PATH_TURN_CONTINUITY_EVIDENCE,
@@ -501,8 +503,9 @@ pub(crate) use world_sense::{
     build_world_snapshot_from_commitments, load_world_snapshot_reminders, load_world_snapshot_tasks,
 };
 pub use write_candidate::{
-    govern_write_candidates, MemoryCandidateContent, MemoryCandidateTarget, MemoryPrivacyClass,
-    MemoryWriteCandidate,
+    govern_write_candidates, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryPrivacyClass,
+    MemorySemanticJudgmentSource, MemoryWriteCandidate,
 };
 pub(crate) use write_coordination::whole_record_lease_advanced;
 

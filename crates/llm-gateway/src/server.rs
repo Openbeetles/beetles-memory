@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
+use bm_entry::EntryAuthDecision;
+use bm_sdk::RuntimeBudgetReport;
 use serde_json::json;
 
 use crate::{
@@ -36,9 +38,15 @@ pub fn serve_llm_gateway_http_stream_with_services<S: Read + Write>(
     services: &mut OpenAiGatewayServices<'_>,
     stream: &mut S,
 ) -> Result<()> {
-    let request = read_http_gateway_request(stream)?;
+    let request = match read_http_gateway_request(stream, config) {
+        Ok(request) => request,
+        Err(error) => return write_error_response(stream, &error),
+    };
     if request.path.starts_with("/v1/") {
-        let request = request.into_openai_request()?;
+        let request = match request.into_openai_request() {
+            Ok(request) => request,
+            Err(error) => return write_error_response(stream, &error),
+        };
         return match handle_openai_request_with_services(
             gateway,
             config,
@@ -86,7 +94,12 @@ pub fn serve_openai_http_stream_with_services<S: Read + Write>(
     services: &mut OpenAiGatewayServices<'_>,
     stream: &mut S,
 ) -> Result<()> {
-    let request = read_http_gateway_request(stream)?.into_openai_request()?;
+    let request = match read_http_gateway_request(stream, config)
+        .and_then(|request| request.into_openai_request())
+    {
+        Ok(request) => request,
+        Err(error) => return write_error_response(stream, &error),
+    };
     match handle_openai_request_with_services(gateway, config, request, upstream, services) {
         Ok(response) => write_openai_http_response(stream, response, services),
         Err(error) => write_error_response(stream, &error),
@@ -110,7 +123,10 @@ pub fn serve_ollama_http_stream_with_services<S: Read + Write>(
     services: &mut OpenAiGatewayServices<'_>,
     stream: &mut S,
 ) -> Result<()> {
-    let request = read_http_gateway_request(stream)?.into_ollama_request();
+    let request = match read_http_gateway_request(stream, config) {
+        Ok(request) => request.into_ollama_request(),
+        Err(error) => return write_error_response(stream, &error),
+    };
     match handle_ollama_request_with_services(gateway, config, request, upstream, services) {
         Ok(response) => write_ollama_http_response(stream, response, services),
         Err(error) => write_error_response(stream, &error),
@@ -172,7 +188,10 @@ impl HttpGatewayRequest {
     }
 }
 
-fn read_http_gateway_request(stream: &mut impl Read) -> Result<HttpGatewayRequest> {
+fn read_http_gateway_request(
+    stream: &mut impl Read,
+    config: &GatewayConfig,
+) -> Result<HttpGatewayRequest> {
     let mut buffer = Vec::new();
     let mut byte = [0u8; 1];
     while !buffer.ends_with(b"\r\n\r\n") {
@@ -225,6 +244,14 @@ fn read_http_gateway_request(stream: &mut impl Read) -> Result<HttpGatewayReques
         })
         .transpose()?
         .unwrap_or(0);
+    let body_budget = RuntimeBudgetReport::static_for_profile(config.entry.profile)
+        .adapter_budget
+        .http_body_max_bytes;
+    if content_length > body_budget {
+        return Err(GatewayError::invalid_request(
+            "HTTP body exceeds runtime adapter budget",
+        ));
+    }
     let mut body_bytes = vec![0u8; content_length];
     if content_length > 0 {
         stream
@@ -239,7 +266,25 @@ fn read_http_gateway_request(stream: &mut impl Read) -> Result<HttpGatewayReques
                 .map_err(|error| GatewayError::invalid_request(error.to_string()))?,
         )
     };
+    let auth = if config.server.loopback_only {
+        EntryAuthDecision::loopback("llm-gateway-loopback")
+    } else {
+        EntryAuthDecision::remote_bearer(
+            &config.entry.auth,
+            headers.get("authorization").map(String::as_str),
+            headers.get("x-bm-auth-subject").map(String::as_str),
+        )
+    };
+    if !auth.authenticated {
+        return Err(GatewayError::invalid_request(format!(
+            "gateway auth rejected request: {}",
+            auth.rejection_reason
+                .as_deref()
+                .unwrap_or("unauthenticated")
+        )));
+    }
     let scope = GatewayScopeRequest {
+        auth_subject: auth.auth_subject.clone(),
         headers: headers.clone(),
         workspace_root_digest: headers.get("x-bm-workspace-digest").cloned(),
         client_conversation_hint: headers.get("x-bm-conversation-id").cloned(),
@@ -366,7 +411,7 @@ fn write_ollama_http_response(
 }
 
 fn write_error_response(stream: &mut impl Write, error: &GatewayError) -> Result<()> {
-    let status_code = error_status_code(error.key());
+    let status_code = error_status_code(error);
     let body = json!({
         "error": {
             "type": format!("{:?}", error.key()),
@@ -388,8 +433,13 @@ fn write_error_response(stream: &mut impl Write, error: &GatewayError) -> Result
         .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))
 }
 
-fn error_status_code(key: GatewayErrorKey) -> u16 {
-    match key {
+fn error_status_code(error: &GatewayError) -> u16 {
+    if error.key() == GatewayErrorKey::InvalidRequest
+        && error.message().contains("runtime adapter budget")
+    {
+        return 413;
+    }
+    match error.key() {
         GatewayErrorKey::InvalidConfig => 500,
         GatewayErrorKey::InvalidRequest => 400,
         GatewayErrorKey::ProviderUnavailable | GatewayErrorKey::UpstreamUnavailable => 502,
@@ -403,6 +453,7 @@ fn reason_phrase(status_code: u16) -> &'static str {
     match status_code {
         200 => "OK",
         400 => "Bad Request",
+        413 => "Payload Too Large",
         422 => "Unprocessable Entity",
         500 => "Internal Server Error",
         502 => "Bad Gateway",

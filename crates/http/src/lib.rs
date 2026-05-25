@@ -65,6 +65,7 @@ pub struct ConsoleRouteSpec {
     pub auth: RouteAuth,
 }
 
+#[cfg(feature = "server-std")]
 const CONSOLE_CAPABILITY_SCHEMA: &str = "beetle-memory.console.capabilities.v1";
 
 const ROUTES: &[RouteSpec] = &[
@@ -352,10 +353,11 @@ pub fn handle_http_request_with_console_services(
             "HTTP body exceeds runtime adapter budget",
         ));
     }
+    reject_missing_remote_source_scope(runtime, route.operation, &request.body)?;
     let command = decode_json_adapter_command(
         route.operation,
         &request.body,
-        &AdapterJsonCommandOptions::new("bm-http").with_default_source_chat_id("chat-1"),
+        &http_command_options(runtime),
     )?;
     let response = runtime.handle_with_services(
         EntryTransportContext {
@@ -534,6 +536,59 @@ fn read_http_runtime_request<S: Read>(
                 .get("x-loopback")
                 .is_some_and(|value| value == "true" || value == "1"),
     })
+}
+
+#[cfg(feature = "server-std")]
+fn http_command_options(runtime: &EntryRuntime) -> AdapterJsonCommandOptions {
+    let options = AdapterJsonCommandOptions::new("bm-http");
+    if runtime.uses_local_default_scope_policy() {
+        options.with_default_source_chat_id(runtime.runtime().scope().chat_id.clone())
+    } else {
+        options
+    }
+}
+
+#[cfg(feature = "server-std")]
+fn reject_missing_remote_source_scope(
+    runtime: &EntryRuntime,
+    operation: AdapterOperation,
+    body: &str,
+) -> bm_sdk::Result<()> {
+    if runtime.uses_local_default_scope_policy() || operation != AdapterOperation::Write {
+        return Ok(());
+    }
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))?;
+    if has_source_chat_id(&value) {
+        return Ok(());
+    }
+    Err(bm_sdk::Error::config(
+        "adapter_json_command",
+        "remote adapter write payload missing source_chat_id; refusing implicit chat-1 scope",
+    ))
+}
+
+#[cfg(feature = "server-std")]
+fn has_source_chat_id(value: &serde_json::Value) -> bool {
+    if value
+        .get("source_chat_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+    value
+        .get("writes")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|writes| {
+            !writes.is_empty()
+                && writes.iter().all(|write| {
+                    write
+                        .get("source_chat_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+        })
 }
 
 #[cfg(feature = "server-std")]

@@ -189,6 +189,48 @@ pub struct RuntimeBudgetReport {
     pub unavailable_reasons: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTranscriptRetentionPolicy {
+    pub max_recent_turns: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummaryRetentionPolicy {
+    pub refresh_after_turns: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaneQuotaPolicy {
+    pub plane: String,
+    pub max_records: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreCompactionPolicy {
+    pub store_snapshot_max_bytes: usize,
+    pub compact_when_pressure: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRetentionQuotaReport {
+    pub owner: String,
+    pub session_transcript: SessionTranscriptRetentionPolicy,
+    pub session_summary: SessionSummaryRetentionPolicy,
+    pub long_term_quota: PlaneQuotaPolicy,
+    pub archive_quota: PlaneQuotaPolicy,
+    pub procedural_quota: PlaneQuotaPolicy,
+    pub private_garden_quota: PlaneQuotaPolicy,
+    pub compaction: StoreCompactionPolicy,
+    pub migration_import_pressure_report: bool,
+    pub host_direct_deletion_allowed: Option<bool>,
+    pub fail_closed_repair: bool,
+}
+
 impl RuntimeBudgetReport {
     pub fn static_for_profile(profile: ProfileId) -> Self {
         compile_runtime_budget(RuntimeBudgetInput::static_for_profile(profile))
@@ -209,6 +251,47 @@ impl RuntimeBudgetReport {
             }
         }
         limit.max(1)
+    }
+
+    pub fn retention_quota_report(&self) -> RuntimeRetentionQuotaReport {
+        let max_records = self.memory_core_budget.profile_max_records.max(1);
+        let recent_turns = self
+            .projection_source_budget
+            .recent_messages_limit
+            .saturating_mul(2)
+            .max(1);
+        RuntimeRetentionQuotaReport {
+            owner: "sdk.runtime".to_string(),
+            session_transcript: SessionTranscriptRetentionPolicy {
+                max_recent_turns: recent_turns,
+            },
+            session_summary: SessionSummaryRetentionPolicy {
+                refresh_after_turns: self.runtime_job_budget.maintenance_batch_max_items.max(1),
+            },
+            long_term_quota: PlaneQuotaPolicy {
+                plane: "long_term".to_string(),
+                max_records,
+            },
+            archive_quota: PlaneQuotaPolicy {
+                plane: "archive".to_string(),
+                max_records: max_records / 2,
+            },
+            procedural_quota: PlaneQuotaPolicy {
+                plane: "procedural".to_string(),
+                max_records: self.store_budget.kv_max_entries.max(1),
+            },
+            private_garden_quota: PlaneQuotaPolicy {
+                plane: "private_garden".to_string(),
+                max_records: max_records / 4,
+            },
+            compaction: StoreCompactionPolicy {
+                store_snapshot_max_bytes: self.store_budget.snapshot_max_bytes,
+                compact_when_pressure: !self.limited_by.is_empty(),
+            },
+            migration_import_pressure_report: true,
+            host_direct_deletion_allowed: None,
+            fail_closed_repair: true,
+        }
     }
 }
 

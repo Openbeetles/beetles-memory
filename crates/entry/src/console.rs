@@ -8,9 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_sdk::{
-    MemorySkillDetailReport, MemorySkillKind, MemorySkillListReport, MemorySkillMutationReport,
-    MemorySkillOrigin, MemorySkillSummary, MemoryStoreEvent, ProfileId, RuntimeBudgetReport,
-    StoreBackendKind,
+    DeferredGovernanceQueueReport, MemorySkillDetailReport, MemorySkillKind, MemorySkillListReport,
+    MemorySkillMutationReport, MemorySkillOrigin, MemorySkillSummary, MemoryStoreEvent, ProfileId,
+    RuntimeBudgetReport, StoreBackendKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +75,7 @@ pub struct EntryConsoleOverview {
     pub writes_today: EntryConsoleMetric,
     pub recall: EntryConsoleMetric,
     pub projection: EntryConsoleMetric,
+    pub deferred_governance: DeferredGovernanceQueueReport,
     pub devices: EntryConsoleMetric,
     pub recent_events: Vec<EntryConsoleEvent>,
     pub capabilities: Vec<EntryConsoleCapabilityRow>,
@@ -470,6 +471,7 @@ impl EntryConsoleState {
         self.overview_with_telemetry_and_budget(
             telemetry,
             &RuntimeBudgetReport::static_for_profile(profile),
+            DeferredGovernanceQueueReport::default(),
         )
     }
 
@@ -477,6 +479,7 @@ impl EntryConsoleState {
         &self,
         telemetry: EntryConsoleTelemetrySnapshot,
         runtime_budget: &RuntimeBudgetReport,
+        deferred_governance: DeferredGovernanceQueueReport,
     ) -> EntryConsoleOverview {
         let inner = self.inner.lock().expect("console state lock");
         let active_devices = inner
@@ -531,6 +534,7 @@ impl EntryConsoleState {
                 ),
                 progress: None,
             },
+            deferred_governance,
             devices: EntryConsoleMetric {
                 value: format!("{active_devices}/{}", inner.devices.len()),
                 desc: "Allowed device access state".to_string(),

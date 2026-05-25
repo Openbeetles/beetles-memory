@@ -2,7 +2,7 @@ use bm_core::error::Result;
 use bm_core::memory::{
     commit_canonical_turn_delta, CanonicalTurnDelta, ConversationScope, MemoryEvidenceAuthority,
     MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, SessionMessage, SessionStore,
-    TranscriptInputMessage,
+    ToolObservationDigest, TranscriptInputMessage,
 };
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -77,6 +77,7 @@ fn canonical_turn_delta_is_idempotent_and_does_not_recommit_full_history() {
             chat_id: "chat-a".to_string(),
             conversation_id: Some("ollama-window-a".to_string()),
         },
+        subject: "subject-qingchuan".to_string(),
         delivery_status: MemoryTurnDeliveryStatus::Delivered,
         source: turn_source(),
         input_messages: vec![
@@ -89,7 +90,20 @@ fn canonical_turn_delta_is_idempotent_and_does_not_recommit_full_history() {
             "你好，青川。",
             MemoryEvidenceAuthority::AssistantUtterance,
         )),
+        tool_observations: vec![ToolObservationDigest {
+            observation_id: "tool-1".to_string(),
+            tool_name: "web_fetch".to_string(),
+            summary: "external page was consulted".to_string(),
+            external_content: true,
+        }],
+        external_content_used: true,
+        candidate_ids: vec!["candidate-1".to_string()],
     };
+
+    assert_eq!(delta.subject, "subject-qingchuan");
+    assert!(delta.external_content_used);
+    assert!(delta.tool_observations[0].external_content);
+    assert_eq!(delta.candidate_ids, vec!["candidate-1"]);
 
     let first = commit_canonical_turn_delta(&store, &delta).unwrap();
     assert!(first.committed);

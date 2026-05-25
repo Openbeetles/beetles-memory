@@ -1,8 +1,9 @@
 mod support;
 
 use bm_core::memory::{
-    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateTarget, MemoryEvidenceAuthority,
-    MemoryPrivacyClass, MemoryWriteCandidate,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemoryWriteCandidate,
 };
 use bm_core::platform::Platform as _;
 use bm_sdk::{
@@ -13,6 +14,15 @@ use bm_sdk::{
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
+
+fn llm_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment {
+    MemoryCandidateSemanticJudgment {
+        source: MemorySemanticJudgmentSource::LlmGovernance,
+        decision: MemoryCandidateSemanticDecision::Accept,
+        governed_target: Some(target),
+        reason: "llm_semantic_judgment".to_string(),
+    }
+}
 
 #[test]
 fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
@@ -35,6 +45,10 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
                     keywords: vec!["sdk".to_string(), "readiness".to_string()],
                 },
                 evidence_refs: vec!["fixture:generic-rust-host".to_string()],
+                semantic_judgment: Some(llm_accept(MemoryCandidateTarget::LongTermMemory {
+                    kind: LongTermMemoryKind::Project,
+                    topic: "sdk_readiness".to_string(),
+                })),
             }],
         })
         .expect("write candidate");
@@ -56,6 +70,16 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
         snapshot: exported.snapshot.clone(),
     });
     assert!(!preview.loss_risk);
+    assert_eq!(preview.manifest.source_memory_space_id, "space-main");
+    assert_eq!(preview.manifest.target_memory_space_id, "space-copy");
+    assert!(preview.manifest.whole_space_snapshot);
+    assert!(preview.manifest.subject_remap.required);
+    assert!(!preview.manifest.subject_remap.applied);
+    assert!(preview
+        .manifest
+        .planes
+        .iter()
+        .any(|plane| plane.plane == "long_term" && plane.records > 0));
     assert_eq!(
         preview.state_fingerprint,
         exported.export_report.state_fingerprint
@@ -106,6 +130,17 @@ fn memory_space_export_without_private_redacts_private_layers() {
     .expect("export");
 
     assert!(exported.privacy_redactions > 0);
+    let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
+        source_memory_space_id: "space-main".to_string(),
+        target_memory_space_id: "space-public".to_string(),
+        snapshot: exported.snapshot.clone(),
+    });
+    assert_eq!(preview.privacy_redactions, 0);
+    assert!(preview
+        .manifest
+        .privacy
+        .iter()
+        .all(|entry| entry.privacy_class != "private"));
     assert!(exported
         .snapshot
         .json_docs

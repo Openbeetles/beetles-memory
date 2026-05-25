@@ -4,8 +4,28 @@
 pub const BOARD_SUBJECT_SCOPE_ID: &str = "board.self";
 pub const PRIVATE_GARDEN_SCOPE_ID: &str = BOARD_SUBJECT_SCOPE_ID;
 
+pub type MemorySpaceId = String;
+pub type SubjectId = String;
+pub type RelationshipId = String;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelationshipScope {
+    pub relationship_id: RelationshipId,
+    pub channel: String,
+    pub conversation_id: Option<String>,
+}
+
 pub fn board_subject_scope_id() -> &'static str {
     BOARD_SUBJECT_SCOPE_ID
+}
+
+pub fn default_subject_id() -> SubjectId {
+    BOARD_SUBJECT_SCOPE_ID.to_string()
+}
+
+pub fn default_memory_space_id(owner_id: &str) -> MemorySpaceId {
+    let owner = encode_scope_component(owner_id);
+    format!("space:{owner}")
 }
 
 pub fn private_garden_scope_id() -> &'static str {
@@ -16,6 +36,18 @@ pub fn relationship_scope_id(channel: &str, chat_id: &str) -> String {
     let channel = encode_scope_component(channel);
     let chat = encode_scope_component(chat_id);
     format!("rel:{}:{}", channel, chat)
+}
+
+pub fn relationship_scope(
+    channel: &str,
+    chat_id: &str,
+    conversation_id: Option<String>,
+) -> RelationshipScope {
+    RelationshipScope {
+        relationship_id: relationship_scope_id(channel, chat_id),
+        channel: channel.trim().to_string(),
+        conversation_id,
+    }
 }
 
 fn encode_scope_component(raw: &str) -> String {
