@@ -12,6 +12,7 @@ import type {
   ConsoleApiSkillList,
   ConsoleApiSkillMutation,
   ConsoleApiTransport,
+  ConsoleApiWorkbenchReport,
   Device,
   StatusKind,
   Transport,
@@ -71,6 +72,11 @@ export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
     devices: deviceResponse.devices.map(fromApiDevice),
     session: sessionResponse.session,
   };
+}
+
+export async function fetchWorkbenchReport(): Promise<ConsoleApiWorkbenchReport> {
+  const response = await apiJson<{ workbenchReport: ConsoleApiWorkbenchReport }>("/console/workbench/report");
+  return response.workbenchReport;
 }
 
 export async function fetchSkill(name: string): Promise<ConsoleApiSkillDetail> {

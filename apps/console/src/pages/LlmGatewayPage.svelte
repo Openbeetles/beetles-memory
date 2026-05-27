@@ -66,6 +66,7 @@
   );
   const transparentReportLine = $derived(visibleTransparentReportLine());
   const transparentReportStatus = $derived(visibleTransparentReportStatus());
+  const transparentBlockers = $derived(transitionBlockerLines());
   const memoryFlow = $derived(memoryFlowCard());
   const appUse = $derived(appUseCard());
 
@@ -213,6 +214,40 @@
     return t.llmGatewayPanel.transparent.stepFailureMessages[
       step.step as keyof typeof t.llmGatewayPanel.transparent.stepFailureMessages
     ] ?? t.llmGatewayPanel.transparent.genericFailure;
+  }
+
+  function transitionBlockerLines(): string[] {
+    const transition = transparentTransition ?? ollamaTransparent?.lastTransition;
+    const message = transition?.failingStep?.message?.trim();
+    if (!message) return [];
+    return message
+      .split(";")
+      .map((line) => userFacingTransparentBlocker(line.trim()))
+      .filter(Boolean);
+  }
+
+  function userFacingTransparentBlocker(message: string): string {
+    if (!message) return "";
+    const transparent = t.llmGatewayPanel.transparent;
+    if (message.includes("bm-llm-gateway transparent front binary is missing")) {
+      return transparent.blockerMessages.gatewayMissing;
+    }
+    if (message.includes("official Ollama binary is missing")) {
+      return transparent.blockerMessages.ollamaMissing;
+    }
+    if (message.includes("official Ollama owns 11434")) {
+      return transparent.blockerMessages.officialOllamaRunning;
+    }
+    if (message.includes("public transparent port is owned by an unknown process")) {
+      return transparent.blockerMessages.publicPortUnknown;
+    }
+    if (message.includes("managed upstream port is owned by a non-managed process")) {
+      return transparent.blockerMessages.upstreamPortBusy;
+    }
+    if (message.includes("managed upstream runner must not own the public Ollama App port")) {
+      return transparent.blockerMessages.managedRunnerOnPublicPort;
+    }
+    return message;
   }
 
   function runtimeErrorLine(message: string): string {
@@ -518,6 +553,13 @@
             {statusLabel(t, transparentReportStatus)}
           </span>
           <p>{transparentReportLine}</p>
+          {#if transparentBlockers.length > 0}
+            <ul class="gateway-transparent-blockers">
+              {#each transparentBlockers as blocker}
+                <li>{blocker}</li>
+              {/each}
+            </ul>
+          {/if}
         </div>
       {/if}
     </section>

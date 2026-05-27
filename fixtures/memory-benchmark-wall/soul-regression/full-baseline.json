@@ -1,0 +1,38 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "soul-regression-full-baseline",
+  "class": "soul_regression",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "Full profile audits persona governance, core revision, relationship boundary, and recovery reports.",
+  "scenario": {
+    "user_goal": "Prove a soul update candidate was accepted, rejected, or deferred with evidence.",
+    "evidence_refs": ["crates/core/src/memory/core_revision_ledger.rs", "crates/core/src/agent/soul_feedback.rs"],
+    "expected_surfaces": ["PersonaGovernanceReplayResult", "SoulFeedbackReport"]
+  },
+  "metrics": {
+    "accuracy_bps": 9500,
+    "evidence_precision_bps": 9300,
+    "projection_faithfulness_bps": 9000,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9100,
+    "soul_regression_count": 0,
+    "latency_ms": 120,
+    "token_budget": 3072,
+    "memory_bytes": 196608
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

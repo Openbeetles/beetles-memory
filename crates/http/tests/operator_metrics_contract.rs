@@ -87,7 +87,7 @@ fn operator_overview_exposes_stable_runtime_metrics_fields() {
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
-            r#"{"name":"operator_metrics_contract","topic":"operator metrics","title":"Operator metrics contract","summary":"Operator API displays metrics from runtime reports.","content":"Write count and hit count are runtime metrics fields.","source":"task_learning"}"#,
+            r#"{"name":"operator_metrics_contract","topic":"operator metrics","title":"Operator metrics contract","summary":"Operator API displays metrics from runtime reports.","content":"Write count and hit count are runtime metrics fields.","source":"manual"}"#,
         ),
     )
     .expect("write");

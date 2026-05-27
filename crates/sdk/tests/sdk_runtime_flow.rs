@@ -41,6 +41,18 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
 
     assert!(write.accepted);
     assert_eq!(write.changed, 1);
+    let evolution = write
+        .procedural_evolution
+        .as_ref()
+        .expect("procedural evolution report");
+    assert!(evolution
+        .added
+        .iter()
+        .any(|name| name == "runtime_skill__release_guard"));
+    assert!(evolution
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("procedural_memory")));
 
     let recall = runtime
         .recall(MemoryRecallRequest {
@@ -53,6 +65,28 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
         .procedural_hits
         .iter()
         .any(|hit| hit.record.name == "runtime_skill__release_guard"));
+    assert!(recall
+        .graph_rerank
+        .candidate_ids
+        .iter()
+        .any(|candidate| candidate == "runtime_skill__release_guard"));
+    assert!(recall
+        .graph_rerank
+        .selected_ids
+        .iter()
+        .any(|candidate| candidate == "runtime_skill__release_guard"));
+    assert!(!recall.graph_gate.high_confidence_projection_allowed);
+    assert!(recall
+        .graph_gate
+        .failures
+        .iter()
+        .any(|failure| failure == "runtime_recall_graph_preview_not_persistent"));
+    assert!(recall.graph_gate.evidence_backlinks > 0);
+    assert!(recall
+        .compact_graph
+        .nodes
+        .iter()
+        .any(|node| node.node_id == "runtime_skill__release_guard"));
 
     let projection = runtime
         .project(MemoryProjectionRequest {

@@ -1,4 +1,4 @@
-export type PageId = "overview" | "skills" | "llm-gateway" | "transports" | "devices" | "account";
+export type PageId = "overview" | "workbench" | "skills" | "llm-gateway" | "transports" | "devices" | "account";
 export type IconComponent = typeof import("lucide-svelte")["Activity"];
 export type StatusKind =
   | "ready"
@@ -208,6 +208,143 @@ export type ConsoleApiSession = {
   owner: string;
   memoryScope: string;
   sessionState: string;
+};
+
+export type ConsoleApiWorkbenchSurface = {
+  surfaceId: string;
+  reportApi: string;
+  privateRawAllowed: boolean;
+};
+export type ConsoleApiWorkbenchApiMap = {
+  surfaces: ConsoleApiWorkbenchSurface[];
+  missingReportApis: string[];
+};
+export type ConsoleApiWorkbenchStatus = {
+  available: boolean;
+  status: StatusKind;
+  reason: string;
+};
+export type ConsoleApiBenchmarkClassCoverage = {
+  class: string;
+  compactFixtures: number;
+  fullFixtures: number;
+};
+export type ConsoleApiBenchmarkFailure = {
+  fixtureId: string;
+  class: string;
+  mode: string;
+  profile: string;
+  stage: string;
+  reason: string;
+};
+export type ConsoleApiBenchmarkBaseline = {
+  accuracyBps: number;
+  evidencePrecisionBps: number;
+  projectionFaithfulnessBps: number;
+  privacyViolationCount: number;
+  staleMemoryFalsePositiveCount: number;
+  proceduralReuseSuccessBps: number;
+  soulRegressionCount: number;
+  latencyMs: number;
+  tokenBudget: number;
+  memoryBytes: number;
+};
+export type ConsoleApiMemoryBenchmarkReport = {
+  suite: string;
+  totalFixtures: number;
+  passedFixtures: number;
+  baseline: ConsoleApiBenchmarkBaseline;
+  classCoverage: ConsoleApiBenchmarkClassCoverage[];
+  missingClasses: Array<{ class: string; mode: string }>;
+  failures: ConsoleApiBenchmarkFailure[];
+  passed: boolean;
+};
+export type ConsoleApiWorkbenchBenchmarkWall = {
+  status: ConsoleApiWorkbenchStatus;
+  fixtureRoot: string;
+  report: ConsoleApiMemoryBenchmarkReport | null;
+};
+export type ConsoleApiWorkbenchRecallInspector = {
+  status: ConsoleApiWorkbenchStatus;
+  query: string;
+  proceduralHits: number;
+  runtimeSkillSelected: number;
+  workingSelectedSurfaces: number;
+  graphNodes: number;
+  graphEdges: number;
+  evidenceBacklinks: number;
+  highConfidenceProjectionAllowed: boolean;
+  graphFailures: string[];
+  graphSelectedIds: string[];
+  staleFalsePositiveCount: number;
+};
+export type ConsoleApiWorkbenchProjectionInspector = {
+  status: ConsoleApiWorkbenchStatus;
+  query: string;
+  systemMemoryChars: number;
+  sourceBudgetChars: number;
+  renderBudgetChars: number;
+  injected: boolean;
+  truncated: boolean;
+  privateGateAllowed: boolean;
+  privateGateReason: string;
+  evidenceRefs: number;
+  budgetDecisions: number;
+  privacyDecisions: number;
+  droppedCandidates: number;
+  faithfulnessPassed: boolean;
+  unsupportedClaims: string[];
+  privateEchoGuardPassed: boolean;
+  privateEchoCount: number;
+};
+export type ConsoleApiWorkbenchSkillRef = {
+  name: string;
+  title: string;
+  topic: string;
+  status: StatusKind;
+  qualityScore: number | null;
+};
+export type ConsoleApiWorkbenchProceduralEvolution = {
+  status: ConsoleApiWorkbenchStatus;
+  totalSkills: number;
+  activeSkills: number;
+  runtimeLearned: number;
+  userProvided: number;
+  disabled: number;
+  topSkills: ConsoleApiWorkbenchSkillRef[];
+};
+export type ConsoleApiWorkbenchVaultMigration = {
+  status: ConsoleApiWorkbenchStatus;
+  sourceMemorySpaceId: string;
+  targetMemorySpaceId: string;
+  jsonDocs: number;
+  blobs: number;
+  events: number;
+  privacyRedactions: number;
+  lossRisk: boolean;
+  preflightPassed: boolean;
+  preflightFailures: string[];
+  snapshotFingerprint: string;
+  eventFingerprint: string;
+};
+export type ConsoleApiWorkbenchSoulHealth = {
+  status: ConsoleApiWorkbenchStatus;
+  profile: string;
+  hygieneSummary: string;
+  runtimeSkillRecords: number;
+  deferredTotal: number;
+  deferredPending: number;
+  deferredFailed: number;
+  safeActions: string[];
+};
+export type ConsoleApiWorkbenchReport = {
+  apiMap: ConsoleApiWorkbenchApiMap;
+  benchmarkWall: ConsoleApiWorkbenchBenchmarkWall;
+  recallInspector: ConsoleApiWorkbenchRecallInspector;
+  projectionInspector: ConsoleApiWorkbenchProjectionInspector;
+  proceduralEvolution: ConsoleApiWorkbenchProceduralEvolution;
+  vaultMigration: ConsoleApiWorkbenchVaultMigration;
+  soulHealth: ConsoleApiWorkbenchSoulHealth;
 };
 export type ConsoleApiRuntimeShape = {
   profile: string;

@@ -7,10 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
+use bm_replay::{MemoryBenchmarkMode, MemoryBenchmarkReport};
 use bm_sdk::{
     DeferredGovernanceQueueReport, MemorySkillDetailReport, MemorySkillKind, MemorySkillListReport,
     MemorySkillMutationReport, MemorySkillOrigin, MemorySkillSummary, MemoryStoreEvent, ProfileId,
-    RuntimeBudgetReport, StoreBackendKind,
+    RuntimeBudgetReport, StoreBackendKind, WorkbenchApiMap,
 };
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +121,266 @@ impl EntryConsoleRuntimeBudget {
             maintenance_reply_max_chars: report.maintenance_budget.reply_input_max_chars,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchStatus {
+    pub available: bool,
+    pub status: String,
+    pub reason: String,
+}
+
+impl EntryConsoleWorkbenchStatus {
+    pub fn ready(reason: impl Into<String>) -> Self {
+        Self {
+            available: true,
+            status: "ready".to_string(),
+            reason: reason.into(),
+        }
+    }
+
+    pub fn limited(reason: impl Into<String>) -> Self {
+        Self {
+            available: true,
+            status: "limited".to_string(),
+            reason: reason.into(),
+        }
+    }
+
+    pub fn blocked(reason: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            status: "blocked".to_string(),
+            reason: reason.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchReport {
+    pub api_map: WorkbenchApiMap,
+    pub benchmark_wall: EntryConsoleWorkbenchBenchmarkWall,
+    pub recall_inspector: EntryConsoleWorkbenchRecallInspector,
+    pub projection_inspector: EntryConsoleWorkbenchProjectionInspector,
+    pub procedural_evolution: EntryConsoleWorkbenchProceduralEvolution,
+    pub vault_migration: EntryConsoleWorkbenchVaultMigration,
+    pub soul_health: EntryConsoleWorkbenchSoulHealth,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchBenchmarkWall {
+    pub status: EntryConsoleWorkbenchStatus,
+    pub fixture_root: String,
+    pub report: Option<EntryConsoleMemoryBenchmarkReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleMemoryBenchmarkReport {
+    pub suite: String,
+    pub total_fixtures: usize,
+    pub passed_fixtures: usize,
+    pub baseline: EntryConsoleMemoryBenchmarkBaseline,
+    pub class_coverage: Vec<EntryConsoleMemoryBenchmarkClassCoverage>,
+    pub missing_classes: Vec<EntryConsoleMemoryBenchmarkMissingClass>,
+    pub failures: Vec<EntryConsoleMemoryBenchmarkFailure>,
+    pub passed: bool,
+}
+
+impl EntryConsoleMemoryBenchmarkReport {
+    pub fn from_report(report: MemoryBenchmarkReport) -> Self {
+        Self {
+            suite: report.suite,
+            total_fixtures: report.total_fixtures,
+            passed_fixtures: report.passed_fixtures,
+            baseline: EntryConsoleMemoryBenchmarkBaseline {
+                accuracy_bps: report.baseline.accuracy_bps,
+                evidence_precision_bps: report.baseline.evidence_precision_bps,
+                projection_faithfulness_bps: report.baseline.projection_faithfulness_bps,
+                privacy_violation_count: report.baseline.privacy_violation_count,
+                stale_memory_false_positive_count: report
+                    .baseline
+                    .stale_memory_false_positive_count,
+                procedural_reuse_success_bps: report.baseline.procedural_reuse_success_bps,
+                soul_regression_count: report.baseline.soul_regression_count,
+                latency_ms: report.baseline.latency_ms,
+                token_budget: report.baseline.token_budget,
+                memory_bytes: report.baseline.memory_bytes,
+            },
+            class_coverage: report
+                .class_coverage
+                .into_iter()
+                .map(|coverage| EntryConsoleMemoryBenchmarkClassCoverage {
+                    class: coverage.class.as_str().to_string(),
+                    compact_fixtures: coverage.compact_fixtures,
+                    full_fixtures: coverage.full_fixtures,
+                })
+                .collect(),
+            missing_classes: report
+                .missing_classes
+                .into_iter()
+                .map(|missing| EntryConsoleMemoryBenchmarkMissingClass {
+                    class: missing.class.as_str().to_string(),
+                    mode: memory_benchmark_mode(missing.mode).to_string(),
+                })
+                .collect(),
+            failures: report
+                .failures
+                .into_iter()
+                .map(|failure| EntryConsoleMemoryBenchmarkFailure {
+                    fixture_id: failure.fixture_id,
+                    class: failure.class.as_str().to_string(),
+                    mode: memory_benchmark_mode(failure.mode).to_string(),
+                    profile: failure.profile.as_str().to_string(),
+                    stage: failure.stage,
+                    reason: failure.reason,
+                })
+                .collect(),
+            passed: report.passed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleMemoryBenchmarkBaseline {
+    pub accuracy_bps: u16,
+    pub evidence_precision_bps: u16,
+    pub projection_faithfulness_bps: u16,
+    pub privacy_violation_count: u32,
+    pub stale_memory_false_positive_count: u32,
+    pub procedural_reuse_success_bps: u16,
+    pub soul_regression_count: u32,
+    pub latency_ms: u32,
+    pub token_budget: u32,
+    pub memory_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleMemoryBenchmarkClassCoverage {
+    pub class: String,
+    pub compact_fixtures: usize,
+    pub full_fixtures: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleMemoryBenchmarkMissingClass {
+    pub class: String,
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleMemoryBenchmarkFailure {
+    pub fixture_id: String,
+    pub class: String,
+    pub mode: String,
+    pub profile: String,
+    pub stage: String,
+    pub reason: String,
+}
+
+const fn memory_benchmark_mode(mode: MemoryBenchmarkMode) -> &'static str {
+    match mode {
+        MemoryBenchmarkMode::Compact => "compact",
+        MemoryBenchmarkMode::Full => "full",
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchRecallInspector {
+    pub status: EntryConsoleWorkbenchStatus,
+    pub query: String,
+    pub procedural_hits: usize,
+    pub runtime_skill_selected: usize,
+    pub working_selected_surfaces: usize,
+    pub graph_nodes: usize,
+    pub graph_edges: usize,
+    pub evidence_backlinks: usize,
+    pub high_confidence_projection_allowed: bool,
+    pub graph_failures: Vec<String>,
+    pub graph_selected_ids: Vec<String>,
+    pub stale_false_positive_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchProjectionInspector {
+    pub status: EntryConsoleWorkbenchStatus,
+    pub query: String,
+    pub system_memory_chars: usize,
+    pub source_budget_chars: usize,
+    pub render_budget_chars: usize,
+    pub injected: bool,
+    pub truncated: bool,
+    pub private_gate_allowed: bool,
+    pub private_gate_reason: String,
+    pub evidence_refs: usize,
+    pub budget_decisions: usize,
+    pub privacy_decisions: usize,
+    pub dropped_candidates: usize,
+    pub faithfulness_passed: bool,
+    pub unsupported_claims: Vec<String>,
+    pub private_echo_guard_passed: bool,
+    pub private_echo_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchProceduralEvolution {
+    pub status: EntryConsoleWorkbenchStatus,
+    pub total_skills: usize,
+    pub active_skills: usize,
+    pub runtime_learned: usize,
+    pub user_provided: usize,
+    pub disabled: usize,
+    pub top_skills: Vec<EntryConsoleWorkbenchSkillRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchSkillRef {
+    pub name: String,
+    pub title: String,
+    pub topic: String,
+    pub status: String,
+    pub quality_score: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchVaultMigration {
+    pub status: EntryConsoleWorkbenchStatus,
+    pub source_memory_space_id: String,
+    pub target_memory_space_id: String,
+    pub json_docs: usize,
+    pub blobs: usize,
+    pub events: usize,
+    pub privacy_redactions: usize,
+    pub loss_risk: bool,
+    pub preflight_passed: bool,
+    pub preflight_failures: Vec<String>,
+    pub snapshot_fingerprint: String,
+    pub event_fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchSoulHealth {
+    pub status: EntryConsoleWorkbenchStatus,
+    pub profile: String,
+    pub hygiene_summary: String,
+    pub runtime_skill_records: usize,
+    pub deferred_total: usize,
+    pub deferred_pending: usize,
+    pub deferred_failed: usize,
+    pub safe_actions: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

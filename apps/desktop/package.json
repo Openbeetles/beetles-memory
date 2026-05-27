@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "cargo build -p bm-llm-gateway --no-default-features --features server-async,client-reqwest && tauri dev",
     "build": "tauri build"
   },
   "devDependencies": {

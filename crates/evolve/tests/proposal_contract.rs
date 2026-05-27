@@ -22,7 +22,10 @@ fn proposal_commit_uses_sdk_write_governance() {
     let report = commit_evolution_proposal(&runtime, proposal).expect("proposal commit");
 
     assert!(report.accepted, "{report:?}");
-    assert_eq!(report.write_operation.as_deref(), Some("write.procedural"));
+    assert_eq!(
+        report.write_operation.as_deref(),
+        Some("write.procedural_promotions")
+    );
     assert_eq!(report.lifecycle_operations, vec!["maintain".to_string()]);
 
     let recall = runtime

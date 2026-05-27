@@ -10,20 +10,27 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
     apply_long_term_memory_extraction, build_deferred_governance_queue_report,
-    commit_canonical_turn_delta, export_continuity_snapshot, govern_write_candidates,
-    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
-    inspect_working_recall, load_prompt_memory_context, run_long_term_memory_refresh,
+    build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta,
+    export_continuity_snapshot, govern_write_candidates, import_continuity_snapshot,
+    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
+    load_prompt_memory_context, promote_task_experience_to_procedure,
+    rerank_recall_with_temporal_graph, run_long_term_memory_refresh,
     run_memory_retention_compaction, run_post_reply_memory_maintenance,
     run_private_garden_governance, write_governed_shared_memory, CanonicalTurnDelta,
-    ContinuitySnapshotExportContext, ContinuitySnapshotImportContext, ContinuitySnapshotMode,
-    DeferredGovernanceJob, DeferredGovernanceJobStatus, DeferredGovernanceQueueReport,
-    GovernedWriteDecision, IngressKind, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
-    LongTermMemoryRefreshRequestOutcome, MemoryHygieneContext, MemoryPlaneGovernanceReport,
-    MemoryWriteAuthority, MemoryWriteDomain, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    CompactMemoryGraph, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
+    ContinuitySnapshotMode, DeferredGovernanceJob, DeferredGovernanceJobStatus,
+    DeferredGovernanceQueueReport, DroppedProjectionCandidate, GovernedWriteDecision,
+    GraphRecallRerankReport, IngressKind, LongTermMemoryRefreshContext,
+    LongTermMemoryRefreshOutcome, LongTermMemoryRefreshRequestOutcome, MemoryGraphEvidence,
+    MemoryGraphNodeKind, MemoryHygieneContext, MemoryPlaneGovernanceReport, MemoryWriteAuthority,
+    MemoryWriteDomain, PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateEchoGuardReport,
     PrivateGardenGovernanceContext, PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome,
-    PromptMemoryContextParams, PromptParticipationPlan, PromptRecallIntent, RecallSelectionReport,
-    SharedMemoryWriteSource, WorkingRecallInspectionInput,
+    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProjectionBudgetDecision,
+    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, PromptMemoryContextParams,
+    PromptParticipationPlan, PromptRecallIntent, RecallCandidate, RecallSelectionReport,
+    SharedMemoryWriteSource, SkillEvolutionReport, SubjectProjectionReport,
+    TemporalMemoryGraphGateReport, WorkingRecallInspectionInput,
 };
 use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
 use bm_core::platform::Platform;
@@ -39,7 +46,7 @@ use bm_core::skills::{
     is_runtime_skill_name, list_runtime_skill_records, list_skill_names,
     retrieve_runtime_skill_hits, set_skill_enabled as set_skill_enabled_record, set_skills_order,
     write_governed_runtime_skills, RuntimeSkillOrigin as CoreRuntimeSkillOrigin,
-    RuntimeSkillRecord, RuntimeSkillStatus,
+    RuntimeSkillRecord, RuntimeSkillStatus, RuntimeSkillWriteAction,
 };
 use bm_store::{MemoryStoreEvent, StorePlatform};
 
@@ -57,7 +64,10 @@ use crate::{
     MemoryRuntimeSystemKind, MemorySkillDeleteRequest, MemorySkillDetailReport,
     MemorySkillDetailRequest, MemorySkillKind, MemorySkillListReport, MemorySkillListRequest,
     MemorySkillMutationReport, MemorySkillOrigin, MemorySkillSetEnabledRequest, MemorySkillSummary,
-    MemorySkillUpsertRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
+    MemorySkillUpsertRequest, MemorySpaceExportReport, MemorySpaceExportRequest,
+    MemorySpaceImportReport, MemorySpaceImportRequest, MemorySpaceMigrateApplyReport,
+    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
+    MemorySpaceMigratePreviewRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
     MemoryWriteReport, MemoryWriteRequest, PressureLevel, Result, RuntimeOperatorAction,
     RuntimeOperatorActionReport, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
     RuntimeSkillWriteSource,
@@ -180,6 +190,7 @@ pub struct MemoryRuntimeConfig {
     pub scope: MemoryScope,
     pub profile: ProfileId,
     pub(crate) platform: Arc<dyn Platform>,
+    store_platform: Option<StorePlatform>,
     pub llm: Option<Arc<dyn LlmClient>>,
     pub clock: Arc<dyn MemoryClock>,
     pub capability_policy: MemoryCapabilityPolicy,
@@ -255,26 +266,143 @@ impl MemoryRuntime {
         );
         let report = match request {
             MemoryWriteRequest::Procedural { writes, source } => {
+                if runtime_skill_write_source_requires_promotion(source) {
+                    let rejected = writes
+                        .iter()
+                        .map(|write| {
+                            if write.name.trim().is_empty() {
+                                sdk_runtime_skill_name(&write.topic)
+                            } else {
+                                write.name.trim().to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let procedural_evolution = Some(SkillEvolutionReport {
+                        rejected,
+                        reasons: vec![
+                            "runtime_learned_procedural_write_requires_promotion".to_string()
+                        ],
+                        ..SkillEvolutionReport::default()
+                    });
+                    let lifecycle_report = self.finish_lifecycle_success(
+                        lifecycle,
+                        RuntimeLifecycleEventKind::RuntimeLifecycle,
+                        RuntimeLifecycleEffect::Noop,
+                        false,
+                        "runtime_learned_procedural_write_requires_promotion",
+                    )?;
+                    MemoryWriteReport {
+                        accepted: false,
+                        changed: 0,
+                        operation: "write.procedural",
+                        reason: "runtime_learned_procedural_write_requires_promotion".to_string(),
+                        lifecycle_report,
+                        semantic_governance: None,
+                        procedural_evolution,
+                        procedural_promotions: Vec::new(),
+                    }
+                } else {
+                    let storage = self.config.platform.skill_storage();
+                    let writes = normalize_runtime_skill_write_names(writes);
+                    let outcome = write_governed_runtime_skills(storage.as_ref(), &writes, source)?;
+                    let procedural_evolution = Some(
+                        build_skill_evolution_report_from_write_outcome(&writes, &outcome),
+                    );
+                    MemoryWriteReport {
+                        accepted: outcome.accepted > 0 || outcome.rejected == 0,
+                        changed: outcome.changed,
+                        operation: "write.procedural",
+                        reason: format!(
+                            "submitted={}, accepted={}, rejected={}",
+                            outcome.submitted, outcome.accepted, outcome.rejected
+                        ),
+                        lifecycle_report: self.finish_lifecycle_success_with_payload(
+                            lifecycle,
+                            RuntimeLifecycleEventKind::RuntimeLifecycle,
+                            RuntimeLifecycleEffect::RunMaintenance,
+                            outcome.changed > 0,
+                            "write.procedural",
+                            &[("changed_count", outcome.changed.to_string())],
+                        )?,
+                        semantic_governance: None,
+                        procedural_evolution,
+                        procedural_promotions: Vec::new(),
+                    }
+                }
+            }
+            MemoryWriteRequest::ProceduralPromotions { promotions, source } => {
+                let promotion_reports = promotions
+                    .into_iter()
+                    .map(|input| {
+                        promote_task_experience_to_procedure(
+                            input,
+                            ProceduralMemoryPromotionPolicy::default(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let writes = normalize_runtime_skill_write_names(
+                    promotion_reports
+                        .iter()
+                        .filter_map(|report| {
+                            runtime_skill_write_from_promotion_report(
+                                report,
+                                Some(&self.config.scope.chat_id),
+                                now_secs,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                );
                 let storage = self.config.platform.skill_storage();
-                let writes = normalize_runtime_skill_write_names(writes);
-                let outcome = write_governed_runtime_skills(storage.as_ref(), &writes, source)?;
+                let outcome = if writes.is_empty() {
+                    crate::RuntimeSkillWriteOutcome {
+                        source,
+                        submitted: promotion_reports.len(),
+                        rejected: promotion_reports
+                            .iter()
+                            .filter(|report| !report.promoted)
+                            .count(),
+                        ..crate::RuntimeSkillWriteOutcome::default()
+                    }
+                } else {
+                    write_governed_runtime_skills(storage.as_ref(), &writes, source)?
+                };
+                let procedural_evolution = Some(merge_promotion_and_write_evolution(
+                    &promotion_reports,
+                    &writes,
+                    &outcome,
+                ));
+                let blocked_reasons = promotion_reports
+                    .iter()
+                    .flat_map(|report| report.blocked_reasons.iter().cloned())
+                    .collect::<Vec<_>>();
                 MemoryWriteReport {
-                    accepted: outcome.accepted > 0 || outcome.rejected == 0,
+                    accepted: !writes.is_empty()
+                        && blocked_reasons.is_empty()
+                        && outcome.accepted == writes.len(),
                     changed: outcome.changed,
-                    operation: "write.procedural",
+                    operation: "write.procedural_promotions",
                     reason: format!(
-                        "submitted={}, accepted={}, rejected={}",
-                        outcome.submitted, outcome.accepted, outcome.rejected
+                        "submitted={}, promoted={}, accepted={}, rejected={}, blocked={}",
+                        promotion_reports.len(),
+                        promotion_reports
+                            .iter()
+                            .filter(|report| report.promoted)
+                            .count(),
+                        outcome.accepted,
+                        outcome.rejected,
+                        blocked_reasons.join("|")
                     ),
                     lifecycle_report: self.finish_lifecycle_success_with_payload(
                         lifecycle,
                         RuntimeLifecycleEventKind::RuntimeLifecycle,
                         RuntimeLifecycleEffect::RunMaintenance,
                         outcome.changed > 0,
-                        "write.procedural",
+                        "write.procedural_promotions",
                         &[("changed_count", outcome.changed.to_string())],
                     )?,
                     semantic_governance: None,
+                    procedural_evolution,
+                    procedural_promotions: promotion_reports,
                 }
             }
             MemoryWriteRequest::LongTermExtraction { extraction } => {
@@ -300,6 +428,8 @@ impl MemoryRuntime {
                         &[("changed_count", changed.to_string())],
                     )?,
                     semantic_governance: None,
+                    procedural_evolution: None,
+                    procedural_promotions: Vec::new(),
                 }
             }
             MemoryWriteRequest::Candidates { candidates } => {
@@ -356,17 +486,22 @@ impl MemoryRuntime {
                     )?;
                     outcome.changed
                 };
-                let skill_changed = if accepted_skill_writes.is_empty() {
-                    0
+                let (skill_changed, procedural_evolution) = if accepted_skill_writes.is_empty() {
+                    (0, None)
                 } else {
                     let storage = self.config.platform.skill_storage();
                     let writes = normalize_runtime_skill_write_names(accepted_skill_writes);
-                    write_governed_runtime_skills(
+                    let outcome = write_governed_runtime_skills(
                         storage.as_ref(),
                         &writes,
                         RuntimeSkillWriteSource::Manual,
-                    )?
-                    .changed
+                    )?;
+                    (
+                        outcome.changed,
+                        Some(build_skill_evolution_report_from_write_outcome(
+                            &writes, &outcome,
+                        )),
+                    )
                 };
                 let changed = long_term_changed + skill_changed;
                 MemoryWriteReport {
@@ -389,6 +524,8 @@ impl MemoryRuntime {
                         &[("changed_count", changed.to_string())],
                     )?,
                     semantic_governance: Some(semantic_governance),
+                    procedural_evolution,
+                    procedural_promotions: Vec::new(),
                 }
             }
         };
@@ -729,6 +866,12 @@ impl MemoryRuntime {
             task_run_store: Some(task_run_store.as_ref()),
             task_learning_store: Some(task_learning_store.as_ref()),
         });
+        let graph = build_recall_graph_report(
+            &request.query,
+            &procedural_hits,
+            &working,
+            self.config.clock.now_secs(),
+        );
         let hit_count = procedural_hits
             .len()
             .saturating_add(working_recall_hit_count(&working));
@@ -749,6 +892,9 @@ impl MemoryRuntime {
             query: request.query,
             procedural_hits,
             working,
+            graph_rerank: graph.rerank,
+            graph_gate: graph.gate,
+            compact_graph: graph.compact_graph,
             lifecycle_report: self.finish_lifecycle_success_with_payload(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -790,6 +936,12 @@ impl MemoryRuntime {
             system_memory_chars,
             !system_memory_block.trim().is_empty(),
         );
+        let subject_projection =
+            build_subject_projection_report(&projection_audit, &request, &system_memory_block);
+        let projection_faithfulness =
+            build_projection_faithfulness_check(&subject_projection, &system_memory_block);
+        let private_echo_guard =
+            build_private_echo_guard_report(&projection_audit, &system_memory_block);
         let telemetry_payload = [
             ("memory_hit", (hit_count > 0).to_string()),
             ("hit_count", hit_count.to_string()),
@@ -821,6 +973,9 @@ impl MemoryRuntime {
             system_memory_block,
             context,
             audit: projection_audit,
+            subject_projection,
+            projection_faithfulness,
+            private_echo_guard,
             lifecycle_report: self.finish_lifecycle_success_with_payload(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -1734,6 +1889,57 @@ impl MemoryRuntime {
         })
     }
 
+    pub fn export_memory_space(
+        &self,
+        request: MemorySpaceExportRequest,
+    ) -> Result<MemorySpaceExportReport> {
+        self.ensure_visible("export.memory_space", self.capabilities.export)?;
+        let platform = self.store_platform_for_memory_space("export.memory_space")?;
+        let report = crate::export_memory_space(platform, request)?;
+        self.audit("export.memory_space", true, "memory_space_export_completed");
+        Ok(report)
+    }
+
+    pub fn import_memory_space(
+        &self,
+        request: MemorySpaceImportRequest,
+    ) -> Result<MemorySpaceImportReport> {
+        self.ensure_visible("import.memory_space", self.capabilities.import)?;
+        let platform = self.store_platform_for_memory_space("import.memory_space")?;
+        let report = crate::import_memory_space(platform, request)?;
+        self.audit("import.memory_space", true, "memory_space_import_completed");
+        Ok(report)
+    }
+
+    pub fn preview_memory_space_migration(
+        &self,
+        request: MemorySpaceMigratePreviewRequest,
+    ) -> Result<MemorySpaceMigratePreviewReport> {
+        self.ensure_visible("preview.memory_space", self.capabilities.export)?;
+        let report = crate::preview_memory_space_migration(request);
+        self.audit(
+            "preview.memory_space",
+            report.vault_preflight.passed,
+            "memory_space_migration_preview_completed",
+        );
+        Ok(report)
+    }
+
+    pub fn apply_memory_space_migration(
+        &self,
+        request: MemorySpaceMigrateApplyRequest,
+    ) -> Result<MemorySpaceMigrateApplyReport> {
+        self.ensure_visible("apply.memory_space", self.capabilities.import)?;
+        let platform = self.store_platform_for_memory_space("apply.memory_space")?;
+        let report = crate::apply_memory_space_migration(platform, request)?;
+        self.audit(
+            "apply.memory_space",
+            true,
+            "memory_space_migration_apply_completed",
+        );
+        Ok(report)
+    }
+
     pub fn recover(&self, request: MemoryRecoverRequest) -> Result<MemoryRecoverReport> {
         self.ensure_visible("recover", self.capabilities.lifecycle.recover)?;
         let lifecycle = self.start_lifecycle(
@@ -1794,6 +2000,15 @@ impl MemoryRuntime {
             self.config.runtime_budget.resource_snapshot.pressure,
         );
         input
+    }
+
+    fn store_platform_for_memory_space(&self, operation: &'static str) -> Result<&StorePlatform> {
+        self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                operation,
+                "memory-space snapshot operations require StorePlatform-backed runtime",
+            )
+        })
     }
 
     fn start_lifecycle(
@@ -2031,6 +2246,432 @@ fn build_projection_audit(
         sources: projection_source_audits(context),
         sections: projection_section_audits(context),
     }
+}
+
+fn build_subject_projection_report(
+    audit: &MemoryProjectionAuditReport,
+    request: &MemoryProjectionRequest,
+    system_memory_block: &str,
+) -> SubjectProjectionReport {
+    let mut evidence_refs = Vec::new();
+    for source in &audit.sources {
+        for selected_id in &source.selected_ids {
+            evidence_refs.push(format!("{}:{selected_id}", source.plane));
+        }
+    }
+    for section in &audit.sections {
+        if section.included {
+            evidence_refs.push(format!("section:{}", section.name));
+        }
+    }
+    if evidence_refs.is_empty() && !system_memory_block.trim().is_empty() {
+        evidence_refs.push("synthesized:runtime_awareness".to_string());
+    }
+
+    let mut dropped_candidates = Vec::new();
+    for source in &audit.sources {
+        let dropped = source.candidate_count.saturating_sub(source.selected_count);
+        if dropped > 0 {
+            dropped_candidates.push(DroppedProjectionCandidate {
+                candidate_id: format!("{}:unselected:{dropped}", source.plane),
+                reason: source
+                    .miss_reason
+                    .clone()
+                    .unwrap_or_else(|| "budget_or_recall_rerank".to_string()),
+            });
+        }
+    }
+    if !audit.private_gate.allowed {
+        dropped_candidates.push(DroppedProjectionCandidate {
+            candidate_id: "private_depth".to_string(),
+            reason: audit.private_gate.reason.clone(),
+        });
+    }
+    if audit.truncated {
+        dropped_candidates.push(DroppedProjectionCandidate {
+            candidate_id: "render_tail".to_string(),
+            reason: "projection_render_budget".to_string(),
+        });
+    }
+
+    let profile_trim_reason = if audit.truncated {
+        "projection_render_budget".to_string()
+    } else {
+        String::new()
+    };
+
+    SubjectProjectionReport {
+        projection_id: audit.projection_id.clone(),
+        profile: audit.profile,
+        identity_mount: format!(
+            "agent:{} owner:{} subject:{}",
+            audit.identity.agent_id, audit.identity.owner_id, audit.subject_id
+        ),
+        relationship_position: format!(
+            "scope:{} chat:{}",
+            audit.scope.channel, audit.scope.chat_id
+        ),
+        situated_now: request.user_query.clone(),
+        evidence_refs,
+        budget_decisions: vec![
+            ProjectionBudgetDecision {
+                surface: "source_context".to_string(),
+                budget_chars: audit.source_budget_chars,
+                used_chars: audit
+                    .sections
+                    .iter()
+                    .map(|section| section.chars)
+                    .sum::<usize>(),
+                reason: "runtime_projection_source_budget".to_string(),
+            },
+            ProjectionBudgetDecision {
+                surface: "prompt".to_string(),
+                budget_chars: audit.render_budget_chars,
+                used_chars: audit.system_memory_chars,
+                reason: "runtime_projection_render_budget".to_string(),
+            },
+        ],
+        privacy_decisions: vec![ProjectionPrivacyDecision {
+            source_id: "private_depth".to_string(),
+            allowed: audit.private_gate.allowed,
+            reason: audit.private_gate.reason.clone(),
+        }],
+        dropped_candidates,
+        profile_trim_reason,
+    }
+}
+
+fn build_projection_faithfulness_check(
+    report: &SubjectProjectionReport,
+    system_memory_block: &str,
+) -> ProjectionFaithfulnessCheck {
+    let unsupported_claims =
+        if system_memory_block.trim().is_empty() && !report.evidence_refs.is_empty() {
+            vec!["projection_report_has_evidence_without_rendered_block".to_string()]
+        } else {
+            Vec::new()
+        };
+    ProjectionFaithfulnessCheck {
+        projection_id: report.projection_id.clone(),
+        checked_refs: report.evidence_refs.clone(),
+        passed: unsupported_claims.is_empty() && !report.evidence_refs.is_empty(),
+        unsupported_claims,
+    }
+}
+
+fn build_private_echo_guard_report(
+    audit: &MemoryProjectionAuditReport,
+    system_memory_block: &str,
+) -> PrivateEchoGuardReport {
+    let blocked_source_ids = if audit.private_gate.allowed {
+        Vec::new()
+    } else {
+        vec!["private_depth".to_string()]
+    };
+    let private_echo_count = private_echo_count(system_memory_block);
+    PrivateEchoGuardReport {
+        checked_surfaces: vec![
+            "prompt".to_string(),
+            "inspection_preview".to_string(),
+            "adapter_preview".to_string(),
+        ],
+        blocked_source_ids,
+        private_echo_count,
+        passed: private_echo_count == 0,
+    }
+}
+
+fn private_echo_count(system_memory_block: &str) -> u32 {
+    let lowered = system_memory_block.to_ascii_lowercase();
+    let private_markers = [
+        "private_raw:",
+        "private-garden-raw:",
+        "private garden raw:",
+        "<private_raw>",
+    ];
+    private_markers
+        .iter()
+        .filter(|marker| lowered.contains(**marker))
+        .count() as u32
+}
+
+struct RuntimeRecallGraphReport {
+    rerank: GraphRecallRerankReport,
+    gate: TemporalMemoryGraphGateReport,
+    compact_graph: CompactMemoryGraph,
+}
+
+fn build_recall_graph_report(
+    query: &str,
+    procedural_hits: &[crate::RuntimeSkillHit],
+    working: &crate::WorkingRecallInspection,
+    now_secs: u64,
+) -> RuntimeRecallGraphReport {
+    let mut evidence = Vec::new();
+    for hit in procedural_hits {
+        push_recall_graph_evidence(
+            &mut evidence,
+            hit.record.name.clone(),
+            MemoryGraphNodeKind::Procedure,
+            hit.record.title.clone(),
+            "procedural_runtime_skill",
+            format!("runtime_skill:{}", hit.record.name),
+            hit.record
+                .updated_at
+                .max(hit.record.observed_at)
+                .max(now_secs),
+        );
+    }
+    append_recall_report_graph_evidence(&mut evidence, &working.shared_factual_report, now_secs);
+    append_recall_report_graph_evidence(
+        &mut evidence,
+        &working.continuity_capsule_report,
+        now_secs,
+    );
+    append_recall_report_graph_evidence(&mut evidence, &working.archive_recall_report, now_secs);
+    append_recall_report_graph_evidence(&mut evidence, &working.runtime_skill_report, now_secs);
+    if let Some(report) = working.task_recall_report.as_ref() {
+        append_recall_report_graph_evidence(&mut evidence, report, now_secs);
+    }
+
+    let mut candidate_ids = Vec::new();
+    evidence.retain(|item| {
+        if candidate_ids
+            .iter()
+            .any(|candidate| candidate == &item.node_id)
+        {
+            false
+        } else {
+            candidate_ids.push(item.node_id.clone());
+            true
+        }
+    });
+    let graph = build_temporal_memory_graph_from_evidence(evidence);
+    let rerank = rerank_recall_with_temporal_graph(query, candidate_ids, &graph);
+    let mut gate = graph.gate;
+    gate.high_confidence_projection_allowed = false;
+    if !gate
+        .failures
+        .iter()
+        .any(|failure| failure == "runtime_recall_graph_preview_not_persistent")
+    {
+        gate.failures
+            .push("runtime_recall_graph_preview_not_persistent".to_string());
+        gate.failures.sort();
+    }
+    RuntimeRecallGraphReport {
+        rerank,
+        gate,
+        compact_graph: graph.compact_graph,
+    }
+}
+
+fn append_recall_report_graph_evidence(
+    evidence: &mut Vec<MemoryGraphEvidence>,
+    report: &RecallSelectionReport,
+    now_secs: u64,
+) {
+    for candidate in selected_recall_candidates(report) {
+        let node_id = candidate.candidate_id.trim();
+        if node_id.is_empty() {
+            continue;
+        }
+        let label = first_non_empty(&[&candidate.title, &candidate.excerpt, node_id]);
+        push_recall_graph_evidence(
+            evidence,
+            node_id.to_string(),
+            MemoryGraphNodeKind::MemoryRecord,
+            label.to_string(),
+            report.plane.label(),
+            format!("{}:{node_id}", report.plane.label()),
+            candidate.observed_at.unwrap_or(now_secs),
+        );
+    }
+    for selected_id in &report.selected_ids {
+        if selected_id.trim().is_empty()
+            || evidence
+                .iter()
+                .any(|item| item.node_id == selected_id.trim())
+        {
+            continue;
+        }
+        push_recall_graph_evidence(
+            evidence,
+            selected_id.trim().to_string(),
+            MemoryGraphNodeKind::MemoryRecord,
+            selected_id.trim().to_string(),
+            report.plane.label(),
+            format!("{}:{}", report.plane.label(), selected_id.trim()),
+            now_secs,
+        );
+    }
+}
+
+fn selected_recall_candidates(report: &RecallSelectionReport) -> Vec<&RecallCandidate> {
+    report
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.selected
+                || report
+                    .selected_ids
+                    .iter()
+                    .any(|selected_id| selected_id == &candidate.candidate_id)
+        })
+        .collect()
+}
+
+fn push_recall_graph_evidence(
+    evidence: &mut Vec<MemoryGraphEvidence>,
+    node_id: String,
+    kind: MemoryGraphNodeKind,
+    label: String,
+    source_kind: &str,
+    source_id: String,
+    observed_at: u64,
+) {
+    if node_id.trim().is_empty() || source_id.trim().is_empty() {
+        return;
+    }
+    let fingerprint_seed = format!("{source_kind}:{source_id}:{node_id}:{observed_at}");
+    evidence.push(MemoryGraphEvidence {
+        node_id,
+        kind,
+        label,
+        source_kind: source_kind.to_string(),
+        source_id,
+        fingerprint: format!("{:016x}", fnv1a64(fingerprint_seed.as_bytes())),
+        observed_at,
+        supports: Vec::new(),
+        supersedes: None,
+    });
+}
+
+fn first_non_empty<'a>(values: &[&'a str]) -> &'a str {
+    values
+        .iter()
+        .find_map(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .unwrap_or("")
+}
+
+fn build_skill_evolution_report_from_write_outcome(
+    writes: &[RuntimeSkillWrite],
+    outcome: &crate::RuntimeSkillWriteOutcome,
+) -> SkillEvolutionReport {
+    let mut report = SkillEvolutionReport::default();
+    for (idx, item) in outcome.reports.iter().enumerate() {
+        let write_name = writes
+            .get(idx)
+            .map(|write| write.name.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| item.topic.clone());
+        match item.action {
+            RuntimeSkillWriteAction::Accepted => report.added.push(write_name),
+            RuntimeSkillWriteAction::Rejected => report.rejected.push(write_name),
+        }
+        report.reasons.push(format!(
+            "{}:{}:{}",
+            item.source.label(),
+            item.reason.label(),
+            item.detail
+        ));
+    }
+    if outcome.accepted > 0 && outcome.changed == 0 {
+        report
+            .reasons
+            .push("accepted_without_store_delta_existing_record".to_string());
+    }
+    report.added.sort();
+    report.added.dedup();
+    report.rejected.sort();
+    report.rejected.dedup();
+    report.reasons.sort();
+    report.reasons.dedup();
+    report
+}
+
+fn runtime_skill_write_from_promotion_report(
+    report: &ProceduralMemoryPromotionReport,
+    source_chat_id: Option<&str>,
+    now_secs: u64,
+) -> Option<RuntimeSkillWrite> {
+    let record = report.record.as_ref()?;
+    Some(RuntimeSkillWrite {
+        name: sdk_runtime_skill_name(&record.trigger),
+        topic: record.trigger.clone(),
+        title: record.trigger.clone(),
+        summary: record.procedure.clone(),
+        content: render_promoted_procedure(record),
+        citations: record.evidence_refs.clone(),
+        source_chat_id: source_chat_id.map(str::to_string),
+        observed_at: now_secs,
+    })
+}
+
+fn render_promoted_procedure(record: &bm_core::memory::ProceduralMemoryRecordV2) -> String {
+    let mut lines = Vec::new();
+    lines.push(record.procedure.clone());
+    if !record.constraints.is_empty() {
+        lines.push(format!("Constraints: {}", record.constraints.join("; ")));
+    }
+    if !record.failure_modes.is_empty() {
+        lines.push(format!(
+            "Failure modes: {}",
+            record.failure_modes.join("; ")
+        ));
+    }
+    if !record.counterfactual_fix.trim().is_empty() {
+        lines.push(format!("Counterfactual fix: {}", record.counterfactual_fix));
+    }
+    lines.join("\n")
+}
+
+fn merge_promotion_and_write_evolution(
+    promotions: &[ProceduralMemoryPromotionReport],
+    writes: &[RuntimeSkillWrite],
+    outcome: &crate::RuntimeSkillWriteOutcome,
+) -> SkillEvolutionReport {
+    let mut report = build_skill_evolution_report_from_write_outcome(writes, outcome);
+    for promotion in promotions {
+        report
+            .reasons
+            .extend(promotion.evolution.reasons.iter().cloned());
+        report
+            .added
+            .extend(promotion.evolution.added.iter().cloned());
+        report
+            .rejected
+            .extend(promotion.evolution.rejected.iter().cloned());
+        report
+            .merged
+            .extend(promotion.evolution.merged.iter().cloned());
+        report
+            .retired
+            .extend(promotion.evolution.retired.iter().cloned());
+        report
+            .demoted
+            .extend(promotion.evolution.demoted.iter().cloned());
+    }
+    report.added.sort();
+    report.added.dedup();
+    report.rejected.sort();
+    report.rejected.dedup();
+    report.merged.sort();
+    report.merged.dedup();
+    report.retired.sort();
+    report.retired.dedup();
+    report.demoted.sort();
+    report.demoted.dedup();
+    report.reasons.sort();
+    report.reasons.dedup();
+    report
+}
+
+fn runtime_skill_write_source_requires_promotion(source: RuntimeSkillWriteSource) -> bool {
+    matches!(source.origin(), CoreRuntimeSkillOrigin::RuntimeLearned)
 }
 
 fn projection_id(runtime: &MemoryRuntime, request: &MemoryProjectionRequest) -> String {
@@ -2759,6 +3400,7 @@ pub struct MemoryRuntimeBuilder {
     static_platform_manifest: Option<StaticPlatformManifest>,
     provider_model_context_limit: Option<ProviderModelContextLimit>,
     runtime_budget: Option<RuntimeBudgetReport>,
+    store_platform: Option<StorePlatform>,
 }
 
 impl Default for MemoryRuntimeBuilder {
@@ -2778,6 +3420,7 @@ impl Default for MemoryRuntimeBuilder {
             static_platform_manifest: None,
             provider_model_context_limit: None,
             runtime_budget: None,
+            store_platform: None,
         }
     }
 }
@@ -2804,12 +3447,14 @@ impl MemoryRuntimeBuilder {
     }
 
     pub fn store_platform(mut self, platform: StorePlatform) -> Self {
+        self.store_platform = Some(platform.clone());
         self.platform = Some(platform.into_arc());
         self
     }
 
     pub fn platform(mut self, platform: Arc<dyn Platform>) -> Self {
         self.platform = Some(platform);
+        self.store_platform = None;
         self
     }
 
@@ -2914,6 +3559,7 @@ impl MemoryRuntimeBuilder {
             scope,
             profile: self.profile,
             platform,
+            store_platform: self.store_platform,
             llm: self.llm,
             clock,
             capability_policy: self.capability_policy,

@@ -1,0 +1,38 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "procedural-reuse-full-baseline",
+  "class": "procedural_reuse",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "Full profile proves procedural reuse and keeps evolution proposal-only until governance accepts it.",
+  "scenario": {
+    "user_goal": "Turn a failed task into reusable method evidence without mutating active procedure automatically.",
+    "evidence_refs": ["crates/evolve/src/proposal.rs", "crates/core/src/memory/skill_routing.rs"],
+    "expected_surfaces": ["EvolutionProposal", "MemoryRecallReport"]
+  },
+  "metrics": {
+    "accuracy_bps": 9600,
+    "evidence_precision_bps": 9300,
+    "projection_faithfulness_bps": 9000,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9600,
+    "soul_regression_count": 0,
+    "latency_ms": 100,
+    "token_budget": 3072,
+    "memory_bytes": 196608
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 9000,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

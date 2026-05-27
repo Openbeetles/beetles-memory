@@ -92,6 +92,8 @@ const ROUTES: &[RouteSpec] = &[
 const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_get("/console/overview"),
     console_get("/console/capabilities"),
+    console_get("/console/workbench/api-map"),
+    console_get("/console/workbench/report"),
     console_get("/console/skills"),
     console_get("/console/skills/{name}"),
     console_post("/console/skills"),
@@ -670,6 +672,20 @@ fn handle_console_request(
                 "capabilities": console_capabilities(services),
             }),
         )),
+        (HttpMethod::Get, "/console/workbench/api-map") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "workbench": runtime.console_workbench_api_map(),
+            }),
+        )),
+        (HttpMethod::Get, "/console/workbench/report") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "workbenchReport": runtime.console_workbench_report(),
+            }),
+        )),
         (HttpMethod::Get, "/console/transports") => Ok(json_response(
             200,
             json!({
@@ -1024,6 +1040,8 @@ fn is_known_console_path(path: &str) -> bool {
         path,
         "/console/overview"
             | "/console/capabilities"
+            | "/console/workbench/api-map"
+            | "/console/workbench/report"
             | "/console/skills"
             | "/console/llm-gateway"
             | "/console/ollama-transparent/status"

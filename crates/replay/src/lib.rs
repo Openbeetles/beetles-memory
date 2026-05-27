@@ -6,7 +6,12 @@ mod harness;
 mod runner;
 
 pub use bench::{
+    load_memory_benchmark_fixture_dir, run_memory_benchmark_wall,
     run_persona_governance_benchmark_gate, run_recall_benchmark_gate, BenchmarkGateReport,
+    MemoryBenchmarkBaseline, MemoryBenchmarkClass, MemoryBenchmarkClassCoverage,
+    MemoryBenchmarkEvaluationSource, MemoryBenchmarkFailure, MemoryBenchmarkFixture,
+    MemoryBenchmarkMetrics, MemoryBenchmarkMissingClass, MemoryBenchmarkMode,
+    MemoryBenchmarkReport, MemoryBenchmarkScenario, MemoryBenchmarkThresholds,
 };
 pub use bm_core::memory::{
     inspect_intelligence_replay, ArchiveBenchmarkCase, ArchiveBenchmarkResult,

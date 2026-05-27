@@ -64,4 +64,36 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
         "standard SDK projection policy must not expose private garden by default"
     );
     assert!(report.audit.private_gate.reason.contains("privacy_policy"));
+    assert_eq!(report.subject_projection.profile, profile);
+    assert_eq!(
+        report.subject_projection.projection_id,
+        report.audit.projection_id
+    );
+    assert!(report
+        .subject_projection
+        .identity_mount
+        .contains("agent-main"));
+    assert!(report
+        .subject_projection
+        .relationship_position
+        .contains("sdk.direct"));
+    assert!(report
+        .subject_projection
+        .evidence_refs
+        .iter()
+        .any(|evidence| evidence.contains("long_term_memory")));
+    assert!(report
+        .subject_projection
+        .budget_decisions
+        .iter()
+        .any(|decision| decision.surface == "prompt"));
+    assert!(report
+        .subject_projection
+        .privacy_decisions
+        .iter()
+        .any(|decision| !decision.allowed && decision.reason.contains("privacy_policy")));
+    assert!(report.subject_projection.validate_contract().accepted);
+    assert!(report.projection_faithfulness.passed);
+    assert_eq!(report.private_echo_guard.private_echo_count, 0);
+    assert!(report.private_echo_guard.passed);
 }

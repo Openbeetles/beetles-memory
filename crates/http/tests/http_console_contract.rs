@@ -254,6 +254,8 @@ fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
 
     for (method, path) in [
         (HttpMethod::Get, "/console/capabilities"),
+        (HttpMethod::Get, "/console/workbench/api-map"),
+        (HttpMethod::Get, "/console/workbench/report"),
         (HttpMethod::Get, "/console/ollama-transparent/status"),
         (HttpMethod::Post, "/console/ollama-transparent/preflight"),
         (HttpMethod::Post, "/console/ollama-transparent/enable"),
@@ -267,6 +269,66 @@ fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
             "missing console route {method:?} {path}"
         );
     }
+}
+
+#[test]
+fn console_workbench_api_map_route_exposes_entry_owned_report_apis() {
+    let runtime = runtime();
+
+    let response = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/console/workbench/api-map"),
+    )
+    .expect("workbench api map");
+
+    assert_eq!(response.status_code, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("workbench json");
+    assert_eq!(body["status"], "accepted");
+    let surfaces = body["workbench"]["surfaces"].as_array().expect("surfaces");
+    assert_eq!(surfaces.len(), 7);
+    assert!(surfaces
+        .iter()
+        .any(|surface| surface["reportApi"] == "sdk.project.subject_projection"));
+    assert!(surfaces
+        .iter()
+        .all(|surface| surface["privateRawAllowed"] == false));
+    assert_eq!(
+        body["workbench"]["missingReportApis"]
+            .as_array()
+            .expect("missing")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn console_workbench_report_route_exposes_runtime_report_summaries() {
+    let runtime = runtime();
+
+    let response = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/console/workbench/report"),
+    )
+    .expect("workbench report");
+
+    assert_eq!(response.status_code, 200, "{}", response.body);
+    let body: Value = serde_json::from_str(&response.body).expect("workbench report json");
+    assert_eq!(body["status"], "accepted");
+    let report = &body["workbenchReport"];
+    assert_eq!(
+        report["apiMap"]["surfaces"]
+            .as_array()
+            .expect("surfaces")
+            .len(),
+        7
+    );
+    assert_eq!(report["benchmarkWall"]["report"]["passed"], true);
+    assert_eq!(report["projectionInspector"]["privateEchoCount"], 0);
+    assert_eq!(
+        report["projectionInspector"]["privateEchoGuardPassed"],
+        true
+    );
+    assert_eq!(report["vaultMigration"]["preflightPassed"], true);
 }
 
 #[test]
@@ -653,7 +715,7 @@ fn console_overview_reflects_real_memory_operations() {
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
-            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"task_learning"}"#,
+            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"manual"}"#,
         ),
     )
     .expect("write");
@@ -663,7 +725,7 @@ fn console_overview_reflects_real_memory_operations() {
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
-            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"task_learning"}"#,
+            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"manual"}"#,
         ),
     )
     .expect("duplicate write");

@@ -36,6 +36,18 @@ pub use bm_core::memory::{
     RecallSelectionReport, WorkingRecallInspection,
 };
 pub use bm_core::memory::{
+    build_temporal_memory_graph_from_evidence, build_vault_migration_preflight,
+    compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
+    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, CompactMemoryGraph,
+    DroppedProjectionCandidate, GraphRecallRerankReport, MemoryAutopilotInput, MemoryGraphEvidence,
+    MemoryGraphNodeKind, PrivateEchoGuardReport, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
+    ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
+    ProjectionPrivacyDecision, SkillEvolutionReport, SubjectProjectionReport,
+    TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, VaultManifest,
+    VaultMigrationPreflight, WorkbenchApiMap, WorkbenchSurface,
+};
+pub use bm_core::memory::{
     CanonicalTurnDelta, CommittedSessionMessage, ConversationScope, DeferredGovernanceJob,
     DeferredGovernanceJobStatus, DeferredGovernanceJobSummary, DeferredGovernanceQueueReport,
     GovernedWriteDecision, MemoryCandidateContent, MemoryCandidateTarget, MemoryEvidenceAuthority,
@@ -181,6 +193,22 @@ pub fn preview_memory_space_migration(
     let privacy_redactions = count_private_snapshot_entries(&request.snapshot);
     let loss_risk = request.snapshot.schema_id != bm_store::STORE_SCHEMA_ID;
     let report = request.snapshot.export_report();
+    let vault_manifest = VaultManifest {
+        identity_id: request.source_memory_space_id.clone(),
+        profile: request.source_profile,
+        store_backend: "store_snapshot".to_string(),
+        snapshot_fingerprint: report.state_fingerprint.clone(),
+        event_fingerprint: report.event_fingerprint.clone(),
+        privacy_policy_fingerprint: privacy_policy_fingerprint(privacy_redactions, loss_risk),
+    };
+    let vault_redaction = build_vault_redaction_report(&request.snapshot);
+    let vault_preflight = build_vault_migration_preflight(
+        vault_manifest.clone(),
+        request.target_profile,
+        vault_redaction.clone(),
+        &request.snapshot.schema_id,
+        bm_store::STORE_SCHEMA_ID,
+    );
     let manifest = build_memory_space_migration_manifest(
         &request.source_memory_space_id,
         &request.target_memory_space_id,
@@ -199,6 +227,9 @@ pub fn preview_memory_space_migration(
         privacy_redactions,
         loss_risk,
         manifest,
+        vault_manifest,
+        vault_redaction,
+        vault_preflight,
     }
 }
 
@@ -206,6 +237,23 @@ pub fn apply_memory_space_migration(
     platform: &StorePlatform,
     request: MemorySpaceMigrateApplyRequest,
 ) -> Result<MemorySpaceMigrateApplyReport> {
+    if !request.preflight.passed {
+        return Err(Error::config(
+            "memory_space_migration",
+            "vault migration preflight failed",
+        ));
+    }
+    let expected_preflight = vault_preflight_for_snapshot(
+        &request.snapshot,
+        request.preflight.source_profile,
+        request.preflight.target_profile,
+    );
+    if request.preflight != expected_preflight {
+        return Err(Error::config(
+            "memory_space_migration",
+            "vault migration preflight does not match snapshot",
+        ));
+    }
     let import_report = platform.import_store_snapshot_with_report(&request.snapshot)?;
     Ok(MemorySpaceMigrateApplyReport {
         target_memory_space_id: request.target_memory_space_id,
@@ -247,6 +295,71 @@ fn count_private_snapshot_entries(snapshot: &StoreSnapshot) -> usize {
                     || is_private_snapshot_key(event.record_key.as_str())
             })
             .count()
+}
+
+fn build_vault_redaction_report(snapshot: &StoreSnapshot) -> PrivateMaterialRedactionReport {
+    let mut checked_refs = Vec::new();
+    let mut redacted_refs = Vec::new();
+    for doc in &snapshot.json_docs {
+        let record_ref = format!("json:{}:{}", doc.namespace, doc.key);
+        checked_refs.push(record_ref.clone());
+        if is_private_snapshot_namespace(&doc.namespace) {
+            redacted_refs.push(record_ref);
+        }
+    }
+    for blob in &snapshot.blobs {
+        let record_ref = format!("blob:{}:{}", blob.namespace, blob.key);
+        checked_refs.push(record_ref.clone());
+        if is_private_snapshot_namespace(&blob.namespace) {
+            redacted_refs.push(record_ref);
+        }
+    }
+    for event in &snapshot.events {
+        let record_ref = format!("event:{}:{}", event.plane, event.record_key);
+        checked_refs.push(record_ref.clone());
+        if is_private_snapshot_namespace(&event.plane)
+            || is_private_snapshot_key(event.record_key.as_str())
+        {
+            redacted_refs.push(record_ref);
+        }
+    }
+    PrivateMaterialRedactionReport {
+        surface: "memory_space_migration_preview".to_string(),
+        checked_refs,
+        redacted_refs,
+        raw_private_leak_count: 0,
+    }
+}
+
+fn vault_preflight_for_snapshot(
+    snapshot: &StoreSnapshot,
+    source_profile: ProfileId,
+    target_profile: ProfileId,
+) -> VaultMigrationPreflight {
+    let report = snapshot.export_report();
+    let privacy_redactions = count_private_snapshot_entries(snapshot);
+    let loss_risk = snapshot.schema_id != bm_store::STORE_SCHEMA_ID;
+    build_vault_migration_preflight(
+        VaultManifest {
+            identity_id: "memory-space-preview".to_string(),
+            profile: source_profile,
+            store_backend: "store_snapshot".to_string(),
+            snapshot_fingerprint: report.state_fingerprint,
+            event_fingerprint: report.event_fingerprint,
+            privacy_policy_fingerprint: privacy_policy_fingerprint(privacy_redactions, loss_risk),
+        },
+        target_profile,
+        build_vault_redaction_report(snapshot),
+        &snapshot.schema_id,
+        bm_store::STORE_SCHEMA_ID,
+    )
+}
+
+fn privacy_policy_fingerprint(privacy_redactions: usize, loss_risk: bool) -> String {
+    format!(
+        "privacy-redactions:{privacy_redactions}:schema-loss-risk:{}",
+        u8::from(loss_risk)
+    )
 }
 
 fn build_memory_space_migration_manifest(

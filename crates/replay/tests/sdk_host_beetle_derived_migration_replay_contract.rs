@@ -84,6 +84,8 @@ fn migrate_then_replay(fixture: &SdkHostReplayFixture) -> bm_replay::ReplayRunRe
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: fixture.source_memory_space_id.clone(),
         target_memory_space_id: fixture.target_memory_space_id.clone(),
+        source_profile: profile,
+        target_profile: ProfileId::DesktopMacosEmbeddedSdk,
         snapshot: exported.snapshot.clone(),
     });
     assert!(!preview.loss_risk);
@@ -96,6 +98,7 @@ fn migrate_then_replay(fixture: &SdkHostReplayFixture) -> bm_replay::ReplayRunRe
         MemorySpaceMigrateApplyRequest {
             target_memory_space_id: fixture.target_memory_space_id.clone(),
             snapshot: exported.snapshot,
+            preflight: preview.vault_preflight,
         },
     )
     .expect("apply migration");

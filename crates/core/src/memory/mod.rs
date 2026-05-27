@@ -37,6 +37,7 @@ mod long_term_extraction;
 mod maintenance;
 mod memory_governance;
 mod mental_privacy;
+mod next_gen_contract;
 mod outer_voice;
 #[cfg(all(
     any(test, feature = "replay-harness"),
@@ -259,6 +260,31 @@ pub use mental_privacy::{
     MENTAL_PRIVACY_SYSTEM_CONSTRAINT, MENTAL_PRIVACY_TARGET_INNER_LIFE,
     MENTAL_PRIVACY_TARGET_SELF_CONTINUITY, MENTAL_PRIVACY_TARGET_SELF_MODEL,
     REL_PATH_MENTAL_PRIVACY_STATES,
+};
+pub use next_gen_contract::{
+    build_edge_memory_appliance_gate_report, build_memory_autopilot_gate_report,
+    build_next_gen_contract_matrix, build_privacy_vault_gate_report,
+    build_procedural_evolution_gate_report, build_soul_kernel2_gate_report,
+    build_temporal_memory_graph_from_evidence, build_temporal_memory_graph_gate_report,
+    build_vault_migration_preflight, build_workbench_gate_report,
+    compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
+    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, AutopilotAuditReport,
+    CompactGraphIndex, CompactMemoryGraph, CompactSoulProfile, ConsolidationProposal,
+    CoreRevisionDiff, DeviceSyncProposal, DeviceTrustRecord, DroppedProjectionCandidate,
+    EdgeMemoryApplianceGateReport, EdgeMemoryBudgetReport, EdgeRecoveryFixture,
+    EncryptedSnapshotEnvelope, EvidenceBacklink, GraphRecallRerankReport, ImportanceDecayModel,
+    MemoryAutopilotGateReport, MemoryAutopilotInput, MemoryAutopilotPlan, MemoryGraphEdge,
+    MemoryGraphEdgeKind, MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind,
+    MemoryHygieneDiff, MemoryOperationSkill, NextGenCapabilityContract, NextGenContractValidation,
+    NextGenPhase, PrivacyVaultGateReport, PrivateEchoGuardReport, PrivateMaterialRedactionReport,
+    ProceduralEvolutionGateReport, ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
+    ProceduralMemoryPromotionReport, ProceduralMemoryRecordV2, ProcedureGenome,
+    ProjectionBudgetDecision, ProjectionFaithfulnessCheck, ProjectionPrivacyDecision,
+    RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest, SoulFeedbackReport,
+    SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport, SoulRegressionSuite,
+    SubjectProjectionReport, TaskExperienceToProcedure, TemporalMemoryGraphBuildReport,
+    TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest, VaultMigrationPreflight,
+    WorkbenchApiMap, WorkbenchGateReport, WorkbenchSurface,
 };
 pub(crate) use outer_voice::run_outer_voice_refresh_with_state;
 pub use outer_voice::{

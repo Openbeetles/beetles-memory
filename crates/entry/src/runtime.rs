@@ -6,24 +6,32 @@ use bm_adapter::{
     dispatch_adapter_command_with_services, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
     AdapterResponse, AdapterRuntimeServices,
 };
+use bm_replay::{load_memory_benchmark_fixture_dir, run_memory_benchmark_wall};
 use bm_sdk::{
     compile_runtime_budget, probe_host_runtime_resource, resolve_memory_capabilities, Error,
-    MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity, MemoryPrivacyPolicy, MemoryRuntime,
-    MemoryScope, MemorySkillDeleteRequest, MemorySkillDetailRequest, MemorySkillListRequest,
-    MemorySkillSetEnabledRequest, MemorySkillUpsertRequest, NoopMemoryAuditSink, ProfileId, Result,
-    RuntimeBudgetInput, RuntimeBudgetReport, StaticPlatformManifest, StoreBackendConfig,
-    StoreBackendKind, StorePlatform,
+    MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity, MemoryInspectionRequest,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemorySkillDeleteRequest, MemorySkillDetailRequest, MemorySkillListRequest,
+    MemorySkillSetEnabledRequest, MemorySkillUpsertRequest, MemorySpaceExportRequest,
+    MemorySpaceMigratePreviewRequest, NoopMemoryAuditSink, PressureLevel, ProfileId, Result,
+    RuntimeBudgetInput, RuntimeBudgetReport, RuntimeLifecycleModeInput, StaticPlatformManifest,
+    StoreBackendConfig, StoreBackendKind, StorePlatform, WorkbenchApiMap, WorkbenchSurface,
 };
 
 use crate::config::{enabled_capability_policy, privacy_policy};
 use crate::console::EntryConsoleTelemetrySnapshot;
 use crate::{
     EntryAuthConfig, EntryCapabilityView, EntryConsoleDevice, EntryConsoleDeviceCreate,
-    EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleOverview,
-    EntryConsoleSession, EntryConsoleSkillDetail, EntryConsoleSkillList, EntryConsoleSkillMutation,
-    EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert, EntryConsoleState, EntryConsoleTransport,
-    EntryConsoleTransportUpdate, EntryIdempotencyCache, EntryIdempotencyConfig, EntryIdentity,
-    EntryResponse, EntryScope, EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleMemoryBenchmarkReport,
+    EntryConsoleOverview, EntryConsoleSession, EntryConsoleSkillDetail, EntryConsoleSkillList,
+    EntryConsoleSkillMutation, EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert,
+    EntryConsoleState, EntryConsoleTransport, EntryConsoleTransportUpdate,
+    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchProceduralEvolution,
+    EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
+    EntryConsoleWorkbenchReport, EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth,
+    EntryConsoleWorkbenchStatus, EntryConsoleWorkbenchVaultMigration, EntryIdempotencyCache,
+    EntryIdempotencyConfig, EntryIdentity, EntryResponse, EntryScope, EntryStoreConfig,
+    EntryTransportConfig, EntryTransportContext,
 };
 
 pub const DEFAULT_SCOPED_RUNTIME_CACHE_LIMIT: usize = 256;
@@ -295,6 +303,340 @@ impl EntryRuntime {
         )
     }
 
+    pub fn console_workbench_api_map(&self) -> WorkbenchApiMap {
+        WorkbenchApiMap {
+            surfaces: vec![
+                WorkbenchSurface {
+                    surface_id: "home".to_string(),
+                    report_api: "entry.console.overview".to_string(),
+                    private_raw_allowed: false,
+                },
+                WorkbenchSurface {
+                    surface_id: "recall_inspector".to_string(),
+                    report_api: "sdk.recall.working_inspection".to_string(),
+                    private_raw_allowed: false,
+                },
+                WorkbenchSurface {
+                    surface_id: "projection_inspector".to_string(),
+                    report_api: "sdk.project.subject_projection".to_string(),
+                    private_raw_allowed: false,
+                },
+                WorkbenchSurface {
+                    surface_id: "soul_health".to_string(),
+                    report_api: "sdk.inspect.operator_surface.soul_governance".to_string(),
+                    private_raw_allowed: false,
+                },
+                WorkbenchSurface {
+                    surface_id: "procedural_evolution".to_string(),
+                    report_api: "sdk.skills.skill_evolution_report".to_string(),
+                    private_raw_allowed: false,
+                },
+                WorkbenchSurface {
+                    surface_id: "replay_diff".to_string(),
+                    report_api: "sdk.replay.memory_benchmark_report".to_string(),
+                    private_raw_allowed: false,
+                },
+                WorkbenchSurface {
+                    surface_id: "vault_migration".to_string(),
+                    report_api: "sdk.vault.redaction_preflight".to_string(),
+                    private_raw_allowed: false,
+                },
+            ],
+            missing_report_apis: Vec::new(),
+        }
+    }
+
+    pub fn console_workbench_report(&self) -> EntryConsoleWorkbenchReport {
+        EntryConsoleWorkbenchReport {
+            api_map: self.console_workbench_api_map(),
+            benchmark_wall: self.console_workbench_benchmark_wall(),
+            recall_inspector: self.console_workbench_recall_inspector(),
+            projection_inspector: self.console_workbench_projection_inspector(),
+            procedural_evolution: self.console_workbench_procedural_evolution(),
+            vault_migration: self.console_workbench_vault_migration(),
+            soul_health: self.console_workbench_soul_health(),
+        }
+    }
+
+    fn console_workbench_benchmark_wall(&self) -> EntryConsoleWorkbenchBenchmarkWall {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures/memory-benchmark-wall");
+        let fixture_root_display = fixture_root.display().to_string();
+        match load_memory_benchmark_fixture_dir(&fixture_root) {
+            Ok(fixtures) => {
+                let report = run_memory_benchmark_wall(&fixtures);
+                let status = if report.passed {
+                    EntryConsoleWorkbenchStatus::ready("memory_benchmark_wall_passed")
+                } else {
+                    EntryConsoleWorkbenchStatus::limited("memory_benchmark_wall_regression")
+                };
+                EntryConsoleWorkbenchBenchmarkWall {
+                    status,
+                    fixture_root: fixture_root_display,
+                    report: Some(EntryConsoleMemoryBenchmarkReport::from_report(report)),
+                }
+            }
+            Err(error) => EntryConsoleWorkbenchBenchmarkWall {
+                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                fixture_root: fixture_root_display,
+                report: None,
+            },
+        }
+    }
+
+    fn console_workbench_recall_inspector(&self) -> EntryConsoleWorkbenchRecallInspector {
+        let query = "workbench memory inspection".to_string();
+        match self.runtime.recall(MemoryRecallRequest {
+            query: query.clone(),
+            limit: 6,
+        }) {
+            Ok(report) => {
+                let working_selected_surfaces = usize::from(report.working.summary_text.is_some())
+                    + usize::from(report.working.work_continuity_text.is_some())
+                    + usize::from(report.working.long_term_memory_text.is_some())
+                    + usize::from(report.working.archive_evidence_text.is_some())
+                    + usize::from(report.working.continuity_capsule_text.is_some())
+                    + usize::from(report.working.runtime_skill_text.is_some())
+                    + usize::from(report.working.task_recall_text.is_some());
+                EntryConsoleWorkbenchRecallInspector {
+                    status: EntryConsoleWorkbenchStatus::ready("sdk_recall_report_available"),
+                    query,
+                    procedural_hits: report.procedural_hits.len(),
+                    runtime_skill_selected: report.working.runtime_skill_report.selected_count,
+                    working_selected_surfaces,
+                    graph_nodes: report.graph_gate.nodes,
+                    graph_edges: report.graph_gate.edges,
+                    evidence_backlinks: report.graph_gate.evidence_backlinks,
+                    high_confidence_projection_allowed: report
+                        .graph_gate
+                        .high_confidence_projection_allowed,
+                    graph_failures: report.graph_gate.failures,
+                    graph_selected_ids: report.graph_rerank.selected_ids,
+                    stale_false_positive_count: report.graph_rerank.stale_false_positive_count,
+                }
+            }
+            Err(error) => EntryConsoleWorkbenchRecallInspector {
+                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                query,
+                procedural_hits: 0,
+                runtime_skill_selected: 0,
+                working_selected_surfaces: 0,
+                graph_nodes: 0,
+                graph_edges: 0,
+                evidence_backlinks: 0,
+                high_confidence_projection_allowed: false,
+                graph_failures: Vec::new(),
+                graph_selected_ids: Vec::new(),
+                stale_false_positive_count: 0,
+            },
+        }
+    }
+
+    fn console_workbench_projection_inspector(&self) -> EntryConsoleWorkbenchProjectionInspector {
+        let query = "Show operator-safe memory workbench context.".to_string();
+        match self.runtime.project(MemoryProjectionRequest {
+            user_query: query.clone(),
+            system_max_len: self
+                .runtime_budget
+                .projection_render_budget
+                .system_block_max_chars,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        }) {
+            Ok(report) => EntryConsoleWorkbenchProjectionInspector {
+                status: EntryConsoleWorkbenchStatus::ready("sdk_projection_report_available"),
+                query,
+                system_memory_chars: report.audit.system_memory_chars,
+                source_budget_chars: report.audit.source_budget_chars,
+                render_budget_chars: report.audit.render_budget_chars,
+                injected: report.audit.injected,
+                truncated: report.audit.truncated,
+                private_gate_allowed: report.audit.private_gate.allowed,
+                private_gate_reason: report.audit.private_gate.reason,
+                evidence_refs: report.subject_projection.evidence_refs.len(),
+                budget_decisions: report.subject_projection.budget_decisions.len(),
+                privacy_decisions: report.subject_projection.privacy_decisions.len(),
+                dropped_candidates: report.subject_projection.dropped_candidates.len(),
+                faithfulness_passed: report.projection_faithfulness.passed,
+                unsupported_claims: report.projection_faithfulness.unsupported_claims,
+                private_echo_guard_passed: report.private_echo_guard.passed,
+                private_echo_count: report.private_echo_guard.private_echo_count,
+            },
+            Err(error) => EntryConsoleWorkbenchProjectionInspector {
+                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                query,
+                system_memory_chars: 0,
+                source_budget_chars: 0,
+                render_budget_chars: 0,
+                injected: false,
+                truncated: false,
+                private_gate_allowed: false,
+                private_gate_reason: "projection_unavailable".to_string(),
+                evidence_refs: 0,
+                budget_decisions: 0,
+                privacy_decisions: 0,
+                dropped_candidates: 0,
+                faithfulness_passed: false,
+                unsupported_claims: Vec::new(),
+                private_echo_guard_passed: false,
+                private_echo_count: 0,
+            },
+        }
+    }
+
+    fn console_workbench_procedural_evolution(&self) -> EntryConsoleWorkbenchProceduralEvolution {
+        match self.runtime.list_skills(MemorySkillListRequest {
+            query: None,
+            include_disabled: true,
+            include_retired: true,
+            limit: 8,
+        }) {
+            Ok(report) => EntryConsoleWorkbenchProceduralEvolution {
+                status: EntryConsoleWorkbenchStatus::ready("sdk_skill_evolution_surface_available"),
+                total_skills: report.total,
+                active_skills: report.active,
+                runtime_learned: report.runtime_learned,
+                user_provided: report.user_provided,
+                disabled: report.disabled,
+                top_skills: report
+                    .skills
+                    .into_iter()
+                    .take(5)
+                    .map(|skill| EntryConsoleWorkbenchSkillRef {
+                        name: skill.name,
+                        title: skill.title,
+                        topic: skill.topic,
+                        status: skill.status,
+                        quality_score: skill.quality_score,
+                    })
+                    .collect(),
+            },
+            Err(error) => EntryConsoleWorkbenchProceduralEvolution {
+                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                total_skills: 0,
+                active_skills: 0,
+                runtime_learned: 0,
+                user_provided: 0,
+                disabled: 0,
+                top_skills: Vec::new(),
+            },
+        }
+    }
+
+    fn console_workbench_vault_migration(&self) -> EntryConsoleWorkbenchVaultMigration {
+        let source_memory_space_id = self.config.scope.chat_id.clone();
+        let target_memory_space_id = format!("{source_memory_space_id}-vault-preview");
+        match self.runtime.export_memory_space(MemorySpaceExportRequest {
+            memory_space_id: source_memory_space_id.clone(),
+            include_private: false,
+        }) {
+            Ok(export) => {
+                let preview =
+                    self.runtime
+                        .preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
+                            source_memory_space_id: source_memory_space_id.clone(),
+                            target_memory_space_id: target_memory_space_id.clone(),
+                            source_profile: self.config.profile,
+                            target_profile: self.config.profile,
+                            snapshot: export.snapshot,
+                        });
+                match preview {
+                    Ok(report) => {
+                        let status = if report.vault_preflight.passed {
+                            EntryConsoleWorkbenchStatus::ready("vault_migration_preflight_passed")
+                        } else {
+                            EntryConsoleWorkbenchStatus::limited(
+                                "vault_migration_preflight_blocked",
+                            )
+                        };
+                        EntryConsoleWorkbenchVaultMigration {
+                            status,
+                            source_memory_space_id,
+                            target_memory_space_id,
+                            json_docs: report.json_docs,
+                            blobs: report.blobs,
+                            events: report.events,
+                            privacy_redactions: report.privacy_redactions,
+                            loss_risk: report.loss_risk,
+                            preflight_passed: report.vault_preflight.passed,
+                            preflight_failures: vault_preflight_failures(
+                                report.vault_preflight.schema_allowed,
+                                report.vault_preflight.capability_allowed,
+                                report.vault_preflight.privacy_allowed,
+                                report.vault_preflight.lineage_allowed,
+                            ),
+                            snapshot_fingerprint: report.state_fingerprint,
+                            event_fingerprint: report.event_fingerprint,
+                        }
+                    }
+                    Err(error) => EntryConsoleWorkbenchVaultMigration {
+                        status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                        source_memory_space_id,
+                        target_memory_space_id,
+                        json_docs: 0,
+                        blobs: 0,
+                        events: 0,
+                        privacy_redactions: 0,
+                        loss_risk: false,
+                        preflight_passed: false,
+                        preflight_failures: Vec::new(),
+                        snapshot_fingerprint: String::new(),
+                        event_fingerprint: String::new(),
+                    },
+                }
+            }
+            Err(error) => EntryConsoleWorkbenchVaultMigration {
+                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                source_memory_space_id,
+                target_memory_space_id,
+                json_docs: 0,
+                blobs: 0,
+                events: 0,
+                privacy_redactions: 0,
+                loss_risk: false,
+                preflight_passed: false,
+                preflight_failures: Vec::new(),
+                snapshot_fingerprint: String::new(),
+                event_fingerprint: String::new(),
+            },
+        }
+    }
+
+    fn console_workbench_soul_health(&self) -> EntryConsoleWorkbenchSoulHealth {
+        match self.runtime.inspect(MemoryInspectionRequest {
+            query: "workbench soul health".to_string(),
+            system_max_len: self
+                .runtime_budget
+                .projection_render_budget
+                .system_block_max_chars,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        }) {
+            Ok(report) => EntryConsoleWorkbenchSoulHealth {
+                status: EntryConsoleWorkbenchStatus::ready("sdk_inspection_report_available"),
+                profile: report.hygiene.profile,
+                hygiene_summary: report.hygiene.summary,
+                runtime_skill_records: report.hygiene.runtime_skill_records,
+                deferred_total: report.deferred_governance.total,
+                deferred_pending: report.deferred_governance.pending,
+                deferred_failed: report.deferred_governance.failed,
+                safe_actions: report.operator_action_report.safe_actions_available,
+            },
+            Err(error) => EntryConsoleWorkbenchSoulHealth {
+                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                profile: self.config.profile.as_str().to_string(),
+                hygiene_summary: "inspection_unavailable".to_string(),
+                runtime_skill_records: 0,
+                deferred_total: 0,
+                deferred_pending: 0,
+                deferred_failed: 0,
+                safe_actions: Vec::new(),
+            },
+        }
+    }
+
     pub fn console_transports(&self) -> Vec<EntryConsoleTransport> {
         self.console.transports()
     }
@@ -526,6 +868,28 @@ fn current_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn vault_preflight_failures(
+    schema_allowed: bool,
+    capability_allowed: bool,
+    privacy_allowed: bool,
+    lineage_allowed: bool,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if !schema_allowed {
+        failures.push("schema_not_allowed".to_string());
+    }
+    if !capability_allowed {
+        failures.push("capability_not_allowed".to_string());
+    }
+    if !privacy_allowed {
+        failures.push("privacy_not_allowed".to_string());
+    }
+    if !lineage_allowed {
+        failures.push("lineage_not_allowed".to_string());
+    }
+    failures
 }
 
 pub fn entry_capability_view(

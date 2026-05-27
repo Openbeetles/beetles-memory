@@ -1,10 +1,15 @@
 #![allow(dead_code)]
 
 use bm_sdk::{
-    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryIdentity, MemoryProfile, MemoryRuntime,
-    MemoryRuntimeSystemKind, MemoryScope, MemoryWriteRequest, PostReplyMemoryMaintenanceContext,
-    ProfileId, PromptMemoryContextParams, PromptParticipationPlan, StoreBackendConfig,
-    StorePlatform,
+    build_temporal_memory_graph_from_evidence, build_vault_migration_preflight,
+    compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
+    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, MemoryAutopilotInput,
+    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGraphEvidence, MemoryGraphNodeKind,
+    MemoryIdentity, MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope,
+    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
+    PromptMemoryContextParams, PromptParticipationPlan, StoreBackendConfig, StorePlatform,
+    VaultManifest,
 };
 
 fn prompt_context_contract_is_sdk_importable<'a>(
@@ -66,4 +71,75 @@ fn prompt_participation_plan_is_available_from_sdk() {
     let plan = PromptParticipationPlan::embedded_first_turn_default();
     assert!(plan.load_l1_constitutional);
     assert!(!plan.load_l2_governed_recall);
+}
+
+#[test]
+fn next_gen_builders_are_sdk_public_without_adapter_ownership() {
+    let graph = build_temporal_memory_graph_from_evidence(vec![MemoryGraphEvidence {
+        node_id: "fact:current".to_string(),
+        kind: MemoryGraphNodeKind::MemoryRecord,
+        label: "Current fact".to_string(),
+        source_kind: "turn_ledger".to_string(),
+        source_id: "turn:1".to_string(),
+        fingerprint: "fp-1".to_string(),
+        observed_at: 1,
+        supports: Vec::new(),
+        supersedes: None,
+    }]);
+    let rerank =
+        rerank_recall_with_temporal_graph("current", vec!["fact:current".to_string()], &graph);
+    assert_eq!(rerank.selected_ids, vec!["fact:current"]);
+    assert!(graph.gate.high_confidence_projection_allowed);
+    assert_eq!(graph.compact_graph.nodes.len(), 1);
+
+    let promotion = promote_task_experience_to_procedure(
+        ProceduralMemoryPromotionInput {
+            task_id: "task-1".to_string(),
+            trigger: "repeatable task".to_string(),
+            procedure: "Use the proven path.".to_string(),
+            constraints: vec!["stay in SDK".to_string()],
+            failure_modes: vec!["adapter shortcut".to_string()],
+            counterfactual_fix: "route through runtime".to_string(),
+            evidence_refs: vec!["task:1".to_string(), "task:2".to_string()],
+            quality_score: 80,
+            repeated_evidence_count: 2,
+            capability_affinity: vec!["sdk".to_string()],
+        },
+        ProceduralMemoryPromotionPolicy::default(),
+    );
+    assert!(promotion.promoted);
+
+    let autopilot = plan_memory_autopilot_for_profile(MemoryAutopilotInput {
+        profile: ProfileId::EspEmbeddedSdk,
+        pressure: "critical".to_string(),
+        recovery_safe_mode: true,
+        pending_stale_items: 1,
+        pending_conflicts: 1,
+        privacy_risk_count: 0,
+    });
+    assert_eq!(autopilot.mutation_policy, "proposal_only");
+
+    let budget = compile_edge_memory_budget_report(ProfileId::EspStandaloneMemory, 1, 2, 3, 4, 5);
+    assert_eq!(budget.profile, ProfileId::EspStandaloneMemory);
+
+    let preflight = build_vault_migration_preflight(
+        VaultManifest {
+            identity_id: "owner-default".to_string(),
+            profile: ProfileId::ServerLinuxDevFull,
+            store_backend: "file".to_string(),
+            snapshot_fingerprint: "state".to_string(),
+            event_fingerprint: "event".to_string(),
+            privacy_policy_fingerprint: "privacy".to_string(),
+        },
+        ProfileId::DesktopMacosEmbeddedSdk,
+        PrivateMaterialRedactionReport {
+            surface: "export_preview".to_string(),
+            checked_refs: Vec::new(),
+            redacted_refs: Vec::new(),
+            raw_private_leak_count: 0,
+        },
+        "schema",
+        "schema",
+    );
+    assert!(preflight.passed);
 }

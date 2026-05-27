@@ -120,7 +120,7 @@ fn run_operation(
         ReplayOperation::WriteProcedural { writes } => {
             let report = runtime.write(MemoryWriteRequest::Procedural {
                 writes: writes.clone(),
-                source: RuntimeSkillWriteSource::ProgrammableReasoning,
+                source: RuntimeSkillWriteSource::Manual,
             })?;
             Ok(OperationReport::new(
                 &report.lifecycle_report,

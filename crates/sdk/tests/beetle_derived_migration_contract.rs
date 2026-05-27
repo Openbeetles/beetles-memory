@@ -93,6 +93,8 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: fixture.source_memory_space_id.clone(),
         target_memory_space_id: fixture.target_memory_space_id.clone(),
+        source_profile: profile,
+        target_profile: ProfileId::DesktopMacosEmbeddedSdk,
         snapshot: exported.snapshot.clone(),
     });
     assert!(
@@ -111,6 +113,7 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         MemorySpaceMigrateApplyRequest {
             target_memory_space_id: fixture.target_memory_space_id.clone(),
             snapshot: exported.snapshot.clone(),
+            preflight: preview.vault_preflight.clone(),
         },
     )
     .expect("apply memory-space migration");

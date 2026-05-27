@@ -6,8 +6,9 @@ use bm_core::memory::{
     MemoryPrivacyClass, MemorySemanticJudgmentSource, MemoryWriteCandidate,
 };
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel,
+    ProceduralMemoryPromotionInput, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -123,4 +124,153 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
         recall.procedural_hits[0].record.name,
         "runtime_skill__release_checklist"
     );
+}
+
+#[test]
+fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
+
+    let blocked = runtime
+        .write(MemoryWriteRequest::ProceduralPromotions {
+            promotions: vec![ProceduralMemoryPromotionInput {
+                task_id: "task-single".to_string(),
+                trigger: "release checklist".to_string(),
+                procedure: "Run gates before release.".to_string(),
+                constraints: vec!["stay inside SDK reports".to_string()],
+                failure_modes: vec!["claimed readiness without gate output".to_string()],
+                counterfactual_fix: "rerun gate and cite output".to_string(),
+                evidence_refs: vec!["task:single".to_string()],
+                quality_score: 90,
+                repeated_evidence_count: 1,
+                capability_affinity: vec!["sdk".to_string()],
+            }],
+            source: RuntimeSkillWriteSource::TaskLearning,
+        })
+        .expect("blocked promotion");
+    assert!(!blocked.accepted);
+    assert_eq!(blocked.changed, 0);
+    assert_eq!(blocked.procedural_promotions.len(), 1);
+    assert!(!blocked.procedural_promotions[0].promoted);
+
+    let mixed = runtime
+        .write(MemoryWriteRequest::ProceduralPromotions {
+            promotions: vec![
+                ProceduralMemoryPromotionInput {
+                    task_id: "task-mixed-single".to_string(),
+                    trigger: "deployment warmup checklist".to_string(),
+                    procedure: "Do not promote from one observation.".to_string(),
+                    constraints: vec!["stay inside SDK reports".to_string()],
+                    failure_modes: vec!["single observation".to_string()],
+                    counterfactual_fix: "wait for repeated evidence".to_string(),
+                    evidence_refs: vec!["task:mixed-single".to_string()],
+                    quality_score: 90,
+                    repeated_evidence_count: 1,
+                    capability_affinity: vec!["sdk".to_string()],
+                },
+                ProceduralMemoryPromotionInput {
+                    task_id: "task-mixed-repeated".to_string(),
+                    trigger: "deployment warmup checklist".to_string(),
+                    procedure: "Promote only the repeated evidence item.".to_string(),
+                    constraints: vec!["stay inside SDK reports".to_string()],
+                    failure_modes: vec!["missing repeated evidence".to_string()],
+                    counterfactual_fix: "cite both observations".to_string(),
+                    evidence_refs: vec![
+                        "task:mixed-first".to_string(),
+                        "task:mixed-second".to_string(),
+                    ],
+                    quality_score: 90,
+                    repeated_evidence_count: 2,
+                    capability_affinity: vec!["sdk".to_string()],
+                },
+            ],
+            source: RuntimeSkillWriteSource::TaskLearning,
+        })
+        .expect("mixed promotion");
+    assert!(!mixed.accepted);
+    assert_eq!(mixed.procedural_promotions.len(), 2);
+    assert_eq!(
+        mixed
+            .procedural_promotions
+            .iter()
+            .filter(|report| report.promoted)
+            .count(),
+        1
+    );
+
+    let accepted = runtime
+        .write(MemoryWriteRequest::ProceduralPromotions {
+            promotions: vec![ProceduralMemoryPromotionInput {
+                task_id: "task-repeated".to_string(),
+                trigger: "release checklist".to_string(),
+                procedure: "Run gates before release.".to_string(),
+                constraints: vec!["stay inside SDK reports".to_string()],
+                failure_modes: vec!["claimed readiness without gate output".to_string()],
+                counterfactual_fix: "rerun gate and cite output".to_string(),
+                evidence_refs: vec!["task:first".to_string(), "task:second".to_string()],
+                quality_score: 90,
+                repeated_evidence_count: 2,
+                capability_affinity: vec!["sdk".to_string()],
+            }],
+            source: RuntimeSkillWriteSource::TaskLearning,
+        })
+        .expect("accepted promotion");
+    assert!(accepted.accepted);
+    assert_eq!(accepted.changed, 1);
+    assert!(accepted.procedural_promotions[0].promoted);
+    assert!(accepted
+        .procedural_evolution
+        .as_ref()
+        .expect("evolution")
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("promotion_policy_passed")));
+
+    let recall = runtime
+        .recall(MemoryRecallRequest {
+            query: "release checklist".to_string(),
+            limit: 4,
+        })
+        .expect("recall");
+    assert!(recall
+        .procedural_hits
+        .iter()
+        .any(|hit| hit.record.name == "runtime_skill__release_checklist"));
+}
+
+#[test]
+fn direct_runtime_learned_procedural_write_is_rejected_without_promotion_gate() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
+
+    let report = runtime
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![RuntimeSkillWrite {
+                name: "runtime_skill__unsafe_runtime_learned".to_string(),
+                topic: "release".to_string(),
+                title: "Unsafe runtime learned write".to_string(),
+                summary: "This write bypasses repeated evidence.".to_string(),
+                content: "1. run one command\n2. claim it worked".to_string(),
+                citations: vec!["single-observation".to_string()],
+                source_chat_id: Some("chat-a".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            source: RuntimeSkillWriteSource::TaskLearning,
+        })
+        .expect("write report");
+
+    assert!(!report.accepted);
+    assert_eq!(report.changed, 0);
+    assert!(report
+        .reason
+        .contains("runtime_learned_procedural_write_requires_promotion"));
+    let recall = runtime
+        .recall(MemoryRecallRequest {
+            query: "unsafe runtime learned".to_string(),
+            limit: 4,
+        })
+        .expect("recall");
+    assert!(recall.procedural_hits.is_empty());
 }

@@ -1,0 +1,38 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "recall-multisession-compact-baseline",
+  "class": "recall_multisession",
+  "profile": "esp_standalone_memory",
+  "mode": "compact",
+  "evaluation_source": "contract_baseline",
+  "description": "Compact profile recalls the current fact from multi-session evidence without selecting stale candidates.",
+  "scenario": {
+    "user_goal": "Recall the latest project release guard across compact session summaries.",
+    "evidence_refs": ["crates/core/src/memory/recall_contract.rs", "crates/sdk/src/runtime.rs"],
+    "expected_surfaces": ["MemoryRecallReport", "RecallSelectionReport"]
+  },
+  "metrics": {
+    "accuracy_bps": 9100,
+    "evidence_precision_bps": 8800,
+    "projection_faithfulness_bps": 8600,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 8800,
+    "soul_regression_count": 0,
+    "latency_ms": 35,
+    "token_budget": 512,
+    "memory_bytes": 32768
+  },
+  "thresholds": {
+    "min_accuracy_bps": 8500,
+    "min_evidence_precision_bps": 8000,
+    "min_projection_faithfulness_bps": 8000,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8000,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 250,
+    "max_token_budget": 1024,
+    "max_memory_bytes": 65536
+  }
+}

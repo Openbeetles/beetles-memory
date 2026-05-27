@@ -8,6 +8,7 @@
   import Topbar from "./components/Topbar.svelte";
   import {
     createDevice,
+    fetchWorkbenchReport,
     loadConsoleSnapshot,
     rotateDeviceKey,
     updateDeviceStatus,
@@ -23,6 +24,7 @@
     ConsoleApiSession,
     ConsoleApiSkillList,
     ConsoleApiSkillSummary,
+    ConsoleApiWorkbenchReport,
     Device,
     DeviceConfirmAction,
     Lang,
@@ -51,6 +53,7 @@
   import OverviewPage from "./pages/OverviewPage.svelte";
   import SkillMemoryPage from "./pages/SkillMemoryPage.svelte";
   import TransportsPage from "./pages/TransportsPage.svelte";
+  import WorkbenchPage from "./pages/WorkbenchPage.svelte";
 
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const isMacOS   = isTauri && typeof navigator !== "undefined" && navigator.userAgent.includes("Mac OS X");
@@ -62,11 +65,13 @@
   let lang: Lang = $state(readLang());
   let backendConnected = $state(false);
   let consoleLoading = $state(false);
+  let workbenchLoading = $state(false);
   let consoleLoadSeq = 0;
 
   let overviewData: ConsoleApiOverview | null = $state(null);
   let consoleCapabilities: ConsoleApiCapabilities | null = $state(null);
   let llmGateway: ConsoleApiLlmGateway | null = $state(null);
+  let workbenchReport: ConsoleApiWorkbenchReport | null = $state(null);
   let ollamaTransparent: ConsoleApiOllamaTransparentStatus | null = $state(null);
   let sessionData: ConsoleApiSession | null = $state(null);
   let transports: Transport[] = $state([]);
@@ -104,6 +109,11 @@
 
   $effect(() => writeStorage(STORAGE_KEYS.theme, theme));
   $effect(() => writeStorage(STORAGE_KEYS.lang, lang));
+  $effect(() => {
+    if (activePage === "workbench" && backendConnected && workbenchReport === null && !workbenchLoading) {
+      void refreshWorkbenchReport();
+    }
+  });
 
   onMount(() => {
     void loadConsoleData();
@@ -111,6 +121,9 @@
 
   function setActivePage(page: PageId) {
     activePage = page;
+    if (page === "workbench" && backendConnected && workbenchReport === null && !workbenchLoading) {
+      void refreshWorkbenchReport();
+    }
   }
 
   function setTheme(nextTheme: Theme) {
@@ -140,6 +153,7 @@
       overviewData = null;
       consoleCapabilities = null;
       llmGateway = null;
+      workbenchReport = null;
       ollamaTransparent = null;
       skillReport = null;
       skills = [];
@@ -151,6 +165,19 @@
       if (consoleLoadSeq === loadId) {
         consoleLoading = false;
       }
+    }
+  }
+
+  async function refreshWorkbenchReport() {
+    if (!backendConnected || workbenchLoading) return;
+    workbenchLoading = true;
+    try {
+      workbenchReport = await fetchWorkbenchReport();
+    } catch {
+      workbenchReport = null;
+      backendConnected = false;
+    } finally {
+      workbenchLoading = false;
     }
   }
 
@@ -355,6 +382,15 @@
           {transportStats}
           {kernelRows}
           {memoryContextRows}
+        />
+      {:else if activePage === "workbench"}
+        <WorkbenchPage
+          {t}
+          {lang}
+          report={workbenchReport}
+          {backendConnected}
+          loading={workbenchLoading}
+          onRefresh={refreshWorkbenchReport}
         />
       {:else if activePage === "skills"}
         <SkillMemoryPage

@@ -26,6 +26,7 @@ license = "Apache-2.0"
 bm-core = { version = "0.1.0", path = "crates/core" }
 bm-store = { version = "0.1.0", path = "crates/store" }
 bm-sdk = { version = "0.1.0", path = "crates/sdk" }
+bm-replay = { version = "0.1.0", path = "crates/replay" }
 bm-adapter = { version = "0.1.0", path = "crates/adapter" }
 bm-entry = { version = "0.1.0", path = "crates/entry" }
 bm-http = { version = "0.1.0", path = "crates/http" }

@@ -2,7 +2,11 @@ use bm_core::memory::IngressKind;
 use bm_core::memory::{
     CanonicalTurnDelta, DeferredGovernanceQueueReport, MemoryHygieneInspection,
     MemoryHygieneOutcome, PostTurnMemoryGovernanceReport, PostTurnSemanticGovernanceReport,
+    PrivateEchoGuardReport, PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck, SkillEvolutionReport,
+    SubjectProjectionReport, VaultManifest, VaultMigrationPreflight,
 };
+use bm_core::memory::{CompactMemoryGraph, GraphRecallRerankReport, TemporalMemoryGraphGateReport};
 use bm_core::{budget::RuntimeRetentionQuotaReport, feature_gate::ProfileId};
 
 use crate::{
@@ -121,6 +125,10 @@ pub enum MemoryWriteRequest {
         writes: Vec<RuntimeSkillWrite>,
         source: RuntimeSkillWriteSource,
     },
+    ProceduralPromotions {
+        promotions: Vec<ProceduralMemoryPromotionInput>,
+        source: RuntimeSkillWriteSource,
+    },
     LongTermExtraction {
         extraction: ParsedLongTermMemoryExtraction,
     },
@@ -137,6 +145,8 @@ pub struct MemoryWriteReport {
     pub reason: String,
     pub lifecycle_report: RuntimeLifecycleReport,
     pub semantic_governance: Option<PostTurnSemanticGovernanceReport>,
+    pub procedural_evolution: Option<SkillEvolutionReport>,
+    pub procedural_promotions: Vec<ProceduralMemoryPromotionReport>,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +160,9 @@ pub struct MemoryRecallReport {
     pub query: String,
     pub procedural_hits: Vec<RuntimeSkillHit>,
     pub working: WorkingRecallInspection,
+    pub graph_rerank: GraphRecallRerankReport,
+    pub graph_gate: TemporalMemoryGraphGateReport,
+    pub compact_graph: CompactMemoryGraph,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -166,6 +179,9 @@ pub struct MemoryProjectionReport {
     pub system_memory_block: String,
     pub context: PromptMemoryContext,
     pub audit: MemoryProjectionAuditReport,
+    pub subject_projection: SubjectProjectionReport,
+    pub projection_faithfulness: ProjectionFaithfulnessCheck,
+    pub private_echo_guard: PrivateEchoGuardReport,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -367,6 +383,8 @@ pub struct MemorySpaceImportReport {
 pub struct MemorySpaceMigratePreviewRequest {
     pub source_memory_space_id: String,
     pub target_memory_space_id: String,
+    pub source_profile: ProfileId,
+    pub target_profile: ProfileId,
     pub snapshot: StoreSnapshot,
 }
 
@@ -415,12 +433,16 @@ pub struct MemorySpaceMigratePreviewReport {
     pub privacy_redactions: usize,
     pub loss_risk: bool,
     pub manifest: MemorySpaceMigrationManifest,
+    pub vault_manifest: VaultManifest,
+    pub vault_redaction: PrivateMaterialRedactionReport,
+    pub vault_preflight: VaultMigrationPreflight,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceMigrateApplyRequest {
     pub target_memory_space_id: String,
     pub snapshot: StoreSnapshot,
+    pub preflight: VaultMigrationPreflight,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
