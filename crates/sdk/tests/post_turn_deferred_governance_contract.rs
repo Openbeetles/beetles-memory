@@ -2,10 +2,10 @@ mod support;
 
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationScope, DeferredGovernanceJob, DeferredGovernanceJobStatus,
-    MemoryDeferredGovernanceRunRequest, MemoryInspectionRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, TranscriptInputMessage,
+    default_memory_space_id, CanonicalTurnDelta, ConversationScope, DeferredGovernanceJob,
+    DeferredGovernanceJobStatus, MemoryDeferredGovernanceRunRequest, MemoryInspectionRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, TranscriptInputMessage,
 };
 
 use support::{
@@ -129,10 +129,13 @@ fn duplicate_canonical_turn_does_not_enqueue_duplicate_deferred_governance() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(
         jobs[0].idempotency_key,
-        "owner-default:subject-default:llm.gateway:chat-a:turn-deferred-1"
+        "space:owner-default:subject-default:llm.gateway:chat-a:turn-deferred-1"
     );
     assert_eq!(jobs[0].subject_id, "subject-default");
-    assert_eq!(jobs[0].memory_space_id, "owner-default");
+    assert_eq!(
+        jobs[0].memory_space_id,
+        default_memory_space_id("owner-default")
+    );
     assert_eq!(jobs[0].turn_id, "turn-deferred-1");
     assert_eq!(jobs[0].candidate_ids, Vec::<String>::new());
     assert_eq!(jobs[0].retry_policy, "standard_backoff");
@@ -228,7 +231,10 @@ fn deferred_governance_queue_report_exposes_operator_visible_scope_and_status() 
     assert_eq!(queue.recent_jobs.len(), 1);
     let job = &queue.recent_jobs[0];
     assert_eq!(job.status, DeferredGovernanceJobStatus::Pending);
-    assert_eq!(job.memory_space_id, "owner-default");
+    assert_eq!(
+        job.memory_space_id,
+        default_memory_space_id("owner-default")
+    );
     assert_eq!(job.subject_id, "subject-default");
     assert_eq!(job.chat_id, "chat-a");
     assert_eq!(job.conversation_id.as_deref(), Some("window-a"));
@@ -293,8 +299,8 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
     let mut other_scope_job = jobs[0].clone();
     other_scope_job.job_id = "governance-manual-other-scope".to_string();
     other_scope_job.idempotency_key =
-        "owner-b:subject-b:llm.gateway:shared-chat:turn-deferred-1".to_string();
-    other_scope_job.memory_space_id = "owner-b".to_string();
+        "space:owner-b:subject-b:llm.gateway:shared-chat:turn-deferred-1".to_string();
+    other_scope_job.memory_space_id = default_memory_space_id("owner-b");
     other_scope_job.subject_id = "subject-b".to_string();
     if let Some(turn) = other_scope_job.turn.as_mut() {
         turn.subject = "subject-b".to_string();
@@ -316,14 +322,16 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
     let jobs: Vec<DeferredGovernanceJob> = serde_json::from_slice(&raw).expect("jobs json");
     assert_eq!(jobs.len(), 2);
     assert!(jobs.iter().any(|job| {
-        job.memory_space_id == "owner-a"
+        job.memory_space_id == default_memory_space_id("owner-a")
             && job.subject_id == "subject-a"
-            && job.idempotency_key == "owner-a:subject-a:llm.gateway:shared-chat:turn-deferred-1"
+            && job.idempotency_key
+                == "space:owner-a:subject-a:llm.gateway:shared-chat:turn-deferred-1"
     }));
     assert!(jobs.iter().any(|job| {
-        job.memory_space_id == "owner-b"
+        job.memory_space_id == default_memory_space_id("owner-b")
             && job.subject_id == "subject-b"
-            && job.idempotency_key == "owner-b:subject-b:llm.gateway:shared-chat:turn-deferred-1"
+            && job.idempotency_key
+                == "space:owner-b:subject-b:llm.gateway:shared-chat:turn-deferred-1"
     }));
 
     let mut http = StaticHttpClient;
@@ -344,7 +352,10 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
         .queue
         .recent_jobs
         .iter()
-        .all(|job| job.memory_space_id == "owner-a" && job.subject_id == "subject-a"));
+        .all(
+            |job| job.memory_space_id == default_memory_space_id("owner-a")
+                && job.subject_id == "subject-a"
+        ));
 
     let raw = platform
         .state_fs()
@@ -354,11 +365,11 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
     let jobs: Vec<DeferredGovernanceJob> = serde_json::from_slice(&raw).expect("jobs json");
     let job_a = jobs
         .iter()
-        .find(|job| job.memory_space_id == "owner-a")
+        .find(|job| job.memory_space_id == default_memory_space_id("owner-a"))
         .expect("owner a job");
     let job_b = jobs
         .iter()
-        .find(|job| job.memory_space_id == "owner-b")
+        .find(|job| job.memory_space_id == default_memory_space_id("owner-b"))
         .expect("owner b job");
     assert_eq!(job_a.status, DeferredGovernanceJobStatus::Terminal);
     assert_eq!(job_b.status, DeferredGovernanceJobStatus::Pending);
@@ -368,6 +379,9 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
         .expect("runtime b queue report");
     assert_eq!(queue_b.pending, 1);
     assert_eq!(queue_b.terminal, 0);
-    assert_eq!(queue_b.recent_jobs[0].memory_space_id, "owner-b");
+    assert_eq!(
+        queue_b.recent_jobs[0].memory_space_id,
+        default_memory_space_id("owner-b")
+    );
     assert_eq!(queue_b.recent_jobs[0].subject_id, "subject-b");
 }

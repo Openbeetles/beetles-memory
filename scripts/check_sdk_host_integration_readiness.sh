@@ -12,6 +12,11 @@ cargo test -p bm-store --test memory_space_event_scope_contract
 cargo test -p bm-sdk --test public_surface
 cargo test -p bm-sdk --test host_platform_injection_contract
 cargo test -p bm-sdk --test write_candidate_contract
+cargo test -p bm-core --test subject_registry_contract
+cargo test -p bm-core --test soul_non_regression_contract
+cargo test -p bm-sdk --test single_agent_default_registry_contract
+cargo test -p bm-sdk --test shared_fact_governance_contract
+cargo test -p bm-sdk --test projection_no_soul_mutation_contract
 cargo test -p bm-sdk --test memory_space_migration_contract
 cargo test -p bm-sdk --test beetle_derived_migration_contract
 cargo test -p bm-sdk --test post_turn_deferred_governance_contract
@@ -32,6 +37,8 @@ cargo test -p bm-replay --test sdk_host_beetle_derived_migration_replay_contract
 
 bash scripts/check_sdk_profile_contract.sh
 
+! rg -n "RoleKey|RoleMemoryLane" crates/core/src crates/store/src crates/sdk/src
+! rg -n "boss_user|ceo_agent|finance_director_agent|warehouse_manager_agent|CEO|BOSS|财务总监|仓库管理员" crates/core/src crates/store/src crates/sdk/src
 test -f fixtures/sdk-host-readiness/generic-rust-host/host-turn-lifecycle.json
 test -f fixtures/sdk-host-readiness/beetle-derived/host-turn-lifecycle.json
 rg -n "Host Turn Lifecycle|Migration Dry-Run|Host Forbidden Zones" docs/en/integration.md

@@ -72,7 +72,6 @@ use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, Pr
 
 let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
-    .subject_id("subject-default")
     .scope(MemoryScope::new("local", "chat-1")?)
     .profile(ProfileId::DesktopMacosEmbeddedSdk)
     .store_platform(store)
@@ -80,7 +79,7 @@ let runtime = MemoryRuntime::builder()
     .build()?;
 ```
 
-`agent_id` identifies the agent instance. `owner_id` identifies the owner or tenant. `subject_id` binds the runtime to the active subject; when omitted, the SDK initializes the local subject from `owner_id`. `channel` and `chat_id` define the default memory scope for runtime operations.
+`agent_id` identifies the agent instance. `owner_id` identifies the owner or tenant. Normal single-agent hosts do not pass `subject_id`: the SDK creates `space:<owner_id>` and the default `agent:<agent_id>` subject automatically, while hiding the `system_governor` / `human_user` / relationship graph details. Only advanced multi-subject hosts configure a custom subject registry, relationship graph, or mounted subject. `channel` and `chat_id` define the default memory scope for runtime operations.
 
 `add_agent_skill_dir` is optional and read-only. The host still owns standard Agent Skill add/edit/import/delete/execute flows; Beetle Memory only scans `SKILL.md` summaries for recall and projection.
 

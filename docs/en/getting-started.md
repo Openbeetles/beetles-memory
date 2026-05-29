@@ -32,7 +32,6 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
 
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
-        .subject_id("subject-default")
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
         .store_platform(store)
@@ -43,6 +42,8 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
         .build()
 }
 ```
+
+The default single-agent entry only needs `owner_id + agent_id`. The SDK creates `space:<owner_id>`, the hidden `system_governor`, the primary `human_user`, and the default `agent:<agent_id>` subject automatically. Only advanced multi-subject hosts need to pass a custom subject registry, relationship graph, or mounted subject.
 
 `add_agent_skill_dir` is optional. It mounts a standard Agent Skill directory read-only so recall and projection can use `SKILL.md` summaries without letting Beetle Memory add, edit, import, delete, or execute those skills.
 

@@ -32,7 +32,6 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
 
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
-        .subject_id("subject-default")
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
         .store_platform(store)
@@ -43,6 +42,8 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
         .build()
 }
 ```
+
+默认 single-agent 入口只需要 `owner_id + agent_id`。SDK 会自动建立 `space:<owner_id>`、隐藏的 `system_governor`、主 `human_user` 和默认 `agent:<agent_id>` 主体；只有高级多主体宿主才需要显式提供 subject registry、relationship graph 或自定义 mounted subject。
 
 `add_agent_skill_dir` 是可选项。它把标准 Agent Skill 目录只读挂载给召回和投影使用，Beetle Memory 只读取 `SKILL.md` 摘要，不添加、不编辑、不导入、不删除、不执行这些 skill。
 

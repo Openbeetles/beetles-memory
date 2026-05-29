@@ -7,8 +7,8 @@ use bm_core::memory::{
 };
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    MemoryProjectionRequest, PressureLevel, ProfileId, ProjectionSourceAuthority,
-    RuntimeLifecycleModeInput,
+    default_agent_subject_id, default_memory_space_id, MemoryProjectionRequest, PressureLevel,
+    ProfileId, ProjectionSourceAuthority, RuntimeLifecycleModeInput,
 };
 
 use support::{empty_store_platform, seeded_store_platform, test_runtime_with_scope};
@@ -84,8 +84,22 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
     assert_eq!(report.audit.identity.owner_id, "owner-default");
     assert_eq!(report.audit.scope.channel, "sdk.direct");
     assert_eq!(report.audit.scope.chat_id, "chat-a");
-    assert_eq!(report.audit.memory_space_id, "owner-default");
-    assert_eq!(report.audit.subject_id, "owner-default");
+    assert_eq!(
+        report.audit.memory_space_id,
+        default_memory_space_id("owner-default")
+    );
+    assert_eq!(
+        report.audit.subject_id,
+        default_agent_subject_id("agent-main")
+    );
+    assert_eq!(
+        report.audit.scoped_runtime.mounted_subject_id,
+        default_agent_subject_id("agent-main")
+    );
+    assert_eq!(
+        report.audit.scoped_runtime.actor_subject_id,
+        default_agent_subject_id("agent-main")
+    );
     assert_eq!(report.audit.conversation_id.as_deref(), Some("chat-a"));
     assert!(report.audit.injected);
     assert_eq!(
@@ -165,7 +179,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
     assert!(report
         .subject_projection
         .identity_mount
-        .contains("subject:owner-default"));
+        .contains("subject:agent:agent-main"));
     assert!(!report
         .subject_projection
         .identity_mount

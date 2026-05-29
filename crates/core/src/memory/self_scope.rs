@@ -1,6 +1,8 @@
 //! Selfhood scope helpers.
 //! 主体/关系作用域辅助：把“板级主体”与“当前关系层”明确分开。
 
+use serde::{Deserialize, Serialize};
+
 pub const BOARD_SUBJECT_SCOPE_ID: &str = "board.self";
 pub const PRIVATE_GARDEN_SCOPE_ID: &str = BOARD_SUBJECT_SCOPE_ID;
 
@@ -8,7 +10,7 @@ pub type MemorySpaceId = String;
 pub type SubjectId = String;
 pub type RelationshipId = String;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelationshipScope {
     pub relationship_id: RelationshipId,
     pub channel: String,
@@ -26,6 +28,21 @@ pub fn default_subject_id() -> SubjectId {
 pub fn default_memory_space_id(owner_id: &str) -> MemorySpaceId {
     let owner = encode_scope_component(owner_id);
     format!("space:{owner}")
+}
+
+pub fn system_governor_subject_id(owner_id: &str) -> SubjectId {
+    let owner = encode_scope_component(owner_id);
+    format!("system:{owner}")
+}
+
+pub fn primary_human_subject_id(user_id: &str) -> SubjectId {
+    let user = encode_scope_component(user_id);
+    format!("user:{user}")
+}
+
+pub fn default_agent_subject_id(agent_id: &str) -> SubjectId {
+    let agent = encode_scope_component(agent_id);
+    format!("agent:{agent}")
 }
 
 pub fn private_garden_scope_id() -> &'static str {

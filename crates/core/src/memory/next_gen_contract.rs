@@ -675,6 +675,16 @@ impl MemoryGraphNode {
         if let Some(rejection) = validate_vec(&self.evidence_refs, "memory_graph_evidence_empty") {
             return rejection;
         }
+        if contains_raw_soul_private_marker(&self.label) {
+            return rejected("memory_graph_raw_soul_private_label");
+        }
+        if self
+            .evidence_refs
+            .iter()
+            .any(|item| contains_raw_soul_private_marker(item))
+        {
+            return rejected("memory_graph_raw_soul_private_evidence_ref");
+        }
         accepted()
     }
 }
@@ -867,6 +877,37 @@ pub struct PrivateMaterialRedactionReport {
     pub checked_refs: Vec<String>,
     pub redacted_refs: Vec<String>,
     pub raw_private_leak_count: u32,
+}
+
+pub fn redact_private_soul_graph_material(
+    surface: &str,
+    refs: &[&str],
+) -> PrivateMaterialRedactionReport {
+    let mut checked_refs = Vec::new();
+    let mut redacted_refs = Vec::new();
+    let surface_is_private = contains_raw_soul_private_marker(surface);
+    for (index, item) in refs.iter().map(|item| item.trim()).enumerate() {
+        if item.is_empty() {
+            continue;
+        }
+        if surface_is_private || contains_raw_soul_private_marker(item) {
+            let redacted_ref = format!("redacted_ref:{index}:private_material");
+            checked_refs.push(redacted_ref.clone());
+            redacted_refs.push(redacted_ref);
+        } else {
+            checked_refs.push(item.to_string());
+        }
+    }
+    PrivateMaterialRedactionReport {
+        surface: if surface_is_private {
+            "redacted_surface:private_material".to_string()
+        } else {
+            surface.trim().to_string()
+        },
+        checked_refs,
+        raw_private_leak_count: redacted_refs.len() as u32,
+        redacted_refs,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1143,6 +1184,16 @@ pub fn build_temporal_memory_graph_gate_report(
             .any(|backlink| backlink.source_id == *evidence_ref && !backlink.fingerprint.is_empty())
         {
             failures.push(format!("missing_evidence_backlink:{evidence_ref}"));
+        }
+    }
+    for backlink in &evidence_backlinks {
+        if contains_raw_soul_private_marker(&backlink.source_kind)
+            || contains_raw_soul_private_marker(&backlink.source_id)
+        {
+            failures.push(format!(
+                "evidence_backlink_raw_soul_private:{}",
+                backlink.source_id
+            ));
         }
     }
 
@@ -1668,6 +1719,31 @@ fn validate_nonempty(value: &str, reason: &'static str) -> Option<NextGenContrac
 
 fn validate_vec<T>(value: &[T], reason: &'static str) -> Option<NextGenContractValidation> {
     value.is_empty().then(|| rejected(reason))
+}
+
+fn contains_raw_soul_private_marker(value: &str) -> bool {
+    let normalized = normalize_private_marker(value);
+    normalized.contains("inner_life")
+        || normalized.contains("private_garden")
+        || normalized.contains("soul_private")
+        || normalized.contains("self_authored_core")
+        || normalized.contains("self_continuity")
+        || normalized.contains("growth_revision_ledger")
+}
+
+fn normalize_private_marker(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_separator = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch);
+            previous_was_separator = false;
+        } else if !previous_was_separator {
+            normalized.push('_');
+            previous_was_separator = true;
+        }
+    }
+    normalized.trim_matches('_').to_string()
 }
 
 fn accepted() -> NextGenContractValidation {

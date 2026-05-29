@@ -3,9 +3,10 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use bm_sdk::{
-    MemoryAuditEvent, MemoryAuditSink, MemoryIdentity, MemoryProjectionRequest, MemoryRuntime,
-    MemoryScope, MemoryWriteRequest, NoopMemoryAuditSink, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    default_agent_subject_id, default_memory_space_id, MemoryAuditEvent, MemoryAuditSink,
+    MemoryIdentity, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest,
+    NoopMemoryAuditSink, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
 };
 
 use support::empty_store_platform;
@@ -74,8 +75,8 @@ fn sdk_audit_events_bind_operation_to_memory_identity_and_scope() {
         .expect("write audit");
     assert_eq!(write.identity.agent_id, "agent-a");
     assert_eq!(write.identity.owner_id, "owner-a");
-    assert_eq!(write.memory_space_id, "owner-a");
-    assert_eq!(write.subject_id, "owner-a");
+    assert_eq!(write.memory_space_id, default_memory_space_id("owner-a"));
+    assert_eq!(write.subject_id, default_agent_subject_id("agent-a"));
     assert_eq!(write.conversation_id.as_deref(), Some("chat-a"));
     assert_ne!(write.memory_space_id, "system");
 

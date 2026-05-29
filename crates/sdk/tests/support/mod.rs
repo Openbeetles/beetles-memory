@@ -69,15 +69,35 @@ pub fn test_runtime_with_scope(
     channel: &str,
     chat_id: &str,
 ) -> MemoryRuntime {
-    test_runtime_with_identity_scope_and_subject(
+    test_runtime_with_identity_scope(
         platform,
         profile,
         "agent-main",
         "owner-default",
-        "owner-default",
         channel,
         chat_id,
     )
+}
+
+pub fn test_runtime_with_identity_scope(
+    platform: StorePlatform,
+    profile: ProfileId,
+    agent_id: &str,
+    owner_id: &str,
+    channel: &str,
+    chat_id: &str,
+) -> MemoryRuntime {
+    MemoryRuntime::builder()
+        .identity(MemoryIdentity::new(agent_id, owner_id).expect("identity"))
+        .scope(MemoryScope::new(channel, chat_id).expect("scope"))
+        .profile(profile)
+        .store_platform(platform)
+        .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(NoopMemoryAuditSink))
+        .build()
+        .expect("runtime")
 }
 
 pub fn test_runtime_with_scope_and_subject(

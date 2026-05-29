@@ -1,10 +1,10 @@
 mod support;
 
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationScope, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, TranscriptInputMessage,
+    default_agent_subject_id, CanonicalTurnDelta, ConversationScope, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
+    MemoryTurnSource, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeSkillWrite, RuntimeSkillWriteSource, TranscriptInputMessage,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -32,7 +32,7 @@ fn finalize_request(turn_id: &str) -> MemoryTurnFinalizeRequest {
                 chat_id: "chat-a".to_string(),
                 conversation_id: Some("conversation-a".to_string()),
             },
-            subject: "owner-default".to_string(),
+            subject: default_agent_subject_id("agent-main"),
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
             source: turn_source(),
             input_messages: vec![TranscriptInputMessage::user(

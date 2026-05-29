@@ -4,7 +4,7 @@ use bm_core::memory::{
     MemoryHygieneOutcome, PostTurnMemoryGovernanceReport, PostTurnSemanticGovernanceReport,
     PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
     ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck, SkillEvolutionReport,
-    SubjectProjectionReport, VaultManifest, VaultMigrationPreflight,
+    SubjectProjectionReport, SubjectScopedRuntime, VaultManifest, VaultMigrationPreflight,
 };
 use bm_core::memory::{CompactMemoryGraph, GraphRecallRerankReport, TemporalMemoryGraphGateReport};
 use bm_core::skills::{
@@ -141,6 +141,7 @@ pub struct MemoryWriteReport {
     pub reason: String,
     pub lifecycle_report: RuntimeLifecycleReport,
     pub semantic_governance: Option<PostTurnSemanticGovernanceReport>,
+    pub shared_fact_governance: Option<bm_core::memory::SharedMemoryWriteOutcome>,
     pub procedural_evolution: Option<SkillEvolutionReport>,
     pub procedural_promotions: Vec<ProceduralMemoryPromotionReport>,
     pub agent_tool_experience: Option<AgentToolExperienceGovernanceReport>,
@@ -292,6 +293,7 @@ pub struct MemoryProjectionAuditReport {
     pub scope: crate::MemoryScope,
     pub memory_space_id: String,
     pub subject_id: String,
+    pub scoped_runtime: SubjectScopedRuntime,
     pub conversation_id: Option<String>,
     pub source_budget_chars: usize,
     pub render_budget_chars: usize,

@@ -2,19 +2,20 @@
 
 use bm_sdk::{
     build_temporal_memory_graph_from_evidence, build_vault_migration_preflight,
-    compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
-    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, AgentSkillDirConfig,
-    AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentToolDescriptor,
-    AgentToolExperienceGovernanceReport, AgentToolHint, AgentToolObservationDigest,
-    AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
-    AgentToolRegistrySnapshot, AgentToolUsageFeedback, LLMRuntimeProjectionEnvelope,
-    MemoryAutopilotInput, MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGraphEvidence,
-    MemoryGraphNodeKind, MemoryIdentity, MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind,
-    MemoryScope, MemoryWriteRequest, PostReplyMemoryMaintenanceContext,
-    PrivateDisclosureIntegrityReport, PrivateMaterialRedactionReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
-    ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
-    SoulLifeProjectionReport, StoreBackendConfig, StorePlatform, VaultManifest,
+    compile_edge_memory_budget_report, default_agent_subject_id, default_memory_space_id,
+    plan_memory_autopilot_for_profile, promote_task_experience_to_procedure,
+    rerank_recall_with_temporal_graph, AgentSkillDirConfig, AgentSkillDirectoryReport,
+    AgentSkillProjectionAudit, AgentToolDescriptor, AgentToolExperienceGovernanceReport,
+    AgentToolHint, AgentToolObservationDigest, AgentToolProjectionAudit, AgentToolRegistryRef,
+    AgentToolRegistryReport, AgentToolRegistrySnapshot, AgentToolUsageFeedback,
+    LLMRuntimeProjectionEnvelope, MemoryAutopilotInput, MemoryCapabilityCatalog,
+    MemoryCapabilityPolicy, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
+    MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemoryWriteRequest,
+    PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
+    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
+    PromptParticipationPlan, SoulLifeProjectionReport, StoreBackendConfig, StorePlatform,
+    SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime, VaultManifest,
     WorkIntegrityReport, AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
     AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
@@ -72,6 +73,10 @@ fn sdk_runtime_contract_types_are_importable(
     _identity: MemoryIdentity,
     _scope: MemoryScope,
     _write: Option<MemoryWriteRequest>,
+    _registry: Option<SubjectRegistry>,
+    _graph: Option<SubjectRelationshipGraph>,
+    _scoped_runtime: Option<SubjectScopedRuntime>,
+    _kind: Option<SubjectKind>,
 ) {
 }
 
@@ -159,7 +164,6 @@ fn sdk_runtime_uses_store_platform_as_public_store_entry() {
 
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").unwrap())
-        .subject_id("subject-default")
         .scope(MemoryScope::new("local", "chat-1").unwrap())
         .profile(ProfileId::ServerLinuxDevFull)
         .store_platform(store)
@@ -167,7 +171,12 @@ fn sdk_runtime_uses_store_platform_as_public_store_entry() {
         .unwrap();
 
     assert_eq!(runtime.identity().agent_id, "agent-main");
-    assert_eq!(runtime.subject_id(), "subject-default");
+    assert_eq!(runtime.subject_id(), default_agent_subject_id("agent-main"));
+    assert_eq!(
+        runtime.memory_space_id(),
+        default_memory_space_id("owner-default")
+    );
+    assert_eq!(default_agent_subject_id("agent-main"), "agent:agent-main");
     assert_eq!(runtime.scope().chat_id, "chat-1");
     assert_eq!(
         runtime.capabilities().profile,

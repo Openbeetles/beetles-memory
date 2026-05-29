@@ -383,6 +383,34 @@ fn temporal_memory_graph_gate_requires_evidence_backlinks_for_projection() {
 }
 
 #[test]
+fn temporal_memory_graph_rejects_raw_soul_private_material() {
+    let graph =
+        bm_core::memory::build_temporal_memory_graph_from_evidence(vec![MemoryGraphEvidence {
+            node_id: "soul:raw-private".to_string(),
+            kind: MemoryGraphNodeKind::SoulArtifact,
+            label: "inner_life raw: hidden fear should never become graph label".to_string(),
+            source_kind: "private_garden note".to_string(),
+            source_id: "private_garden note:journal/today.md".to_string(),
+            fingerprint: "fp-private".to_string(),
+            observed_at: 1_800_000_000,
+            supports: Vec::new(),
+            supersedes: None,
+        }]);
+
+    assert!(!graph.gate.high_confidence_projection_allowed);
+    assert!(graph
+        .gate
+        .failures
+        .iter()
+        .any(|failure| failure.contains("memory_graph_raw_soul_private_label")));
+    assert!(graph
+        .gate
+        .failures
+        .iter()
+        .any(|failure| failure.contains("evidence_backlink_raw_soul_private")));
+}
+
+#[test]
 fn temporal_memory_graph_builder_creates_nodes_edges_and_graph_rerank_report() {
     let graph = bm_core::memory::build_temporal_memory_graph_from_evidence(vec![
         MemoryGraphEvidence {

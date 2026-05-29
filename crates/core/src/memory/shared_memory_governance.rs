@@ -72,6 +72,12 @@ impl SharedMemoryWriteReason {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SharedMemoryWriteItemReport {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_space_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_subject_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_subject_id: Option<String>,
     pub source: SharedMemoryWriteSource,
     pub action: SharedMemoryWriteAction,
     pub reason: SharedMemoryWriteReason,
@@ -82,6 +88,20 @@ pub struct SharedMemoryWriteItemReport {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SharedMemoryWriteOutcome {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_space_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_layer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_subject_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_subject_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_subject_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub requested_visibility: String,
     pub source: SharedMemoryWriteSource,
     pub submitted: usize,
     pub accepted: usize,
@@ -89,6 +109,60 @@ pub struct SharedMemoryWriteOutcome {
     pub changed: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reports: Vec<SharedMemoryWriteItemReport>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedFactWriteGovernanceContext {
+    pub memory_space_id: String,
+    pub origin_subject_id: String,
+    pub actor_subject_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_subject_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
+    pub requested_visibility: String,
+    pub source: SharedMemoryWriteSource,
+}
+
+impl SharedFactWriteGovernanceContext {
+    pub fn new(
+        memory_space_id: impl Into<String>,
+        origin_subject_id: impl Into<String>,
+        actor_subject_id: impl Into<String>,
+        source: SharedMemoryWriteSource,
+    ) -> Self {
+        Self {
+            memory_space_id: memory_space_id.into().trim().to_string(),
+            origin_subject_id: origin_subject_id.into().trim().to_string(),
+            actor_subject_id: actor_subject_id.into().trim().to_string(),
+            target_subject_id: None,
+            relationship_id: None,
+            requested_visibility: "shared_factual_candidate".to_string(),
+            source,
+        }
+    }
+}
+
+pub fn write_governed_shared_memory_in_space(
+    store: &dyn LongTermMemoryStore,
+    drafts: &[LongTermMemoryDraft],
+    now_secs: u64,
+    context: SharedFactWriteGovernanceContext,
+) -> Result<SharedMemoryWriteOutcome> {
+    let mut outcome = write_governed_shared_memory(store, drafts, now_secs, context.source)?;
+    outcome.memory_space_id = context.memory_space_id.clone();
+    outcome.owner_layer = "memory_space".to_string();
+    outcome.origin_subject_id = Some(context.origin_subject_id.clone());
+    outcome.actor_subject_id = Some(context.actor_subject_id.clone());
+    outcome.target_subject_id = context.target_subject_id.clone();
+    outcome.relationship_id = context.relationship_id.clone();
+    outcome.requested_visibility = context.requested_visibility.clone();
+    for report in &mut outcome.reports {
+        report.memory_space_id = context.memory_space_id.clone();
+        report.origin_subject_id = Some(context.origin_subject_id.clone());
+        report.actor_subject_id = Some(context.actor_subject_id.clone());
+    }
+    Ok(outcome)
 }
 
 pub fn write_governed_shared_memory(
@@ -135,6 +209,9 @@ pub fn write_governed_shared_memory(
                 ),
             };
             reports.push(SharedMemoryWriteItemReport {
+                memory_space_id: String::new(),
+                origin_subject_id: None,
+                actor_subject_id: None,
                 source,
                 action: SharedMemoryWriteAction::Rejected,
                 reason,
@@ -146,6 +223,9 @@ pub fn write_governed_shared_memory(
         };
         if let Some((reason, detail)) = inspect_canonical_factual_shape(&factual_draft) {
             reports.push(SharedMemoryWriteItemReport {
+                memory_space_id: String::new(),
+                origin_subject_id: None,
+                actor_subject_id: None,
                 source,
                 action: SharedMemoryWriteAction::Rejected,
                 reason,
@@ -161,6 +241,9 @@ pub fn write_governed_shared_memory(
                     super::LongTermMemoryMergeGuardDecision::Allow => {}
                     super::LongTermMemoryMergeGuardDecision::RejectOlderObservation => {
                         reports.push(SharedMemoryWriteItemReport {
+                            memory_space_id: String::new(),
+                            origin_subject_id: None,
+                            actor_subject_id: None,
                             source,
                             action: SharedMemoryWriteAction::Rejected,
                             reason: SharedMemoryWriteReason::OlderThanExisting,
@@ -175,6 +258,9 @@ pub fn write_governed_shared_memory(
                     }
                     super::LongTermMemoryMergeGuardDecision::RejectLowerConfidenceContent => {
                         reports.push(SharedMemoryWriteItemReport {
+                            memory_space_id: String::new(),
+                            origin_subject_id: None,
+                            actor_subject_id: None,
                             source,
                             action: SharedMemoryWriteAction::Rejected,
                             reason: SharedMemoryWriteReason::LowerConfidenceThanExisting,
@@ -191,6 +277,9 @@ pub fn write_governed_shared_memory(
             }
         }
         reports.push(SharedMemoryWriteItemReport {
+            memory_space_id: String::new(),
+            origin_subject_id: None,
+            actor_subject_id: None,
             source,
             action: SharedMemoryWriteAction::Accepted,
             reason: SharedMemoryWriteReason::DurableFact,
@@ -211,6 +300,13 @@ pub fn write_governed_shared_memory(
         .filter(|report| matches!(report.action, SharedMemoryWriteAction::Rejected))
         .count();
     Ok(SharedMemoryWriteOutcome {
+        memory_space_id: String::new(),
+        owner_layer: "shared_memory_governance".to_string(),
+        origin_subject_id: None,
+        actor_subject_id: None,
+        target_subject_id: None,
+        relationship_id: None,
+        requested_visibility: String::new(),
         source,
         submitted: drafts.len(),
         accepted: accepted_count,

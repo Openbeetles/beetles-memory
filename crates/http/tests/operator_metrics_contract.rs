@@ -6,9 +6,9 @@ use bm_entry::{
 };
 use bm_http::{handle_http_request, HttpRuntimeRequest};
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationScope, MemoryCapabilityPolicy, MemoryPrivacyPolicy,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    ProfileId, StoreBackendKind, TranscriptInputMessage,
+    default_agent_subject_id, CanonicalTurnDelta, ConversationScope, MemoryCapabilityPolicy,
+    MemoryPrivacyPolicy, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
+    MemoryTurnSource, ProfileId, StoreBackendKind, TranscriptInputMessage,
 };
 use serde_json::Value;
 
@@ -62,7 +62,7 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
                 chat_id: "operator-chat".to_string(),
                 conversation_id: Some("operator-conversation".to_string()),
             },
-            subject: "operator-owner".to_string(),
+            subject: default_agent_subject_id("operator-metrics-agent"),
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
             source: turn_source(),
             input_messages: vec![TranscriptInputMessage::user("记住 operator queue 必须可见")],

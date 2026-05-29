@@ -83,6 +83,7 @@ mod shared_factual_plane;
 mod shared_memory_governance;
 mod skill_routing;
 mod subject_shell;
+mod subject_space;
 mod temperament_continuity;
 mod turn_commit;
 mod turn_continuity_evidence;
@@ -273,22 +274,22 @@ pub use next_gen_contract::{
     build_temporal_memory_graph_gate_report, build_vault_migration_preflight,
     build_workbench_gate_report, compile_edge_memory_budget_report,
     plan_memory_autopilot_for_profile, promote_task_experience_to_procedure,
-    rerank_recall_with_temporal_graph, AutopilotAuditReport, CompactGraphIndex, CompactMemoryGraph,
-    CompactSoulProfile, ConsolidationProposal, CoreRevisionDiff, DeviceSyncProposal,
-    DeviceTrustRecord, DroppedProjectionCandidate, EdgeMemoryApplianceGateReport,
-    EdgeMemoryBudgetReport, EdgeRecoveryFixture, EncryptedSnapshotEnvelope, EvidenceBacklink,
-    GraphRecallRerankReport, ImportanceDecayModel, MemoryAutopilotGateReport, MemoryAutopilotInput,
-    MemoryAutopilotPlan, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence,
-    MemoryGraphNode, MemoryGraphNodeKind, MemoryHygieneDiff, MemoryOperationSkill,
-    NextGenCapabilityContract, NextGenContractValidation, NextGenPhase, PrivacyVaultGateReport,
-    PrivateDisclosureIntegrityGuard, PrivateMaterialRedactionReport, ProceduralEvolutionGateReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
-    ProceduralMemoryPromotionReport, ProceduralMemoryRecordV2, ProcedureGenome,
-    ProjectionBudgetDecision, ProjectionFaithfulnessCheck, ProjectionPrivacyDecision,
-    RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest, SoulFeedbackReport,
-    SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport, SoulRegressionSuite,
-    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
-    SubjectProjectionWorkIntegrityReport, TaskExperienceToProcedure,
+    redact_private_soul_graph_material, rerank_recall_with_temporal_graph, AutopilotAuditReport,
+    CompactGraphIndex, CompactMemoryGraph, CompactSoulProfile, ConsolidationProposal,
+    CoreRevisionDiff, DeviceSyncProposal, DeviceTrustRecord, DroppedProjectionCandidate,
+    EdgeMemoryApplianceGateReport, EdgeMemoryBudgetReport, EdgeRecoveryFixture,
+    EncryptedSnapshotEnvelope, EvidenceBacklink, GraphRecallRerankReport, ImportanceDecayModel,
+    MemoryAutopilotGateReport, MemoryAutopilotInput, MemoryAutopilotPlan, MemoryGraphEdge,
+    MemoryGraphEdgeKind, MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind,
+    MemoryHygieneDiff, MemoryOperationSkill, NextGenCapabilityContract, NextGenContractValidation,
+    NextGenPhase, PrivacyVaultGateReport, PrivateDisclosureIntegrityGuard,
+    PrivateMaterialRedactionReport, ProceduralEvolutionGateReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProceduralMemoryRecordV2,
+    ProcedureGenome, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
+    ProjectionPrivacyDecision, RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest,
+    SoulFeedbackReport, SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport,
+    SoulRegressionSuite, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
+    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, TaskExperienceToProcedure,
     TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest,
     VaultMigrationPreflight, WorkbenchApiMap, WorkbenchGateReport, WorkbenchSurface,
 };
@@ -462,9 +463,10 @@ pub use self_runtime::{
     SELF_RUNTIME_CHANNEL, SELF_RUNTIME_SYSTEM_PROMPT,
 };
 pub use self_scope::{
-    board_subject_scope_id, default_memory_space_id, default_subject_id, private_garden_scope_id,
-    relationship_scope, relationship_scope_id, MemorySpaceId, RelationshipId, RelationshipScope,
-    SubjectId, BOARD_SUBJECT_SCOPE_ID, PRIVATE_GARDEN_SCOPE_ID,
+    board_subject_scope_id, default_agent_subject_id, default_memory_space_id, default_subject_id,
+    primary_human_subject_id, private_garden_scope_id, relationship_scope, relationship_scope_id,
+    system_governor_subject_id, MemorySpaceId, RelationshipId, RelationshipScope, SubjectId,
+    BOARD_SUBJECT_SCOPE_ID, PRIVATE_GARDEN_SCOPE_ID,
 };
 pub use self_state::{
     build_self_state, render_self_state_block, SelfAutonomyState, SelfAutonomyStatus,
@@ -484,11 +486,17 @@ pub(crate) use shared_factual_plane::{
     SharedFactualPlaneSnapshot, SharedFactualReconcileAction,
 };
 pub use shared_memory_governance::{
-    write_governed_shared_memory, SharedMemoryWriteAction, SharedMemoryWriteItemReport,
+    write_governed_shared_memory, write_governed_shared_memory_in_space,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteAction, SharedMemoryWriteItemReport,
     SharedMemoryWriteOutcome, SharedMemoryWriteReason, SharedMemoryWriteSource,
 };
 pub(crate) use skill_routing::{route_long_term_draft, MemoryPlane};
 pub(crate) use subject_shell::{compile_subject_shell, SubjectShell, SubjectShellCompileInput};
+pub use subject_space::{
+    SubjectContractValidation, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
+    SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
+    SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulSurface, SubjectVisibility,
+};
 pub(crate) use temperament_continuity::{
     build_temperament_continuity_refresh_input, run_temperament_continuity_refresh_with_state,
     TemperamentContinuityRefreshCandidate,

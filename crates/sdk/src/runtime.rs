@@ -12,12 +12,13 @@ use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
     apply_long_term_memory_extraction, build_deferred_governance_queue_report,
     build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta,
-    compile_inhabited_subject_projection, export_continuity_snapshot, govern_write_candidates,
-    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
-    inspect_working_recall, load_prompt_memory_context, promote_task_experience_to_procedure,
+    compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
+    export_continuity_snapshot, govern_write_candidates, import_continuity_snapshot,
+    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
+    load_prompt_memory_context, promote_task_experience_to_procedure, relationship_scope,
     rerank_recall_with_temporal_graph, run_long_term_memory_refresh,
     run_memory_retention_compaction, run_post_reply_memory_maintenance,
-    run_private_garden_governance, write_governed_shared_memory, CanonicalTurnDelta,
+    run_private_garden_governance, write_governed_shared_memory_in_space, CanonicalTurnDelta,
     CompactMemoryGraph, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
     ContinuitySnapshotMode, DeferredGovernanceJob, DeferredGovernanceJobStatus,
     DeferredGovernanceQueueReport, DroppedProjectionCandidate, GovernedWriteDecision,
@@ -31,9 +32,10 @@ use bm_core::memory::{
     ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
     ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
     PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate,
-    RecallSelectionReport, SharedMemoryWriteSource, SkillEvolutionReport,
-    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
-    SubjectProjectionWorkIntegrityReport, TemporalMemoryGraphGateReport,
+    RecallSelectionReport, SharedFactWriteGovernanceContext, SharedMemoryWriteSource,
+    SkillEvolutionReport, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
+    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, SubjectRegistry,
+    SubjectRelationshipGraph, SubjectScopedRuntime, TemporalMemoryGraphGateReport,
     WorkingRecallInspectionInput,
 };
 use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
@@ -171,7 +173,30 @@ impl MemoryAuditEvent {
         allowed: bool,
         reason: impl Into<String>,
     ) -> Self {
-        let memory_space_id = identity.owner_id.clone();
+        let memory_space_id = default_memory_space_id(&identity.owner_id);
+        Self::for_scoped_runtime_operation(
+            operation,
+            profile,
+            identity,
+            scope,
+            memory_space_id,
+            subject_id,
+            allowed,
+            reason,
+        )
+    }
+
+    pub fn for_scoped_runtime_operation(
+        operation: impl Into<String>,
+        profile: ProfileId,
+        identity: MemoryIdentity,
+        scope: MemoryScope,
+        memory_space_id: impl Into<String>,
+        subject_id: impl Into<String>,
+        allowed: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        let memory_space_id = memory_space_id.into();
         let subject_id = subject_id.into();
         let conversation_id = Some(scope.chat_id.clone());
         Self {
@@ -196,7 +221,11 @@ impl MemoryAuditSink for NoopMemoryAuditSink {
 
 pub struct MemoryRuntimeConfig {
     pub identity: MemoryIdentity,
+    pub memory_space_id: String,
     pub subject_id: String,
+    pub scoped_runtime: SubjectScopedRuntime,
+    pub subject_registry: SubjectRegistry,
+    pub subject_relationship_graph: SubjectRelationshipGraph,
     pub scope: MemoryScope,
     pub profile: ProfileId,
     pub(crate) platform: Arc<dyn Platform>,
@@ -230,8 +259,24 @@ impl MemoryRuntime {
         &self.config.identity
     }
 
+    pub fn memory_space_id(&self) -> &str {
+        &self.config.memory_space_id
+    }
+
     pub fn subject_id(&self) -> &str {
         &self.config.subject_id
+    }
+
+    pub fn scoped_runtime(&self) -> &SubjectScopedRuntime {
+        &self.config.scoped_runtime
+    }
+
+    pub fn subject_registry(&self) -> &SubjectRegistry {
+        &self.config.subject_registry
+    }
+
+    pub fn subject_relationship_graph(&self) -> &SubjectRelationshipGraph {
+        &self.config.subject_relationship_graph
     }
 
     pub fn scope(&self) -> &MemoryScope {
@@ -358,6 +403,7 @@ impl MemoryRuntime {
                         reason: "runtime_learned_procedural_write_requires_promotion".to_string(),
                         lifecycle_report,
                         semantic_governance: None,
+                        shared_fact_governance: None,
                         procedural_evolution,
                         procedural_promotions: Vec::new(),
                         agent_tool_experience: None,
@@ -386,6 +432,7 @@ impl MemoryRuntime {
                             &[("changed_count", outcome.changed.to_string())],
                         )?,
                         semantic_governance: None,
+                        shared_fact_governance: None,
                         procedural_evolution,
                         procedural_promotions: Vec::new(),
                         agent_tool_experience: None,
@@ -463,6 +510,7 @@ impl MemoryRuntime {
                         &[("changed_count", outcome.changed.to_string())],
                     )?,
                     semantic_governance: None,
+                    shared_fact_governance: None,
                     procedural_evolution,
                     procedural_promotions: promotion_reports,
                     agent_tool_experience: None,
@@ -491,6 +539,7 @@ impl MemoryRuntime {
                         &[("changed_count", changed.to_string())],
                     )?,
                     semantic_governance: None,
+                    shared_fact_governance: None,
                     procedural_evolution: None,
                     procedural_promotions: Vec::new(),
                     agent_tool_experience: None,
@@ -538,18 +587,33 @@ impl MemoryRuntime {
                         )
                     })
                     .collect::<Vec<_>>();
-                let long_term_changed = if accepted_drafts.is_empty() {
-                    0
+                let shared_fact_governance = if accepted_drafts.is_empty() {
+                    None
                 } else {
                     let store = self.config.platform.long_term_memory_store();
-                    let outcome = write_governed_shared_memory(
+                    let mut context = SharedFactWriteGovernanceContext::new(
+                        self.config.memory_space_id.clone(),
+                        self.config.scoped_runtime.mounted_subject_id.clone(),
+                        self.config.scoped_runtime.actor_subject_id.clone(),
+                        SharedMemoryWriteSource::ManualTool,
+                    );
+                    context.relationship_id = self
+                        .config
+                        .scoped_runtime
+                        .relationship_scope
+                        .as_ref()
+                        .map(|scope| scope.relationship_id.clone());
+                    Some(write_governed_shared_memory_in_space(
                         store.as_ref(),
                         &accepted_drafts,
                         now_secs,
-                        SharedMemoryWriteSource::ManualTool,
-                    )?;
-                    outcome.changed
+                        context,
+                    )?)
                 };
+                let long_term_changed = shared_fact_governance
+                    .as_ref()
+                    .map(|outcome| outcome.changed)
+                    .unwrap_or(0);
                 let (skill_changed, procedural_evolution) = if accepted_skill_writes.is_empty() {
                     (0, None)
                 } else {
@@ -588,6 +652,7 @@ impl MemoryRuntime {
                         &[("changed_count", changed.to_string())],
                     )?,
                     semantic_governance: Some(semantic_governance),
+                    shared_fact_governance,
                     procedural_evolution,
                     procedural_promotions: Vec::new(),
                     agent_tool_experience: None,
@@ -620,6 +685,7 @@ impl MemoryRuntime {
                         &[("changed_count", changed.to_string())],
                     )?,
                     semantic_governance: None,
+                    shared_fact_governance: None,
                     procedural_evolution: None,
                     procedural_promotions: Vec::new(),
                     agent_tool_experience: Some(governance),
@@ -1586,7 +1652,7 @@ impl MemoryRuntime {
             self.config.platform.as_ref(),
             &self.config.scope,
             &session_commit,
-            &self.config.identity.owner_id,
+            &self.config.memory_space_id,
             request,
             reason,
             self.config.clock.now_secs(),
@@ -2254,8 +2320,16 @@ impl MemoryRuntime {
                 .with_payload("owner_id", self.config.identity.owner_id.clone())
                 .with_payload("channel", self.config.scope.channel.clone())
                 .with_payload("chat_id", self.config.scope.chat_id.clone())
-                .with_payload("memory_space_id", self.config.identity.owner_id.clone())
+                .with_payload("memory_space_id", self.config.memory_space_id.clone())
                 .with_payload("subject_id", self.config.subject_id.clone())
+                .with_payload(
+                    "mounted_subject_id",
+                    self.config.scoped_runtime.mounted_subject_id.clone(),
+                )
+                .with_payload(
+                    "actor_subject_id",
+                    self.config.scoped_runtime.actor_subject_id.clone(),
+                )
                 .with_payload("conversation_id", self.config.scope.chat_id.clone())
                 .with_payload(
                     "projection_source_max_chars",
@@ -2308,11 +2382,12 @@ impl MemoryRuntime {
     fn audit(&self, operation: &str, allowed: bool, reason: &str) {
         self.config
             .audit_sink
-            .record(MemoryAuditEvent::for_runtime_operation(
+            .record(MemoryAuditEvent::for_scoped_runtime_operation(
                 operation,
                 self.config.profile,
                 self.config.identity.clone(),
                 self.config.scope.clone(),
+                self.config.memory_space_id.clone(),
                 self.config.subject_id.clone(),
                 allowed,
                 reason,
@@ -2524,8 +2599,9 @@ fn build_projection_audit(input: ProjectionAuditInput<'_>) -> MemoryProjectionAu
         profile: runtime.config.profile,
         identity: runtime.config.identity.clone(),
         scope: runtime.config.scope.clone(),
-        memory_space_id: runtime.config.identity.owner_id.clone(),
+        memory_space_id: runtime.config.memory_space_id.clone(),
         subject_id: runtime.config.subject_id.clone(),
+        scoped_runtime: runtime.config.scoped_runtime.clone(),
         conversation_id: Some(runtime.config.scope.chat_id.clone()),
         source_budget_chars,
         render_budget_chars,
@@ -3510,7 +3586,7 @@ fn runtime_skill_write_source_requires_promotion(source: RuntimeSkillWriteSource
 fn projection_id(runtime: &MemoryRuntime, request: &MemoryProjectionRequest) -> String {
     let seed = format!(
         "{}:{}:{}:{}",
-        runtime.config.identity.owner_id,
+        runtime.config.memory_space_id,
         runtime.config.scope.channel,
         runtime.config.scope.chat_id,
         request.user_query
@@ -4055,7 +4131,7 @@ fn deferred_governance_job_matches_runtime(
     job: &DeferredGovernanceJob,
     config: &MemoryRuntimeConfig,
 ) -> bool {
-    job.memory_space_id.trim() == config.identity.owner_id
+    job.memory_space_id.trim() == config.memory_space_id
         && job.subject_id.trim() == config.subject_id
         && job.channel.trim() == config.scope.channel
         && job.chat_id.trim() == config.scope.chat_id
@@ -4266,6 +4342,9 @@ fn sdk_runtime_skill_name(seed: &str) -> String {
 pub struct MemoryRuntimeBuilder {
     identity: Option<MemoryIdentity>,
     subject_id: Option<String>,
+    subject_registry: Option<SubjectRegistry>,
+    subject_relationship_graph: Option<SubjectRelationshipGraph>,
+    scoped_runtime: Option<SubjectScopedRuntime>,
     scope: Option<MemoryScope>,
     profile: ProfileId,
     platform: Option<Arc<dyn Platform>>,
@@ -4288,6 +4367,9 @@ impl Default for MemoryRuntimeBuilder {
         Self {
             identity: None,
             subject_id: None,
+            subject_registry: None,
+            subject_relationship_graph: None,
+            scoped_runtime: None,
             scope: None,
             profile: ProfileId::ServerLinuxDevFull,
             platform: None,
@@ -4315,6 +4397,21 @@ impl MemoryRuntimeBuilder {
 
     pub fn subject_id(mut self, subject_id: impl Into<String>) -> Self {
         self.subject_id = Some(subject_id.into());
+        self
+    }
+
+    pub fn subject_registry(mut self, registry: SubjectRegistry) -> Self {
+        self.subject_registry = Some(registry);
+        self
+    }
+
+    pub fn subject_relationship_graph(mut self, graph: SubjectRelationshipGraph) -> Self {
+        self.subject_relationship_graph = Some(graph);
+        self
+    }
+
+    pub fn scoped_runtime(mut self, scoped_runtime: SubjectScopedRuntime) -> Self {
+        self.scoped_runtime = Some(scoped_runtime);
         self
     }
 
@@ -4409,12 +4506,12 @@ impl MemoryRuntimeBuilder {
         let identity = self
             .identity
             .ok_or_else(|| Error::config("memory_runtime_config", "identity must be configured"))?;
-        let subject_id = self
+        let requested_subject_id = self
             .subject_id
-            .unwrap_or_else(|| identity.owner_id.clone())
+            .unwrap_or_else(|| default_agent_subject_id(&identity.agent_id))
             .trim()
             .to_string();
-        if subject_id.is_empty() {
+        if requested_subject_id.is_empty() {
             return Err(Error::config(
                 "memory_runtime_config",
                 "subject_id must not be empty",
@@ -4426,6 +4523,73 @@ impl MemoryRuntimeBuilder {
         let platform = self
             .platform
             .ok_or_else(|| Error::config("memory_runtime_config", "platform must be configured"))?;
+        let memory_space_id = default_memory_space_id(&identity.owner_id);
+        let subject_registry = match self.subject_registry {
+            Some(registry) => registry,
+            None => SubjectRegistry::single_agent_default_with_subject(
+                &identity.owner_id,
+                &identity.agent_id,
+                None,
+                &requested_subject_id,
+            )
+            .map_err(|reason| Error::config("memory_runtime_config", reason))?,
+        };
+        let validation = subject_registry.validate_contract();
+        if !validation.accepted {
+            return Err(Error::config("memory_runtime_config", validation.reason));
+        }
+        if subject_registry.memory_space_id != memory_space_id {
+            return Err(Error::config(
+                "memory_runtime_config",
+                "subject_registry_memory_space_mismatch",
+            ));
+        }
+        let scoped_runtime = match self.scoped_runtime {
+            Some(scoped_runtime) => scoped_runtime,
+            None => SubjectScopedRuntime {
+                memory_space_id: memory_space_id.clone(),
+                mounted_subject_id: requested_subject_id.clone(),
+                actor_subject_id: requested_subject_id.clone(),
+                agent_id: identity.agent_id.clone(),
+                relationship_scope: Some(relationship_scope(
+                    &scope.channel,
+                    &scope.chat_id,
+                    Some(scope.chat_id.clone()),
+                )),
+                projection_policy: "subject_aware_default".to_string(),
+                write_policy: "subject_candidate_then_space_governance".to_string(),
+            },
+        };
+        let runtime_validation = scoped_runtime.validate_against_registry(&subject_registry);
+        if !runtime_validation.accepted {
+            return Err(Error::config(
+                "memory_runtime_config",
+                runtime_validation.reason,
+            ));
+        }
+        let subject_id = scoped_runtime.mounted_subject_id.trim().to_string();
+        if subject_id.is_empty() {
+            return Err(Error::config(
+                "memory_runtime_config",
+                "runtime_mounted_subject_empty",
+            ));
+        }
+        let subject_relationship_graph = match self.subject_relationship_graph {
+            Some(graph) => graph,
+            None => SubjectRelationshipGraph::single_agent_default_for_subject(
+                &subject_registry,
+                &subject_id,
+            )
+            .map_err(|reason| Error::config("memory_runtime_config", reason))?,
+        };
+        let graph_validation =
+            subject_relationship_graph.validate_against_registry(&subject_registry);
+        if !graph_validation.accepted {
+            return Err(Error::config(
+                "memory_runtime_config",
+                graph_validation.reason,
+            ));
+        }
         let clock = self
             .clock
             .ok_or_else(|| Error::config("memory_runtime_config", "clock must be configured"))?;
@@ -4467,7 +4631,11 @@ impl MemoryRuntimeBuilder {
         }
         let config = MemoryRuntimeConfig {
             identity,
+            memory_space_id,
             subject_id,
+            scoped_runtime,
+            subject_registry,
+            subject_relationship_graph,
             scope,
             profile: self.profile,
             platform,

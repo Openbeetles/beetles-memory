@@ -72,7 +72,6 @@ use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, Pr
 
 let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
-    .subject_id("subject-default")
     .scope(MemoryScope::new("local", "chat-1")?)
     .profile(ProfileId::DesktopMacosEmbeddedSdk)
     .store_platform(store)
@@ -80,7 +79,7 @@ let runtime = MemoryRuntime::builder()
     .build()?;
 ```
 
-`agent_id` 标识 agent 实例。`owner_id` 标识 owner 或 tenant。`subject_id` 标识当前 runtime 绑定的主体；如果不显式配置，SDK 会用 `owner_id` 初始化本地主体。`channel` 和 `chat_id` 定义 runtime 操作的默认 memory scope。
+`agent_id` 标识 agent 实例。`owner_id` 标识 owner 或 tenant。普通 single-agent 宿主不需要传 `subject_id`：SDK 会自动生成 `space:<owner_id>` 和默认 `agent:<agent_id>` 主体，并隐藏 `system_governor` / `human_user` / relationship graph 细节。只有高级多主体宿主才显式配置 subject registry、relationship graph 或 mounted subject。`channel` 和 `chat_id` 定义 runtime 操作的默认 memory scope。
 
 `add_agent_skill_dir` 是可选只读挂载。标准 Agent Skill 的添加、编辑、导入、删除和执行仍归宿主；Beetle Memory 只扫描 `SKILL.md` 摘要参与召回和投影。
 
