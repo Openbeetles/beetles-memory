@@ -18,6 +18,11 @@ cargo test -p bm-entry --features replay-harness --test workbench_contract
 cargo test -p bm-http --features server-std,replay-harness --test http_console_contract console_workbench
 
 git -C dev-docs diff --check
+test -f dev-docs/multi-subject-memory-space-plan.md
+rg -Fq "Multi-Subject Memory Space 当前设计真源" dev-docs/README.md
+rg -Fq "W0.5 Multi-Subject Memory Space 合同" dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq 'shared factual plane 属于 `MemorySpace`' dev-docs/multi-subject-memory-space-plan.md
+rg -Fq "不得出现 Beetle Agent 官方 CBD 角色名" dev-docs/sdk-host-integration-readiness-plan.md
 rg -Fq "W1 MemoryBenchmarkReport + fixture matrix + script gate + baseline 已落地" dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "W2 Soul Kernel 2.0 发布闸已由 SoulKernelBenchmarkJudgeReport + core builders + fixture semantic contract 闭合" dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "W3 Subject Projection 2.0 发布闸已由 SubjectProjectionBenchmarkJudgeReport + SDK projection report + Gateway audit contract 闭合" dev-docs/next-gen-soul-memory-roadmap.md
