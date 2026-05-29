@@ -6,25 +6,29 @@ use bm_adapter::{
     dispatch_adapter_command_with_services, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
     AdapterResponse, AdapterRuntimeServices,
 };
+#[cfg(feature = "replay-harness")]
 use bm_replay::{load_memory_benchmark_fixture_dir, run_memory_benchmark_wall};
 use bm_sdk::{
-    compile_runtime_budget, probe_host_runtime_resource, resolve_memory_capabilities, Error,
-    MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity, MemoryInspectionRequest,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemorySkillDeleteRequest, MemorySkillDetailRequest, MemorySkillListRequest,
-    MemorySkillSetEnabledRequest, MemorySkillUpsertRequest, MemorySpaceExportRequest,
-    MemorySpaceMigratePreviewRequest, NoopMemoryAuditSink, PressureLevel, ProfileId, Result,
-    RuntimeBudgetInput, RuntimeBudgetReport, RuntimeLifecycleModeInput, StaticPlatformManifest,
-    StoreBackendConfig, StoreBackendKind, StorePlatform, WorkbenchApiMap, WorkbenchSurface,
+    compile_runtime_budget, probe_host_runtime_resource, resolve_memory_capabilities,
+    AgentSkillDirConfig, Error, MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity,
+    MemoryInspectionRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRuntime, MemoryScope, MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest,
+    NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeBudgetInput, RuntimeBudgetReport,
+    RuntimeLifecycleModeInput, RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest,
+    RuntimeSkillEditRequest, RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest,
+    StaticPlatformManifest, StoreBackendConfig, StoreBackendKind, StorePlatform, WorkbenchApiMap,
+    WorkbenchSurface,
 };
 
 use crate::config::{enabled_capability_policy, privacy_policy};
 use crate::console::EntryConsoleTelemetrySnapshot;
+#[cfg(feature = "replay-harness")]
+use crate::EntryConsoleMemoryBenchmarkReport;
 use crate::{
     EntryAuthConfig, EntryCapabilityView, EntryConsoleDevice, EntryConsoleDeviceCreate,
-    EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleMemoryBenchmarkReport,
-    EntryConsoleOverview, EntryConsoleSession, EntryConsoleSkillDetail, EntryConsoleSkillList,
-    EntryConsoleSkillMutation, EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert,
+    EntryConsoleDeviceKeyReport, EntryConsoleDeviceUpdate, EntryConsoleOverview,
+    EntryConsoleRuntimeSkillEdit, EntryConsoleSession, EntryConsoleSkillDetail,
+    EntryConsoleSkillList, EntryConsoleSkillMutation, EntryConsoleSkillSetEnabled,
     EntryConsoleState, EntryConsoleTransport, EntryConsoleTransportUpdate,
     EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchProceduralEvolution,
     EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
@@ -244,6 +248,7 @@ impl EntryRuntime {
             .profile(config.profile)
             .store_platform(store.clone())
             .runtime_budget(runtime_budget.clone())
+            .agent_skill_dirs(agent_skill_dirs_from_env())
             .capability_policy(capability_policy.clone())
             .privacy_policy(privacy.clone())
             .audit_sink(Arc::new(NoopMemoryAuditSink))
@@ -342,7 +347,16 @@ impl EntryRuntime {
                     private_raw_allowed: false,
                 },
             ],
-            missing_report_apis: Vec::new(),
+            missing_report_apis: {
+                #[cfg(feature = "replay-harness")]
+                {
+                    Vec::new()
+                }
+                #[cfg(not(feature = "replay-harness"))]
+                {
+                    vec!["sdk.replay.memory_benchmark_report".to_string()]
+                }
+            },
         }
     }
 
@@ -359,29 +373,41 @@ impl EntryRuntime {
     }
 
     fn console_workbench_benchmark_wall(&self) -> EntryConsoleWorkbenchBenchmarkWall {
-        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("fixtures/memory-benchmark-wall");
-        let fixture_root_display = fixture_root.display().to_string();
-        match load_memory_benchmark_fixture_dir(&fixture_root) {
-            Ok(fixtures) => {
-                let report = run_memory_benchmark_wall(&fixtures);
-                let status = if report.passed {
-                    EntryConsoleWorkbenchStatus::ready("memory_benchmark_wall_passed")
-                } else {
-                    EntryConsoleWorkbenchStatus::limited("memory_benchmark_wall_regression")
-                };
-                EntryConsoleWorkbenchBenchmarkWall {
-                    status,
-                    fixture_root: fixture_root_display,
-                    report: Some(EntryConsoleMemoryBenchmarkReport::from_report(report)),
-                }
-            }
-            Err(error) => EntryConsoleWorkbenchBenchmarkWall {
-                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
-                fixture_root: fixture_root_display,
+        #[cfg(not(feature = "replay-harness"))]
+        {
+            return EntryConsoleWorkbenchBenchmarkWall {
+                status: EntryConsoleWorkbenchStatus::limited("replay_harness_not_compiled"),
+                fixture_root: "fixtures/memory-benchmark-wall".to_string(),
                 report: None,
-            },
+            };
+        }
+
+        #[cfg(feature = "replay-harness")]
+        {
+            let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("fixtures/memory-benchmark-wall");
+            let fixture_root_display = fixture_root.display().to_string();
+            match load_memory_benchmark_fixture_dir(&fixture_root) {
+                Ok(fixtures) => {
+                    let report = run_memory_benchmark_wall(&fixtures);
+                    let status = if report.passed {
+                        EntryConsoleWorkbenchStatus::ready("memory_benchmark_wall_passed")
+                    } else {
+                        EntryConsoleWorkbenchStatus::limited("memory_benchmark_wall_regression")
+                    };
+                    EntryConsoleWorkbenchBenchmarkWall {
+                        status,
+                        fixture_root: fixture_root_display,
+                        report: Some(EntryConsoleMemoryBenchmarkReport::from_report(report)),
+                    }
+                }
+                Err(error) => EntryConsoleWorkbenchBenchmarkWall {
+                    status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                    fixture_root: fixture_root_display,
+                    report: None,
+                },
+            }
         }
     }
 
@@ -390,6 +416,7 @@ impl EntryRuntime {
         match self.runtime.recall(MemoryRecallRequest {
             query: query.clone(),
             limit: 6,
+            tool_registry_refs: Vec::new(),
         }) {
             Ok(report) => {
                 let working_selected_surfaces = usize::from(report.working.summary_text.is_some())
@@ -414,6 +441,9 @@ impl EntryRuntime {
                     graph_failures: report.graph_gate.failures,
                     graph_selected_ids: report.graph_rerank.selected_ids,
                     stale_false_positive_count: report.graph_rerank.stale_false_positive_count,
+                    agent_tool_hints: report.agent_tool_hints.len(),
+                    tool_experience_reason: report.tool_experience_status.reason,
+                    host_fallback_required: report.tool_experience_status.host_fallback_required,
                 }
             }
             Err(error) => EntryConsoleWorkbenchRecallInspector {
@@ -429,6 +459,9 @@ impl EntryRuntime {
                 graph_failures: Vec::new(),
                 graph_selected_ids: Vec::new(),
                 stale_false_positive_count: 0,
+                agent_tool_hints: 0,
+                tool_experience_reason: "recall_unavailable".to_string(),
+                host_fallback_required: true,
             },
         }
     }
@@ -444,6 +477,7 @@ impl EntryRuntime {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         }) {
             Ok(report) => EntryConsoleWorkbenchProjectionInspector {
                 status: EntryConsoleWorkbenchStatus::ready("sdk_projection_report_available"),
@@ -453,7 +487,14 @@ impl EntryRuntime {
                 render_budget_chars: report.audit.render_budget_chars,
                 injected: report.audit.injected,
                 truncated: report.audit.truncated,
-                private_gate_allowed: report.audit.private_gate.allowed,
+                runtime_private_context_allowed: report
+                    .audit
+                    .private_gate
+                    .runtime_private_context_allowed,
+                foreground_disclosure_allowed: report
+                    .audit
+                    .private_gate
+                    .foreground_disclosure_allowed,
                 private_gate_reason: report.audit.private_gate.reason,
                 evidence_refs: report.subject_projection.evidence_refs.len(),
                 budget_decisions: report.subject_projection.budget_decisions.len(),
@@ -461,8 +502,12 @@ impl EntryRuntime {
                 dropped_candidates: report.subject_projection.dropped_candidates.len(),
                 faithfulness_passed: report.projection_faithfulness.passed,
                 unsupported_claims: report.projection_faithfulness.unsupported_claims,
-                private_echo_guard_passed: report.private_echo_guard.passed,
-                private_echo_count: report.private_echo_guard.private_echo_count,
+                disclosure_integrity_passed: report.private_disclosure_integrity.passed,
+                raw_private_violation_count: report
+                    .private_disclosure_integrity
+                    .raw_private_violation_count,
+                agent_tool_hints: report.runtime_projection.agent_tool_hints.len(),
+                agent_tool_rejections: report.audit.agent_tools.rejected.len(),
             },
             Err(error) => EntryConsoleWorkbenchProjectionInspector {
                 status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
@@ -472,7 +517,8 @@ impl EntryRuntime {
                 render_budget_chars: 0,
                 injected: false,
                 truncated: false,
-                private_gate_allowed: false,
+                runtime_private_context_allowed: false,
+                foreground_disclosure_allowed: false,
                 private_gate_reason: "projection_unavailable".to_string(),
                 evidence_refs: 0,
                 budget_decisions: 0,
@@ -480,14 +526,16 @@ impl EntryRuntime {
                 dropped_candidates: 0,
                 faithfulness_passed: false,
                 unsupported_claims: Vec::new(),
-                private_echo_guard_passed: false,
-                private_echo_count: 0,
+                disclosure_integrity_passed: false,
+                raw_private_violation_count: 0,
+                agent_tool_hints: 0,
+                agent_tool_rejections: 0,
             },
         }
     }
 
     fn console_workbench_procedural_evolution(&self) -> EntryConsoleWorkbenchProceduralEvolution {
-        match self.runtime.list_skills(MemorySkillListRequest {
+        match self.runtime.list_runtime_skills(RuntimeSkillListRequest {
             query: None,
             include_disabled: true,
             include_retired: true,
@@ -497,8 +545,7 @@ impl EntryRuntime {
                 status: EntryConsoleWorkbenchStatus::ready("sdk_skill_evolution_surface_available"),
                 total_skills: report.total,
                 active_skills: report.active,
-                runtime_learned: report.runtime_learned,
-                user_provided: report.user_provided,
+                runtime_learned: report.runtime_skills,
                 disabled: report.disabled,
                 top_skills: report
                     .skills
@@ -518,7 +565,6 @@ impl EntryRuntime {
                 total_skills: 0,
                 active_skills: 0,
                 runtime_learned: 0,
-                user_provided: 0,
                 disabled: 0,
                 top_skills: Vec::new(),
             },
@@ -623,6 +669,10 @@ impl EntryRuntime {
                 deferred_pending: report.deferred_governance.pending,
                 deferred_failed: report.deferred_governance.failed,
                 safe_actions: report.operator_action_report.safe_actions_available,
+                agent_tool_registries: report.agent_tool_registry.registries,
+                agent_tool_registry_tools: report.agent_tool_registry.tools,
+                agent_tool_experiences: report.agent_tool_registry.governed_experiences,
+                agent_tool_stale_experiences: report.agent_tool_registry.stale_experiences,
             },
             Err(error) => EntryConsoleWorkbenchSoulHealth {
                 status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
@@ -633,6 +683,10 @@ impl EntryRuntime {
                 deferred_pending: 0,
                 deferred_failed: 0,
                 safe_actions: Vec::new(),
+                agent_tool_registries: 0,
+                agent_tool_registry_tools: 0,
+                agent_tool_experiences: 0,
+                agent_tool_stale_experiences: 0,
             },
         }
     }
@@ -692,7 +746,7 @@ impl EntryRuntime {
 
     pub fn console_skills(&self, query: Option<String>) -> Result<EntryConsoleSkillList> {
         self.runtime
-            .list_skills(MemorySkillListRequest {
+            .list_runtime_skills(RuntimeSkillListRequest {
                 query,
                 include_disabled: true,
                 include_retired: true,
@@ -702,7 +756,7 @@ impl EntryRuntime {
     }
 
     pub fn console_skill_detail(&self, name: &str) -> Result<Option<EntryConsoleSkillDetail>> {
-        match self.runtime.get_skill(MemorySkillDetailRequest {
+        match self.runtime.get_runtime_skill(RuntimeSkillDetailRequest {
             name: name.to_string(),
         }) {
             Ok(report) => Ok(Some(report.into())),
@@ -711,17 +765,13 @@ impl EntryRuntime {
         }
     }
 
-    pub fn console_upsert_skill(
+    pub fn console_edit_runtime_skill(
         &self,
-        payload: EntryConsoleSkillUpsert,
+        name: &str,
+        payload: EntryConsoleRuntimeSkillEdit,
     ) -> Result<EntryConsoleSkillMutation> {
-        let existed = payload
-            .name
-            .as_deref()
-            .and_then(|name| self.console_skill_detail(name).ok().flatten())
-            .is_some();
-        let report = self.runtime.upsert_skill(MemorySkillUpsertRequest {
-            name: payload.name,
+        let report = self.runtime.edit_runtime_skill(RuntimeSkillEditRequest {
+            name: name.to_string(),
             title: payload.title,
             topic: payload.topic,
             summary: payload.summary,
@@ -730,14 +780,15 @@ impl EntryRuntime {
             source_chat_id: payload
                 .source_chat_id
                 .or_else(|| Some(self.config.scope.chat_id.clone())),
+            edit_reason: payload
+                .edit_reason
+                .unwrap_or_else(|| "operator_runtime_skill_edit".to_string()),
             observed_at: current_unix_secs(),
         })?;
         let mutation: EntryConsoleSkillMutation = report.into();
         if mutation.accepted {
-            self.console.record_skill_mutation(
-                &mutation.name,
-                if existed { "updated" } else { "imported" },
-            );
+            self.console
+                .record_skill_mutation(&mutation.name, "updated");
         }
         Ok(mutation)
     }
@@ -749,7 +800,7 @@ impl EntryRuntime {
     ) -> Result<Option<EntryConsoleSkillMutation>> {
         match self
             .runtime
-            .set_skill_enabled(MemorySkillSetEnabledRequest {
+            .set_runtime_skill_enabled(RuntimeSkillSetEnabledRequest {
                 name: name.to_string(),
                 enabled: payload.enabled,
             }) {
@@ -773,9 +824,11 @@ impl EntryRuntime {
     }
 
     pub fn console_delete_skill(&self, name: &str) -> Result<Option<EntryConsoleSkillMutation>> {
-        match self.runtime.delete_skill(MemorySkillDeleteRequest {
-            name: name.to_string(),
-        }) {
+        match self
+            .runtime
+            .delete_runtime_skill(RuntimeSkillDeleteRequest {
+                name: name.to_string(),
+            }) {
             Ok(report) => {
                 let mutation: EntryConsoleSkillMutation = report.into();
                 if mutation.accepted {
@@ -868,6 +921,19 @@ fn current_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn agent_skill_dirs_from_env() -> Vec<AgentSkillDirConfig> {
+    std::env::var_os("BM_AGENT_SKILL_DIRS")
+        .map(|value| {
+            std::env::split_paths(&value)
+                .enumerate()
+                .map(|(index, path)| {
+                    AgentSkillDirConfig::read_only(path, format!("env_agent_skill_{index}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn vault_preflight_failures(

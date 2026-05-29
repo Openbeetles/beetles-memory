@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { BookOpen, LoaderCircle, Pencil, Plus, Search, Trash2, Upload } from "lucide-svelte";
+  import { BookOpen, LoaderCircle, Pencil, Search, Trash2 } from "lucide-svelte";
   import SkillDeleteModal from "../components/SkillDeleteModal.svelte";
   import SkillEditorModal from "../components/SkillEditorModal.svelte";
-  import { deleteSkill, fetchSkill, setSkillEnabled, upsertSkill } from "../lib/console-api";
+  import { deleteSkill, editSkill, fetchSkill, setSkillEnabled } from "../lib/console-api";
   import type { ConsoleCopy } from "../lib/i18n";
   import type {
     ConsoleApiSkillDetail,
@@ -16,8 +16,6 @@
     citationsText,
     filterSkills,
     parseCitations,
-    skillKindLabel,
-    skillOriginLabel,
     skillQuality,
     statusLabel,
   } from "../lib/view-model";
@@ -47,17 +45,15 @@
   let skillError = $state("");
   let skillSearch = $state("");
   let skillStatusFilter: "all" | "active" | "disabled" | "retired" = $state("all");
-  let skillOriginFilter: "all" | "user_provided" | "runtime_learned" = $state("all");
   let selectingSkillName: string | null = $state(null);
   let skillFormSubmitting = $state(false);
   let skillToggleBusyName: string | null = $state(null);
   let skillDeleting = $state(false);
-  let skillFileReading = $state(false);
 
   const selectedSkillSummary = $derived(skills.find((skill) => skill.name === selectedSkillName) ?? selectedSkill?.summary ?? null);
-  const filteredSkills = $derived(filterSkills(skills, skillSearch, skillStatusFilter, skillOriginFilter));
+  const filteredSkills = $derived(filterSkills(skills, skillSearch, skillStatusFilter));
   const skillOperationBusy = $derived(
-    selectingSkillName !== null || skillFormSubmitting || skillToggleBusyName !== null || skillDeleting || skillFileReading,
+    selectingSkillName !== null || skillFormSubmitting || skillToggleBusyName !== null || skillDeleting,
   );
 
   $effect(() => {
@@ -74,18 +70,6 @@
 
   function setSkillFormField(field: keyof SkillForm, value: string) {
     skillForm = { ...skillForm, [field]: value };
-  }
-
-  function openSkillCreate() {
-    if (skillOperationBusy) return;
-    resetSkillForm();
-    skillModal = "create";
-  }
-
-  function openSkillImport() {
-    if (skillOperationBusy) return;
-    resetSkillForm();
-    skillModal = "import";
   }
 
   function openSkillEdit() {
@@ -108,7 +92,7 @@
   }
 
   function closeSkillModal() {
-    if (skillFormSubmitting || skillDeleting || skillFileReading) return;
+    if (skillFormSubmitting || skillDeleting) return;
     resetSkillModal();
   }
 
@@ -148,10 +132,14 @@
       skillError = lang === "zh-CN" ? "标题、主题、摘要和过程都不能为空" : "Title, topic, summary, and procedure are required";
       return;
     }
-    const name = skillModal === "edit" ? selectedSkill?.summary.name : undefined;
+    const name = selectedSkill?.summary.name;
+    if (!name) {
+      skillError = lang === "zh-CN" ? "请选择一个运行时技能" : "Select a runtime skill first";
+      return;
+    }
     skillFormSubmitting = true;
     try {
-      const mutation = await upsertSkill(name, {
+      const mutation = await editSkill(name, {
         title,
         topic,
         summary,
@@ -202,27 +190,6 @@
       skillDeleting = false;
     }
   }
-
-  async function readSkillFile(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file || skillFileReading) return;
-    skillFileReading = true;
-    try {
-      const text = await file.text();
-      skillForm = {
-        ...skillForm,
-        title: skillForm.title || file.name.replace(/\.[^.]+$/, ""),
-        procedure: text,
-        summary: skillForm.summary || text.trim().split(/\r?\n/).find(Boolean)?.slice(0, 180) || "",
-      };
-    } catch (error) {
-      skillError = error instanceof Error ? error.message : String(error);
-    } finally {
-      input.value = "";
-      skillFileReading = false;
-    }
-  }
 </script>
 
 <div class="skill-top panel">
@@ -231,21 +198,12 @@
       <p class="panel-label">{t.skillsPanel.label}</p>
       <h3>{t.skillsPanel.title}</h3>
     </div>
-    <div class="panel-title-actions">
-      <button class="ghost-button" type="button" onclick={openSkillImport} disabled={skillOperationBusy}>
-        <Upload size={13} /> {t.actions.importSkill}
-      </button>
-      <button class="primary-button" type="button" onclick={openSkillCreate} disabled={skillOperationBusy}>
-        <Plus size={13} /> {t.actions.createSkill}
-      </button>
-    </div>
   </div>
   <div class="skill-stats">
     <div><span>{t.skillsPanel.total}</span><strong>{skillReport?.total ?? 0}</strong></div>
     <div><span>{t.skillsPanel.active}</span><strong>{skillReport?.active ?? 0}</strong></div>
     <div><span>{t.skillsPanel.disabled}</span><strong>{skillReport?.disabled ?? 0}</strong></div>
     <div><span>{t.skillsPanel.runtimeLearned}</span><strong>{skillReport?.runtimeLearned ?? 0}</strong></div>
-    <div><span>{t.skillsPanel.userProvided}</span><strong>{skillReport?.userProvided ?? 0}</strong></div>
   </div>
   <div class="skill-toolbar">
     <div class="skill-search">
@@ -258,11 +216,6 @@
         <option value="active">{t.skillsPanel.active}</option>
         <option value="disabled">{t.skillsPanel.disabled}</option>
         <option value="retired">{t.skillsPanel.retired}</option>
-      </select>
-      <select value={skillOriginFilter} onchange={(event) => (skillOriginFilter = (event.currentTarget as HTMLSelectElement).value as typeof skillOriginFilter)}>
-        <option value="all">{t.skillsPanel.all}</option>
-        <option value="user_provided">{t.skillsPanel.userProvided}</option>
-        <option value="runtime_learned">{t.skillsPanel.runtimeLearned}</option>
       </select>
     </div>
   </div>
@@ -293,7 +246,6 @@
             <span class="skill-row-meta">
               {#if selectingSkillName === skill.name}<LoaderCircle class="spin-icon" size={12} />{/if}
               <span class={`badge ${skill.enabled ? skill.status : "disabled"}`}>{skill.enabled ? statusLabel(t, skill.status) : statusLabel(t, "disabled")}</span>
-              <span>{skillOriginLabel(t, skill.origin)}</span>
               <span>{t.skillsPanel.quality}: {skillQuality(skill)}</span>
               <span>{t.skillsPanel.uses}: {skill.useCount}</span>
             </span>
@@ -307,7 +259,7 @@
     {#if selectedSkill && selectedSkillSummary}
       <div class="panel-title">
         <div>
-          <p class="panel-label">{skillOriginLabel(t, selectedSkillSummary.origin)} · {skillKindLabel(selectedSkillSummary.kind, lang)}</p>
+          <p class="panel-label">{t.skillsPanel.runtimeLearned}</p>
           <h3>{selectedSkillSummary.title}</h3>
         </div>
         <div class="panel-title-actions">
@@ -330,7 +282,7 @@
         <div><span>{t.skillsPanel.uses}</span><strong>{selectedSkillSummary.useCount}</strong></div>
         <div><span>{t.skillsPanel.successes}</span><strong>{selectedSkillSummary.validatedSuccessCount}</strong></div>
         <div><span>{t.skillsPanel.mismatches}</span><strong>{selectedSkillSummary.mismatchCount}</strong></div>
-        <div><span>{t.skillsPanel.revisionPending}</span><strong>{selectedSkillSummary.revisionPending ? "YES" : "NO"}</strong></div>
+        <div><span>{t.skillsPanel.revisionPending}</span><strong>{selectedSkillSummary.revisionPending ? t.workbenchPanel.yes : t.workbenchPanel.no}</strong></div>
         <div><span>{t.labels.status}</span><strong>{selectedSkillSummary.enabled ? statusLabel(t, selectedSkillSummary.status) : statusLabel(t, "disabled")}</strong></div>
       </div>
 
@@ -377,17 +329,15 @@
   </article>
 </div>
 
-{#if skillModal === "create" || skillModal === "import" || skillModal === "edit"}
+{#if skillModal === "edit"}
   <SkillEditorModal
     {t}
     mode={skillModal}
     form={skillForm}
     error={skillError}
     loading={skillFormSubmitting}
-    readFileLoading={skillFileReading}
     onClose={closeSkillModal}
     onSubmit={(event) => void submitSkillForm(event)}
-    onReadFile={(event) => void readSkillFile(event)}
     onFieldChange={setSkillFormField}
   />
 {/if}

@@ -1995,14 +1995,11 @@ mod tests {
             ..Default::default()
         };
         let recent = vec![
-            SessionMessage {
-                role: "user".to_string(),
-                content: "最近我们在做长期记忆重构。".to_string(),
-            },
-            SessionMessage {
-                role: "assistant".to_string(),
-                content: "这轮先把提取输入和解析从 agent loop 里拆出去。".to_string(),
-            },
+            SessionMessage::synthetic("user".to_string(), "最近我们在做长期记忆重构。".to_string()),
+            SessionMessage::synthetic(
+                "assistant".to_string(),
+                "这轮先把提取输入和解析从 agent loop 里拆出去。".to_string(),
+            ),
         ];
         let archive_memory_store = StubMemoryStore {
             daily_notes: vec![(
@@ -2072,14 +2069,14 @@ mod tests {
             ..Default::default()
         };
         let recent = vec![
-            SessionMessage {
-                role: "user".to_string(),
-                content: "以后这个项目都按当前发布闸口走。".to_string(),
-            },
-            SessionMessage {
-                role: "assistant".to_string(),
-                content: "我会把这个作为后续发布流程的长期约束。".to_string(),
-            },
+            SessionMessage::synthetic(
+                "user".to_string(),
+                "以后这个项目都按当前发布闸口走。".to_string(),
+            ),
+            SessionMessage::synthetic(
+                "assistant".to_string(),
+                "我会把这个作为后续发布流程的长期约束。".to_string(),
+            ),
         ];
         let input = build_long_term_memory_extraction_input(
             &store,
@@ -2104,15 +2101,14 @@ mod tests {
     fn enrich_drafts_with_archive_evidence_attaches_structured_support() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "当前主模型已经切到 OpenAI 了。".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "收到，这轮把主模型事实和证据一起写回 shared factual plane。"
-                        .to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "当前主模型已经切到 OpenAI 了。".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "收到，这轮把主模型事实和证据一起写回 shared factual plane。".to_string(),
+                ),
             ],
             count: 2,
         };

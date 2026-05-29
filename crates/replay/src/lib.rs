@@ -11,7 +11,10 @@ pub use bench::{
     MemoryBenchmarkBaseline, MemoryBenchmarkClass, MemoryBenchmarkClassCoverage,
     MemoryBenchmarkEvaluationSource, MemoryBenchmarkFailure, MemoryBenchmarkFixture,
     MemoryBenchmarkMetrics, MemoryBenchmarkMissingClass, MemoryBenchmarkMode,
-    MemoryBenchmarkReport, MemoryBenchmarkScenario, MemoryBenchmarkThresholds,
+    MemoryBenchmarkReport, MemoryBenchmarkScenario, MemoryBenchmarkSemanticContract,
+    MemoryBenchmarkSemanticCoverage, MemoryBenchmarkSemanticDimension,
+    MemoryBenchmarkSemanticFailure, MemoryBenchmarkThresholds, SoulKernelBenchmarkJudgeReport,
+    SubjectProjectionBenchmarkJudgeReport,
 };
 pub use bm_core::memory::{
     inspect_intelligence_replay, ArchiveBenchmarkCase, ArchiveBenchmarkResult,

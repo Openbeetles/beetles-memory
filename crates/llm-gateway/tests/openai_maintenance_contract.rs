@@ -134,7 +134,11 @@ fn non_streaming_response_runs_post_reply_maintenance_when_services_are_injected
             scope_request(),
             json!({
                 "model": "local",
-                "messages": [{ "role": "user", "content": "remember release guard" }]
+                "messages": [{
+                    "role": "user",
+                    "name": "reviewer-agent",
+                    "content": "remember release guard with speaker metadata"
+                }]
             }),
         ),
         &mut upstream,
@@ -166,7 +170,11 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
             scope_request(),
             json!({
                 "model": "local",
-                "messages": [{ "role": "user", "content": "remember release guard" }]
+                "messages": [{
+                    "role": "user",
+                    "name": "reviewer-agent",
+                    "content": "remember release guard with speaker metadata"
+                }]
             }),
         ),
         &mut upstream,
@@ -190,14 +198,34 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
-    assert!(projection
+    let user_message = projection
         .context
         .recent_messages
         .iter()
-        .any(|message| message.content == "remember release guard"));
+        .find(|message| message.content == "remember release guard with speaker metadata")
+        .unwrap_or_else(|| {
+            panic!(
+                "user message persisted; recent={:?}",
+                projection
+                    .context
+                    .recent_messages
+                    .iter()
+                    .map(|message| (
+                        message.role.as_str(),
+                        message.speaker_id.as_str(),
+                        message.content.as_str()
+                    ))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(user_message.message_id.starts_with("msg_"));
+    assert_eq!(user_message.role, "user");
+    assert_eq!(user_message.speaker_id, "reviewer-agent");
+    assert_eq!(user_message.speaker_kind, "human");
     assert!(projection
         .context
         .recent_messages
@@ -252,6 +280,7 @@ fn missing_maintenance_services_skip_without_polluting_successful_response() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
     assert!(projection
@@ -316,6 +345,7 @@ fn maintenance_hidden_records_skipped_without_blocking_turn_commit() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
     assert!(projection
@@ -429,6 +459,7 @@ fn streaming_response_without_done_does_not_commit_partial_assistant() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
     assert!(projection.context.recent_messages.is_empty());

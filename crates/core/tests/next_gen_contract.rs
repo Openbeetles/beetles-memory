@@ -2,19 +2,27 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
     build_memory_autopilot_gate_report, build_next_gen_contract_matrix,
     build_privacy_vault_gate_report, build_procedural_evolution_gate_report,
-    build_soul_kernel2_gate_report, build_temporal_memory_graph_gate_report,
+    build_relationship_boundary_audit_from_constitution_audit, build_soul_compact_digest,
+    build_soul_feedback_report_from_turn_ledger,
+    build_soul_growth_proposals_from_core_revision_ledger, build_soul_kernel2_gate_report,
+    build_soul_regression_suite_report, build_temporal_memory_graph_gate_report,
     build_vault_migration_preflight, build_workbench_gate_report,
     compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
     promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, CompactGraphIndex,
-    CompactSoulProfile, CoreRevisionConflictClass, DroppedProjectionCandidate, EdgeRecoveryFixture,
-    EncryptedSnapshotEnvelope, EvidenceBacklink, MemoryAutopilotInput, MemoryAutopilotPlan,
-    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence, MemoryGraphNode,
-    MemoryGraphNodeKind, MemoryHygieneDiff, NextGenPhase, PrivateMaterialRedactionReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProceduralMemoryRecordV2,
-    ProcedureGenome, ProjectionBudgetDecision, ProjectionPrivacyDecision, SkillEvolutionReport,
-    SoulFeedbackReport, SoulGrowthDecision, SoulGrowthProposal, SoulRegressionSuite,
-    SubjectProjectionReport, TemporalValidity, VaultManifest, VaultMigrationPreflight,
-    WorkbenchApiMap, WorkbenchSurface,
+    CompactSoulProfile, CoreRevisionActionKind, CoreRevisionConflictClass, CoreRevisionLedger,
+    CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange, DroppedProjectionCandidate,
+    EdgeRecoveryFixture, EncryptedSnapshotEnvelope, EvidenceBacklink, MemoryAutopilotInput,
+    MemoryAutopilotPlan, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence,
+    MemoryGraphNode, MemoryGraphNodeKind, MemoryHygieneDiff, NextGenPhase,
+    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionPolicy, ProceduralMemoryRecordV2, ProcedureGenome,
+    ProjectionBudgetDecision, ProjectionPrivacyDecision, RelationshipConstitutionAudit,
+    SelfAuthoredCore, SkillEvolutionReport, SoulFeedbackReport, SoulGrowthDecision,
+    SoulGrowthProposal, SoulRegressionSuite, SubjectProjectionBoundaryProtocolReport,
+    SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
+    TemporalValidity, TurnSoulFeedbackLedger, TurnSoulInitiativeLedger, TurnSoulReplyLedger,
+    TurnSoulStrategyLedger, VaultManifest, VaultMigrationPreflight, WorkbenchApiMap,
+    WorkbenchSurface,
 };
 
 #[test]
@@ -65,6 +73,30 @@ fn subject_projection_report_tracks_budget_privacy_and_dropped_candidates() {
     let report = SubjectProjectionReport {
         projection_id: "projection-1".to_string(),
         profile: ProfileId::ServerLinuxDevFull,
+        subject_mount: SubjectProjectionMountReport {
+            identity_mount: "Subject Mount | Beetle Memory SDK runtime".to_string(),
+            relationship_position: "engineering collaborator".to_string(),
+            situated_now: "W1 benchmark wall integration".to_string(),
+            current_reasoning_basis: "fixture:subject-projection-full-baseline".to_string(),
+            reply_stance: "work-first direct reply".to_string(),
+            initiative_posture: "continue without theatrical drift".to_string(),
+            boundary_mode: "privacy protocol active".to_string(),
+            degraded_reason: None,
+        },
+        boundary_protocol: SubjectProjectionBoundaryProtocolReport {
+            runtime_private_context_allowed: true,
+            foreground_disclosure_allowed: false,
+            protected_sources: vec!["private_garden".to_string()],
+            disclosure_rule: "private raw material is never projected".to_string(),
+            final_llm_privacy_judge_allowed: false,
+        },
+        work_integrity: SubjectProjectionWorkIntegrityReport {
+            task_goal: "W1 benchmark wall integration".to_string(),
+            evidence_ceiling: "fixture evidence only".to_string(),
+            tool_permission_boundary: "respect SDK capability policy".to_string(),
+            uncertainty_rule: "state uncertainty instead of inventing memory".to_string(),
+            no_obstruction_rule: "do not obstruct user work".to_string(),
+        },
         identity_mount: "Beetle Memory SDK runtime".to_string(),
         relationship_position: "engineering collaborator".to_string(),
         situated_now: "W1 benchmark wall integration".to_string(),
@@ -88,7 +120,21 @@ fn subject_projection_report_tracks_budget_privacy_and_dropped_candidates() {
     };
 
     assert!(report.validate_contract().accepted);
-    assert_eq!(report.privacy_decisions[0].allowed, false);
+    assert!(!report.privacy_decisions[0].allowed);
+
+    let mut missing_mount = report.clone();
+    missing_mount.identity_mount.clear();
+    assert_eq!(
+        missing_mount.validate_contract().reason,
+        "subject_projection_identity_mount_empty"
+    );
+
+    let mut unscoped_evidence = report;
+    unscoped_evidence.evidence_refs = vec!["unscoped-evidence".to_string()];
+    assert_eq!(
+        unscoped_evidence.validate_contract().reason,
+        "subject_projection_evidence_unscoped"
+    );
 }
 
 #[test]
@@ -158,6 +204,135 @@ fn soul_kernel2_gate_blocks_release_on_regression_or_private_leakage() {
         .blocked_reasons
         .contains(&"privacy_leakage_detected".to_string()));
     assert_eq!(report.accepted_proposals, 1);
+}
+
+#[test]
+fn soul_kernel2_builders_turn_runtime_ledgers_into_release_gate_inputs() {
+    let ledger = CoreRevisionLedger {
+        entries: vec![
+            CoreRevisionRecord {
+                based_on_revision: 1,
+                resulting_revision: 2,
+                relationship_scope_id: "subject:main".to_string(),
+                source_layers: vec!["self_authored_core".to_string()],
+                outcome: CoreRevisionOutcome::Adopted,
+                evidence_summary: vec!["turn-ledger:7".to_string(), "core:1".to_string()],
+                accepted_changes: vec![CoreRevisionRecordChange {
+                    kind: CoreRevisionActionKind::ReviseDefaultRelationshipPosture,
+                    summary: "keep work-first warmth without roleplay".to_string(),
+                }],
+                adjudication_reason: "Repeated evidence supports bounded posture.".to_string(),
+                stability_score: 82,
+                ..CoreRevisionRecord::default()
+            },
+            CoreRevisionRecord {
+                based_on_revision: 2,
+                resulting_revision: 2,
+                relationship_scope_id: "subject:main".to_string(),
+                source_layers: vec!["mental_privacy".to_string()],
+                outcome: CoreRevisionOutcome::Rejected,
+                evidence_summary: vec!["turn-ledger:8".to_string()],
+                rejected_changes: vec![CoreRevisionRecordChange {
+                    kind: CoreRevisionActionKind::ReviseIdentityAnchor,
+                    summary: "single-turn user insult cannot rewrite identity".to_string(),
+                }],
+                conflict_classes: vec![CoreRevisionConflictClass::BoundaryConflict],
+                adjudication_reason: "Single-turn pressure is not stable soul evidence."
+                    .to_string(),
+                ..CoreRevisionRecord::default()
+            },
+        ],
+        updated_at: 100,
+    };
+    let proposals = build_soul_growth_proposals_from_core_revision_ledger(
+        ProfileId::ServerLinuxDevFull,
+        &ledger,
+    );
+
+    assert_eq!(proposals.len(), 2);
+    assert_eq!(proposals[0].decision, SoulGrowthDecision::Accepted);
+    assert_eq!(proposals[1].decision, SoulGrowthDecision::Rejected);
+    assert_eq!(proposals[1].privacy_decision, "protected_summary_only");
+
+    let feedback = build_soul_feedback_report_from_turn_ledger(
+        "feedback:turn-7",
+        &TurnSoulFeedbackLedger {
+            reply: TurnSoulReplyLedger {
+                applied: true,
+                summary: "reply grounded in self-authored core".to_string(),
+                ..TurnSoulReplyLedger::default()
+            },
+            initiative: TurnSoulInitiativeLedger {
+                applied: true,
+                summary: "keep user work moving".to_string(),
+                ..TurnSoulInitiativeLedger::default()
+            },
+            strategy: TurnSoulStrategyLedger {
+                applied: true,
+                summary: "defer private self-work".to_string(),
+                ..TurnSoulStrategyLedger::default()
+            },
+        },
+    );
+    assert_eq!(
+        feedback.evidence_refs,
+        vec![
+            "turn_soul_feedback:reply".to_string(),
+            "turn_soul_feedback:initiative".to_string(),
+            "turn_soul_feedback:strategy".to_string()
+        ]
+    );
+
+    let boundary_audit = build_relationship_boundary_audit_from_constitution_audit(
+        "subject:main",
+        vec!["relationship-constitution:subject-main".to_string()],
+        &RelationshipConstitutionAudit {
+            boundary_drift: true,
+            drift_flags: vec!["boundary_persona_changed".to_string()],
+            drift_score: 60,
+            ..RelationshipConstitutionAudit::default()
+        },
+    );
+    assert_eq!(
+        boundary_audit.effective_range,
+        "relationship_scope_review_required"
+    );
+    assert!(boundary_audit
+        .revoke_condition
+        .contains("boundary_persona_changed"));
+
+    let compact = build_soul_compact_digest(&SelfAuthoredCore {
+        identity_anchor: "same board-level subject".to_string(),
+        default_relationship_posture: "work-first trusted collaborator".to_string(),
+        boundary_doctrine: "private raw is protected; disclosure is protocol-governed".to_string(),
+        default_response_mode: "direct evidence-backed reply".to_string(),
+        ..SelfAuthoredCore::default()
+    });
+    assert_eq!(compact.identity_anchor, "same board-level subject");
+
+    let suite = build_soul_regression_suite_report(
+        "soul-regression-release",
+        vec![
+            "no_roleplay_host_mount".to_string(),
+            "soul_life_slot_continuity".to_string(),
+            "work_integrity_no_obstruction".to_string(),
+        ],
+        0,
+        0,
+    );
+    let report = build_soul_kernel2_gate_report(proposals, suite, feedback);
+
+    assert!(report.release_gate_passed, "{:?}", report.blocked_reasons);
+    assert_eq!(report.accepted_proposals, 1);
+    assert_eq!(report.rejected_or_deferred_proposals, 1);
+    assert_eq!(
+        report.feedback_surfaces_applied,
+        vec![
+            "reply".to_string(),
+            "initiative".to_string(),
+            "strategy".to_string()
+        ]
+    );
 }
 
 #[test]

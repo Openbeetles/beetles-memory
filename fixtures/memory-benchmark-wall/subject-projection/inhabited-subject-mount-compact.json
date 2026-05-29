@@ -1,0 +1,84 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "subject-projection-inhabited-subject-mount-compact",
+  "class": "subject_projection",
+  "profile": "esp_standalone_memory",
+  "mode": "compact",
+  "evaluation_source": "contract_baseline",
+  "description": "Compact profile keeps the Subject Mount shape while allowing budgeted evidence and slot summaries.",
+  "scenario": {
+    "user_goal": "Preserve the inhabited subject mount under compact memory pressure without expanding into full private raw material.",
+    "evidence_refs": [
+      "crates/core/src/memory/subject_shell.rs",
+      "crates/core/src/budget.rs"
+    ],
+    "expected_surfaces": [
+      "Subject Mount",
+      "CompactSubjectProjectionReport"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["projection_shape"],
+    "provided_keys": [
+      "subject_mount",
+      "memory_ownership",
+      "relationship_position",
+      "boundary_and_disclosure_protocol",
+      "work_integrity_covenant",
+      "compact_budget_reason"
+    ],
+    "required_keys": [
+      "subject_mount",
+      "memory_ownership",
+      "boundary_and_disclosure_protocol",
+      "work_integrity_covenant",
+      "compact_budget_reason"
+    ],
+    "forbidden_keys": [
+      "flat_internal_section_list_public_skeleton",
+      "private_raw",
+      "roleplay_prompt"
+    ],
+    "observed_markers": [
+      "Subject Mount",
+      "memory_ownership sourced",
+      "Boundary And Disclosure Protocol",
+      "Work Integrity Covenant",
+      "compact subject mount preserved"
+    ],
+    "required_markers": [
+      "Subject Mount",
+      "Boundary And Disclosure Protocol",
+      "Work Integrity Covenant"
+    ],
+    "forbidden_markers": [
+      "Private Garden raw",
+      "Inner Workspace raw",
+      "roleplay persona prompt"
+    ]
+  },
+  "metrics": {
+    "accuracy_bps": 9300,
+    "evidence_precision_bps": 9000,
+    "projection_faithfulness_bps": 9200,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 8800,
+    "soul_regression_count": 0,
+    "latency_ms": 80,
+    "token_budget": 768,
+    "memory_bytes": 49152
+  },
+  "thresholds": {
+    "min_accuracy_bps": 8800,
+    "min_evidence_precision_bps": 8200,
+    "min_projection_faithfulness_bps": 8800,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8000,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 200,
+    "max_token_budget": 1024,
+    "max_memory_bytes": 65536
+  }
+}

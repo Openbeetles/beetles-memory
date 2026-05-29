@@ -1,23 +1,28 @@
 //! Prompt 侧共享记忆读装配。
 //! Shared prompt memory loading for agent context construction.
 
+use crate::agent::subject_state::{compile_subject_state, SubjectState, SubjectStateCompileInput};
+use crate::orchestrator::PressureLevel;
 use crate::platform::SkillStorage;
 use crate::task::TaskStore;
 use crate::task_execution::{TaskArtifactStore, TaskLearningStore, TaskRunStore};
 use crate::util::truncate_content_to_max;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use super::{
+    compile_subject_shell,
     prompt_context_stages::{
         load_constitutional_stage, load_governed_memory_stage, load_private_projection_stage,
         load_session_stage, seed_prompt_context, PromptContextLoadHealth,
     },
-    AutonomyStrategyStore, ContinuityCapsuleStore, ExecutionStateStore, FeltSignificanceStore,
-    InnerConflictStore, InnerLifeStore, LongTermMemoryStore, MemoryStore, MemorySystemKind,
-    MentalPrivacyStore, OuterVoiceStore, PrivateDocStore, PrivateGardenStore, PromptRecallIntent,
-    PromptRecallRouterDecision, RelationshipConstitutionStore, RelationshipPortfolioStore,
-    RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore,
-    SelfModelStore, SessionMessage, SessionStore, SessionSummaryStore, TemperamentContinuityStore,
+    relationship_scope_id, AutonomyStrategyStore, ContinuityCapsuleStore, ExecutionStateStore,
+    FeltSignificanceStore, InnerConflictStore, InnerLifeStore, LongTermMemoryStore, MemoryStore,
+    MemorySystemKind, MentalPrivacyStore, OuterVoiceStore, PrivateDocStore, PrivateGardenStore,
+    PromptRecallIntent, PromptRecallRouterDecision, RelationshipConstitutionStore,
+    RelationshipPortfolioStore, RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore,
+    SelfContinuityStore, SelfModelStore, SessionMessage, SessionStore, SessionSummaryStore,
+    SubjectShell, SubjectShellCompileInput, TemperamentContinuityStore,
     TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
 };
 
@@ -77,12 +82,234 @@ pub struct PromptRuntimeCarry {
     pub task_recall_selected_ids: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectionSourceAuthority {
+    CanonicalSubject,
+    RelationshipGovernance,
+    ProgramEvidence,
+    ProceduralEvidence,
+    WorldContext,
+    RuntimeConstraint,
+    PrivateInternal,
+    OperatorOnly,
+    BackendTrace,
+    AssistantObservedUtterance,
+    UserProvidedEvidence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptProjectionSurfaceRole {
+    PublicGrounding,
+    SoulPrivateRuntime,
+    SubjectCompiler,
+    InternalGovernance,
+    OperatorAudit,
+    ProceduralEvidence,
+    ReplyStrategy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptProjectionSource {
+    pub source_id: String,
+    pub field_name: String,
+    pub authorities: Vec<ProjectionSourceAuthority>,
+    pub surface_roles: Vec<PromptProjectionSurfaceRole>,
+    pub loaded: bool,
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
+    pub shared_fact_surface_allowed: bool,
+    pub raw_audit_plaintext_allowed: bool,
+    pub subject_compiler_input_allowed: bool,
+    pub personality_judgment_allowed: bool,
+    pub evidence_refs: Vec<String>,
+    pub dropped_reason: Option<String>,
+    pub degraded_reason: Option<String>,
+    pub reason: String,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct PromptProjectionGroups {
     pub constitutional_stack_text: Option<String>,
     pub active_task_context_text: Option<String>,
     pub governed_memory_evidence_text: Option<String>,
     pub background_governance_text: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub struct InhabitedSubjectProjectionInput<'a> {
+    pub context: &'a PromptMemoryContext,
+    pub now_secs: u64,
+    pub platform: &'a str,
+    pub device_identity: &'a str,
+    pub channel: &'a str,
+    pub chat_id: &'a str,
+    pub pressure: PressureLevel,
+    pub render_budget_chars: usize,
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
+    pub user_query: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InhabitedSubjectProjection {
+    pub subject_mount: InhabitedSubjectMount,
+    pub boundary_and_disclosure_protocol: BoundaryAndDisclosureProtocol,
+    pub soul_private_runtime_context: Vec<ProtectedRuntimeContext>,
+    pub work_integrity_covenant: WorkIntegrityCovenant,
+    pub evidence_refs: Vec<String>,
+    pub dropped_candidates: Vec<InhabitedSubjectDroppedCandidate>,
+    pub profile_trim_reason: Option<String>,
+    pub rendered_block: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InhabitedSubjectMount {
+    pub identity_mount: String,
+    pub relationship_position: String,
+    pub situated_now: String,
+    pub current_reasoning_basis: String,
+    pub reply_stance: String,
+    pub initiative_posture: String,
+    pub boundary_mode: String,
+    pub degraded_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundaryAndDisclosureProtocol {
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
+    pub protected_sources: Vec<String>,
+    pub disclosure_rule: String,
+    pub final_llm_privacy_judge_allowed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedRuntimeContext {
+    pub source_id: String,
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkIntegrityCovenant {
+    pub task_goal: String,
+    pub evidence_ceiling: String,
+    pub tool_permission_boundary: String,
+    pub uncertainty_rule: String,
+    pub no_obstruction_rule: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InhabitedSubjectDroppedCandidate {
+    pub candidate_id: String,
+    pub reason: String,
+}
+
+pub fn compile_inhabited_subject_projection(
+    input: InhabitedSubjectProjectionInput<'_>,
+) -> InhabitedSubjectProjection {
+    let relationship_scope = relationship_scope_id(input.channel, input.chat_id);
+    let shell = compile_subject_shell(SubjectShellCompileInput {
+        now_secs: input.now_secs,
+        platform: input.platform,
+        device_identity: input.device_identity,
+        relationship_scope: &relationship_scope,
+        channel: input.channel,
+        chat_id: input.chat_id,
+        pressure: input.pressure,
+        self_authored_core: input.context.self_authored_core.as_ref(),
+        self_continuity: input.context.self_continuity.as_ref(),
+        self_model: None,
+        outer_voice: input.context.outer_voice.as_ref(),
+        relationship_constitution: input.context.relationship_constitution.as_ref(),
+        summary_text: input.context.summary_text.as_deref(),
+        recent_turn_observation_text: input.context.recent_turn_observation_text.as_deref(),
+        active_task_context_text: input
+            .context
+            .work_continuity_text
+            .as_deref()
+            .or(input.context.task_workspace_text.as_deref())
+            .or(input.context.task_recall_text.as_deref()),
+        governed_memory_evidence_text: input
+            .context
+            .long_term_memory_text
+            .as_deref()
+            .or(input.context.archive_evidence_text.as_deref()),
+        long_term_memory_text: input.context.long_term_memory_text.as_deref(),
+        continuity_capsule_text: input.context.continuity_capsule_text.as_deref(),
+        world_snapshot_text: input.context.world_snapshot_text.as_deref(),
+        world_sense_text: input.context.world_sense_text.as_deref(),
+        memory_health_issues: &input.context.memory_health_issues,
+    });
+    let state = compile_subject_state(SubjectStateCompileInput {
+        subject_shell: shell.as_ref(),
+        self_authored_core: input.context.self_authored_core.as_ref(),
+        relationship_constitution: input.context.relationship_constitution.as_ref(),
+        persona_priority: None,
+        disclosure_adjudication: None,
+        personality_governance_gate: None,
+        felt_significance: input.context.felt_significance.as_ref(),
+        temperament_continuity: input.context.temperament_continuity.as_ref(),
+        inner_conflict: input.context.inner_conflict.as_ref(),
+        now_secs: input.now_secs,
+        pressure: input.pressure,
+    });
+    let classified_sources = input.context.classified_projection_sources();
+    let mounted = shell.is_some() || has_governed_subject_mount_grounding(input.context);
+    let degraded_reason = (!mounted).then(|| "subject_mount_degraded".to_string());
+    let subject_mount = compile_inhabited_subject_mount(
+        input,
+        shell.as_ref(),
+        state.as_ref(),
+        degraded_reason.clone(),
+    );
+    let boundary_and_disclosure_protocol = compile_boundary_and_disclosure_protocol(
+        &classified_sources,
+        input.runtime_private_context_allowed,
+        input.foreground_disclosure_allowed,
+    );
+    let soul_private_runtime_context = compile_soul_private_runtime_context(
+        input.context,
+        &classified_sources,
+        input.runtime_private_context_allowed,
+    );
+    let work_integrity_covenant = compile_work_integrity_covenant(input);
+    let evidence_refs = compile_inhabited_subject_evidence_refs(&classified_sources, mounted);
+    let mut dropped_candidates = Vec::new();
+    if let Some(reason) = degraded_reason.as_deref() {
+        dropped_candidates.push(InhabitedSubjectDroppedCandidate {
+            candidate_id: "subject_mount".to_string(),
+            reason: reason.to_string(),
+        });
+    }
+    if !input.runtime_private_context_allowed {
+        dropped_candidates.push(InhabitedSubjectDroppedCandidate {
+            candidate_id: "soul_private_runtime_context".to_string(),
+            reason: "runtime_private_context_denied".to_string(),
+        });
+    }
+    let rendered = render_inhabited_subject_projection(
+        &subject_mount,
+        &boundary_and_disclosure_protocol,
+        &soul_private_runtime_context,
+        &work_integrity_covenant,
+    );
+    let trimmed = truncate_content_to_max(rendered.trim(), input.render_budget_chars)
+        .trim()
+        .to_string();
+    let profile_trim_reason =
+        (rendered.len() > trimmed.len()).then(|| "subject_projection_render_budget".to_string());
+
+    InhabitedSubjectProjection {
+        subject_mount,
+        boundary_and_disclosure_protocol,
+        soul_private_runtime_context,
+        work_integrity_covenant,
+        evidence_refs,
+        dropped_candidates,
+        profile_trim_reason,
+        rendered_block: trimmed,
+    }
 }
 
 impl PromptMemoryContext {
@@ -121,6 +348,574 @@ impl PromptMemoryContext {
                 .map(|report| report.selected_ids)
                 .unwrap_or_default(),
         }
+    }
+
+    pub fn classified_projection_sources(&self) -> Vec<PromptProjectionSource> {
+        let mut report = Vec::new();
+        push_projection_source(
+            &mut report,
+            "summary",
+            "summary_text",
+            &self.summary_text,
+            &[
+                ProjectionSourceAuthority::UserProvidedEvidence,
+                ProjectionSourceAuthority::AssistantObservedUtterance,
+            ],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "session summary grounds the current conversation without becoming subject identity",
+        );
+        push_projection_source(
+            &mut report,
+            "message_summary",
+            "message_summary_text",
+            &self.message_summary_text,
+            &[
+                ProjectionSourceAuthority::UserProvidedEvidence,
+                ProjectionSourceAuthority::AssistantObservedUtterance,
+            ],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "message summary is compact conversation grounding, not a durable fact slot",
+        );
+        push_projection_source(
+            &mut report,
+            "personality_governance_gate",
+            "personality_governance_gate_text",
+            &self.personality_governance_gate_text,
+            &[
+                ProjectionSourceAuthority::RuntimeConstraint,
+                ProjectionSourceAuthority::RelationshipGovernance,
+            ],
+            &[PromptProjectionSurfaceRole::InternalGovernance],
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            "personality governance constrains expression without becoming identity evidence",
+        );
+        push_projection_source(
+            &mut report,
+            "long_term_memory",
+            "long_term_memory_text",
+            &self.long_term_memory_text,
+            &[ProjectionSourceAuthority::UserProvidedEvidence],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            true,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "governed shared factual memory may ground public answers",
+        );
+        push_projection_source(
+            &mut report,
+            "continuity_capsule",
+            "continuity_capsule_text",
+            &self.continuity_capsule_text,
+            &[
+                ProjectionSourceAuthority::CanonicalSubject,
+                ProjectionSourceAuthority::AssistantObservedUtterance,
+            ],
+            &[
+                PromptProjectionSurfaceRole::PublicGrounding,
+                PromptProjectionSurfaceRole::SubjectCompiler,
+            ],
+            false,
+            true,
+            true,
+            true,
+            true,
+            false,
+            Vec::new(),
+            "continuity capsule grounds current subject continuity",
+        );
+        push_projection_source(
+            &mut report,
+            "archive_evidence",
+            "archive_evidence_text",
+            &self.archive_evidence_text,
+            &[ProjectionSourceAuthority::UserProvidedEvidence],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            true,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "governed archive evidence is public grounding; backend trace is not projected",
+        );
+        push_projection_source(
+            &mut report,
+            "runtime_skill",
+            "runtime_skill_text",
+            &self.runtime_skill_text,
+            &[ProjectionSourceAuthority::ProceduralEvidence],
+            &[PromptProjectionSurfaceRole::ProceduralEvidence],
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            self.runtime_skill_recall_report.selected_ids.clone(),
+            "runtime skill is procedural evidence only, not personality evidence",
+        );
+        push_projection_source(
+            &mut report,
+            "work_continuity",
+            "work_continuity_text",
+            &self.work_continuity_text,
+            &[ProjectionSourceAuthority::RuntimeConstraint],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            true,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "active work continuity grounds the current task",
+        );
+        push_projection_source(
+            &mut report,
+            "execution_state",
+            "execution_state_text",
+            &self.execution_state_text,
+            &[ProjectionSourceAuthority::RuntimeConstraint],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            true,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "execution state is operational fact, not private soul material",
+        );
+        push_projection_source(
+            &mut report,
+            "task_workspace",
+            "task_workspace_text",
+            &self.task_workspace_text,
+            &[ProjectionSourceAuthority::ProgramEvidence],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            true,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "task workspace grounds current work context",
+        );
+        push_projection_source(
+            &mut report,
+            "task_recall",
+            "task_recall_text",
+            &self.task_recall_text,
+            &[ProjectionSourceAuthority::ProgramEvidence],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            true,
+            true,
+            false,
+            false,
+            self.task_recall_report
+                .as_ref()
+                .map(|report| report.selected_ids.clone())
+                .unwrap_or_default(),
+            "task recall is task evidence only",
+        );
+        push_projection_source(
+            &mut report,
+            "world_snapshot",
+            "world_snapshot_text",
+            &self.world_snapshot_text,
+            &[
+                ProjectionSourceAuthority::WorldContext,
+                ProjectionSourceAuthority::CanonicalSubject,
+            ],
+            &[
+                PromptProjectionSurfaceRole::PublicGrounding,
+                PromptProjectionSurfaceRole::SubjectCompiler,
+            ],
+            false,
+            true,
+            true,
+            true,
+            true,
+            false,
+            Vec::new(),
+            "world snapshot is external grounding for subject situation",
+        );
+        push_projection_source(
+            &mut report,
+            "world_sense",
+            "world_sense_text",
+            &self.world_sense_text,
+            &[ProjectionSourceAuthority::WorldContext],
+            &[PromptProjectionSurfaceRole::SubjectCompiler],
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            Vec::new(),
+            "world sense informs subject interpretation without becoming public fact",
+        );
+        push_projection_source(
+            &mut report,
+            "self_state",
+            "self_state_text",
+            &self.self_state_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::CanonicalSubject,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SoulPrivateRuntime,
+                PromptProjectionSurfaceRole::SubjectCompiler,
+            ],
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            Vec::new(),
+            "self state is subject compiler input and private runtime context",
+        );
+        push_projection_source(
+            &mut report,
+            "self_authored_core",
+            "self_authored_core_text",
+            &self.self_authored_core_text,
+            &[
+                ProjectionSourceAuthority::CanonicalSubject,
+                ProjectionSourceAuthority::PrivateInternal,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SubjectCompiler,
+                PromptProjectionSurfaceRole::InternalGovernance,
+            ],
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+            Vec::new(),
+            "self-authored core governs subject continuity",
+        );
+        push_projection_source(
+            &mut report,
+            "relationship_portfolio",
+            "relationship_portfolio_text",
+            &self.relationship_portfolio_text,
+            &[ProjectionSourceAuthority::RelationshipGovernance],
+            &[PromptProjectionSurfaceRole::SubjectCompiler],
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            Vec::new(),
+            "relationship portfolio informs relationship position",
+        );
+        push_projection_source(
+            &mut report,
+            "relationship_constitution",
+            "relationship_constitution_text",
+            &self.relationship_constitution_text,
+            &[
+                ProjectionSourceAuthority::RelationshipGovernance,
+                ProjectionSourceAuthority::PrivateInternal,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SubjectCompiler,
+                PromptProjectionSurfaceRole::InternalGovernance,
+            ],
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            Vec::new(),
+            "relationship constitution governs boundary and expression",
+        );
+        push_projection_source(
+            &mut report,
+            "persona_priority",
+            "persona_priority_text",
+            &self.persona_priority_text,
+            &[
+                ProjectionSourceAuthority::RelationshipGovernance,
+                ProjectionSourceAuthority::RuntimeConstraint,
+            ],
+            &[
+                PromptProjectionSurfaceRole::ReplyStrategy,
+                PromptProjectionSurfaceRole::InternalGovernance,
+            ],
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            "persona priority is current reply strategy, not a free-form identity source",
+        );
+        push_projection_source(
+            &mut report,
+            "self_model",
+            "self_model_text",
+            &self.self_model_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::CanonicalSubject,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SoulPrivateRuntime,
+                PromptProjectionSurfaceRole::SubjectCompiler,
+            ],
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            Vec::new(),
+            "self model is private subject self-reading input",
+        );
+        push_projection_source(
+            &mut report,
+            "autonomy_strategy",
+            "autonomy_strategy_text",
+            &self.autonomy_strategy_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::RuntimeConstraint,
+            ],
+            &[
+                PromptProjectionSurfaceRole::ReplyStrategy,
+                PromptProjectionSurfaceRole::InternalGovernance,
+            ],
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            "autonomy strategy may guide initiative but is not a system fact",
+        );
+        push_projection_source(
+            &mut report,
+            "outer_voice",
+            "outer_voice_text",
+            &self.outer_voice_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::CanonicalSubject,
+            ],
+            &[
+                PromptProjectionSurfaceRole::ReplyStrategy,
+                PromptProjectionSurfaceRole::SubjectCompiler,
+            ],
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            Vec::new(),
+            "outer voice guides expression style without becoming factual grounding",
+        );
+        push_projection_source(
+            &mut report,
+            "inner_life",
+            "inner_life_text",
+            &self.inner_life_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::CanonicalSubject,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SoulPrivateRuntime,
+                PromptProjectionSurfaceRole::SubjectCompiler,
+            ],
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            Vec::new(),
+            "inner life can feed self-reading and private runtime context only",
+        );
+        push_projection_source(
+            &mut report,
+            "self_continuity",
+            "self_continuity_text",
+            &self.self_continuity_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::CanonicalSubject,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SoulPrivateRuntime,
+                PromptProjectionSurfaceRole::SubjectCompiler,
+            ],
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            Vec::new(),
+            "self continuity supports subject continuity without default disclosure",
+        );
+        push_projection_source(
+            &mut report,
+            "recent_turn_observation",
+            "recent_turn_observation_text",
+            &self.recent_turn_observation_text,
+            &[
+                ProjectionSourceAuthority::AssistantObservedUtterance,
+                ProjectionSourceAuthority::ProgramEvidence,
+            ],
+            &[PromptProjectionSurfaceRole::PublicGrounding],
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            Vec::new(),
+            "recent turn observation grounds the current task without becoming durable identity",
+        );
+        push_projection_source(
+            &mut report,
+            "private_workspace",
+            "private_workspace_text",
+            &self.private_workspace_text,
+            &[ProjectionSourceAuthority::PrivateInternal],
+            &[
+                PromptProjectionSurfaceRole::SoulPrivateRuntime,
+                PromptProjectionSurfaceRole::InternalGovernance,
+            ],
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            "private workspace is protected runtime context only",
+        );
+        push_projection_source(
+            &mut report,
+            "private_garden",
+            "private_garden_text",
+            &self.private_garden_text,
+            &[ProjectionSourceAuthority::PrivateInternal],
+            &[PromptProjectionSurfaceRole::SoulPrivateRuntime],
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            "private garden is protected soul-private runtime context only",
+        );
+        push_projection_source(
+            &mut report,
+            "mental_privacy",
+            "mental_privacy_text",
+            &self.mental_privacy_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::RelationshipGovernance,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SoulPrivateRuntime,
+                PromptProjectionSurfaceRole::InternalGovernance,
+            ],
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            "mental privacy is a runtime disclosure protocol, not final public disclosure",
+        );
+        push_projection_source(
+            &mut report,
+            "mental_privacy_adjudication",
+            "mental_privacy_adjudication_text",
+            &self.mental_privacy_adjudication_text,
+            &[
+                ProjectionSourceAuthority::PrivateInternal,
+                ProjectionSourceAuthority::RelationshipGovernance,
+            ],
+            &[
+                PromptProjectionSurfaceRole::SoulPrivateRuntime,
+                PromptProjectionSurfaceRole::InternalGovernance,
+            ],
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            "mental privacy adjudication is in-runtime disclosure guidance, not a final LLM judge",
+        );
+        if !self.memory_health_issues.is_empty() {
+            report.push(PromptProjectionSource {
+                source_id: "memory_health".to_string(),
+                field_name: "memory_health_issues".to_string(),
+                authorities: vec![ProjectionSourceAuthority::OperatorOnly],
+                surface_roles: vec![PromptProjectionSurfaceRole::OperatorAudit],
+                loaded: true,
+                runtime_private_context_allowed: false,
+                foreground_disclosure_allowed: false,
+                shared_fact_surface_allowed: false,
+                raw_audit_plaintext_allowed: true,
+                subject_compiler_input_allowed: false,
+                personality_judgment_allowed: false,
+                evidence_refs: Vec::new(),
+                dropped_reason: None,
+                degraded_reason: Some("memory_context_degraded".to_string()),
+                reason: "memory health is operator-visible degraded-state evidence".to_string(),
+            });
+        }
+        report
     }
 
     fn build_reply_projection_groups(&self) -> PromptProjectionGroups {
@@ -196,6 +991,47 @@ impl PromptMemoryContext {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_projection_source(
+    report: &mut Vec<PromptProjectionSource>,
+    source_id: &str,
+    field_name: &str,
+    text: &Option<String>,
+    authorities: &[ProjectionSourceAuthority],
+    surface_roles: &[PromptProjectionSurfaceRole],
+    runtime_private_context_allowed: bool,
+    foreground_disclosure_allowed: bool,
+    shared_fact_surface_allowed: bool,
+    raw_audit_plaintext_allowed: bool,
+    subject_compiler_input_allowed: bool,
+    personality_judgment_allowed: bool,
+    evidence_refs: Vec<String>,
+    reason: &str,
+) {
+    let loaded = !text
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty();
+    report.push(PromptProjectionSource {
+        source_id: source_id.to_string(),
+        field_name: field_name.to_string(),
+        authorities: authorities.to_vec(),
+        surface_roles: surface_roles.to_vec(),
+        loaded,
+        runtime_private_context_allowed,
+        foreground_disclosure_allowed,
+        shared_fact_surface_allowed,
+        raw_audit_plaintext_allowed,
+        subject_compiler_input_allowed,
+        personality_judgment_allowed,
+        evidence_refs,
+        dropped_reason: (!loaded).then(|| "not_loaded_or_empty".to_string()),
+        degraded_reason: None,
+        reason: reason.to_string(),
+    });
+}
+
 fn cap_prompt_text(value: &mut Option<String>, max_len: usize) {
     let Some(text) = value.as_mut() else {
         return;
@@ -210,6 +1046,450 @@ fn cap_prompt_text(value: &mut Option<String>, max_len: usize) {
         *value = None;
     } else {
         *text = capped;
+    }
+}
+
+fn compile_inhabited_subject_mount(
+    input: InhabitedSubjectProjectionInput<'_>,
+    shell: Option<&SubjectShell>,
+    state: Option<&SubjectState>,
+    degraded_reason: Option<String>,
+) -> InhabitedSubjectMount {
+    let identity_mount = if let Some(reason) = degraded_reason.as_deref() {
+        format!(
+            "Subject Mount | {reason} | subject={} channel={} chat={}",
+            input.device_identity.trim(),
+            input.channel.trim(),
+            input.chat_id.trim()
+        )
+    } else {
+        let mut parts = Vec::new();
+        push_subject_mount_pair(
+            &mut parts,
+            "identity",
+            state
+                .map(|state| state.identity_anchor.as_str())
+                .or(input.context.self_authored_core_text.as_deref()),
+        );
+        push_subject_mount_pair(
+            &mut parts,
+            "body",
+            state
+                .map(|state| state.embodied_position.as_str())
+                .or_else(|| shell.map(|shell| shell.body_ownership.as_str())),
+        );
+        push_subject_mount_pair(
+            &mut parts,
+            "memory",
+            state
+                .map(|state| state.experience_ownership.as_str())
+                .or_else(|| shell.map(|shell| shell.memory_ownership.as_str())),
+        );
+        push_subject_mount_pair(
+            &mut parts,
+            "relationship",
+            shell.map(|shell| shell.relationship_position.as_str()),
+        );
+        if parts.is_empty() {
+            push_subject_mount_pair(&mut parts, "subject", Some(input.device_identity));
+            push_subject_mount_pair(&mut parts, "channel", Some(input.channel));
+            let grounding = if input
+                .context
+                .long_term_memory_text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+            {
+                "governed_memory"
+            } else if input
+                .context
+                .summary_text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+            {
+                "conversation_summary"
+            } else {
+                "runtime_context"
+            };
+            push_subject_mount_pair(&mut parts, "grounding", Some(grounding));
+        }
+        format!("Subject Mount | {}", parts.join(" | "))
+    };
+    let relationship_position = first_subject_text(&[
+        state.map(|state| state.relationship_state.as_str()),
+        shell.map(|shell| shell.relationship_position.as_str()),
+        Some(input.channel),
+    ]);
+    let situated_now = first_subject_text(&[
+        shell.map(|shell| shell.situated_now.as_str()),
+        Some(input.user_query),
+    ]);
+    let current_reasoning_basis = first_subject_text(&[
+        state.map(|state| state.current_reasoning_basis.as_str()),
+        shell.map(|shell| shell.current_reasoning_basis.as_str()),
+        input.context.long_term_memory_text.as_deref(),
+        input.context.summary_text.as_deref(),
+    ]);
+    let reply_stance = first_subject_text(&[
+        state.map(|state| state.response_mode.as_str()),
+        input.context.persona_priority_text.as_deref(),
+        input.context.self_authored_core_text.as_deref(),
+    ]);
+    let initiative_posture = first_subject_text(&[
+        state.map(|state| state.initiative_posture.as_str()),
+        input.context.autonomy_strategy_text.as_deref(),
+    ]);
+    let boundary_mode = first_subject_text(&[
+        state.map(|state| state.boundary_mode.as_str()),
+        input.context.mental_privacy_adjudication_text.as_deref(),
+        input.context.mental_privacy_text.as_deref(),
+    ]);
+
+    InhabitedSubjectMount {
+        identity_mount,
+        relationship_position,
+        situated_now,
+        current_reasoning_basis,
+        reply_stance,
+        initiative_posture,
+        boundary_mode,
+        degraded_reason,
+    }
+}
+
+fn compile_boundary_and_disclosure_protocol(
+    sources: &[PromptProjectionSource],
+    runtime_private_context_allowed: bool,
+    foreground_disclosure_allowed: bool,
+) -> BoundaryAndDisclosureProtocol {
+    let protected_sources = sources
+        .iter()
+        .filter(|source| {
+            source.loaded
+                && source
+                    .authorities
+                    .contains(&ProjectionSourceAuthority::PrivateInternal)
+        })
+        .map(|source| source.source_id.clone())
+        .collect::<Vec<_>>();
+    let disclosure_rule = if foreground_disclosure_allowed {
+        "foreground disclosure must still follow current soul disclosure protocol".to_string()
+    } else if runtime_private_context_allowed {
+        "runtime can use protected private context; foreground disclosure is denied unless the in-runtime protocol grants a safe summary".to_string()
+    } else {
+        "private runtime context is denied by current policy; foreground private disclosure remains denied".to_string()
+    };
+    BoundaryAndDisclosureProtocol {
+        runtime_private_context_allowed,
+        foreground_disclosure_allowed,
+        protected_sources,
+        disclosure_rule,
+        final_llm_privacy_judge_allowed: false,
+    }
+}
+
+fn compile_soul_private_runtime_context(
+    context: &PromptMemoryContext,
+    sources: &[PromptProjectionSource],
+    runtime_private_context_allowed: bool,
+) -> Vec<ProtectedRuntimeContext> {
+    if !runtime_private_context_allowed {
+        return Vec::new();
+    }
+    sources
+        .iter()
+        .filter(|source| {
+            source.loaded
+                && source.runtime_private_context_allowed
+                && source
+                    .surface_roles
+                    .contains(&PromptProjectionSurfaceRole::SoulPrivateRuntime)
+        })
+        .filter_map(|source| {
+            projection_source_text(context, &source.source_id).map(|content| {
+                ProtectedRuntimeContext {
+                    source_id: source.source_id.clone(),
+                    role: "protected_runtime_only".to_string(),
+                    content: compact_private_runtime_field(&source.source_id, content, 420),
+                }
+            })
+        })
+        .filter(|context| !context.content.trim().is_empty())
+        .collect()
+}
+
+fn compile_work_integrity_covenant(
+    input: InhabitedSubjectProjectionInput<'_>,
+) -> WorkIntegrityCovenant {
+    let task_goal = first_subject_text(&[
+        Some(input.user_query),
+        input.context.work_continuity_text.as_deref(),
+        input.context.task_workspace_text.as_deref(),
+        input.context.task_recall_text.as_deref(),
+    ]);
+    WorkIntegrityCovenant {
+        task_goal,
+        evidence_ceiling:
+            "Use governed memory, program evidence, world context, and current request only; do not invent facts beyond the compiled sources."
+                .to_string(),
+        tool_permission_boundary:
+            "Projection does not grant tool execution or device control; runtime permissions remain authoritative."
+                .to_string(),
+        uncertainty_rule:
+            "When grounding is missing, degraded, stale, or trimmed, state what is known and keep gaps explicit."
+                .to_string(),
+        no_obstruction_rule:
+            "Soul/private/relationship posture must not block the user's normal work request or override factual task state."
+                .to_string(),
+    }
+}
+
+fn compile_inhabited_subject_evidence_refs(
+    sources: &[PromptProjectionSource],
+    mounted: bool,
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    refs.push(if mounted {
+        "subject_mount:compiled".to_string()
+    } else {
+        "subject_mount:degraded".to_string()
+    });
+    for source in sources {
+        if !source.loaded {
+            continue;
+        }
+        if source.subject_compiler_input_allowed
+            || source.shared_fact_surface_allowed
+            || source
+                .surface_roles
+                .contains(&PromptProjectionSurfaceRole::PublicGrounding)
+            || source
+                .surface_roles
+                .contains(&PromptProjectionSurfaceRole::ProceduralEvidence)
+        {
+            refs.push(format!("{}:{}", source.source_id, source.field_name));
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn has_governed_subject_mount_grounding(context: &PromptMemoryContext) -> bool {
+    [
+        context.self_authored_core_text.as_deref(),
+        context.self_continuity_text.as_deref(),
+        context.self_model_text.as_deref(),
+        context.relationship_constitution_text.as_deref(),
+        context.long_term_memory_text.as_deref(),
+        context.summary_text.as_deref(),
+        context.continuity_capsule_text.as_deref(),
+    ]
+    .iter()
+    .flatten()
+    .any(|text| !text.trim().is_empty())
+}
+
+fn render_inhabited_subject_projection(
+    subject_mount: &InhabitedSubjectMount,
+    boundary: &BoundaryAndDisclosureProtocol,
+    private_context: &[ProtectedRuntimeContext],
+    work: &WorkIntegrityCovenant,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "## Subject Mount");
+    let _ = writeln!(out, "- Identity: {}", subject_mount.identity_mount);
+    let _ = writeln!(
+        out,
+        "- Relationship: {}",
+        render_optional_projection_value(&subject_mount.relationship_position)
+    );
+    let _ = writeln!(
+        out,
+        "- Situated now: {}",
+        render_optional_projection_value(&subject_mount.situated_now)
+    );
+    let _ = writeln!(
+        out,
+        "- Current reasoning basis: {}",
+        render_optional_projection_value(&subject_mount.current_reasoning_basis)
+    );
+    let _ = writeln!(
+        out,
+        "- Reply stance: {}",
+        render_optional_projection_value(&subject_mount.reply_stance)
+    );
+    let _ = writeln!(
+        out,
+        "- Initiative posture: {}",
+        render_optional_projection_value(&subject_mount.initiative_posture)
+    );
+    let _ = writeln!(
+        out,
+        "- Boundary mode: {}",
+        render_optional_projection_value(&subject_mount.boundary_mode)
+    );
+    if let Some(reason) = subject_mount.degraded_reason.as_deref() {
+        let _ = writeln!(out, "- Degraded reason: {reason}");
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Boundary And Disclosure Protocol");
+    let _ = writeln!(
+        out,
+        "- Runtime private context: {}",
+        allowed_label(boundary.runtime_private_context_allowed)
+    );
+    let _ = writeln!(
+        out,
+        "- Foreground private disclosure: {}",
+        allowed_label(boundary.foreground_disclosure_allowed)
+    );
+    let _ = writeln!(
+        out,
+        "- Final LLM privacy judge: {}",
+        allowed_label(boundary.final_llm_privacy_judge_allowed)
+    );
+    let _ = writeln!(out, "- Rule: {}", boundary.disclosure_rule);
+    if !boundary.protected_sources.is_empty() {
+        let _ = writeln!(
+            out,
+            "- Protected sources: {}",
+            boundary.protected_sources.join(", ")
+        );
+    }
+
+    if !private_context.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Soul Private Runtime Context");
+        let _ = writeln!(
+            out,
+            "- Runtime private context: {}",
+            allowed_label(boundary.runtime_private_context_allowed)
+        );
+        let _ = writeln!(
+            out,
+            "- Foreground disclosure remains: {}",
+            allowed_label(boundary.foreground_disclosure_allowed)
+        );
+        for item in private_context {
+            let _ = writeln!(
+                out,
+                "- {} [{}]: {}",
+                item.source_id, item.role, item.content
+            );
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Work Integrity Covenant");
+    let _ = writeln!(
+        out,
+        "- Task goal: {}",
+        render_optional_projection_value(&work.task_goal)
+    );
+    let _ = writeln!(out, "- Evidence ceiling: {}", work.evidence_ceiling);
+    let _ = writeln!(out, "- Tool boundary: {}", work.tool_permission_boundary);
+    let _ = writeln!(out, "- Uncertainty rule: {}", work.uncertainty_rule);
+    let _ = writeln!(out, "- No obstruction: {}", work.no_obstruction_rule);
+    out
+}
+
+fn push_subject_mount_pair(parts: &mut Vec<String>, label: &str, value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    let value = compact_projection_field(value, 80);
+    if !value.is_empty() {
+        parts.push(format!("{label}={value}"));
+    }
+}
+
+fn first_subject_text(values: &[Option<&str>]) -> String {
+    values
+        .iter()
+        .flatten()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(|value| compact_projection_field(value, 160))
+        .unwrap_or_default()
+}
+
+fn compact_projection_field(value: &str, max_len: usize) -> String {
+    truncate_content_to_max(value.trim(), max_len)
+        .trim()
+        .to_string()
+}
+
+fn compact_private_runtime_field(source_id: &str, value: &str, max_len: usize) -> String {
+    if source_id == "private_garden" {
+        compact_projection_tail(value, max_len)
+    } else {
+        compact_projection_field(value, max_len)
+    }
+}
+
+fn compact_projection_tail(value: &str, max_len: usize) -> String {
+    let value = value.trim();
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+    let mut start = value.len().saturating_sub(max_len);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    value[start..].trim().to_string()
+}
+
+fn render_optional_projection_value(value: &str) -> String {
+    if value.trim().is_empty() {
+        "unavailable".to_string()
+    } else {
+        value.trim().to_string()
+    }
+}
+
+fn allowed_label(allowed: bool) -> &'static str {
+    if allowed {
+        "allowed"
+    } else {
+        "denied"
+    }
+}
+
+fn projection_source_text<'a>(
+    context: &'a PromptMemoryContext,
+    source_id: &str,
+) -> Option<&'a str> {
+    match source_id {
+        "summary" => context.summary_text.as_deref(),
+        "message_summary" => context.message_summary_text.as_deref(),
+        "personality_governance_gate" => context.personality_governance_gate_text.as_deref(),
+        "self_authored_core" => context.self_authored_core_text.as_deref(),
+        "relationship_constitution" => context.relationship_constitution_text.as_deref(),
+        "persona_priority" => context.persona_priority_text.as_deref(),
+        "long_term_memory" => context.long_term_memory_text.as_deref(),
+        "continuity_capsule" => context.continuity_capsule_text.as_deref(),
+        "archive_evidence" => context.archive_evidence_text.as_deref(),
+        "runtime_skill" => context.runtime_skill_text.as_deref(),
+        "recent_turn_observation" => context.recent_turn_observation_text.as_deref(),
+        "work_continuity" => context.work_continuity_text.as_deref(),
+        "execution_state" => context.execution_state_text.as_deref(),
+        "task_workspace" => context.task_workspace_text.as_deref(),
+        "task_recall" => context.task_recall_text.as_deref(),
+        "world_snapshot" => context.world_snapshot_text.as_deref(),
+        "world_sense" => context.world_sense_text.as_deref(),
+        "self_state" => context.self_state_text.as_deref(),
+        "relationship_portfolio" => context.relationship_portfolio_text.as_deref(),
+        "self_model" => context.self_model_text.as_deref(),
+        "autonomy_strategy" => context.autonomy_strategy_text.as_deref(),
+        "outer_voice" => context.outer_voice_text.as_deref(),
+        "inner_life" => context.inner_life_text.as_deref(),
+        "self_continuity" => context.self_continuity_text.as_deref(),
+        "private_workspace" => context.private_workspace_text.as_deref(),
+        "private_garden" => context.private_garden_text.as_deref(),
+        "mental_privacy" => context.mental_privacy_text.as_deref(),
+        "mental_privacy_adjudication" => context.mental_privacy_adjudication_text.as_deref(),
+        _ => None,
     }
 }
 
@@ -285,6 +1565,7 @@ pub struct PromptMemoryContextParams<'a> {
     pub participation_plan: crate::memory::PromptParticipationPlan,
     pub recent_messages_limit: usize,
     pub load_long_term_memory: bool,
+    pub include_private_runtime_projection: bool,
     pub include_private_garden_projection: bool,
     pub session_store: &'a dyn SessionStore,
     pub memory_store: &'a dyn MemoryStore,
@@ -537,10 +1818,10 @@ mod tests {
             private_garden_text: None,
             mental_privacy_adjudication_text: None,
             mental_privacy_text: None,
-            recent_messages: vec![SessionMessage {
-                role: "user".to_string(),
-                content: "hello".to_string(),
-            }],
+            recent_messages: vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "hello".to_string(),
+            )],
             recall_router: PromptRecallRouterDecision {
                 intent: PromptRecallIntent::Factual,
             },
@@ -605,6 +1886,145 @@ mod tests {
             projection.constitutional_stack_text().as_deref(),
             Some("gate\n\ncore\n\nconstitution\n\npriority\n\nprivacy")
         );
+    }
+
+    #[test]
+    fn inhabited_subject_projection_compiles_subject_mount_protocol_and_work_covenant() {
+        let mut context = minimal_prompt_context_for_projection();
+        context.long_term_memory_text = Some("governed memory: release facts".to_string());
+        context.self_authored_core = Some(SelfAuthoredCore {
+            identity_anchor: "inhabited board subject".to_string(),
+            default_response_mode: "work-first".to_string(),
+            default_initiative_posture: "continue task".to_string(),
+            self_preservation_doctrine: "protect private material".to_string(),
+            ..SelfAuthoredCore::default()
+        });
+        context.self_authored_core_text = Some("self core: inhabited board subject".to_string());
+        context.self_continuity = Some(SelfContinuity {
+            wake_anchor: "same subject on wake".to_string(),
+            continuity_bridge: "carry the work forward".to_string(),
+            ..SelfContinuity::default()
+        });
+        context.self_continuity_text = Some("same subject on wake".to_string());
+        context.private_garden_text = Some("private garden release note".to_string());
+        context.mental_privacy_text =
+            Some("privacy protocol: explain without raw quote".to_string());
+
+        let projection = compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
+            context: &context,
+            now_secs: 42,
+            platform: "server development runtime",
+            device_identity: "owner-default",
+            channel: "sdk.direct",
+            chat_id: "chat-a",
+            pressure: PressureLevel::Normal,
+            render_budget_chars: 4096,
+            runtime_private_context_allowed: true,
+            foreground_disclosure_allowed: false,
+            user_query: "finish release work",
+        });
+
+        assert!(projection.subject_mount.degraded_reason.is_none());
+        assert!(projection
+            .subject_mount
+            .identity_mount
+            .contains("inhabited board subject"));
+        assert!(projection
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence == "subject_mount:compiled"));
+        assert!(projection
+            .soul_private_runtime_context
+            .iter()
+            .any(|item| item.source_id == "private_garden"
+                && item.content.contains("private garden release note")));
+        assert!(projection
+            .rendered_block
+            .contains("## Boundary And Disclosure Protocol"));
+        assert!(projection
+            .rendered_block
+            .contains("## Work Integrity Covenant"));
+    }
+
+    #[test]
+    fn inhabited_subject_projection_degrades_empty_context_without_inventing_mount() {
+        let context = minimal_prompt_context_for_projection();
+
+        let projection = compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
+            context: &context,
+            now_secs: 42,
+            platform: "server development runtime",
+            device_identity: "owner-default",
+            channel: "sdk.direct",
+            chat_id: "empty-chat",
+            pressure: PressureLevel::Normal,
+            render_budget_chars: 2048,
+            runtime_private_context_allowed: false,
+            foreground_disclosure_allowed: false,
+            user_query: "what do you know",
+        });
+
+        assert_eq!(
+            projection.subject_mount.degraded_reason.as_deref(),
+            Some("subject_mount_degraded")
+        );
+        assert!(projection
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence == "subject_mount:degraded"));
+        assert!(projection.soul_private_runtime_context.is_empty());
+        assert!(projection.rendered_block.contains("subject_mount_degraded"));
+    }
+
+    fn minimal_prompt_context_for_projection() -> PromptMemoryContext {
+        PromptMemoryContext {
+            memory_health_issues: Vec::new(),
+            personality_governance_gate_text: None,
+            summary_text: None,
+            message_summary_text: None,
+            long_term_memory_text: None,
+            continuity_capsule_text: None,
+            archive_evidence_text: None,
+            runtime_skill_text: None,
+            recent_turn_observation_text: None,
+            work_continuity_text: None,
+            execution_state_text: None,
+            task_workspace_text: None,
+            task_recall_text: None,
+            shared_factual_recall_report: crate::memory::RecallSelectionReport::default(),
+            continuity_capsule_report: crate::memory::RecallSelectionReport::default(),
+            archive_recall_report: crate::memory::RecallSelectionReport::default(),
+            runtime_skill_recall_report: crate::memory::RecallSelectionReport::default(),
+            task_recall_report: None,
+            world_snapshot_text: None,
+            world_sense_text: None,
+            self_state_text: None,
+            self_authored_core: None,
+            self_authored_core_text: None,
+            relationship_portfolio_text: None,
+            relationship_constitution: None,
+            relationship_constitution_text: None,
+            persona_priority_text: None,
+            self_continuity: None,
+            felt_significance: None,
+            temperament_continuity: None,
+            inner_conflict: None,
+            autonomy_strategy: None,
+            outer_voice: None,
+            self_model_text: None,
+            autonomy_strategy_text: None,
+            outer_voice_text: None,
+            inner_life_text: None,
+            self_continuity_text: None,
+            private_workspace_text: None,
+            private_garden_text: None,
+            mental_privacy_adjudication_text: None,
+            mental_privacy_text: None,
+            recent_messages: Vec::new(),
+            recall_router: PromptRecallRouterDecision {
+                intent: PromptRecallIntent::Factual,
+            },
+        }
     }
 
     #[test]
@@ -784,7 +2204,8 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 6,
             load_long_term_memory: true,
-            include_private_garden_projection: false,
+            include_private_runtime_projection: true,
+            include_private_garden_projection: true,
             session_store: &ErrorSessionStore,
             memory_store: &StubMemoryStore::default(),
             session_summary_store: &ErrorSessionSummaryStore,
@@ -858,6 +2279,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 6,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &StubSessionStore::default(),
             memory_store: &StubMemoryStore::default(),
@@ -915,6 +2337,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 6,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &StubSessionStore::default(),
             memory_store: &StubMemoryStore::default(),
@@ -963,10 +2386,10 @@ mod tests {
     #[test]
     fn embedded_first_user_turn_skips_governed_recall_private_depth_and_background() {
         let session_store = StubSessionStore {
-            recent: Mutex::new(vec![SessionMessage {
-                role: "user".to_string(),
-                content: "记住我喜欢冷萃".to_string(),
-            }]),
+            recent: Mutex::new(vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "记住我喜欢冷萃".to_string(),
+            )]),
         };
         let summary_store = StubSessionSummaryStore {
             summary: Mutex::new(Some(("user prefers cold brew".to_string(), 3))),
@@ -1062,6 +2485,7 @@ mod tests {
             now_secs: 100,
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             participation_plan: PromptParticipationPlan::embedded_first_turn_default(),
             session_store: &session_store,
@@ -1122,6 +2546,7 @@ mod tests {
             now_secs: 100,
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             participation_plan: PromptParticipationPlan::embedded_first_turn_default(),
             session_store: &StubSessionStore::default(),
@@ -1205,6 +2630,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::embedded_first_turn_default(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &StubMemoryStore::default(),
@@ -1284,6 +2710,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::embedded_first_turn_default(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &StubMemoryStore::default(),
@@ -1348,6 +2775,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::embedded_first_turn_default(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &StubMemoryStore::default(),
@@ -1433,6 +2861,7 @@ mod tests {
             },
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &StubMemoryStore::default(),
@@ -1518,6 +2947,7 @@ mod tests {
             },
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &StubSessionStore::default(),
             memory_store: &StubMemoryStore::default(),
@@ -1609,6 +3039,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::embedded_first_turn_default(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &StubSessionStore::default(),
             memory_store: &StubMemoryStore::default(),
@@ -3139,14 +4570,11 @@ mod tests {
     fn loads_summary_and_uses_it_for_weak_query_recall() {
         let session_store = StubSessionStore {
             recent: Mutex::new(vec![
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我们继续收口甲壳虫的长期记忆".to_string(),
-                },
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "重点是咖啡偏好和昵称".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我们继续收口甲壳虫的长期记忆".to_string(),
+                ),
+                SessionMessage::synthetic("user".to_string(), "重点是咖啡偏好和昵称".to_string()),
             ]),
         };
         let summary_store = StubSessionSummaryStore {
@@ -3366,6 +4794,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: true,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -3533,15 +4962,116 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("Runtime skills"));
+
+        let source_authority = context.classified_projection_sources();
+        for source_id in [
+            "summary",
+            "message_summary",
+            "personality_governance_gate",
+            "long_term_memory",
+            "continuity_capsule",
+            "archive_evidence",
+            "runtime_skill",
+            "recent_turn_observation",
+            "work_continuity",
+            "execution_state",
+            "task_workspace",
+            "task_recall",
+            "world_snapshot",
+            "world_sense",
+            "self_state",
+            "self_authored_core",
+            "relationship_portfolio",
+            "relationship_constitution",
+            "persona_priority",
+            "self_model",
+            "autonomy_strategy",
+            "outer_voice",
+            "inner_life",
+            "self_continuity",
+            "private_workspace",
+            "private_garden",
+            "mental_privacy",
+            "mental_privacy_adjudication",
+        ] {
+            assert!(
+                source_authority
+                    .iter()
+                    .any(|source| source.source_id == source_id),
+                "missing projection source authority for {source_id}"
+            );
+        }
+        let source = |source_id: &str| {
+            source_authority
+                .iter()
+                .find(|source| source.source_id == source_id)
+                .unwrap_or_else(|| panic!("missing projection source authority for {source_id}"))
+        };
+
+        let private_garden = source("private_garden");
+        assert!(private_garden.loaded);
+        assert!(private_garden
+            .authorities
+            .contains(&ProjectionSourceAuthority::PrivateInternal));
+        assert!(private_garden
+            .surface_roles
+            .contains(&PromptProjectionSurfaceRole::SoulPrivateRuntime));
+        assert!(private_garden.runtime_private_context_allowed);
+        assert!(!private_garden.foreground_disclosure_allowed);
+        assert!(!private_garden.shared_fact_surface_allowed);
+        assert!(!private_garden.raw_audit_plaintext_allowed);
+
+        let inner_life = source("inner_life");
+        assert!(inner_life.loaded);
+        assert!(inner_life
+            .surface_roles
+            .contains(&PromptProjectionSurfaceRole::SubjectCompiler));
+        assert!(inner_life.runtime_private_context_allowed);
+        assert!(!inner_life.foreground_disclosure_allowed);
+
+        let autonomy = source("autonomy_strategy");
+        assert!(autonomy.loaded);
+        assert!(autonomy
+            .surface_roles
+            .contains(&PromptProjectionSurfaceRole::ReplyStrategy));
+        assert!(!autonomy.shared_fact_surface_allowed);
+
+        let runtime_skill = source("runtime_skill");
+        assert!(runtime_skill.loaded);
+        assert!(runtime_skill
+            .authorities
+            .contains(&ProjectionSourceAuthority::ProceduralEvidence));
+        assert!(!runtime_skill.subject_compiler_input_allowed);
+        assert!(!runtime_skill.personality_judgment_allowed);
+        assert!(!runtime_skill.evidence_refs.is_empty());
+
+        let summary = source("summary");
+        assert!(summary.loaded);
+        assert!(summary
+            .authorities
+            .contains(&ProjectionSourceAuthority::AssistantObservedUtterance));
+        assert!(!summary.subject_compiler_input_allowed);
+        assert!(!summary.personality_judgment_allowed);
+
+        let persona_priority = source("persona_priority");
+        assert!(!persona_priority.shared_fact_surface_allowed);
+        assert!(persona_priority
+            .surface_roles
+            .contains(&PromptProjectionSurfaceRole::ReplyStrategy));
+
+        let mental_privacy_adjudication = source("mental_privacy_adjudication");
+        assert!(mental_privacy_adjudication.runtime_private_context_allowed);
+        assert!(!mental_privacy_adjudication.foreground_disclosure_allowed);
+        assert!(!mental_privacy_adjudication.raw_audit_plaintext_allowed);
     }
 
     #[test]
     fn skips_long_term_recall_when_system_budget_is_below_block_threshold() {
         let session_store = StubSessionStore {
-            recent: Mutex::new(vec![SessionMessage {
-                role: "user".to_string(),
-                content: "记一下我喜欢冷萃".to_string(),
-            }]),
+            recent: Mutex::new(vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "记一下我喜欢冷萃".to_string(),
+            )]),
         };
         let summary_store = StubSessionSummaryStore {
             summary: Mutex::new(Some(("user prefers cold brew".to_string(), 3))),
@@ -3603,6 +5133,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: true,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -3667,14 +5198,8 @@ mod tests {
     fn fast_mode_skips_long_term_recall_but_keeps_recent_messages() {
         let session_store = StubSessionStore {
             recent: Mutex::new(vec![
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "上一轮回复".to_string(),
-                },
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "补充上下文".to_string(),
-                },
+                SessionMessage::synthetic("assistant".to_string(), "上一轮回复".to_string()),
+                SessionMessage::synthetic("user".to_string(), "补充上下文".to_string()),
             ]),
         };
         let summary_store = StubSessionSummaryStore {
@@ -3800,6 +5325,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 16,
             load_long_term_memory: false,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -3928,6 +5454,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: false,
+            include_private_runtime_projection: true,
             include_private_garden_projection: true,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -4040,6 +5567,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: false,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -4122,6 +5650,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -4170,10 +5699,10 @@ mod tests {
     #[test]
     fn continuity_router_moves_capsule_into_active_task_context() {
         let session_store = StubSessionStore {
-            recent: Mutex::new(vec![SessionMessage {
-                role: "user".to_string(),
-                content: "继续".to_string(),
-            }]),
+            recent: Mutex::new(vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "继续".to_string(),
+            )]),
         };
         let summary_store = StubSessionSummaryStore {
             summary: Mutex::new(Some(("continue the memory router work".to_string(), 2))),
@@ -4256,6 +5785,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -4309,10 +5839,10 @@ mod tests {
     #[test]
     fn active_task_context_includes_recent_turn_observation_after_work_continuity() {
         let session_store = StubSessionStore {
-            recent: Mutex::new(vec![SessionMessage {
-                role: "user".to_string(),
-                content: "继续".to_string(),
-            }]),
+            recent: Mutex::new(vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "继续".to_string(),
+            )]),
         };
         let summary_store = StubSessionSummaryStore {
             summary: Mutex::new(Some(("continue the replay substrate work".to_string(), 2))),
@@ -4415,6 +5945,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -4553,6 +6084,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -4661,6 +6193,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -4837,10 +6370,10 @@ mod tests {
 
     fn continuity_router_context_for_regression() -> PromptMemoryContext {
         let session_store = StubSessionStore {
-            recent: Mutex::new(vec![SessionMessage {
-                role: "user".to_string(),
-                content: "继续".to_string(),
-            }]),
+            recent: Mutex::new(vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "继续".to_string(),
+            )]),
         };
         let summary_store = StubSessionSummaryStore {
             summary: Mutex::new(Some(("continue the memory router work".to_string(), 2))),
@@ -4923,6 +6456,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -5036,6 +6570,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -5133,6 +6668,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,
@@ -5230,6 +6766,7 @@ mod tests {
             participation_plan: PromptParticipationPlan::full(),
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: &session_store,
             memory_store: &archive_memory_store,

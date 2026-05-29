@@ -208,11 +208,13 @@ impl RuntimeObservation {
     }
 
     pub fn to_mode_input(self) -> RuntimeLifecycleModeInput {
-        let mut input = RuntimeLifecycleModeInput::default();
-        input.pressure = if self.critical_turn {
-            crate::orchestrator::PressureLevel::Critical
-        } else {
-            self.pressure
+        let mut input = RuntimeLifecycleModeInput {
+            pressure: if self.critical_turn {
+                crate::orchestrator::PressureLevel::Critical
+            } else {
+                self.pressure
+            },
+            ..RuntimeLifecycleModeInput::default()
         };
         if let Some(source) = self.foreground_source {
             input.foreground = RuntimeForegroundOverlay {

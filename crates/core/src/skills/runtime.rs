@@ -109,22 +109,18 @@ impl RuntimeSkillStatus {
 pub enum RuntimeSkillOrigin {
     #[default]
     RuntimeLearned,
-    UserProvided,
 }
 
 impl RuntimeSkillOrigin {
     pub const fn label(self) -> &'static str {
         match self {
             Self::RuntimeLearned => "runtime_learned",
-            Self::UserProvided => "user_provided",
         }
     }
 
     fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "user_provided" | "user-provided" | "user provided" | "manual" => Self::UserProvided,
-            _ => Self::RuntimeLearned,
-        }
+        let _ = value;
+        Self::RuntimeLearned
     }
 }
 
@@ -247,7 +243,7 @@ impl RuntimeSkillWriteSource {
 
     pub const fn origin(self) -> RuntimeSkillOrigin {
         match self {
-            Self::Manual => RuntimeSkillOrigin::UserProvided,
+            Self::Manual => RuntimeSkillOrigin::RuntimeLearned,
             Self::Extraction | Self::TaskLearning | Self::ProgrammableReasoning => {
                 RuntimeSkillOrigin::RuntimeLearned
             }
@@ -3048,7 +3044,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_skill_record_persists_user_provided_origin() {
+    fn runtime_skill_record_persists_runtime_learned_origin_for_manual_edits() {
         let storage = StubSkillStorage::default();
         let outcome = write_governed_runtime_skills(
             &storage,
@@ -3068,7 +3064,7 @@ mod tests {
 
         assert_eq!(outcome.accepted, 1);
         let records = list_runtime_skill_records(&storage);
-        assert_eq!(records[0].origin, RuntimeSkillOrigin::UserProvided);
+        assert_eq!(records[0].origin, RuntimeSkillOrigin::RuntimeLearned);
     }
 
     #[test]

@@ -291,10 +291,10 @@ mod tests {
     #[test]
     fn archive_evidence_prompt_hides_backend_trace_but_keeps_evidence() {
         let session_store = StubSessionStore {
-            messages: vec![SessionMessage {
-                role: "user".to_string(),
-                content: "release patch verification succeeded after checklist review".to_string(),
-            }],
+            messages: vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "release patch verification succeeded after checklist review".to_string(),
+            )],
         };
         let memory_store = StubMemoryStore {
             note_name: "2026-05-23.md".to_string(),

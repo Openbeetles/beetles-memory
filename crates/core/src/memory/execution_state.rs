@@ -1634,14 +1634,8 @@ mod tests {
     fn refresh_updates_store_when_llm_returns_state() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续收 execution state".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我先把 store 接好".to_string(),
-                },
+                SessionMessage::synthetic("user".to_string(), "继续收 execution state".to_string()),
+                SessionMessage::synthetic("assistant".to_string(), "我先把 store 接好".to_string()),
             ],
         };
         let summary_store = StubSessionSummaryStore::default();
@@ -1686,15 +1680,14 @@ mod tests {
     fn refresh_backfills_last_output_from_reply_when_model_omits_it() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "帮我把 execution state 这轮收掉".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我已经把 task continuation 逻辑删掉并切到 execution state"
-                        .to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "帮我把 execution state 这轮收掉".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我已经把 task continuation 逻辑删掉并切到 execution state".to_string(),
+                ),
             ],
         };
         let summary_store = StubSessionSummaryStore::default();
@@ -1739,10 +1732,10 @@ mod tests {
     #[test]
     fn refresh_clears_store_when_llm_returns_null() {
         let session_store = StubSessionStore {
-            recent: vec![SessionMessage {
-                role: "user".to_string(),
-                content: "好了".to_string(),
-            }],
+            recent: vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "好了".to_string(),
+            )],
         };
         let summary_store = StubSessionSummaryStore::default();
         let execution_store = StubExecutionStateStore {
@@ -1795,10 +1788,10 @@ mod tests {
     #[test]
     fn existing_state_low_signal_turn_without_tools_is_skipped() {
         let session_store = StubSessionStore {
-            recent: vec![SessionMessage {
-                role: "user".to_string(),
-                content: "继续".to_string(),
-            }],
+            recent: vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "继续".to_string(),
+            )],
         };
         let summary_store = StubSessionSummaryStore::default();
         let execution_store = StubExecutionStateStore {
@@ -1991,10 +1984,10 @@ mod tests {
                 ..ExecutionState::default()
             }),
             None,
-            &[SessionMessage {
-                role: "user".to_string(),
-                content: "继续处理 execution state".to_string(),
-            }],
+            &[SessionMessage::synthetic(
+                "user".to_string(),
+                "继续处理 execution state".to_string(),
+            )],
             None,
             memory_policy(MemoryProfile::Embedded).execution_state,
         );
@@ -2008,10 +2001,10 @@ mod tests {
         let input = build_execution_state_refresh_input(
             None,
             Some("continue closing the execution state loop"),
-            &[SessionMessage {
-                role: "user".to_string(),
-                content: "继续".to_string(),
-            }],
+            &[SessionMessage::synthetic(
+                "user".to_string(),
+                "继续".to_string(),
+            )],
             Some(&TurnObservationLedger {
                 execution_class: TurnExecutionClass::ToolAssisted,
                 deliberation_class: TurnDeliberationClass::HardReasoning,
@@ -2054,14 +2047,11 @@ mod tests {
     fn refresh_enriches_working_set_with_recent_turn_observation() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续收口当前这一轮".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我先基于上轮执行结果继续收敛。".to_string(),
-                },
+                SessionMessage::synthetic("user".to_string(), "继续收口当前这一轮".to_string()),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我先基于上轮执行结果继续收敛。".to_string(),
+                ),
             ],
         };
         let summary_store = StubSessionSummaryStore::default();

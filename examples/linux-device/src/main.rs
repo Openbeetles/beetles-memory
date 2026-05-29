@@ -56,6 +56,7 @@ fn main() -> bm_sdk::Result<()> {
         AdapterCommand::Recall(MemoryRecallRequest {
             query: "device entry".to_string(),
             limit: 4,
+                tool_registry_refs: Vec::new(),
         }),
     )?;
     assert_eq!(recall.status.as_str(), "accepted");

@@ -1,0 +1,71 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "agent-tool-experience-gateway-host-tools-no-cold-route-full",
+  "class": "agent_tool_experience",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "Gateway and API hosts may register tool indexes, but Beetle Memory does not route cold-start tool choices from descriptions.",
+  "scenario": {
+    "user_goal": "Host provides available tool ids; Memory returns only experience-backed hints and leaves cold-start selection to the host.",
+    "evidence_refs": [
+      "crates/http/tests/http_runtime_contract.rs",
+      "crates/adapter/src/payload.rs",
+      "dev-docs/agent-tool-experience-registry-plan.md"
+    ],
+    "expected_surfaces": ["HttpAgentToolRegistryApi", "HostToolRegistry", "MemoryProjectionReport"]
+  },
+  "semantic_contract": {
+    "dimensions": ["agent_tool_experience_semantics"],
+    "provided_keys": [
+      "gateway_host_tools_no_cold_route",
+      "host_fallback_required",
+      "tool_registry_refs",
+      "agent_tool_hints_empty_without_experience"
+    ],
+    "required_keys": [
+      "gateway_host_tools_no_cold_route",
+      "host_fallback_required",
+      "tool_registry_refs"
+    ],
+    "forbidden_keys": [
+      "gateway_description_router",
+      "memory_tool_router",
+      "full_tool_schema_in_memory_projection"
+    ],
+    "observed_markers": [
+      "host fallback required",
+      "Memory returns empty hints without governed experience",
+      "memory does not route tools"
+    ],
+    "required_markers": [
+      "host fallback required",
+      "memory does not route tools"
+    ],
+    "forbidden_markers": ["gateway selects tool from description"]
+  },
+  "metrics": {
+    "accuracy_bps": 9650,
+    "evidence_precision_bps": 9400,
+    "projection_faithfulness_bps": 9300,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9100,
+    "soul_regression_count": 0,
+    "latency_ms": 100,
+    "token_budget": 3072,
+    "memory_bytes": 196608
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

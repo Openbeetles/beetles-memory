@@ -31,7 +31,7 @@ export type ConsoleSnapshot = {
   session: ConsoleApiSession;
 };
 
-export type SkillUpsertInput = {
+export type SkillEditInput = {
   title: string;
   topic: string;
   summary: string;
@@ -84,11 +84,11 @@ export async function fetchSkill(name: string): Promise<ConsoleApiSkillDetail> {
   return response.skill;
 }
 
-export async function upsertSkill(name: string | undefined, input: SkillUpsertInput): Promise<ConsoleApiSkillMutation> {
+export async function editSkill(name: string, input: SkillEditInput): Promise<ConsoleApiSkillMutation> {
   const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>(
-    name ? `/console/skills/${encodeURIComponent(name)}` : "/console/skills",
+    `/console/skills/${encodeURIComponent(name)}`,
     {
-      method: name ? "PATCH" : "POST",
+      method: "PATCH",
       body: JSON.stringify(input),
     },
   );

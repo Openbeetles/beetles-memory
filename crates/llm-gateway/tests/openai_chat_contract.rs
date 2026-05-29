@@ -1,8 +1,8 @@
 use bm_entry::EntryRuntimeBaseConfig;
 use bm_llm_gateway::{
-    handle_openai_request, GatewayConfig, GatewayErrorKey, GatewayRuntime, GatewayScopeRequest,
-    GatewayScopeResolver, OpenAiCompatibleUpstream, OpenAiGatewayBody, OpenAiGatewayRequest,
-    OpenAiUpstreamRequest, OpenAiUpstreamResponse,
+    handle_openai_request, GatewayConfig, GatewayErrorKey, GatewayProjectionAuditStatus,
+    GatewayRuntime, GatewayScopeRequest, GatewayScopeResolver, OpenAiCompatibleUpstream,
+    OpenAiGatewayBody, OpenAiGatewayRequest, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
@@ -188,6 +188,20 @@ fn chat_non_streaming_injects_memory_and_preserves_openai_payload_shape() {
         response.body.json()["choices"][0]["message"]["content"],
         "ok"
     );
+    assert_eq!(
+        response.audit.projection_record.status,
+        GatewayProjectionAuditStatus::NotRecorded
+    );
+    assert_eq!(
+        response.audit.projection_record.reason,
+        "raw_projection_recording_disabled"
+    );
+    assert!(response
+        .audit
+        .notes
+        .contains(&"gateway_host_tools_no_cold_route".to_string()));
+    assert!(response.audit.projection_record.projection_chars > 0);
+    assert!(response.audit.projection_record.block.is_none());
 }
 
 #[test]

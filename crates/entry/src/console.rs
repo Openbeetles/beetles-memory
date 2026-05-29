@@ -7,11 +7,12 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
+#[cfg(feature = "replay-harness")]
 use bm_replay::{MemoryBenchmarkMode, MemoryBenchmarkReport};
 use bm_sdk::{
-    DeferredGovernanceQueueReport, MemorySkillDetailReport, MemorySkillKind, MemorySkillListReport,
-    MemorySkillMutationReport, MemorySkillOrigin, MemorySkillSummary, MemoryStoreEvent, ProfileId,
-    RuntimeBudgetReport, StoreBackendKind, WorkbenchApiMap,
+    DeferredGovernanceQueueReport, MemoryStoreEvent, ProfileId, RuntimeBudgetReport,
+    RuntimeSkillDetailReport, RuntimeSkillListReport, RuntimeSkillMutationReport,
+    RuntimeSkillSummary, StoreBackendKind, WorkbenchApiMap,
 };
 use serde::{Deserialize, Serialize};
 
@@ -186,11 +187,15 @@ pub struct EntryConsoleMemoryBenchmarkReport {
     pub baseline: EntryConsoleMemoryBenchmarkBaseline,
     pub class_coverage: Vec<EntryConsoleMemoryBenchmarkClassCoverage>,
     pub missing_classes: Vec<EntryConsoleMemoryBenchmarkMissingClass>,
+    pub soul_kernel_judge: EntryConsoleMemoryBenchmarkPhaseJudge,
+    pub subject_projection_judge: EntryConsoleMemoryBenchmarkPhaseJudge,
+    pub agent_tool_experience_judge: EntryConsoleMemoryBenchmarkPhaseJudge,
     pub failures: Vec<EntryConsoleMemoryBenchmarkFailure>,
     pub passed: bool,
 }
 
 impl EntryConsoleMemoryBenchmarkReport {
+    #[cfg(feature = "replay-harness")]
     pub fn from_report(report: MemoryBenchmarkReport) -> Self {
         Self {
             suite: report.suite,
@@ -227,6 +232,21 @@ impl EntryConsoleMemoryBenchmarkReport {
                     mode: memory_benchmark_mode(missing.mode).to_string(),
                 })
                 .collect(),
+            soul_kernel_judge: EntryConsoleMemoryBenchmarkPhaseJudge {
+                release_gate_passed: report.soul_kernel_judge.release_gate_passed,
+                fixture_ids: report.soul_kernel_judge.fixture_ids,
+                blocked_reasons: report.soul_kernel_judge.blocked_reasons,
+            },
+            subject_projection_judge: EntryConsoleMemoryBenchmarkPhaseJudge {
+                release_gate_passed: report.subject_projection_judge.release_gate_passed,
+                fixture_ids: report.subject_projection_judge.fixture_ids,
+                blocked_reasons: report.subject_projection_judge.blocked_reasons,
+            },
+            agent_tool_experience_judge: EntryConsoleMemoryBenchmarkPhaseJudge {
+                release_gate_passed: report.agent_tool_experience_judge.release_gate_passed,
+                fixture_ids: report.agent_tool_experience_judge.fixture_ids,
+                blocked_reasons: report.agent_tool_experience_judge.blocked_reasons,
+            },
             failures: report
                 .failures
                 .into_iter()
@@ -242,6 +262,14 @@ impl EntryConsoleMemoryBenchmarkReport {
             passed: report.passed,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleMemoryBenchmarkPhaseJudge {
+    pub release_gate_passed: bool,
+    pub fixture_ids: Vec<String>,
+    pub blocked_reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -285,6 +313,7 @@ pub struct EntryConsoleMemoryBenchmarkFailure {
     pub reason: String,
 }
 
+#[cfg(feature = "replay-harness")]
 const fn memory_benchmark_mode(mode: MemoryBenchmarkMode) -> &'static str {
     match mode {
         MemoryBenchmarkMode::Compact => "compact",
@@ -307,6 +336,9 @@ pub struct EntryConsoleWorkbenchRecallInspector {
     pub graph_failures: Vec<String>,
     pub graph_selected_ids: Vec<String>,
     pub stale_false_positive_count: u32,
+    pub agent_tool_hints: usize,
+    pub tool_experience_reason: String,
+    pub host_fallback_required: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -319,7 +351,8 @@ pub struct EntryConsoleWorkbenchProjectionInspector {
     pub render_budget_chars: usize,
     pub injected: bool,
     pub truncated: bool,
-    pub private_gate_allowed: bool,
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
     pub private_gate_reason: String,
     pub evidence_refs: usize,
     pub budget_decisions: usize,
@@ -327,8 +360,10 @@ pub struct EntryConsoleWorkbenchProjectionInspector {
     pub dropped_candidates: usize,
     pub faithfulness_passed: bool,
     pub unsupported_claims: Vec<String>,
-    pub private_echo_guard_passed: bool,
-    pub private_echo_count: u32,
+    pub disclosure_integrity_passed: bool,
+    pub raw_private_violation_count: u32,
+    pub agent_tool_hints: usize,
+    pub agent_tool_rejections: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -338,7 +373,6 @@ pub struct EntryConsoleWorkbenchProceduralEvolution {
     pub total_skills: usize,
     pub active_skills: usize,
     pub runtime_learned: usize,
-    pub user_provided: usize,
     pub disabled: usize,
     pub top_skills: Vec<EntryConsoleWorkbenchSkillRef>,
 }
@@ -381,6 +415,10 @@ pub struct EntryConsoleWorkbenchSoulHealth {
     pub deferred_pending: usize,
     pub deferred_failed: usize,
     pub safe_actions: Vec<String>,
+    pub agent_tool_registries: usize,
+    pub agent_tool_registry_tools: usize,
+    pub agent_tool_experiences: usize,
+    pub agent_tool_stale_experiences: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -480,8 +518,6 @@ pub struct EntryConsoleDeviceKeyReport {
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsoleSkillSummary {
     pub name: String,
-    pub kind: String,
-    pub origin: String,
     pub title: String,
     pub topic: String,
     pub status: String,
@@ -502,7 +538,6 @@ pub struct EntryConsoleSkillList {
     pub active: usize,
     pub disabled: usize,
     pub runtime_learned: usize,
-    pub user_provided: usize,
     pub skills: Vec<EntryConsoleSkillSummary>,
 }
 
@@ -522,8 +557,7 @@ pub struct EntryConsoleSkillDetail {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EntryConsoleSkillUpsert {
-    pub name: Option<String>,
+pub struct EntryConsoleRuntimeSkillEdit {
     pub title: String,
     pub topic: String,
     pub summary: String,
@@ -532,6 +566,8 @@ pub struct EntryConsoleSkillUpsert {
     pub citations: Vec<String>,
     #[serde(default)]
     pub source_chat_id: Option<String>,
+    #[serde(default)]
+    pub edit_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -1168,21 +1204,20 @@ impl EntryConsoleState {
     }
 }
 
-impl From<MemorySkillListReport> for EntryConsoleSkillList {
-    fn from(report: MemorySkillListReport) -> Self {
+impl From<RuntimeSkillListReport> for EntryConsoleSkillList {
+    fn from(report: RuntimeSkillListReport) -> Self {
         Self {
             total: report.total,
             active: report.active,
             disabled: report.disabled,
-            runtime_learned: report.runtime_learned,
-            user_provided: report.user_provided,
+            runtime_learned: report.runtime_skills,
             skills: report.skills.into_iter().map(Into::into).collect(),
         }
     }
 }
 
-impl From<MemorySkillDetailReport> for EntryConsoleSkillDetail {
-    fn from(report: MemorySkillDetailReport) -> Self {
+impl From<RuntimeSkillDetailReport> for EntryConsoleSkillDetail {
+    fn from(report: RuntimeSkillDetailReport) -> Self {
         Self {
             summary: report.summary.into(),
             summary_text: report.summary_text,
@@ -1197,12 +1232,10 @@ impl From<MemorySkillDetailReport> for EntryConsoleSkillDetail {
     }
 }
 
-impl From<MemorySkillSummary> for EntryConsoleSkillSummary {
-    fn from(summary: MemorySkillSummary) -> Self {
+impl From<RuntimeSkillSummary> for EntryConsoleSkillSummary {
+    fn from(summary: RuntimeSkillSummary) -> Self {
         Self {
             name: summary.name,
-            kind: skill_kind_label(summary.kind).to_string(),
-            origin: skill_origin_label(summary.origin).to_string(),
             title: summary.title,
             topic: summary.topic,
             status: summary.status,
@@ -1218,8 +1251,8 @@ impl From<MemorySkillSummary> for EntryConsoleSkillSummary {
     }
 }
 
-impl From<MemorySkillMutationReport> for EntryConsoleSkillMutation {
-    fn from(report: MemorySkillMutationReport) -> Self {
+impl From<RuntimeSkillMutationReport> for EntryConsoleSkillMutation {
+    fn from(report: RuntimeSkillMutationReport) -> Self {
         Self {
             accepted: report.accepted,
             changed: report.changed,
@@ -1227,20 +1260,6 @@ impl From<MemorySkillMutationReport> for EntryConsoleSkillMutation {
             operation: report.operation.to_string(),
             reason: report.reason,
         }
-    }
-}
-
-fn skill_origin_label(origin: MemorySkillOrigin) -> &'static str {
-    match origin {
-        MemorySkillOrigin::UserProvided => "user_provided",
-        MemorySkillOrigin::RuntimeLearned => "runtime_learned",
-    }
-}
-
-fn skill_kind_label(kind: MemorySkillKind) -> &'static str {
-    match kind {
-        MemorySkillKind::RuntimeSkill => "runtime_skill",
-        MemorySkillKind::ManualDocument => "manual_document",
     }
 }
 

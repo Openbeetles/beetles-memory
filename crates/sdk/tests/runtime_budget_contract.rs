@@ -17,6 +17,7 @@ fn projection_render_limit_does_not_cut_source_recall() {
             recent_messages_limit: 1,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -63,14 +64,19 @@ fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
             recent_messages_limit: 4,
             pressure: PressureLevel::Cautious,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
     let block = projection.system_memory_block;
-    assert!(block.contains("## Runtime Awareness"), "{block}");
+    assert!(block.contains("## Runtime Constraints"), "{block}");
     assert!(block.contains("Resource pressure: cautious"), "{block}");
     assert!(block.contains("Beetle Memory"), "{block}");
-    assert!(block.contains("## World Snapshot"), "{block}");
+    assert!(block.contains("## Governed Memory Evidence"), "{block}");
+    assert!(
+        block.contains("world_snapshot [public_grounding"),
+        "{block}"
+    );
     assert!(block.contains("release artifact safety"), "{block}");
     for forbidden in [
         "IndexedHybrid",

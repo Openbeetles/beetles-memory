@@ -811,10 +811,10 @@ mod tests {
     #[test]
     fn weak_continuity_inspection_prefers_capsule_before_archive_fallback() {
         let session_store = StubSessionStore {
-            recent: vec![SessionMessage {
-                role: "user".to_string(),
-                content: "继续".to_string(),
-            }],
+            recent: vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "继续".to_string(),
+            )],
         };
         let memory_store = StubMemoryStore {
             daily_notes: vec![(

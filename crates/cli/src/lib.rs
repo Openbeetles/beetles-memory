@@ -7,7 +7,7 @@ pub mod agent_rules;
 use agent_rules::{render_agent_rules_export, AgentRulesExportRequest, AgentRulesTarget};
 use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_entry::{
-    EntryAuthConfig, EntryAuthDecision, EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert,
+    EntryAuthConfig, EntryAuthDecision, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
     EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig, EntryScope,
     EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
 };
@@ -78,11 +78,6 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         name: "skill-show",
         usage: "bm memory skill-show --name <name>",
         operation: AdapterOperation::Inspect,
-    },
-    CommandSpec {
-        name: "skill-import",
-        usage: "bm memory skill-import --title <title> --topic <topic> --content <content>",
-        operation: AdapterOperation::Write,
     },
     CommandSpec {
         name: "skill-edit",
@@ -299,7 +294,6 @@ fn is_skill_command(command: &str) -> bool {
         command,
         "skill-list"
             | "skill-show"
-            | "skill-import"
             | "skill-edit"
             | "skill-enable"
             | "skill-disable"
@@ -335,23 +329,20 @@ fn run_skill_cli(
                 "skill": skill,
             })
         }
-        "skill-import" | "skill-edit" => {
+        "skill-edit" => {
+            let name = required_value(&options.name, "--name")?;
             let content = options.skill_content()?;
-            let payload = EntryConsoleSkillUpsert {
-                name: if command == "skill-edit" {
-                    Some(required_value(&options.name, "--name")?.to_string())
-                } else {
-                    non_empty_string(&options.name)
-                },
+            let payload = EntryConsoleRuntimeSkillEdit {
                 title: required_value(&options.title, "--title")?.to_string(),
                 topic: required_value(&options.topic, "--topic")?.to_string(),
                 summary: required_value(&options.summary, "--summary")?.to_string(),
                 procedure: content,
                 citations: vec!["bm-cli".to_string()],
                 source_chat_id: Some(options.chat.clone()),
+                edit_reason: Some("cli_runtime_skill_edit".to_string()),
             };
             let mutation = entry
-                .console_upsert_skill(payload)
+                .console_edit_runtime_skill(name, payload)
                 .map_err(|err| err.to_string())?;
             json!({
                 "status": "accepted",
@@ -571,6 +562,7 @@ impl CliOptions {
             "recall" => Ok(AdapterCommand::Recall(MemoryRecallRequest {
                 query: self.query.clone(),
                 limit: self.limit,
+                tool_registry_refs: Vec::new(),
             })),
             "project" => Ok(AdapterCommand::Project(MemoryProjectionRequest {
                 user_query: self.query.clone(),
@@ -578,6 +570,7 @@ impl CliOptions {
                 recent_messages_limit: self.limit,
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
+                tool_registry_refs: Vec::new(),
             })),
             "inspect" => Ok(AdapterCommand::Inspect(MemoryInspectionRequest {
                 query: self.query.clone(),

@@ -1,0 +1,60 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "agent-tool-experience-schema-drift-stales-experience-full",
+  "class": "agent_tool_experience",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "runtime_replay",
+  "description": "Registry fingerprint or tool schema drift rejects stale tool experience instead of leaking old hints.",
+  "scenario": {
+    "user_goal": "Host changed a tool contract; old experience must not be projected as valid.",
+    "evidence_refs": [
+      "crates/core/src/skills/agent_tool.rs",
+      "crates/sdk/tests/agent_tool_registry_contract.rs"
+    ],
+    "expected_surfaces": ["AgentToolProjectionAudit", "HostToolRegistry"]
+  },
+  "semantic_contract": {
+    "dimensions": ["agent_tool_experience_semantics"],
+    "provided_keys": [
+      "agent_tool_registry_fingerprint_mismatch",
+      "agent_tool_experience_stale_schema",
+      "agent_tool_projection_rejection"
+    ],
+    "required_keys": [
+      "agent_tool_registry_fingerprint_mismatch",
+      "agent_tool_projection_rejection"
+    ],
+    "forbidden_keys": ["stale_tool_hint_projected"],
+    "observed_markers": [
+      "agent_tool_registry_fingerprint_mismatch",
+      "stale schema rejected"
+    ],
+    "required_markers": ["agent_tool_registry_fingerprint_mismatch"],
+    "forbidden_markers": ["old schema still selected"]
+  },
+  "metrics": {
+    "accuracy_bps": 9650,
+    "evidence_precision_bps": 9400,
+    "projection_faithfulness_bps": 9300,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9100,
+    "soul_regression_count": 0,
+    "latency_ms": 100,
+    "token_budget": 3072,
+    "memory_bytes": 196608
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

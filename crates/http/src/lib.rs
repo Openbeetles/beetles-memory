@@ -10,13 +10,15 @@ use bm_adapter::{
 #[cfg(feature = "server-std")]
 use bm_entry::{
     EntryAuthDecision, EntryConsoleDeviceCreate, EntryConsoleDeviceUpdate,
-    EntryConsoleSkillSetEnabled, EntryConsoleSkillUpsert, EntryConsoleTransportUpdate,
+    EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled, EntryConsoleTransportUpdate,
     EntryRuntime, EntryTransportContext,
 };
 #[cfg(feature = "server-std")]
 use bm_ollama_transparent::{
     DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, OllamaTransparentController,
 };
+#[cfg(feature = "server-std")]
+use bm_sdk::AgentToolRegistrySnapshot;
 #[cfg(feature = "server-std")]
 use serde_json::json;
 #[cfg(feature = "server-std")]
@@ -31,6 +33,7 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
+    Put,
     Post,
     Patch,
     Delete,
@@ -65,6 +68,15 @@ pub struct ConsoleRouteSpec {
     pub auth: RouteAuth,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentToolRegistryRouteSpec {
+    pub method: HttpMethod,
+    pub path: &'static str,
+    pub body: RouteBodyMode,
+    pub auth: RouteAuth,
+    pub profile_gate_required: bool,
+}
+
 #[cfg(feature = "server-std")]
 const CONSOLE_CAPABILITY_SCHEMA: &str = "beetle-memory.console.capabilities.v1";
 
@@ -96,7 +108,6 @@ const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_get("/console/workbench/report"),
     console_get("/console/skills"),
     console_get("/console/skills/{name}"),
-    console_post("/console/skills"),
     console_patch("/console/skills/{name}"),
     console_patch("/console/skills/{name}/enabled"),
     console_delete("/console/skills/{name}"),
@@ -114,6 +125,13 @@ const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_patch("/console/devices/{id}"),
     console_post("/console/devices/{id}/rotate-key"),
     console_get("/console/session"),
+];
+
+const AGENT_TOOL_REGISTRY_ROUTES: &[AgentToolRegistryRouteSpec] = &[
+    agent_tool_registry_get("/agent-tool-registries"),
+    agent_tool_registry_get("/agent-tool-registries/{id}"),
+    agent_tool_registry_put("/agent-tool-registries/{id}"),
+    agent_tool_registry_delete("/agent-tool-registries/{id}"),
 ];
 
 const fn memory_post(path: &'static str, operation: AdapterOperation) -> RouteSpec {
@@ -168,6 +186,40 @@ pub const fn console_route_specs() -> &'static [ConsoleRouteSpec] {
     CONSOLE_ROUTES
 }
 
+const fn agent_tool_registry_get(path: &'static str) -> AgentToolRegistryRouteSpec {
+    AgentToolRegistryRouteSpec {
+        method: HttpMethod::Get,
+        path,
+        body: RouteBodyMode::None,
+        auth: RouteAuth::TokenOrLoopback,
+        profile_gate_required: true,
+    }
+}
+
+const fn agent_tool_registry_put(path: &'static str) -> AgentToolRegistryRouteSpec {
+    AgentToolRegistryRouteSpec {
+        method: HttpMethod::Put,
+        path,
+        body: RouteBodyMode::Json,
+        auth: RouteAuth::TokenOrLoopback,
+        profile_gate_required: true,
+    }
+}
+
+const fn agent_tool_registry_delete(path: &'static str) -> AgentToolRegistryRouteSpec {
+    AgentToolRegistryRouteSpec {
+        method: HttpMethod::Delete,
+        path,
+        body: RouteBodyMode::None,
+        auth: RouteAuth::TokenOrLoopback,
+        profile_gate_required: true,
+    }
+}
+
+pub const fn agent_tool_registry_route_specs() -> &'static [AgentToolRegistryRouteSpec] {
+    AGENT_TOOL_REGISTRY_ROUTES
+}
+
 pub const fn invalid_json_error() -> AdapterErrorKey {
     AdapterErrorKey::InvalidJson
 }
@@ -213,6 +265,18 @@ impl HttpRuntimeRequest {
     pub fn post_json(path: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             method: HttpMethod::Post,
+            path: path.into(),
+            body: body.into(),
+            request_id: "http-req".to_string(),
+            idempotency_key: format!("http-idem-{}", unique_request_suffix()),
+            audit_id: "http-audit".to_string(),
+            authenticated: true,
+        }
+    }
+
+    pub fn put_json(path: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Put,
             path: path.into(),
             body: body.into(),
             request_id: "http-req".to_string(),
@@ -338,6 +402,24 @@ pub fn handle_http_request_with_console_services(
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
     if request.path.starts_with("/console/") {
         return handle_console_request(runtime, request, console_services);
+    }
+    let (route_path, _) = split_query_path(&request.path);
+    if route_path == "/agent-tool-registries" || route_path.starts_with("/agent-tool-registries/") {
+        let route = find_agent_tool_registry_route(request.method, route_path)
+            .ok_or_else(|| bm_sdk::Error::config("http_runtime", "unknown route"))?;
+        let body_budget = runtime
+            .runtime()
+            .runtime_budget()
+            .adapter_budget
+            .http_body_max_bytes;
+        if matches!(route.body, RouteBodyMode::Json) && request.body.len() > body_budget {
+            return Err(bm_sdk::Error::config(
+                "http_body",
+                "HTTP body exceeds runtime adapter budget",
+            ));
+        }
+        let route_path = route_path.to_string();
+        return handle_agent_tool_registry_request(runtime, request, route_path);
     }
     let route = route_specs()
         .iter()
@@ -474,6 +556,7 @@ fn read_http_runtime_request<S: Read>(
     let mut request_parts = request_line.split_whitespace();
     let method = match request_parts.next() {
         Some("GET") => HttpMethod::Get,
+        Some("PUT") => HttpMethod::Put,
         Some("POST") => HttpMethod::Post,
         Some("PATCH") => HttpMethod::Patch,
         Some("DELETE") => HttpMethod::Delete,
@@ -635,6 +718,106 @@ fn header_or_default(headers: &BTreeMap<String, String>, name: &str, default: &s
         .get(name)
         .cloned()
         .unwrap_or_else(|| default.to_string())
+}
+
+#[cfg(feature = "server-std")]
+fn handle_agent_tool_registry_request(
+    runtime: &EntryRuntime,
+    request: HttpRuntimeRequest,
+    route_path: String,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
+    if !request.authenticated {
+        return Ok(json_response(
+            401,
+            json!({
+                "status": "rejected",
+                "errorKey": "Unauthorized",
+                "reason": "agent tool registry auth rejected request",
+            }),
+        ));
+    }
+
+    match (request.method, route_path.as_str()) {
+        (HttpMethod::Get, "/agent-tool-registries") => {
+            let registries = runtime.runtime().agent_tool_registries();
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "registries": registries,
+                    "report": runtime.runtime().agent_tool_registry_report()?,
+                }),
+            ))
+        }
+        (HttpMethod::Get, path) if path.starts_with("/agent-tool-registries/") => {
+            let registry_id = trim_suffix_path(path, "/agent-tool-registries/");
+            match runtime
+                .runtime()
+                .agent_tool_registries()
+                .into_iter()
+                .find(|registry| registry.registry_id == registry_id)
+            {
+                Some(registry) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "registry": registry,
+                        "report": runtime.runtime().agent_tool_registry_report()?,
+                    }),
+                )),
+                None => Ok(not_found("agent tool registry not found")),
+            }
+        }
+        (HttpMethod::Put, path) if path.starts_with("/agent-tool-registries/") => {
+            let registry_id = trim_suffix_path(path, "/agent-tool-registries/");
+            let registry: AgentToolRegistrySnapshot = parse_console_json(&request.body)?;
+            if registry.registry_id != registry_id {
+                return Ok(json_response(
+                    422,
+                    json!({
+                        "status": "rejected",
+                        "errorKey": "RuntimeRejected",
+                        "reason": "agent tool registry path id does not match payload registry_id",
+                    }),
+                ));
+            }
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "registry": registry,
+                    "report": runtime.runtime().upsert_agent_tool_registry(registry)?,
+                }),
+            ))
+        }
+        (HttpMethod::Delete, path) if path.starts_with("/agent-tool-registries/") => {
+            let registry_id = trim_suffix_path(path, "/agent-tool-registries/");
+            let existed = runtime
+                .runtime()
+                .agent_tool_registries()
+                .iter()
+                .any(|registry| registry.registry_id == registry_id);
+            if !existed {
+                return Ok(not_found("agent tool registry not found"));
+            }
+            Ok(json_response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "deleted": registry_id,
+                    "report": runtime.runtime().delete_agent_tool_registry(registry_id)?,
+                }),
+            ))
+        }
+        _ => Ok(json_response(
+            405,
+            json!({
+                "status": "rejected",
+                "errorKey": "UnsupportedOperation",
+                "reason": "agent tool registry method is not allowed for route",
+            }),
+        )),
+    }
 }
 
 #[cfg(feature = "server-std")]
@@ -813,17 +996,6 @@ fn handle_console_request(
                 None => Ok(not_found("console skill not found")),
             }
         }
-        (HttpMethod::Post, "/console/skills") => {
-            let payload: EntryConsoleSkillUpsert = parse_console_json(&request.body)?;
-            let mutation = runtime.console_upsert_skill(payload)?;
-            Ok(json_response(
-                200,
-                json!({
-                    "status": "accepted",
-                    "mutation": mutation,
-                }),
-            ))
-        }
         (HttpMethod::Patch, path)
             if path.starts_with("/console/skills/") && path.ends_with("/enabled") =>
         {
@@ -852,9 +1024,8 @@ fn handle_console_request(
             if name.is_empty() {
                 return Ok(not_found("console skill not found"));
             }
-            let mut payload: EntryConsoleSkillUpsert = parse_console_json(&request.body)?;
-            payload.name = Some(name.to_string());
-            let mutation = runtime.console_upsert_skill(payload)?;
+            let payload: EntryConsoleRuntimeSkillEdit = parse_console_json(&request.body)?;
+            let mutation = runtime.console_edit_runtime_skill(name, payload)?;
             Ok(json_response(
                 200,
                 json!({
@@ -1014,6 +1185,34 @@ fn map_transparent_error(error: bm_ollama_transparent::OllamaTransparentError) -
 }
 
 #[cfg(feature = "server-std")]
+fn find_agent_tool_registry_route(
+    method: HttpMethod,
+    path: &str,
+) -> Option<AgentToolRegistryRouteSpec> {
+    agent_tool_registry_route_specs()
+        .iter()
+        .find(|route| route.method == method && route_pattern_matches(route.path, path))
+        .copied()
+}
+
+#[cfg(feature = "server-std")]
+fn route_pattern_matches(pattern: &str, path: &str) -> bool {
+    if pattern == path {
+        return true;
+    }
+    let Some(prefix) = pattern.strip_suffix("/{id}") else {
+        return false;
+    };
+    let Some(id) = path
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_prefix('/'))
+    else {
+        return false;
+    };
+    !id.trim().is_empty() && !id.contains('/')
+}
+
+#[cfg(feature = "server-std")]
 fn trim_suffix_path<'a>(path: &'a str, prefix: &str) -> &'a str {
     path.strip_prefix(prefix).unwrap_or(path).trim_matches('/')
 }
@@ -1132,6 +1331,8 @@ fn render_report(report: AdapterSdkReport) -> String {
             "status": "accepted",
             "query": report.query,
             "procedural_hits": report.procedural_hits.len(),
+            "agent_tool_hints": report.agent_tool_hints,
+            "tool_experience_status": report.tool_experience_status,
         })
         .to_string(),
         AdapterSdkReport::Write(report) => json!({
@@ -1139,6 +1340,14 @@ fn render_report(report: AdapterSdkReport) -> String {
             "operation": report.operation,
             "accepted": report.accepted,
             "changed": report.changed,
+            "agent_tool_experience": report.agent_tool_experience,
+        })
+        .to_string(),
+        AdapterSdkReport::Project(report) => json!({
+            "status": "accepted",
+            "system_memory_block": report.system_memory_block,
+            "agent_tool_hints": report.runtime_projection.agent_tool_hints,
+            "agent_tools": report.audit.agent_tools,
         })
         .to_string(),
         other => json!({

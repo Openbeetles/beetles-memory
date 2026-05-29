@@ -81,6 +81,7 @@ fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
             AdapterCommand::Recall(MemoryRecallRequest {
                 query: "release".to_string(),
                 limit: 2,
+                tool_registry_refs: Vec::new(),
             }),
         )
         .expect("entry handle");
@@ -146,6 +147,7 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
             AdapterCommand::Recall(MemoryRecallRequest {
                 query: "entry runtime".to_string(),
                 limit: 4,
+                tool_registry_refs: Vec::new(),
             }),
         )
         .expect("recall through runtime b");
@@ -265,6 +267,7 @@ fn entry_runtime_rejects_operation_mismatch_before_sdk_runtime_call() {
             AdapterCommand::Recall(MemoryRecallRequest {
                 query: "release".to_string(),
                 limit: 2,
+                tool_registry_refs: Vec::new(),
             }),
         )
         .expect("entry handle");

@@ -37,6 +37,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-a2a
 bash scripts/check_platform_compile_gates.sh
 bash scripts/check_deployment_runtime_contract.sh
+bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_release_surface.sh
 ```
 

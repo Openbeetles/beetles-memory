@@ -2060,14 +2060,11 @@ mod tests {
             .insert(
                 "chat-a".to_string(),
                 vec![
-                    SessionMessage {
-                        role: "user".to_string(),
-                        content: "讨论灯光自动化计划".to_string(),
-                    },
-                    SessionMessage {
-                        role: "assistant".to_string(),
-                        content: "已整理客厅灯光自动化方案".to_string(),
-                    },
+                    SessionMessage::synthetic("user".to_string(), "讨论灯光自动化计划".to_string()),
+                    SessionMessage::synthetic(
+                        "assistant".to_string(),
+                        "已整理客厅灯光自动化方案".to_string(),
+                    ),
                 ],
             );
         let memory_store = StubMemoryStore::default();
@@ -2117,10 +2114,10 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .insert(
                 "chat-a".to_string(),
-                vec![SessionMessage {
-                    role: "user".to_string(),
-                    content: "家庭网络重构计划".to_string(),
-                }],
+                vec![SessionMessage::synthetic(
+                    "user".to_string(),
+                    "家庭网络重构计划".to_string(),
+                )],
             );
         let memory_store = StubMemoryStore::default();
         let turn_ledger_store = StubTurnLedgerStore::default();
@@ -2175,14 +2172,14 @@ mod tests {
             .insert(
                 "chat-a".to_string(),
                 vec![
-                    SessionMessage {
-                        role: "user".to_string(),
-                        content: "先记录一下家庭网络重构方案".to_string(),
-                    },
-                    SessionMessage {
-                        role: "assistant".to_string(),
-                        content: "我已经整理了网络重构方案的关键节点".to_string(),
-                    },
+                    SessionMessage::synthetic(
+                        "user".to_string(),
+                        "先记录一下家庭网络重构方案".to_string(),
+                    ),
+                    SessionMessage::synthetic(
+                        "assistant".to_string(),
+                        "我已经整理了网络重构方案的关键节点".to_string(),
+                    ),
                 ],
             );
         let memory_store = StubMemoryStore::default();
@@ -2231,18 +2228,12 @@ mod tests {
             .insert(
                 "chat-a".to_string(),
                 vec![
-                    SessionMessage {
-                        role: "user".to_string(),
-                        content: "消息一".to_string(),
-                    },
-                    SessionMessage {
-                        role: "assistant".to_string(),
-                        content: "需要长期定位的消息".to_string(),
-                    },
-                    SessionMessage {
-                        role: "user".to_string(),
-                        content: "消息三".to_string(),
-                    },
+                    SessionMessage::synthetic("user".to_string(), "消息一".to_string()),
+                    SessionMessage::synthetic(
+                        "assistant".to_string(),
+                        "需要长期定位的消息".to_string(),
+                    ),
+                    SessionMessage::synthetic("user".to_string(), "消息三".to_string()),
                 ],
             );
         let memory_store = StubMemoryStore::default();
@@ -2272,18 +2263,12 @@ mod tests {
             .insert(
                 "chat-a".to_string(),
                 vec![
-                    SessionMessage {
-                        role: "assistant".to_string(),
-                        content: "需要长期定位的消息".to_string(),
-                    },
-                    SessionMessage {
-                        role: "user".to_string(),
-                        content: "消息三".to_string(),
-                    },
-                    SessionMessage {
-                        role: "assistant".to_string(),
-                        content: "新消息".to_string(),
-                    },
+                    SessionMessage::synthetic(
+                        "assistant".to_string(),
+                        "需要长期定位的消息".to_string(),
+                    ),
+                    SessionMessage::synthetic("user".to_string(), "消息三".to_string()),
+                    SessionMessage::synthetic("assistant".to_string(), "新消息".to_string()),
                 ],
             );
 

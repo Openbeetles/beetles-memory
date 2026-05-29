@@ -32,6 +32,7 @@ fn proposal_commit_uses_sdk_write_governance() {
         .recall(MemoryRecallRequest {
             query: "release artifact".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
     assert!(recall

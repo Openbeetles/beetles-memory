@@ -1153,14 +1153,14 @@ mod tests {
     fn maintenance_continues_extraction_scheduling_when_summary_refresh_errors() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "我们在做长期记忆链路收口".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "这轮会继续拆 coordinator".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "我们在做长期记忆链路收口".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "这轮会继续拆 coordinator".to_string(),
+                ),
             ],
             count: 10,
             ..Default::default()
@@ -1332,14 +1332,8 @@ mod tests {
     fn embedded_maintenance_uses_model_summary_when_summary_is_only_due() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "好".to_string(),
-                },
+                SessionMessage::synthetic("user".to_string(), "继续".to_string()),
+                SessionMessage::synthetic("assistant".to_string(), "好".to_string()),
             ],
             count: 40,
             ..Default::default()
@@ -1410,22 +1404,22 @@ mod tests {
     fn maintenance_reuses_recent_window_when_summary_and_execution_both_refresh() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "先把 Linux 和 ESP 的构建链都过一遍".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我会先整理维护链，再统一 build 验证".to_string(),
-                },
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续把 post-reply memory maintenance 收紧".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "这轮会合并 session summary 和 execution state 的重复读取".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "先把 Linux 和 ESP 的构建链都过一遍".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我会先整理维护链，再统一 build 验证".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "继续把 post-reply memory maintenance 收紧".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "这轮会合并 session summary 和 execution state 的重复读取".to_string(),
+                ),
             ],
             count: 40,
             ..Default::default()
@@ -1499,14 +1493,14 @@ mod tests {
     fn maintenance_writes_task_continuity_capsule_for_active_run() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续把 continuity capsule 接到维护链".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我会把 task run、execution state、inspection 串起来".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "继续把 continuity capsule 接到维护链".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我会把 task run、execution state、inspection 串起来".to_string(),
+                ),
             ],
             count: 18,
             ..Default::default()
@@ -2158,14 +2152,14 @@ mod tests {
     fn maintenance_does_not_touch_private_garden_docs() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "把稳定内容收到内核里，剩下的继续整理".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "这轮会把已经稳定的草稿上提，然后清掉重复 garden 文档".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "把稳定内容收到内核里，剩下的继续整理".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "这轮会把已经稳定的草稿上提，然后清掉重复 garden 文档".to_string(),
+                ),
             ],
             count: 16,
             ..Default::default()
@@ -2243,14 +2237,14 @@ mod tests {
     fn maintenance_skips_long_term_refresh_after_external_content_turn() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "帮我根据网页内容继续整理".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我已经读了外部资料并整理要点".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "帮我根据网页内容继续整理".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我已经读了外部资料并整理要点".to_string(),
+                ),
             ],
             count: 12,
             ..Default::default()
@@ -2322,14 +2316,14 @@ mod tests {
     fn post_reply_maintenance_records_runtime_skill_success_and_mismatch() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续按 release patch flow 做".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我会按之前验证过的流程继续".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "继续按 release patch flow 做".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我会按之前验证过的流程继续".to_string(),
+                ),
             ],
             count: 10,
             ..Default::default()

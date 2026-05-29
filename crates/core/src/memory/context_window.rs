@@ -292,14 +292,14 @@ mod tests {
     fn build_context_messages_preserves_marked_session_user_not_previous_assistant() {
         let session = RecentSessionStore {
             recent: vec![
-                crate::memory::SessionMessage {
-                    role: "user".to_string(),
-                    content: "KEEP_ME important user marker".to_string(),
-                },
-                crate::memory::SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "assistant filler ".repeat(32),
-                },
+                crate::memory::SessionMessage::synthetic(
+                    "user".to_string(),
+                    "KEEP_ME important user marker".to_string(),
+                ),
+                crate::memory::SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "assistant filler ".repeat(32),
+                ),
             ],
         };
         let important = CountingImportantStore::default();

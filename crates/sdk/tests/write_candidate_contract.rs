@@ -68,6 +68,7 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
 
@@ -117,6 +118,7 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
         .recall(MemoryRecallRequest {
             query: "release checklist evidence".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
     assert_eq!(recall.procedural_hits.len(), 1);
@@ -231,6 +233,7 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
         .recall(MemoryRecallRequest {
             query: "release checklist".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
     assert!(recall
@@ -270,6 +273,7 @@ fn direct_runtime_learned_procedural_write_is_rejected_without_promotion_gate() 
         .recall(MemoryRecallRequest {
             query: "unsafe runtime learned".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
     assert!(recall.procedural_hits.is_empty());

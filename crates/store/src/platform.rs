@@ -806,10 +806,28 @@ impl SessionStore for StorePlatform {
         let mut messages = self
             .json_get::<Vec<SessionMessage>>("session", chat_id)?
             .unwrap_or_default();
-        messages.push(SessionMessage {
-            role: role.to_string(),
-            content: content.to_string(),
-        });
+        let now_secs = current_unix_secs();
+        let (speaker_id, speaker_kind) = default_session_speaker_for_role(role);
+        let message_id = stable_hash_id(
+            "msg",
+            &(
+                chat_id,
+                role,
+                content,
+                messages.len(),
+                now_secs,
+                current_unix_nanos(),
+            ),
+        );
+        messages.push(SessionMessage::new(
+            message_id,
+            role,
+            content,
+            now_secs,
+            now_secs,
+            speaker_id,
+            speaker_kind,
+        ));
         if messages.len() > MAX_SESSION_ENTRIES {
             let remove_count = messages.len() - MAX_SESSION_ENTRIES;
             messages.drain(0..remove_count);
@@ -818,10 +836,42 @@ impl SessionStore for StorePlatform {
     }
 
     fn append_batch(&self, chat_id: &str, messages: &[SessionMessage]) -> Result<()> {
-        for message in messages {
-            SessionStore::append(self, chat_id, &message.role, &message.content)?;
+        if messages.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let mut persisted = self
+            .json_get::<Vec<SessionMessage>>("session", chat_id)?
+            .unwrap_or_default();
+        for message in messages {
+            if message.message_id.trim().is_empty() {
+                return Err(Error::config(
+                    "session_append_batch",
+                    "message_id must not be empty",
+                ));
+            }
+            if message.role.trim().is_empty() {
+                return Err(Error::config(
+                    "session_append_batch",
+                    "role must not be empty",
+                ));
+            }
+            if message.content.len() > MAX_SESSION_MESSAGE_LEN {
+                return Err(Error::config(
+                    "session_append_batch",
+                    format!(
+                        "content length {} exceeds {}",
+                        message.content.len(),
+                        MAX_SESSION_MESSAGE_LEN
+                    ),
+                ));
+            }
+            persisted.push(message.clone());
+        }
+        if persisted.len() > MAX_SESSION_ENTRIES {
+            let remove_count = persisted.len() - MAX_SESSION_ENTRIES;
+            persisted.drain(0..remove_count);
+        }
+        self.json_put("session", chat_id, &persisted)
     }
 
     fn load_recent(&self, chat_id: &str, n: usize) -> Result<Vec<SessionMessage>> {

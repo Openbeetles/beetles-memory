@@ -288,14 +288,14 @@ mod tests {
             .insert(
                 "chat-a".to_string(),
                 vec![
-                    SessionMessage {
-                        role: "user".to_string(),
-                        content: "今晚先把家庭网络 setup checklist 收一下".to_string(),
-                    },
-                    SessionMessage {
-                        role: "assistant".to_string(),
-                        content: "先配 Wi-Fi，再核对 archive retrieval trace。".to_string(),
-                    },
+                    SessionMessage::synthetic(
+                        "user".to_string(),
+                        "今晚先把家庭网络 setup checklist 收一下".to_string(),
+                    ),
+                    SessionMessage::synthetic(
+                        "assistant".to_string(),
+                        "先配 Wi-Fi，再核对 archive retrieval trace。".to_string(),
+                    ),
                 ],
             );
         session_store
@@ -304,10 +304,10 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .insert(
                 "chat-b".to_string(),
-                vec![SessionMessage {
-                    role: "user".to_string(),
-                    content: "今天主要在讨论咖啡豆".to_string(),
-                }],
+                vec![SessionMessage::synthetic(
+                    "user".to_string(),
+                    "今天主要在讨论咖啡豆".to_string(),
+                )],
             );
 
         let memory_store = StubMemoryStore::default();

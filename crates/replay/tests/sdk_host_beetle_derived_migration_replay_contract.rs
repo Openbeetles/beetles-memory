@@ -69,6 +69,7 @@ fn migrate_then_replay(fixture: &SdkHostReplayFixture) -> bm_replay::ReplayRunRe
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project before migration");
     assert!(!projection.system_memory_block.is_empty());

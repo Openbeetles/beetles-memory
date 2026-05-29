@@ -26,6 +26,7 @@ required_docs=(
   "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
   "dev-docs/release-surface-plan.md"
+  "dev-docs/agent-tool-experience-registry-plan.md"
 )
 
 for doc in "${required_docs[@]}"; do
@@ -71,6 +72,7 @@ publishable=(
   "bm-entry"
   "bm-cli"
   "bm-llm-gateway"
+  "bm-ollama-transparent"
   "bm-http"
   "bm-wss"
   "bm-mcp"
@@ -87,6 +89,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-entry \
   -p bm-cli \
   -p bm-llm-gateway \
+  -p bm-ollama-transparent \
   -p bm-http \
   -p bm-wss \
   -p bm-mcp \
@@ -95,6 +98,18 @@ cargo doc --no-deps --no-default-features \
 bash scripts/emit_platform_capability_snapshots.sh --check
 bash scripts/check_entry_runtime_contract.sh
 bash scripts/check_deployment_runtime_contract.sh
+bash scripts/check_next_gen_memory_plan.sh
+bash scripts/check_memory_benchmark_wall.sh
+
+for needle in \
+  "Agent Tool Registry" \
+  "agent_tool_hints" \
+  "no_governed_tool_experience" \
+  "host_execution_required" \
+  "/agent-tool-registries/{id}"
+do
+  rg -F -q "$needle" docs/en/api.md docs/zh-CN/api.md dev-docs/agent-tool-experience-registry-plan.md
+done
 
 publish_dry_run() {
   local crate="$1"
@@ -129,14 +144,19 @@ publish_dry_run() {
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
       extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
+      extra+=(--config 'patch.crates-io.bm-replay.path="crates/replay"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
       ;;
     bm-cli|bm-llm-gateway|bm-http|bm-wss|bm-mcp|bm-a2a)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
       extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
+      extra+=(--config 'patch.crates-io.bm-replay.path="crates/replay"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
       extra+=(--config 'patch.crates-io.bm-entry.path="crates/entry"')
+      extra+=(--config 'patch.crates-io.bm-ollama-transparent.path="crates/ollama-transparent"')
+      ;;
+    bm-ollama-transparent)
       ;;
     *)
       echo "missing publish dry-run patch mapping: $crate" >&2

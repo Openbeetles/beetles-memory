@@ -68,7 +68,7 @@ ESP profile 应使用 `StoreBackendConfig::embedded(profile)` 或 `in_memory(pro
 ## 4. 构建 Runtime
 
 ```rust
-use bm_sdk::{MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId};
+use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId};
 
 let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
@@ -76,10 +76,13 @@ let runtime = MemoryRuntime::builder()
     .scope(MemoryScope::new("local", "chat-1")?)
     .profile(ProfileId::DesktopMacosEmbeddedSdk)
     .store_platform(store)
+    .add_agent_skill_dir(AgentSkillDirConfig::read_only("./skills", "host-project"))
     .build()?;
 ```
 
 `agent_id` 标识 agent 实例。`owner_id` 标识 owner 或 tenant。`subject_id` 标识当前 runtime 绑定的主体；如果不显式配置，SDK 会用 `owner_id` 初始化本地主体。`channel` 和 `chat_id` 定义 runtime 操作的默认 memory scope。
+
+`add_agent_skill_dir` 是可选只读挂载。标准 Agent Skill 的添加、编辑、导入、删除和执行仍归宿主；Beetle Memory 只扫描 `SKILL.md` 摘要参与召回和投影。
 
 ## 5. 写入记忆
 
@@ -117,6 +120,7 @@ use bm_sdk::{
 let recall = runtime.recall(MemoryRecallRequest {
     query: "release artifacts".to_string(),
     limit: 4,
+    tool_registry_refs: Vec::new(),
 })?;
 
 let projection = runtime.project(MemoryProjectionRequest {
@@ -125,6 +129,7 @@ let projection = runtime.project(MemoryProjectionRequest {
     recent_messages_limit: 8,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
+    tool_registry_refs: Vec::new(),
 })?;
 
 let memory_block = projection.system_memory_block;

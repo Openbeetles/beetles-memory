@@ -145,6 +145,7 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         .recall(MemoryRecallRequest {
             query: fixture.recall_query.clone(),
             limit: 8,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall after migration");
     let recalled_skill_names = recall
@@ -180,6 +181,7 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project after migration");
     let operator_text = format!(

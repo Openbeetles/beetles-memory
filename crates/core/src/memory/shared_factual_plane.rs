@@ -878,10 +878,10 @@ mod tests {
             &store,
             "chat-1",
             Some("summary"),
-            &[SessionMessage {
-                role: "user".to_string(),
-                content: "主模型现在是什么".to_string(),
-            }],
+            &[SessionMessage::synthetic(
+                "user".to_string(),
+                "主模型现在是什么".to_string(),
+            )],
             512,
             MemoryProfile::Embedded,
         )

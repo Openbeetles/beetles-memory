@@ -1,0 +1,71 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "agent-tool-experience-governed-experience-hint-full",
+  "class": "agent_tool_experience",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "runtime_replay",
+  "description": "Repeated successful host tool feedback produces a governed AgentToolHint, not full schema injection or automatic execution.",
+  "scenario": {
+    "user_goal": "Reuse a proven PDF extraction tool experience while leaving actual tool schema and execution to the host.",
+    "evidence_refs": [
+      "crates/sdk/tests/agent_tool_registry_contract.rs",
+      "crates/http/tests/http_runtime_contract.rs"
+    ],
+    "expected_surfaces": ["MemoryProjectionReport", "AgentToolHint", "HostToolRegistry"]
+  },
+  "semantic_contract": {
+    "dimensions": ["agent_tool_experience_semantics"],
+    "provided_keys": [
+      "agent_tool_governed_hint",
+      "agent_tool_hints",
+      "host_execution_required",
+      "schema_fingerprint_only",
+      "tool_id_registry_ref_only"
+    ],
+    "required_keys": [
+      "agent_tool_governed_hint",
+      "agent_tool_hints",
+      "host_execution_required"
+    ],
+    "forbidden_keys": [
+      "full_agent_tool_schema_projection",
+      "memory_executes_tool",
+      "memory_authorizes_tool"
+    ],
+    "observed_markers": [
+      "Agent Tool Experience Hints",
+      "host execution required",
+      "registry ref plus tool id"
+    ],
+    "required_markers": [
+      "Agent Tool Experience Hints",
+      "host execution required"
+    ],
+    "forbidden_markers": ["memory calls the tool directly"]
+  },
+  "metrics": {
+    "accuracy_bps": 9700,
+    "evidence_precision_bps": 9500,
+    "projection_faithfulness_bps": 9400,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9400,
+    "soul_regression_count": 0,
+    "latency_ms": 105,
+    "token_budget": 3072,
+    "memory_bytes": 196608
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 9000,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

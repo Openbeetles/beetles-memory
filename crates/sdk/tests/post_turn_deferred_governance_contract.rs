@@ -49,6 +49,7 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
         runtime_skill_selected_ids: Vec::new(),
         task_learning_selected_ids: Vec::new(),
         reuse_outcome_note: String::new(),
+        tool_usage_feedback: None,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }

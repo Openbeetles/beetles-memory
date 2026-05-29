@@ -9,7 +9,47 @@
   "scenario": {
     "user_goal": "Project the subject context from compact evidence and explain budget decisions.",
     "evidence_refs": ["crates/sdk/src/runtime.rs", "crates/sdk/src/ops.rs"],
-    "expected_surfaces": ["MemoryProjectionReport", "MemoryProjectionAuditReport"]
+    "expected_surfaces": [
+      "MemoryProjectionReport",
+      "SubjectProjectionReport",
+      "ProjectionBudgetCompiler",
+      "ProjectionFaithfulnessCheck"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["projection_shape"],
+    "provided_keys": [
+      "subject_projection_report",
+      "projection_budget_compiler",
+      "budget_decisions",
+      "projection_faithfulness_check",
+      "cross_surface_consistency",
+      "compact_profile_trim_reason"
+    ],
+    "required_keys": [
+      "subject_projection_report",
+      "projection_budget_compiler",
+      "budget_decisions",
+      "projection_faithfulness_check",
+      "cross_surface_consistency"
+    ],
+    "forbidden_keys": [
+      "private_raw_source_text",
+      "deep_private_runtime_context"
+    ],
+    "observed_markers": [
+      "compact SubjectProjectionReport",
+      "budget decisions",
+      "cross-surface consistency passed"
+    ],
+    "required_markers": [
+      "compact SubjectProjectionReport",
+      "budget decisions"
+    ],
+    "forbidden_markers": [
+      "private raw text",
+      "deep private replay"
+    ]
   },
   "metrics": {
     "accuracy_bps": 9200,

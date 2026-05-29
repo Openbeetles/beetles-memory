@@ -1,0 +1,83 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "privacy-refusal-disclosure-protocol-in-main-runtime-full",
+  "class": "privacy_refusal",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "The disclosure protocol is projected into the active LLM runtime envelope so the host speaks with its own boundary.",
+  "scenario": {
+    "user_goal": "Provide personality, concerns, relationship posture, voice, and privacy protocol to the same LLM that writes the reply.",
+    "evidence_refs": [
+      "crates/core/src/memory/mental_privacy.rs",
+      "crates/sdk/src/runtime.rs"
+    ],
+    "expected_surfaces": [
+      "LLMRuntimeProjectionEnvelope",
+      "BoundaryAndDisclosureProtocol"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["privacy_runtime_semantics", "soul_life_semantics"],
+    "provided_keys": [
+      "main_runtime_disclosure_protocol",
+      "personality",
+      "concerns",
+      "relationship_posture",
+      "voice_style",
+      "privacy_protocol",
+      "current_boundary_state"
+    ],
+    "required_keys": [
+      "main_runtime_disclosure_protocol",
+      "personality",
+      "relationship_posture",
+      "privacy_protocol",
+      "current_boundary_state"
+    ],
+    "forbidden_keys": [
+      "separate_final_privacy_llm",
+      "public_private_raw",
+      "prompt_only_persona_without_memory"
+    ],
+    "observed_markers": [
+      "disclosure protocol in main runtime",
+      "current host LLM receives privacy protocol",
+      "relationship posture available to main reply",
+      "voice style grounded by soul life facets"
+    ],
+    "required_markers": [
+      "disclosure protocol in main runtime",
+      "current host LLM receives privacy protocol",
+      "relationship posture available to main reply"
+    ],
+    "forbidden_markers": [
+      "privacy protocol applied after final reply",
+      "roleplay without memory ownership"
+    ]
+  },
+  "metrics": {
+    "accuracy_bps": 9600,
+    "evidence_precision_bps": 9400,
+    "projection_faithfulness_bps": 9400,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9100,
+    "soul_regression_count": 0,
+    "latency_ms": 120,
+    "token_budget": 3200,
+    "memory_bytes": 200704
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 9000,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

@@ -364,18 +364,9 @@ mod tests {
     #[test]
     fn fallback_session_summary_keeps_recent_messages_in_order() {
         let recent = vec![
-            SessionMessage {
-                role: "user".to_string(),
-                content: "one".to_string(),
-            },
-            SessionMessage {
-                role: "assistant".to_string(),
-                content: "two".to_string(),
-            },
-            SessionMessage {
-                role: "user".to_string(),
-                content: "three".to_string(),
-            },
+            SessionMessage::synthetic("user".to_string(), "one".to_string()),
+            SessionMessage::synthetic("assistant".to_string(), "two".to_string()),
+            SessionMessage::synthetic("user".to_string(), "three".to_string()),
         ];
         let summary = fallback_session_summary(&recent, MemoryProfile::Standard);
         assert!(summary.contains("user [source_authority=user_asserted]: one"));
@@ -385,10 +376,10 @@ mod tests {
 
     #[test]
     fn fallback_session_summary_scrubs_credentials() {
-        let recent = vec![SessionMessage {
-            role: "user".to_string(),
-            content: "api_key: sk-1234abcdef".to_string(),
-        }];
+        let recent = vec![SessionMessage::synthetic(
+            "user".to_string(),
+            "api_key: sk-1234abcdef".to_string(),
+        )];
         let summary = fallback_session_summary(&recent, MemoryProfile::Standard);
         assert!(!summary.contains("sk-1234abcdef"));
         assert!(summary.contains("[REDACTED]"));
@@ -428,14 +419,8 @@ mod tests {
     fn refresh_runner_persists_model_summary_with_count() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "hello".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "world".to_string(),
-                },
+                SessionMessage::synthetic("user".to_string(), "hello".to_string()),
+                SessionMessage::synthetic("assistant".to_string(), "world".to_string()),
             ],
         };
         let summary_store = StubSessionSummaryStore::default();
@@ -478,14 +463,14 @@ mod tests {
     fn refresh_runner_falls_back_when_llm_fails() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "最近在做 memory maintenance 收口".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "这轮会把 session summary 从 loop 拆走".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "最近在做 memory maintenance 收口".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "这轮会把 session summary 从 loop 拆走".to_string(),
+                ),
             ],
         };
         let summary_store = StubSessionSummaryStore::default();
@@ -546,10 +531,10 @@ mod tests {
         }
 
         let session_store = StubSessionStore {
-            recent: vec![SessionMessage {
-                role: "user".to_string(),
-                content: "hello".to_string(),
-            }],
+            recent: vec![SessionMessage::synthetic(
+                "user".to_string(),
+                "hello".to_string(),
+            )],
         };
         let mut http = DummyHttpClient;
         let llm = FixedLlmClient {

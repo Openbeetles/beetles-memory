@@ -3,19 +3,60 @@
 use bm_sdk::{
     build_temporal_memory_graph_from_evidence, build_vault_migration_preflight,
     compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
-    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, MemoryAutopilotInput,
-    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGraphEvidence, MemoryGraphNodeKind,
-    MemoryIdentity, MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope,
-    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PrivateMaterialRedactionReport,
+    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, AgentSkillDirConfig,
+    AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentToolDescriptor,
+    AgentToolExperienceGovernanceReport, AgentToolHint, AgentToolObservationDigest,
+    AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
+    AgentToolRegistrySnapshot, AgentToolUsageFeedback, LLMRuntimeProjectionEnvelope,
+    MemoryAutopilotInput, MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGraphEvidence,
+    MemoryGraphNodeKind, MemoryIdentity, MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind,
+    MemoryScope, MemoryWriteRequest, PostReplyMemoryMaintenanceContext,
+    PrivateDisclosureIntegrityReport, PrivateMaterialRedactionReport,
     ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
-    PromptMemoryContextParams, PromptParticipationPlan, StoreBackendConfig, StorePlatform,
-    VaultManifest,
+    ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
+    SoulLifeProjectionReport, StoreBackendConfig, StorePlatform, VaultManifest,
+    WorkIntegrityReport, AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
+    AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
 
 fn prompt_context_contract_is_sdk_importable<'a>(
     params: PromptMemoryContextParams<'a>,
 ) -> PromptMemoryContextParams<'a> {
     params
+}
+
+fn sdk_agent_skill_contract_types_are_importable(
+    _dir: Option<AgentSkillDirConfig>,
+    _directory: Option<AgentSkillDirectoryReport>,
+    _projection: Option<AgentSkillProjectionAudit>,
+    _hint: Option<ProjectedAgentSkillHint>,
+) {
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sdk_agent_tool_contract_types_are_importable(
+    _descriptor: Option<AgentToolDescriptor>,
+    _registry_ref: Option<AgentToolRegistryRef>,
+    _registry: Option<AgentToolRegistrySnapshot>,
+    _registry_report: Option<AgentToolRegistryReport>,
+    _hint: Option<AgentToolHint>,
+    _projection: Option<AgentToolProjectionAudit>,
+    _observation: Option<AgentToolObservationDigest>,
+    _feedback: Option<AgentToolUsageFeedback>,
+    _governance: Option<AgentToolExperienceGovernanceReport>,
+) {
+    assert_eq!(
+        AGENT_TOOL_NO_EXPERIENCE_REASON,
+        "no_governed_tool_experience"
+    );
+    assert_eq!(
+        AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
+        "agent_tool_registry_fingerprint_mismatch"
+    );
+    assert_eq!(
+        AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
+        "agent_tool_registry_forbidden_by_profile"
+    );
 }
 
 fn post_reply_context_contract_is_sdk_importable<'a>(
@@ -32,6 +73,74 @@ fn sdk_runtime_contract_types_are_importable(
     _scope: MemoryScope,
     _write: Option<MemoryWriteRequest>,
 ) {
+}
+
+fn sdk_projection_report_set_types_are_importable(
+    _runtime_projection: Option<LLMRuntimeProjectionEnvelope>,
+    _life_projection: Option<SoulLifeProjectionReport>,
+    _disclosure_integrity: Option<PrivateDisclosureIntegrityReport>,
+    _work_integrity: Option<WorkIntegrityReport>,
+) {
+}
+
+#[test]
+fn sdk_runtime_does_not_use_post_reply_mental_privacy_rewriter() {
+    let sdk_runtime_source = include_str!("../src/runtime.rs");
+
+    assert!(!sdk_runtime_source.contains("run_mental_privacy_review"));
+    assert!(!sdk_runtime_source.contains("MENTAL_PRIVACY_SYSTEM_PROMPT"));
+}
+
+#[test]
+fn sdk_and_gateway_do_not_keep_flat_projection_renderer_switches() {
+    let sdk_runtime_source = include_str!("../src/runtime.rs");
+    let gateway_openai_source = include_str!("../../llm-gateway/src/openai.rs");
+    let gateway_ollama_source = include_str!("../../llm-gateway/src/ollama.rs");
+
+    for source in [
+        sdk_runtime_source,
+        gateway_openai_source,
+        gateway_ollama_source,
+    ] {
+        for forbidden in [
+            "sdk_projection_text_parts",
+            "render_sdk_projection_block",
+            "legacy_flat_projection",
+            "flat_projection_compat",
+            "use_flat_projection",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "old flat projection renderer path leaked back: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn public_skill_surface_does_not_expose_memory_owned_agent_skill_crud() {
+    let sdk_ops = include_str!("../src/ops.rs");
+    let sdk_runtime = include_str!("../src/runtime.rs");
+    let sdk_lib = include_str!("../src/lib.rs");
+
+    for source in [sdk_ops, sdk_runtime, sdk_lib] {
+        for forbidden in [
+            concat!("Memory", "Skill", "Origin"),
+            concat!("Memory", "Skill", "Kind"),
+            concat!("Memory", "Skill", "Upsert", "Request"),
+            concat!("Memory", "Skill", "List", "Request"),
+            concat!("Memory", "Skill", "Detail", "Request"),
+            concat!("Memory", "Skill", "SetEnabled", "Request"),
+            concat!("Memory", "Skill", "Delete", "Request"),
+            concat!("upsert", "_", "skill"),
+            concat!("list", "_", "skills"),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "old Skill CRUD public surface leaked back: {forbidden}"
+            );
+        }
+    }
 }
 
 #[test]

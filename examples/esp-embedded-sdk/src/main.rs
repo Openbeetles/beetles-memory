@@ -37,6 +37,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     let recall = runtime.recall(MemoryRecallRequest {
         query: "host sdk".to_string(),
         limit: 2,
+                tool_registry_refs: Vec::new(),
     })?;
     assert!(!recall.procedural_hits.is_empty());
     let projection = runtime.project(MemoryProjectionRequest {
@@ -45,6 +46,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         recent_messages_limit: 2,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
+                tool_registry_refs: Vec::new(),
     })?;
     assert!(projection.system_memory_block.len() <= 1024);
     Ok(())

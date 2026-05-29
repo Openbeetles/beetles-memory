@@ -16,10 +16,10 @@ struct InMemorySessionStore {
 
 impl SessionStore for InMemorySessionStore {
     fn append(&self, _chat_id: &str, role: &str, content: &str) -> Result<()> {
-        self.messages.lock().unwrap().push(SessionMessage {
-            role: role.to_string(),
-            content: content.to_string(),
-        });
+        self.messages
+            .lock()
+            .unwrap()
+            .push(SessionMessage::synthetic(role, content));
         Ok(())
     }
 
@@ -48,12 +48,7 @@ impl SessionStore for InMemorySessionStore {
         Ok(self
             .load_recent(_chat_id, n)?
             .into_iter()
-            .enumerate()
-            .map(|(idx, message)| SessionMessageRecord {
-                message_id: format!("msg-{idx}"),
-                role: message.role,
-                content: message.content,
-            })
+            .map(SessionMessageRecord::from)
             .collect())
     }
 

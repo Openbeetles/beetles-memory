@@ -1,8 +1,9 @@
 use bm_sdk::{
-    ContinuitySnapshot, ContinuitySnapshotImportMode, IngressKind, MemoryCloseRequest,
-    MemoryExportRequest, MemoryImportRequest, MemoryInspectionRequest, MemoryMaintenanceRequest,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryRecoverRequest, MemoryReplayRequest,
-    MemoryWriteRequest, PressureLevel, Result, RuntimeLifecycleModeInput, RuntimeLifecycleTrigger,
+    AgentToolRegistryRef, AgentToolUsageFeedback, ContinuitySnapshot, ContinuitySnapshotImportMode,
+    IngressKind, MemoryCloseRequest, MemoryExportRequest, MemoryImportRequest,
+    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryRecoverRequest, MemoryReplayRequest, MemoryWriteRequest,
+    PressureLevel, Result, RuntimeLifecycleModeInput, RuntimeLifecycleTrigger,
     RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 use serde::Deserialize;
@@ -49,6 +50,7 @@ pub fn decode_json_adapter_command(
             Ok(AdapterCommand::Recall(MemoryRecallRequest {
                 query: payload.query,
                 limit: payload.limit.unwrap_or(8),
+                tool_registry_refs: payload.tool_registry_refs,
             }))
         }
         AdapterOperation::Project => {
@@ -59,6 +61,7 @@ pub fn decode_json_adapter_command(
                 recent_messages_limit: payload.recent_messages_limit.unwrap_or(8),
                 pressure: payload.pressure,
                 mode_input: payload.mode_input,
+                tool_registry_refs: payload.tool_registry_refs,
             }))
         }
         AdapterOperation::Maintain => {
@@ -129,6 +132,11 @@ pub fn decode_json_adapter_command(
 
 fn decode_write(body: &str, options: &AdapterJsonCommandOptions) -> Result<AdapterCommand> {
     let payload: WritePayload = parse_json(body)?;
+    if let Some(feedback) = payload.tool_usage_feedback {
+        return Ok(AdapterCommand::Write(
+            MemoryWriteRequest::AgentToolUsageFeedback { feedback },
+        ));
+    }
     let writes = if payload.writes.is_empty() {
         vec![RuntimeSkillWrite {
             name: required_field(payload.name, "name")?,
@@ -178,6 +186,8 @@ fn required_field(value: Option<String>, field: &'static str) -> Result<String> 
 #[derive(Deserialize)]
 struct WritePayload {
     #[serde(default)]
+    tool_usage_feedback: Option<AgentToolUsageFeedback>,
+    #[serde(default)]
     writes: Vec<RuntimeSkillWrite>,
     #[serde(default)]
     source: RuntimeSkillWriteSource,
@@ -204,6 +214,8 @@ struct RecallPayload {
     query: String,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    tool_registry_refs: Vec<AgentToolRegistryRef>,
 }
 
 #[derive(Deserialize)]
@@ -218,6 +230,8 @@ struct ProjectPayload {
     pressure: PressureLevel,
     #[serde(default)]
     mode_input: RuntimeLifecycleModeInput,
+    #[serde(default)]
+    tool_registry_refs: Vec<AgentToolRegistryRef>,
 }
 
 #[derive(Deserialize)]

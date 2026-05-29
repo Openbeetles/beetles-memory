@@ -1,5 +1,8 @@
 use bm_adapter::{AdapterErrorKey, AdapterOperation, TransportKind};
-use bm_http::{console_route_specs, route_specs, HttpMethod, RouteAuth, RouteBodyMode};
+use bm_http::{
+    agent_tool_registry_route_specs, console_route_specs, route_specs, HttpMethod, RouteAuth,
+    RouteBodyMode,
+};
 
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
@@ -50,6 +53,42 @@ fn console_route_catalog_is_separate_from_memory_operations() {
     assert!(routes
         .iter()
         .all(|route| matches!(route.auth, RouteAuth::TokenOrLoopback)));
+}
+
+#[test]
+fn agent_tool_registry_route_catalog_declares_body_auth_and_profile_gate() {
+    let routes = agent_tool_registry_route_specs();
+    assert_eq!(routes.len(), 4);
+    for (method, path, body) in [
+        (
+            HttpMethod::Get,
+            "/agent-tool-registries",
+            RouteBodyMode::None,
+        ),
+        (
+            HttpMethod::Get,
+            "/agent-tool-registries/{id}",
+            RouteBodyMode::None,
+        ),
+        (
+            HttpMethod::Put,
+            "/agent-tool-registries/{id}",
+            RouteBodyMode::Json,
+        ),
+        (
+            HttpMethod::Delete,
+            "/agent-tool-registries/{id}",
+            RouteBodyMode::None,
+        ),
+    ] {
+        let route = routes
+            .iter()
+            .find(|route| route.method == method && route.path == path)
+            .unwrap_or_else(|| panic!("missing agent tool registry route {method:?} {path}"));
+        assert_eq!(route.body, body);
+        assert!(matches!(route.auth, RouteAuth::TokenOrLoopback));
+        assert!(route.profile_gate_required);
+    }
 }
 
 #[test]

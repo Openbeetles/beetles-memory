@@ -166,15 +166,21 @@ mod tests {
 
     impl SessionStore for StubSessionStore {
         fn append(&self, chat_id: &str, role: &str, content: &str) -> Result<()> {
-            self.chats
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(chat_id.to_string())
-                .or_default()
-                .push(SessionMessage {
-                    role: role.to_string(),
-                    content: content.to_string(),
-                });
+            let mut chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
+            let messages = chats.entry(chat_id.to_string()).or_default();
+            let occurrence = u32::try_from(messages.len().saturating_add(1)).unwrap_or(u32::MAX);
+            let message_id =
+                crate::memory::synthesize_session_message_id(chat_id, role, content, occurrence);
+            let (speaker_id, speaker_kind) = crate::memory::default_session_speaker_for_role(role);
+            messages.push(SessionMessage::new(
+                message_id,
+                role.to_string(),
+                content.to_string(),
+                u64::from(occurrence),
+                u64::from(occurrence),
+                speaker_id,
+                speaker_kind,
+            ));
             Ok(())
         }
 

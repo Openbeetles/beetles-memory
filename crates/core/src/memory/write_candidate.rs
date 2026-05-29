@@ -393,14 +393,7 @@ pub fn govern_write_candidates(
                 "assistant_self_claim_is_not_identity_memory".to_string(),
                 MemoryWriteAuthority::RuntimeDeterministic,
             )
-        } else if candidate.semantic_judgment.is_none() {
-            (
-                GovernedWriteDecision::Deferred,
-                "llm_semantic_judgment_required_before_plane_mutation".to_string(),
-                MemoryWriteAuthority::RuntimeDeterministic,
-            )
-        } else {
-            let judgment = candidate.semantic_judgment.as_ref().expect("checked above");
+        } else if let Some(judgment) = &candidate.semantic_judgment {
             let authority = match judgment.source {
                 MemorySemanticJudgmentSource::LlmGovernance => {
                     MemoryWriteAuthority::LlmGovernedSemantic
@@ -447,6 +440,12 @@ pub fn govern_write_candidates(
                     authority,
                 ),
             }
+        } else {
+            (
+                GovernedWriteDecision::Deferred,
+                "llm_semantic_judgment_required_before_plane_mutation".to_string(),
+                MemoryWriteAuthority::RuntimeDeterministic,
+            )
         };
 
         match decision {

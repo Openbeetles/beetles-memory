@@ -32,12 +32,11 @@ Commands:
 | `replay` | Inspect turn replay for a chat. |
 | `export` | Export a continuity snapshot. |
 | `import` | Import a continuity snapshot. |
-| `skill-list` | List Skill Memory records. |
-| `skill-show` | Inspect one Skill Memory record. |
-| `skill-import` | Import or create a Skill Memory record. |
-| `skill-edit` | Edit an existing Skill Memory record. |
-| `skill-enable` / `skill-disable` | Enable or disable Skill Memory. |
-| `skill-delete` | Delete Skill Memory. |
+| `skill-list` | List runtime Skill Memory records. |
+| `skill-show` | Inspect one runtime Skill Memory record. |
+| `skill-edit` | Edit an existing runtime Skill Memory record. |
+| `skill-enable` / `skill-disable` | Enable or disable runtime Skill Memory. |
+| `skill-delete` | Delete runtime Skill Memory. |
 | `close` | Close the runtime and emit lifecycle report. |
 
 Common options:
@@ -56,22 +55,38 @@ Common options:
 | `--limit <n>` | `8` |
 | `--max-len <n>` | `4096` |
 
-## Skill Memory Management
+## Runtime Skill Memory Management
 
-These commands manage procedural memory records only. They do not execute skills or install plugins.
+These commands manage existing runtime procedural memory records only. They do not execute skills or install plugins. Standard Agent Skill directories remain host-managed; standalone deployments can mount them with `BM_AGENT_SKILL_DIRS`, and the runtime only scans and recalls them read-only.
 
 ```bash
 cargo run -p bm-cli --bin bm -- \
-  memory skill-import \
+  memory write-procedural \
   --profile profile-server-linux-dev-full \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
+  --name runtime_skill__release_guard \
   --title "Release guard" \
   --topic release \
   --summary "Verify release artifacts before publishing." \
   --content "1. run gates
 2. inspect artifacts
 3. dry run publish"
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory skill-edit \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --chat chat-1 \
+  --name runtime_skill__release_guard \
+  --title "Release guard" \
+  --topic release \
+  --summary "Verify release artifacts and changelog before publishing." \
+  --content "1. run gates
+2. inspect artifacts
+3. inspect changelog"
 ```
 
 ```bash

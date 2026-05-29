@@ -2,11 +2,17 @@ use bm_core::memory::IngressKind;
 use bm_core::memory::{
     CanonicalTurnDelta, DeferredGovernanceQueueReport, MemoryHygieneInspection,
     MemoryHygieneOutcome, PostTurnMemoryGovernanceReport, PostTurnSemanticGovernanceReport,
-    PrivateEchoGuardReport, PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
+    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
     ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck, SkillEvolutionReport,
     SubjectProjectionReport, VaultManifest, VaultMigrationPreflight,
 };
 use bm_core::memory::{CompactMemoryGraph, GraphRecallRerankReport, TemporalMemoryGraphGateReport};
+use bm_core::skills::{
+    AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentSkillRecallHit,
+    AgentToolExperienceGovernanceReport, AgentToolExperienceStatusReport, AgentToolHint,
+    AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
+    AgentToolUsageFeedback, ProjectedAgentSkillHint,
+};
 use bm_core::{budget::RuntimeRetentionQuotaReport, feature_gate::ProfileId};
 
 use crate::{
@@ -20,21 +26,10 @@ use crate::{
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleModeInput, RuntimeLifecycleReport,
     RuntimeLifecycleTrigger,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemorySkillOrigin {
-    UserProvided,
-    RuntimeLearned,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemorySkillKind {
-    RuntimeSkill,
-    ManualDocument,
-}
+use bm_core::memory::PromptProjectionSource;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillListRequest {
+pub struct RuntimeSkillListRequest {
     pub query: Option<String>,
     pub include_disabled: bool,
     pub include_retired: bool,
@@ -42,10 +37,8 @@ pub struct MemorySkillListRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillSummary {
+pub struct RuntimeSkillSummary {
     pub name: String,
-    pub kind: MemorySkillKind,
-    pub origin: MemorySkillOrigin,
     pub title: String,
     pub topic: String,
     pub status: String,
@@ -60,23 +53,22 @@ pub struct MemorySkillSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillListReport {
+pub struct RuntimeSkillListReport {
     pub total: usize,
     pub active: usize,
     pub disabled: usize,
-    pub runtime_learned: usize,
-    pub user_provided: usize,
-    pub skills: Vec<MemorySkillSummary>,
+    pub runtime_skills: usize,
+    pub skills: Vec<RuntimeSkillSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillDetailRequest {
+pub struct RuntimeSkillDetailRequest {
     pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillDetailReport {
-    pub summary: MemorySkillSummary,
+pub struct RuntimeSkillDetailReport {
+    pub summary: RuntimeSkillSummary,
     pub summary_text: String,
     pub procedure_text: String,
     pub raw_content: String,
@@ -88,19 +80,20 @@ pub struct MemorySkillDetailReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillUpsertRequest {
-    pub name: Option<String>,
+pub struct RuntimeSkillEditRequest {
+    pub name: String,
     pub title: String,
     pub topic: String,
     pub summary: String,
     pub procedure: String,
     pub citations: Vec<String>,
     pub source_chat_id: Option<String>,
+    pub edit_reason: String,
     pub observed_at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillMutationReport {
+pub struct RuntimeSkillMutationReport {
     pub accepted: bool,
     pub changed: bool,
     pub name: String,
@@ -109,13 +102,13 @@ pub struct MemorySkillMutationReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillSetEnabledRequest {
+pub struct RuntimeSkillSetEnabledRequest {
     pub name: String,
     pub enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySkillDeleteRequest {
+pub struct RuntimeSkillDeleteRequest {
     pub name: String,
 }
 
@@ -135,6 +128,9 @@ pub enum MemoryWriteRequest {
     Candidates {
         candidates: Vec<bm_core::memory::MemoryWriteCandidate>,
     },
+    AgentToolUsageFeedback {
+        feedback: AgentToolUsageFeedback,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,18 +143,23 @@ pub struct MemoryWriteReport {
     pub semantic_governance: Option<PostTurnSemanticGovernanceReport>,
     pub procedural_evolution: Option<SkillEvolutionReport>,
     pub procedural_promotions: Vec<ProceduralMemoryPromotionReport>,
+    pub agent_tool_experience: Option<AgentToolExperienceGovernanceReport>,
 }
 
 #[derive(Clone, Debug)]
 pub struct MemoryRecallRequest {
     pub query: String,
     pub limit: usize,
+    pub tool_registry_refs: Vec<AgentToolRegistryRef>,
 }
 
 #[derive(Clone, Debug)]
 pub struct MemoryRecallReport {
     pub query: String,
     pub procedural_hits: Vec<RuntimeSkillHit>,
+    pub agent_skill_hits: Vec<AgentSkillRecallHit>,
+    pub agent_tool_hints: Vec<AgentToolHint>,
+    pub tool_experience_status: AgentToolExperienceStatusReport,
     pub working: WorkingRecallInspection,
     pub graph_rerank: GraphRecallRerankReport,
     pub graph_gate: TemporalMemoryGraphGateReport,
@@ -173,15 +174,86 @@ pub struct MemoryProjectionRequest {
     pub recent_messages_limit: usize,
     pub pressure: crate::PressureLevel,
     pub mode_input: RuntimeLifecycleModeInput,
+    pub tool_registry_refs: Vec<AgentToolRegistryRef>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LLMRuntimeProjectionEnvelope {
+    pub projection_id: String,
+    pub runtime_awareness: String,
+    pub subject_mount: SoulLifeProjectionReport,
+    pub boundary_protocol: RuntimeDisclosureProtocolReport,
+    pub protected_private_runtime_context: Vec<RuntimeProjectionSourceBlock>,
+    pub governed_memory_evidence: Vec<RuntimeProjectionSourceBlock>,
+    pub procedural_evidence: Vec<RuntimeProjectionSourceBlock>,
+    pub agent_skill_hints: Vec<ProjectedAgentSkillHint>,
+    pub agent_tool_hints: Vec<AgentToolHint>,
+    pub runtime_constraints: Vec<String>,
+    pub work_integrity: WorkIntegrityReport,
+    pub operator_audit_excluded_source_ids: Vec<String>,
+    pub section_names: Vec<String>,
+    pub rendered_block: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SoulLifeProjectionReport {
+    pub identity_mount: String,
+    pub relationship_position: String,
+    pub situated_now: String,
+    pub current_reasoning_basis: String,
+    pub reply_stance: String,
+    pub initiative_posture: String,
+    pub boundary_mode: String,
+    pub degraded_reason: Option<String>,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeDisclosureProtocolReport {
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
+    pub protected_sources: Vec<String>,
+    pub disclosure_rule: String,
+    pub final_llm_privacy_judge_allowed: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeProjectionSourceBlock {
+    pub source_id: String,
+    pub role: String,
+    pub content: String,
+    pub evidence_refs: Vec<String>,
+    pub protected: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkIntegrityReport {
+    pub task_goal: String,
+    pub evidence_ceiling: String,
+    pub tool_permission_boundary: String,
+    pub uncertainty_rule: String,
+    pub no_obstruction_rule: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrivateDisclosureIntegrityReport {
+    pub checked_surfaces: Vec<String>,
+    pub blocked_source_ids: Vec<String>,
+    pub redacted_source_ids: Vec<String>,
+    pub raw_private_violation_count: u32,
+    pub passed: bool,
 }
 
 pub struct MemoryProjectionReport {
     pub system_memory_block: String,
     pub context: PromptMemoryContext,
     pub audit: MemoryProjectionAuditReport,
+    pub runtime_projection: LLMRuntimeProjectionEnvelope,
+    pub life_projection: SoulLifeProjectionReport,
+    pub work_integrity: WorkIntegrityReport,
     pub subject_projection: SubjectProjectionReport,
     pub projection_faithfulness: ProjectionFaithfulnessCheck,
-    pub private_echo_guard: PrivateEchoGuardReport,
+    pub private_disclosure_integrity: PrivateDisclosureIntegrityReport,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -204,9 +276,10 @@ pub struct MemoryProjectionSectionAudit {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryProjectionPrivateGateAudit {
-    pub allowed: bool,
     pub privacy_policy_allowed: bool,
     pub lifecycle_private_depth_allowed: bool,
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
     pub reason: String,
 }
 
@@ -226,6 +299,9 @@ pub struct MemoryProjectionAuditReport {
     pub injected: bool,
     pub truncated: bool,
     pub private_gate: MemoryProjectionPrivateGateAudit,
+    pub source_authority: Vec<PromptProjectionSource>,
+    pub agent_skills: AgentSkillProjectionAudit,
+    pub agent_tools: AgentToolProjectionAudit,
     pub sources: Vec<MemoryProjectionSourceAudit>,
     pub sections: Vec<MemoryProjectionSectionAudit>,
 }
@@ -258,6 +334,7 @@ pub struct MemoryTurnFinalizeRequest {
     pub runtime_skill_selected_ids: Vec<String>,
     pub task_learning_selected_ids: Vec<String>,
     pub reuse_outcome_note: String,
+    pub tool_usage_feedback: Option<AgentToolUsageFeedback>,
     pub pressure: crate::PressureLevel,
     pub mode_input: RuntimeLifecycleModeInput,
 }
@@ -312,6 +389,8 @@ pub struct MemoryInspectionReport {
     pub working: WorkingRecallInspection,
     pub hygiene: MemoryHygieneInspection,
     pub deferred_governance: DeferredGovernanceQueueReport,
+    pub agent_skill_directory: AgentSkillDirectoryReport,
+    pub agent_tool_registry: AgentToolRegistryReport,
     pub capabilities: MemoryCapabilityCatalog,
     pub operator_action_report: RuntimeOperatorActionReport,
     pub lifecycle_report: RuntimeLifecycleReport,

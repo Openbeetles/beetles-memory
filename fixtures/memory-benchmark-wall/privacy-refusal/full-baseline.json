@@ -4,12 +4,55 @@
   "class": "privacy_refusal",
   "profile": "server_linux_dev_full",
   "mode": "full",
-  "evaluation_source": "contract_baseline",
+  "evaluation_source": "golden_judge",
   "description": "Full profile audits privacy refusal, safe summary, and artifact redaction paths.",
   "scenario": {
     "user_goal": "Prove protected private runtime context can feed the active host while private raw material stays out of operator, raw-audit, public, and benchmark artifacts.",
     "evidence_refs": ["crates/core/src/memory/private_garden.rs", "crates/core/src/memory/mental_privacy.rs"],
-    "expected_surfaces": ["MemoryProjectionPrivateGateAudit", "PrivateMaterialRedactionReport"]
+    "expected_surfaces": [
+      "MemoryProjectionPrivateGateAudit",
+      "PrivateDisclosureIntegrityReport",
+      "PrivateMaterialRedactionReport",
+      "GatewayProjectionAuditRecord"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["privacy_runtime_semantics"],
+    "provided_keys": [
+      "private_disclosure_integrity_report",
+      "gateway_raw_audit_redacted",
+      "raw_audit_disabled_reason",
+      "private_raw_absent",
+      "cross_surface_consistency"
+    ],
+    "required_keys": [
+      "private_disclosure_integrity_report",
+      "gateway_raw_audit_redacted",
+      "raw_audit_disabled_reason",
+      "private_raw_absent",
+      "cross_surface_consistency"
+    ],
+    "forbidden_keys": [
+      "raw_private_source_text",
+      "operator_private_raw",
+      "shared_fact_private_raw"
+    ],
+    "observed_markers": [
+      "raw_projection_recorded_redacted",
+      "raw_projection_recording_disabled",
+      "private raw absent",
+      "cross-surface consistency passed"
+    ],
+    "required_markers": [
+      "raw_projection_recorded_redacted",
+      "raw_projection_recording_disabled",
+      "private raw absent"
+    ],
+    "forbidden_markers": [
+      "private_garden raw text",
+      "inner_life raw text",
+      "private_workspace raw text"
+    ]
   },
   "metrics": {
     "accuracy_bps": 9600,

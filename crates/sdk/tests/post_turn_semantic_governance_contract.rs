@@ -143,6 +143,7 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
     assert!(!projection.system_memory_block.contains("Qingchuan"));

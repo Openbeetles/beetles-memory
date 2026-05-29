@@ -63,6 +63,7 @@ fn sdk_audit_events_bind_operation_to_memory_identity_and_scope() {
             recent_messages_limit: 4,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
 

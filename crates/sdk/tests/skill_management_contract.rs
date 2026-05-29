@@ -1,7 +1,8 @@
 use bm_sdk::{
-    MemoryIdentity, MemoryRuntime, MemoryScope, MemorySkillDeleteRequest, MemorySkillDetailRequest,
-    MemorySkillListRequest, MemorySkillOrigin, MemorySkillSetEnabledRequest,
-    MemorySkillUpsertRequest, ProfileId, StoreBackendConfig, StorePlatform,
+    MemoryIdentity, MemoryRuntime, MemoryScope, MemoryWriteRequest, ProfileId,
+    RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
+    RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
 };
 
 fn test_runtime() -> MemoryRuntime {
@@ -17,28 +18,46 @@ fn test_runtime() -> MemoryRuntime {
         .expect("runtime")
 }
 
-fn release_skill_request() -> MemorySkillUpsertRequest {
-    MemorySkillUpsertRequest {
-        name: Some("runtime_skill__release_guard".to_string()),
+fn seed_release_skill(runtime: &MemoryRuntime) {
+    let report = runtime
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![RuntimeSkillWrite {
+                name: "runtime_skill__release_guard".to_string(),
+                title: "Release guard".to_string(),
+                topic: "release".to_string(),
+                summary: "Check release artifacts before publishing.".to_string(),
+                content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
+                citations: vec!["test".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 1_800_000_000,
+            }],
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("seed procedural skill");
+    assert!(report.changed > 0);
+}
+
+fn release_skill_edit_request() -> RuntimeSkillEditRequest {
+    RuntimeSkillEditRequest {
+        name: "runtime_skill__release_guard".to_string(),
         title: "Release guard".to_string(),
         topic: "release".to_string(),
-        summary: "Check release artifacts before publishing.".to_string(),
-        procedure: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
-        citations: vec!["test".to_string()],
+        summary: "Check release artifacts and changelog before publishing.".to_string(),
+        procedure: "1. run gates\n2. inspect artifacts\n3. inspect changelog".to_string(),
+        citations: vec!["test-edit".to_string()],
         source_chat_id: Some("chat-1".to_string()),
-        observed_at: 1_800_000_000,
+        edit_reason: "sdk_contract_edit".to_string(),
+        observed_at: 1_800_000_001,
     }
 }
 
 #[test]
-fn runtime_lists_user_and_runtime_skills_with_summary_counts() {
+fn runtime_lists_runtime_skills_with_summary_counts() {
     let runtime = test_runtime();
-    runtime
-        .upsert_skill(release_skill_request())
-        .expect("upsert");
+    seed_release_skill(&runtime);
 
     let report = runtime
-        .list_skills(MemorySkillListRequest {
+        .list_runtime_skills(RuntimeSkillListRequest {
             query: Some("release".to_string()),
             include_disabled: true,
             include_retired: true,
@@ -47,21 +66,20 @@ fn runtime_lists_user_and_runtime_skills_with_summary_counts() {
         .expect("list");
 
     assert_eq!(report.total, 1);
-    assert_eq!(report.user_provided, 1);
-    assert_eq!(report.runtime_learned, 0);
-    assert_eq!(report.skills[0].origin, MemorySkillOrigin::UserProvided);
+    assert_eq!(report.runtime_skills, 1);
     assert_eq!(report.skills[0].name, "runtime_skill__release_guard");
     assert_eq!(report.skills[0].title, "Release guard");
 }
 
 #[test]
-fn runtime_gets_skill_detail_without_executing_it() {
+fn runtime_gets_runtime_skill_detail_without_executing_it() {
     let runtime = test_runtime();
-    let created = runtime
-        .upsert_skill(release_skill_request())
-        .expect("upsert");
+    seed_release_skill(&runtime);
+
     let detail = runtime
-        .get_skill(MemorySkillDetailRequest { name: created.name })
+        .get_runtime_skill(RuntimeSkillDetailRequest {
+            name: "runtime_skill__release_guard".to_string(),
+        })
         .expect("detail");
 
     assert_eq!(detail.summary.name, "runtime_skill__release_guard");
@@ -70,40 +88,46 @@ fn runtime_gets_skill_detail_without_executing_it() {
 }
 
 #[test]
-fn runtime_skill_management_mutations_go_through_runtime_reports() {
+fn runtime_skill_management_mutations_require_existing_runtime_skill() {
     let runtime = test_runtime();
-    let upsert = runtime
-        .upsert_skill(release_skill_request())
-        .expect("upsert");
-    assert!(upsert.accepted);
-    assert!(upsert.changed);
+    assert!(runtime
+        .edit_runtime_skill(release_skill_edit_request())
+        .is_err());
+
+    seed_release_skill(&runtime);
+
+    let edited = runtime
+        .edit_runtime_skill(release_skill_edit_request())
+        .expect("edit");
+    assert!(edited.accepted);
+    assert!(edited.changed);
 
     let disabled = runtime
-        .set_skill_enabled(MemorySkillSetEnabledRequest {
-            name: upsert.name.clone(),
+        .set_runtime_skill_enabled(RuntimeSkillSetEnabledRequest {
+            name: edited.name.clone(),
             enabled: false,
         })
         .expect("disable");
     assert!(disabled.accepted);
 
     let list = runtime
-        .list_skills(MemorySkillListRequest {
+        .list_runtime_skills(RuntimeSkillListRequest {
             query: None,
             include_disabled: false,
             include_retired: true,
             limit: 10,
         })
         .expect("list");
-    assert!(list.skills.iter().all(|skill| skill.name != upsert.name));
+    assert!(list.skills.iter().all(|skill| skill.name != edited.name));
 
     let deleted = runtime
-        .delete_skill(MemorySkillDeleteRequest {
-            name: upsert.name.clone(),
+        .delete_runtime_skill(RuntimeSkillDeleteRequest {
+            name: edited.name.clone(),
         })
         .expect("delete");
     assert!(deleted.accepted);
 
     assert!(runtime
-        .get_skill(MemorySkillDetailRequest { name: upsert.name })
+        .get_runtime_skill(RuntimeSkillDetailRequest { name: edited.name })
         .is_err());
 }

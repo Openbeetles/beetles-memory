@@ -11,6 +11,36 @@
     "evidence_refs": ["crates/core/src/memory/persona_governance_benchmark.rs", "crates/core/src/runtime/soul_kernel.rs"],
     "expected_surfaces": ["PersonaGovernanceReplayResult", "SoulCompactDigest"]
   },
+  "semantic_contract": {
+    "dimensions": ["soul_life_semantics"],
+    "provided_keys": [
+      "soul_compact_digest",
+      "compact_profile_no_private_depth",
+      "privacy_zero_gate"
+    ],
+    "required_keys": [
+      "soul_compact_digest",
+      "compact_profile_no_private_depth",
+      "privacy_zero_gate"
+    ],
+    "forbidden_keys": [
+      "deep_private_replay",
+      "full_soul_raw_private_context"
+    ],
+    "observed_markers": [
+      "SoulCompactDigest",
+      "compact digest only",
+      "private depth skipped"
+    ],
+    "required_markers": [
+      "SoulCompactDigest",
+      "compact digest only"
+    ],
+    "forbidden_markers": [
+      "deep private replay",
+      "full private raw"
+    ]
+  },
   "metrics": {
     "accuracy_bps": 9200,
     "evidence_precision_bps": 8800,

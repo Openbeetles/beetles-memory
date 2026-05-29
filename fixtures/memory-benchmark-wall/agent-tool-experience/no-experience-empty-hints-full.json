@@ -1,0 +1,68 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "agent-tool-experience-no-experience-empty-hints-full",
+  "class": "agent_tool_experience",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "runtime_replay",
+  "description": "Full profile may know a host tool registry, but without governed tool experience it returns empty tool hints and requires host fallback.",
+  "scenario": {
+    "user_goal": "Ask for PDF extraction before any accepted tool experience exists.",
+    "evidence_refs": [
+      "crates/sdk/tests/agent_tool_registry_contract.rs",
+      "crates/http/tests/http_runtime_contract.rs"
+    ],
+    "expected_surfaces": ["MemoryRecallReport", "HostToolRegistry"]
+  },
+  "semantic_contract": {
+    "dimensions": ["agent_tool_experience_semantics"],
+    "provided_keys": [
+      "agent_tool_no_experience_empty_hints",
+      "tool_experience_status",
+      "host_fallback_required"
+    ],
+    "required_keys": [
+      "agent_tool_no_experience_empty_hints",
+      "tool_experience_status",
+      "host_fallback_required"
+    ],
+    "forbidden_keys": [
+      "description_based_tool_selection",
+      "embedding_based_tool_selection",
+      "regex_based_tool_selection"
+    ],
+    "observed_markers": [
+      "no_governed_tool_experience",
+      "host fallback required"
+    ],
+    "required_markers": [
+      "no_governed_tool_experience",
+      "host fallback required"
+    ],
+    "forbidden_markers": ["selected from tool description"]
+  },
+  "metrics": {
+    "accuracy_bps": 9700,
+    "evidence_precision_bps": 9400,
+    "projection_faithfulness_bps": 9300,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9100,
+    "soul_regression_count": 0,
+    "latency_ms": 90,
+    "token_budget": 2048,
+    "memory_bytes": 131072
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

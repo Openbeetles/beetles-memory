@@ -54,9 +54,10 @@ After publishing, use the crate version instead of a path dependency.
 
 ```rust
 use bm_sdk::{
-    MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
+    AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRuntime, MemoryScope, MemoryWriteRequest, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    StorePlatform,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
@@ -68,6 +69,10 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
         .store_platform(store)
+        .add_agent_skill_dir(AgentSkillDirConfig::read_only(
+            "./skills",
+            "host-project",
+        ))
         .build()
 }
 
@@ -89,6 +94,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     let recall = runtime.recall(MemoryRecallRequest {
         query: "release artifacts".to_string(),
         limit: 4,
+        tool_registry_refs: Vec::new(),
     })?;
     assert!(!recall.procedural_hits.is_empty());
 
@@ -98,6 +104,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         recent_messages_limit: 8,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
+        tool_registry_refs: Vec::new(),
     })?;
     assert!(projection.system_memory_block.len() <= 4096);
     Ok(())
@@ -163,7 +170,6 @@ cargo run --manifest-path examples/server-runtime/Cargo.toml
 cargo run --manifest-path examples/linux-device/Cargo.toml
 cargo run --manifest-path examples/esp-standalone-memory/Cargo.toml
 cargo run --manifest-path examples/esp-embedded-sdk/Cargo.toml
-cargo run --manifest-path examples/memory-gateway/Cargo.toml
 ```
 
 ## Verification
@@ -175,6 +181,7 @@ cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/check_profile_matrix.sh
+bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_release_surface.sh
 ```
 

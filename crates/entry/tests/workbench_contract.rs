@@ -53,7 +53,13 @@ fn workbench_api_map_is_entry_owned_and_private_raw_closed() {
             "vault_migration",
         ]
     );
+    #[cfg(feature = "replay-harness")]
     assert!(map.missing_report_apis.is_empty());
+    #[cfg(not(feature = "replay-harness"))]
+    assert_eq!(
+        map.missing_report_apis,
+        vec!["sdk.replay.memory_benchmark_report".to_string()]
+    );
     assert!(map
         .surfaces
         .iter()
@@ -71,21 +77,34 @@ fn workbench_report_exposes_real_runtime_reports_without_private_raw_surfaces() 
     let report = runtime.console_workbench_report();
 
     assert_eq!(report.api_map.surfaces.len(), 7);
-    assert!(report.benchmark_wall.report.is_some());
-    assert!(
-        report
+    #[cfg(feature = "replay-harness")]
+    {
+        assert!(report.benchmark_wall.report.is_some());
+        let benchmark = report
             .benchmark_wall
             .report
             .as_ref()
-            .expect("benchmark report")
-            .passed
-    );
+            .expect("benchmark report");
+        assert!(benchmark.passed);
+        assert!(benchmark.soul_kernel_judge.release_gate_passed);
+        assert!(benchmark.subject_projection_judge.release_gate_passed);
+    }
+    #[cfg(not(feature = "replay-harness"))]
+    {
+        assert!(report.benchmark_wall.report.is_none());
+        assert_eq!(report.benchmark_wall.status.status, "limited");
+        assert_eq!(
+            report.benchmark_wall.status.reason,
+            "replay_harness_not_compiled"
+        );
+    }
     assert_eq!(report.recall_inspector.query, "workbench memory inspection");
     assert!(!report.recall_inspector.high_confidence_projection_allowed);
     assert_eq!(
-        report.projection_inspector.private_echo_count, 0,
+        report.projection_inspector.raw_private_violation_count, 0,
         "console workbench must not surface private raw echoes"
     );
-    assert!(report.projection_inspector.private_echo_guard_passed);
+    assert!(!report.projection_inspector.foreground_disclosure_allowed);
+    assert!(report.projection_inspector.disclosure_integrity_passed);
     assert!(report.vault_migration.preflight_passed);
 }

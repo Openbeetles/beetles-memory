@@ -9,7 +9,54 @@
   "scenario": {
     "user_goal": "Prove a soul update candidate was accepted, rejected, or deferred with evidence.",
     "evidence_refs": ["crates/core/src/memory/core_revision_ledger.rs", "crates/core/src/agent/soul_feedback.rs"],
-    "expected_surfaces": ["PersonaGovernanceReplayResult", "SoulFeedbackReport"]
+    "expected_surfaces": [
+      "SoulGrowthProposal",
+      "SoulRegressionSuite",
+      "SoulFeedbackReport",
+      "CoreRevisionDiff",
+      "RelationshipBoundaryAudit"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["soul_life_semantics"],
+    "provided_keys": [
+      "soul_growth_proposal",
+      "soul_regression_suite",
+      "soul_feedback_report",
+      "core_revision_diff",
+      "relationship_boundary_audit",
+      "accepted_rejected_deferred_decision",
+      "privacy_zero_gate"
+    ],
+    "required_keys": [
+      "soul_growth_proposal",
+      "soul_regression_suite",
+      "soul_feedback_report",
+      "core_revision_diff",
+      "relationship_boundary_audit",
+      "accepted_rejected_deferred_decision",
+      "privacy_zero_gate"
+    ],
+    "forbidden_keys": [
+      "prompt_only_soul_update",
+      "single_turn_identity_promotion",
+      "adapter_owned_soul_decision"
+    ],
+    "observed_markers": [
+      "SoulGrowthProposal",
+      "SoulRegressionSuite",
+      "SoulFeedbackReport",
+      "accepted/rejected/deferred reasons"
+    ],
+    "required_markers": [
+      "SoulGrowthProposal",
+      "SoulRegressionSuite",
+      "SoulFeedbackReport"
+    ],
+    "forbidden_markers": [
+      "prompt-only soul update",
+      "adapter decides soul"
+    ]
   },
   "metrics": {
     "accuracy_bps": 9500,

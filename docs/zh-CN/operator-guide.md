@@ -23,19 +23,21 @@ assert!(report.capabilities.inspection.visible);
 
 Projection 诊断来自 `MemoryProjectionReport.audit`，包括 source plane、selected ids、section chars、budget 和 private gate。保守压缩来自 `MemoryRuntime::run_retention_compaction()`，该 report 明确宿主不能直接删除已接受记忆。
 
-## Skill 记忆管理
+## 运行时 Skill 与标准 Agent Skill
 
-独立部署配置台和 CLI 可以管理 Skill 记忆，但它们管理的是 procedural memory record，不是执行器、插件市场或 workflow runner。
+独立部署配置台和 CLI 只管理运行时 Skill 记忆，也就是系统运行中沉淀出来的 procedural memory record。它们不是执行器、插件市场或 workflow runner，也不管理标准 Agent Skill 目录。
 
 SDK 侧入口：
 
-- `MemoryRuntime::list_skills`
-- `MemoryRuntime::get_skill`
-- `MemoryRuntime::upsert_skill`
-- `MemoryRuntime::set_skill_enabled`
-- `MemoryRuntime::delete_skill`
+- `MemoryRuntime::list_runtime_skills`
+- `MemoryRuntime::get_runtime_skill`
+- `MemoryRuntime::edit_runtime_skill`
+- `MemoryRuntime::set_runtime_skill_enabled`
+- `MemoryRuntime::delete_runtime_skill`
 
-所有 mutation 都进入 `MemoryRuntime`，再进入 core skill governance 和 store backend。HTTP console 只路由 `/console/skills*`，CLI 只调用 entry facade；两者都不能直接读写 skill 文件。
+所有 mutation 都进入 `MemoryRuntime`，再进入 core skill governance 和 store backend。HTTP console 只路由运行时 Skill 的 `/console/skills*` 查看、编辑、启停、删除；CLI 只调用 entry facade；两者都不能直接读写 skill 文件。
+
+标准 Agent Skill 由宿主项目自己添加、编辑、导入和删除。SDK 只提供 `MemoryRuntimeBuilder::agent_skill_dirs` / `add_agent_skill_dir` 只读挂载，独立 HTTP/CLI 部署可通过 `BM_AGENT_SKILL_DIRS` 配置目录。召回和投影只使用 `SKILL.md` 摘要、资源计数和指纹，不执行 scripts，不读取 assets，不把目录变成记忆系统管理对象。ESP profile 禁止挂载标准 Agent Skill 目录。
 
 ## Recover
 

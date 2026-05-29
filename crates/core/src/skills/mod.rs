@@ -4,10 +4,36 @@
 use crate::error::{Error, Result};
 use crate::platform::{SkillMetaStore, SkillStorage};
 
+mod agent_skill;
+mod agent_tool;
 mod capability_atoms;
 mod prompt_cache;
 mod runtime;
 
+pub use agent_skill::{
+    agent_skill_dirs_forbidden_by_profile, build_agent_skill_registry_snapshot,
+    build_projected_agent_skill_hints, retrieve_agent_skill_hits, AgentSkillAccess,
+    AgentSkillDirConfig, AgentSkillDirectoryReport, AgentSkillDirectoryWarning,
+    AgentSkillMountReport, AgentSkillPackageRecord, AgentSkillPackageStatus,
+    AgentSkillPackageWarning, AgentSkillProjectionAudit, AgentSkillProjectionRejection,
+    AgentSkillProjectionSource, AgentSkillRecallHit, AgentSkillRefreshPolicy,
+    AgentSkillRegistrySnapshot, AgentSkillResourceSummary, AgentSkillScope, AgentSkillTrust,
+    ProjectedAgentSkillHint,
+};
+pub use agent_tool::{
+    agent_tool_registries_forbidden_by_profile, build_agent_tool_registry_report,
+    fingerprint_agent_tool_descriptor, fingerprint_agent_tool_registry,
+    govern_agent_tool_usage_feedback, list_agent_tool_experience_records, select_agent_tool_hints,
+    validate_agent_tool_registry_snapshot, write_agent_tool_experience_record, AgentToolDescriptor,
+    AgentToolExperienceConfidence, AgentToolExperienceGovernanceDecision,
+    AgentToolExperienceGovernanceReport, AgentToolExperienceRecord, AgentToolExperienceStatus,
+    AgentToolExperienceStatusReport, AgentToolHint, AgentToolObservationDigest, AgentToolOutcome,
+    AgentToolProjectionAudit, AgentToolProjectionRejection, AgentToolRegistryOwner,
+    AgentToolRegistryRef, AgentToolRegistryReport, AgentToolRegistryScope,
+    AgentToolRegistrySnapshot, AgentToolSelectionReport, AgentToolUsageFeedback,
+    AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
+    AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
+};
 pub use capability_atoms::{
     build_capability_atom_operator_summary, export_capability_atom_exchange_envelope,
     import_capability_atom_exchange_envelope, is_capability_atom_name,

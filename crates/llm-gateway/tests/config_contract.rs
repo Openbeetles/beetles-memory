@@ -26,12 +26,14 @@ fn gateway_config_defaults_are_loopback_memory_required_and_bounded() {
         GatewayMaintenanceConfig { enabled: true }
     );
     assert!(!config.audit.record_raw_projection);
+    assert_eq!(config.audit.raw_projection_diagnostic_path, None);
+    assert_eq!(config.audit.raw_projection_retention_limit, 32);
     assert!(!config.audit.record_full_request_body);
     assert!(!config.audit.record_full_response_body);
 }
 
 #[test]
-fn gateway_config_rejects_zero_runtime_cache_and_missing_default_provider() {
+fn gateway_config_rejects_zero_runtime_cache_missing_provider_and_unbounded_raw_projection_audit() {
     let mut config = GatewayConfig::default_for_local_dev();
     config.runtime_cache = GatewayRuntimeCacheConfig { max_runtimes: 0 };
     let error = config.validate().expect_err("zero runtime cache must fail");
@@ -42,6 +44,23 @@ fn gateway_config_rejects_zero_runtime_cache_and_missing_default_provider() {
     let error = config
         .validate()
         .expect_err("default provider must exist in provider map");
+    assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
+
+    let mut config = GatewayConfig::default_for_local_dev();
+    config.audit.record_raw_projection = true;
+    let error = config
+        .validate()
+        .expect_err("raw projection audit requires a diagnostic path");
+    assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
+
+    let mut config = GatewayConfig::default_for_local_dev();
+    config.audit.record_raw_projection = true;
+    config.audit.raw_projection_diagnostic_path =
+        Some(std::env::temp_dir().join("bm-llm-gateway-audit-contract"));
+    config.audit.raw_projection_retention_limit = 0;
+    let error = config
+        .validate()
+        .expect_err("raw projection audit requires a retention limit");
     assert_eq!(error.key(), GatewayErrorKey::InvalidConfig);
 
     assert!(GatewayConfig::default_for_local_dev().validate().is_ok());

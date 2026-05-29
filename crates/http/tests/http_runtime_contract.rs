@@ -7,10 +7,11 @@ use bm_entry::{
 };
 use bm_http::{handle_http_request, handle_http_request_with_services, HttpRuntimeRequest};
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy,
-    MemoryPrivacyPolicy, Message, ProfileId, ResponseBody, StopReason, StoreBackendKind,
-    ToolChoicePolicy, ToolSpec,
+    AgentToolDescriptor, AgentToolRegistrySnapshot, LlmClient, LlmHttpClient, LlmModelCompat,
+    LlmResponse, MemoryCapabilityPolicy, MemoryPrivacyPolicy, Message, ProfileId, ResponseBody,
+    StopReason, StoreBackendKind, ToolChoicePolicy, ToolSpec,
 };
+use serde_json::{json, Value};
 
 fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -39,6 +40,13 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
+fn agent_tool_registry() -> AgentToolRegistrySnapshot {
+    let mut tool = AgentToolDescriptor::compact("pdf.extract", "Extract PDF text", "schema-pdf-v1");
+    tool.permission_tags = vec!["filesystem.read".to_string()];
+    tool.risk_tags = vec!["external_content".to_string()];
+    AgentToolRegistrySnapshot::compact("host-tools", "host", vec![tool], 1_800_000_000)
+}
+
 #[test]
 fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
     let runtime = runtime();
@@ -59,6 +67,175 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
     .expect("recall");
     assert_eq!(recall.status_code, 200);
     assert!(recall.body.contains("\"status\""));
+}
+
+#[test]
+fn http_runtime_registers_compact_agent_tool_registry_without_router_behavior() {
+    let runtime = runtime();
+    let registry = agent_tool_registry();
+    let body = serde_json::to_string(&registry).expect("registry body");
+
+    let upsert = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::put_json("/agent-tool-registries/host-tools", body),
+    )
+    .expect("upsert registry");
+    assert_eq!(upsert.status_code, 200);
+    let upsert_body: Value = serde_json::from_str(&upsert.body).expect("upsert json");
+    assert_eq!(upsert_body["status"], "accepted");
+    assert_eq!(upsert_body["report"]["registries"], 1);
+    assert_eq!(upsert_body["report"]["tools"], 1);
+
+    let listed = handle_http_request(&runtime, HttpRuntimeRequest::get("/agent-tool-registries"))
+        .expect("list registries");
+    let listed_body: Value = serde_json::from_str(&listed.body).expect("list json");
+    assert_eq!(
+        listed_body["registries"]
+            .as_array()
+            .expect("registries")
+            .len(),
+        1
+    );
+    assert_eq!(
+        listed_body["registries"][0]["registry_id"],
+        registry.registry_id.as_str()
+    );
+
+    let fetched = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/agent-tool-registries/host-tools"),
+    )
+    .expect("fetch registry");
+    let fetched_body: Value = serde_json::from_str(&fetched.body).expect("fetch json");
+    assert_eq!(
+        fetched_body["registry"]["fingerprint"],
+        registry.fingerprint.as_str()
+    );
+
+    let deleted = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::delete("/agent-tool-registries/host-tools"),
+    )
+    .expect("delete registry");
+    assert_eq!(deleted.status_code, 200);
+    let after_delete = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::get("/agent-tool-registries/host-tools"),
+    )
+    .expect("fetch deleted registry");
+    assert_eq!(after_delete.status_code, 404);
+}
+
+#[test]
+fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
+    let runtime = runtime();
+    let registry = agent_tool_registry();
+    handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::put_json(
+            "/agent-tool-registries/host-tools",
+            serde_json::to_string(&registry).expect("registry body"),
+        ),
+    )
+    .expect("upsert registry");
+
+    let project_without_experience = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/project",
+            json!({
+                "query": "extract text from this PDF",
+                "max_len": 4096,
+                "recent_messages_limit": 8,
+                "tool_registry_refs": [registry.registry_ref()]
+            })
+            .to_string(),
+        ),
+    )
+    .expect("project without experience");
+    let no_hint: Value =
+        serde_json::from_str(&project_without_experience.body).expect("project json");
+    assert!(no_hint["agent_tool_hints"]
+        .as_array()
+        .expect("hints")
+        .is_empty());
+
+    let feedback = json!({
+        "tool_usage_feedback": {
+            "registry_ref": registry.registry_ref(),
+            "observations": [
+                {
+                    "observation_id": "obs-1",
+                    "registry_id": "host-tools",
+                    "tool_id": "pdf.extract",
+                    "schema_fingerprint": "schema-pdf-v1",
+                    "call_id": "call-1",
+                    "task_signature": "extract_pdf_text",
+                    "summary": "PDF extraction produced usable text.",
+                    "outcome": "succeeded",
+                    "error_code": null,
+                    "external_content": true,
+                    "private_content_used": false,
+                    "permission_tags": ["filesystem.read"],
+                    "risk_tags": ["external_content"],
+                    "started_at": 1800000000u64,
+                    "completed_at": 1800000001u64
+                },
+                {
+                    "observation_id": "obs-2",
+                    "registry_id": "host-tools",
+                    "tool_id": "pdf.extract",
+                    "schema_fingerprint": "schema-pdf-v1",
+                    "call_id": "call-2",
+                    "task_signature": "extract_pdf_text",
+                    "summary": "PDF extraction produced usable text again.",
+                    "outcome": "succeeded",
+                    "error_code": null,
+                    "external_content": true,
+                    "private_content_used": false,
+                    "permission_tags": ["filesystem.read"],
+                    "risk_tags": ["external_content"],
+                    "started_at": 1800000002u64,
+                    "completed_at": 1800000003u64
+                }
+            ],
+            "user_visible_result_summary": "PDF extraction helped prepare notes.",
+            "reuse_outcome": "succeeded",
+            "operator_note": null
+        }
+    });
+    let write = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json("/memory/write", feedback.to_string()),
+    )
+    .expect("write feedback");
+    let write_body: Value = serde_json::from_str(&write.body).expect("write json");
+    assert_eq!(write_body["agent_tool_experience"]["accepted"], true);
+    assert_eq!(write_body["changed"], 1);
+
+    let projected = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/project",
+            json!({
+                "query": "extract text from this PDF",
+                "max_len": 4096,
+                "recent_messages_limit": 8,
+                "tool_registry_refs": [registry.registry_ref()]
+            })
+            .to_string(),
+        ),
+    )
+    .expect("project with experience");
+    let projected_body: Value = serde_json::from_str(&projected.body).expect("project json");
+    assert_eq!(
+        projected_body["agent_tool_hints"][0]["tool_id"],
+        "pdf.extract"
+    );
+    assert_eq!(
+        projected_body["agent_tool_hints"][0]["host_execution_required"],
+        true
+    );
 }
 
 #[test]
@@ -100,6 +277,19 @@ fn http_runtime_body_limit_comes_from_runtime_budget_report() {
         HttpRuntimeRequest::post_json("/memory/recall", &over_budget),
     )
     .expect_err("runtime budget must reject oversized body before decode");
+
+    assert_eq!(error.stage(), "http_body");
+}
+
+#[test]
+fn http_runtime_agent_tool_registry_body_limit_uses_runtime_budget_report() {
+    let runtime = runtime();
+    let over_budget = "x".repeat(runtime.runtime_budget().adapter_budget.http_body_max_bytes + 1);
+    let error = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::put_json("/agent-tool-registries/host-tools", &over_budget),
+    )
+    .expect_err("registry upsert must reject oversized body before decode");
 
     assert_eq!(error.stage(), "http_body");
 }

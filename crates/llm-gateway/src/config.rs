@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryRuntimeBaseConfig, EntryStoreConfig,
@@ -81,6 +81,8 @@ impl Default for GatewayMaintenanceConfig {
 pub struct GatewayAuditConfig {
     pub enabled: bool,
     pub record_raw_projection: bool,
+    pub raw_projection_diagnostic_path: Option<PathBuf>,
+    pub raw_projection_retention_limit: usize,
     pub record_full_request_body: bool,
     pub record_full_response_body: bool,
 }
@@ -90,6 +92,8 @@ impl Default for GatewayAuditConfig {
         Self {
             enabled: true,
             record_raw_projection: false,
+            raw_projection_diagnostic_path: None,
+            raw_projection_retention_limit: 32,
             record_full_request_body: false,
             record_full_response_body: false,
         }
@@ -155,6 +159,18 @@ impl GatewayConfig {
             return Err(GatewayError::invalid_config(
                 "remote gateway requires token enforcement",
             ));
+        }
+        if self.audit.enabled && self.audit.record_raw_projection {
+            if self.audit.raw_projection_diagnostic_path.is_none() {
+                return Err(GatewayError::invalid_config(
+                    "audit.record_raw_projection requires audit.raw_projection_diagnostic_path",
+                ));
+            }
+            if self.audit.raw_projection_retention_limit == 0 {
+                return Err(GatewayError::invalid_config(
+                    "audit.raw_projection_retention_limit must be greater than zero",
+                ));
+            }
         }
         Ok(())
     }

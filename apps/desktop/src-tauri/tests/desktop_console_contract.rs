@@ -56,7 +56,7 @@ fn desktop_console_serves_ollama_transparent_status_without_404() {
 fn desktop_console_mutates_skills_through_entry_runtime() {
     let state = DesktopConsoleState::open_for_data_dir(test_store_dir("skills-mutation")).unwrap();
 
-    let mutation = state
+    let create_forbidden = state
         .handle_console_request(DesktopConsoleRequest::post_json(
             "/console/skills",
             r#"{
@@ -68,7 +68,37 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
             }"#,
         ))
         .unwrap();
-    assert_eq!(mutation.status_code, 200);
+    assert_eq!(create_forbidden.status_code, 405);
+
+    let seeded = state
+        .handle_console_request(DesktopConsoleRequest::post_json(
+            "/memory/write",
+            r#"{
+              "name":"runtime_skill__desktop_console",
+              "topic":"desktop_console",
+              "title":"Desktop direct skill",
+              "summary":"Desktop commands must use the in-process entry runtime.",
+              "content":"1. open the Tauri app\n2. call the shared console API\n3. verify the returned report",
+              "source":"manual",
+              "citations":["desktop contract test"]
+            }"#,
+        ))
+        .unwrap();
+    assert_eq!(seeded.status_code, 200, "{}", seeded.body);
+
+    let mutation = state
+        .handle_console_request(DesktopConsoleRequest::patch_json(
+            "/console/skills/runtime_skill__desktop_console",
+            r#"{
+              "title":"Desktop direct skill",
+              "topic":"desktop_console",
+              "summary":"Desktop commands must use the in-process entry runtime.",
+              "procedure":"1. open the Tauri app\n2. call the shared console API\n3. verify the returned report\n4. keep edits inside runtime skill management",
+              "citations":["desktop contract test edit"]
+            }"#,
+        ))
+        .unwrap();
+    assert_eq!(mutation.status_code, 200, "{}", mutation.body);
     assert!(
         mutation.body.contains(r#""accepted":true"#),
         "{}",
@@ -80,7 +110,7 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
         .unwrap();
     assert_eq!(list.status_code, 200);
     assert!(list.body.contains("Desktop direct skill"));
-    assert!(list.body.contains(r#""userProvided":1"#));
+    assert!(list.body.contains(r#""runtimeLearned":1"#));
 }
 
 #[test]
@@ -190,6 +220,7 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
 }

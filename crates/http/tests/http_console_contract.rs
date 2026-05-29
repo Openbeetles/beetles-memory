@@ -108,6 +108,7 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
 }
@@ -292,13 +293,13 @@ fn console_workbench_api_map_route_exposes_entry_owned_report_apis() {
     assert!(surfaces
         .iter()
         .all(|surface| surface["privateRawAllowed"] == false));
-    assert_eq!(
-        body["workbench"]["missingReportApis"]
-            .as_array()
-            .expect("missing")
-            .len(),
-        0
-    );
+    let missing = body["workbench"]["missingReportApis"]
+        .as_array()
+        .expect("missing");
+    #[cfg(feature = "replay-harness")]
+    assert!(missing.is_empty());
+    #[cfg(not(feature = "replay-harness"))]
+    assert_eq!(missing.len(), 1);
 }
 
 #[test]
@@ -322,10 +323,19 @@ fn console_workbench_report_route_exposes_runtime_report_summaries() {
             .len(),
         7
     );
+    #[cfg(feature = "replay-harness")]
     assert_eq!(report["benchmarkWall"]["report"]["passed"], true);
-    assert_eq!(report["projectionInspector"]["privateEchoCount"], 0);
+    #[cfg(not(feature = "replay-harness"))]
+    {
+        assert!(report["benchmarkWall"]["report"].is_null());
+        assert_eq!(
+            report["benchmarkWall"]["status"]["reason"],
+            "replay_harness_not_compiled"
+        );
+    }
+    assert_eq!(report["projectionInspector"]["rawPrivateViolationCount"], 0);
     assert_eq!(
-        report["projectionInspector"]["privateEchoGuardPassed"],
+        report["projectionInspector"]["disclosureIntegrityPassed"],
         true
     );
     assert_eq!(report["vaultMigration"]["preflightPassed"], true);
@@ -813,24 +823,38 @@ fn http_parser_accepts_delete_for_console_skill_routes() {
 }
 
 #[test]
-fn console_http_skill_routes_support_crud_without_store_shortcut() {
+fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     let runtime = runtime();
 
-    let created = handle_http_request(
+    let create_forbidden = handle_http_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/console/skills",
             r#"{"title":"Release guard","topic":"release","summary":"Check artifacts before publishing.","procedure":"1. run gates\n2. inspect artifacts\n3. dry run publish","citations":["http-test"]}"#,
         ),
     )
-    .expect("create");
-    assert_eq!(created.status_code, 200, "{}", created.body);
+    .expect("create forbidden");
+    assert_eq!(
+        create_forbidden.status_code, 405,
+        "{}",
+        create_forbidden.body
+    );
+
+    let seeded = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/write",
+            r#"{"name":"runtime_skill__release","topic":"release","title":"Release guard","summary":"Check artifacts before publishing.","content":"1. run gates\n2. inspect artifacts\n3. dry run publish","source":"manual","citations":["http-test"]}"#,
+        ),
+    )
+    .expect("seed runtime skill");
+    assert_eq!(seeded.status_code, 200, "{}", seeded.body);
 
     let list =
         handle_http_request(&runtime, HttpRuntimeRequest::get("/console/skills")).expect("list");
     assert_eq!(list.status_code, 200);
     assert!(list.body.contains("Release guard"));
-    assert!(list.body.contains("user_provided"));
+    assert!(list.body.contains("runtimeLearned"));
 
     let detail = handle_http_request(
         &runtime,

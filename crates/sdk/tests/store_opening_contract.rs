@@ -55,6 +55,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
         .recall(MemoryRecallRequest {
             query: "StorePlatform backend".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
 
@@ -70,6 +71,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
     assert!(projection.system_memory_block.len() <= 4096);

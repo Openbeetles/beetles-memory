@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::budget::{
@@ -11,26 +12,29 @@ use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
     apply_long_term_memory_extraction, build_deferred_governance_queue_report,
     build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta,
-    export_continuity_snapshot, govern_write_candidates, import_continuity_snapshot,
-    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
-    load_prompt_memory_context, promote_task_experience_to_procedure,
+    compile_inhabited_subject_projection, export_continuity_snapshot, govern_write_candidates,
+    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
+    inspect_working_recall, load_prompt_memory_context, promote_task_experience_to_procedure,
     rerank_recall_with_temporal_graph, run_long_term_memory_refresh,
     run_memory_retention_compaction, run_post_reply_memory_maintenance,
     run_private_garden_governance, write_governed_shared_memory, CanonicalTurnDelta,
     CompactMemoryGraph, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
     ContinuitySnapshotMode, DeferredGovernanceJob, DeferredGovernanceJobStatus,
     DeferredGovernanceQueueReport, DroppedProjectionCandidate, GovernedWriteDecision,
-    GraphRecallRerankReport, IngressKind, LongTermMemoryRefreshContext,
-    LongTermMemoryRefreshOutcome, LongTermMemoryRefreshRequestOutcome, MemoryGraphEvidence,
-    MemoryGraphNodeKind, MemoryHygieneContext, MemoryPlaneGovernanceReport, MemoryWriteAuthority,
-    MemoryWriteDomain, PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateEchoGuardReport,
-    PrivateGardenGovernanceContext, PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome,
-    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProjectionBudgetDecision,
-    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, PromptMemoryContextParams,
-    PromptParticipationPlan, PromptRecallIntent, RecallCandidate, RecallSelectionReport,
-    SharedMemoryWriteSource, SkillEvolutionReport, SubjectProjectionReport,
-    TemporalMemoryGraphGateReport, WorkingRecallInspectionInput,
+    GraphRecallRerankReport, IngressKind, InhabitedSubjectProjection,
+    InhabitedSubjectProjectionInput, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    LongTermMemoryRefreshRequestOutcome, MemoryGraphEvidence, MemoryGraphNodeKind,
+    MemoryHygieneContext, MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
+    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateGardenGovernanceContext,
+    PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome, ProceduralMemoryPromotionPolicy,
+    ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
+    ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
+    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate,
+    RecallSelectionReport, SharedMemoryWriteSource, SkillEvolutionReport,
+    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
+    SubjectProjectionWorkIntegrityReport, TemporalMemoryGraphGateReport,
+    WorkingRecallInspectionInput,
 };
 use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
 use bm_core::platform::Platform;
@@ -42,35 +46,41 @@ use bm_core::runtime::{
     RuntimeLifecycleOperation, RuntimeLifecycleReport, RuntimeLifecycleTrigger,
 };
 use bm_core::skills::{
-    delete_skill as delete_skill_record, get_disabled_skills, get_skill_content, get_skills_order,
-    is_runtime_skill_name, list_runtime_skill_records, list_skill_names,
-    retrieve_runtime_skill_hits, set_skill_enabled as set_skill_enabled_record, set_skills_order,
-    write_governed_runtime_skills, RuntimeSkillOrigin as CoreRuntimeSkillOrigin,
-    RuntimeSkillRecord, RuntimeSkillStatus, RuntimeSkillWriteAction,
+    build_agent_skill_registry_snapshot, build_agent_tool_registry_report,
+    build_projected_agent_skill_hints, delete_skill as delete_skill_record, get_disabled_skills,
+    get_skills_order, govern_agent_tool_usage_feedback, is_runtime_skill_name,
+    list_agent_tool_experience_records, list_runtime_skill_records, retrieve_agent_skill_hits,
+    retrieve_runtime_skill_hits, select_agent_tool_hints,
+    set_skill_enabled as set_skill_enabled_record, set_skills_order,
+    validate_agent_tool_registry_snapshot, write_agent_tool_experience_record,
+    write_governed_runtime_skills, AgentSkillDirConfig, AgentSkillProjectionAudit,
+    AgentSkillRegistrySnapshot, AgentToolProjectionAudit, AgentToolRegistryReport,
+    AgentToolRegistrySnapshot, RuntimeSkillRecord, RuntimeSkillStatus, RuntimeSkillWriteAction,
 };
 use bm_store::{MemoryStoreEvent, StorePlatform};
 
 use crate::{
-    resolve_memory_capabilities, Error, LlmClient, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
-    MemoryCloseReport, MemoryCloseRequest, MemoryDeferredGovernanceRunReport,
-    MemoryDeferredGovernanceRunRequest, MemoryExportReport, MemoryExportRequest,
-    MemoryImportReport, MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
-    MemoryMaintenanceReport, MemoryMaintenanceRequest, MemoryOperationVisibility,
-    MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionAuditReport,
+    resolve_memory_capabilities, Error, LLMRuntimeProjectionEnvelope, LlmClient,
+    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
+    MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest, MemoryExportReport,
+    MemoryExportRequest, MemoryImportReport, MemoryImportRequest, MemoryInspectionReport,
+    MemoryInspectionRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
+    MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionAuditReport,
     MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
     MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallReport,
     MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport,
     MemoryReplayRequest, MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest,
-    MemoryRuntimeSystemKind, MemorySkillDeleteRequest, MemorySkillDetailReport,
-    MemorySkillDetailRequest, MemorySkillKind, MemorySkillListReport, MemorySkillListRequest,
-    MemorySkillMutationReport, MemorySkillOrigin, MemorySkillSetEnabledRequest, MemorySkillSummary,
-    MemorySkillUpsertRequest, MemorySpaceExportReport, MemorySpaceExportRequest,
+    MemoryRuntimeSystemKind, MemorySpaceExportReport, MemorySpaceExportRequest,
     MemorySpaceImportReport, MemorySpaceImportRequest, MemorySpaceMigrateApplyReport,
     MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
     MemorySpaceMigratePreviewRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
-    MemoryWriteReport, MemoryWriteRequest, PressureLevel, Result, RuntimeOperatorAction,
-    RuntimeOperatorActionReport, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
-    RuntimeSkillWriteSource,
+    MemoryWriteReport, MemoryWriteRequest, PressureLevel, PrivateDisclosureIntegrityReport, Result,
+    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    RuntimeProjectionSourceBlock, RuntimeSkillDeleteRequest, RuntimeSkillDetailReport,
+    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListReport,
+    RuntimeSkillListRequest, RuntimeSkillMutationReport, RuntimeSkillReuseOutcome,
+    RuntimeSkillSetEnabledRequest, RuntimeSkillSummary, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    SoulLifeProjectionReport, WorkIntegrityReport,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,12 +207,14 @@ pub struct MemoryRuntimeConfig {
     pub privacy_policy: MemoryPrivacyPolicy,
     pub audit_sink: Arc<dyn MemoryAuditSink>,
     pub runtime_budget: RuntimeBudgetReport,
+    pub agent_skill_registry: AgentSkillRegistrySnapshot,
 }
 
 pub struct MemoryRuntime {
     pub(crate) config: MemoryRuntimeConfig,
     pub(crate) capabilities: MemoryCapabilityCatalog,
     lifecycle: RuntimeLifecycleEngine,
+    agent_tool_registries: Mutex<Vec<AgentToolRegistrySnapshot>>,
 }
 
 impl MemoryRuntime {
@@ -232,6 +244,54 @@ impl MemoryRuntime {
 
     pub fn runtime_budget(&self) -> &RuntimeBudgetReport {
         &self.config.runtime_budget
+    }
+
+    pub fn agent_tool_registries(&self) -> Vec<AgentToolRegistrySnapshot> {
+        self.agent_tool_registries
+            .lock()
+            .expect("agent tool registry state poisoned")
+            .clone()
+    }
+
+    pub fn upsert_agent_tool_registry(
+        &self,
+        registry: AgentToolRegistrySnapshot,
+    ) -> Result<AgentToolRegistryReport> {
+        validate_agent_tool_registry_snapshot(self.config.profile, &registry)
+            .map_err(|error| Error::config(error.stage(), error.to_string()))?;
+        {
+            let mut registries = self
+                .agent_tool_registries
+                .lock()
+                .expect("agent tool registry state poisoned");
+            if let Some(existing) = registries
+                .iter_mut()
+                .find(|existing| existing.registry_id == registry.registry_id)
+            {
+                *existing = registry;
+            } else {
+                registries.push(registry);
+            }
+        }
+        self.agent_tool_registry_report()
+    }
+
+    pub fn delete_agent_tool_registry(&self, registry_id: &str) -> Result<AgentToolRegistryReport> {
+        self.agent_tool_registries
+            .lock()
+            .expect("agent tool registry state poisoned")
+            .retain(|registry| registry.registry_id != registry_id);
+        self.agent_tool_registry_report()
+    }
+
+    pub fn agent_tool_registry_report(&self) -> Result<AgentToolRegistryReport> {
+        let registries = self.agent_tool_registries();
+        let skill_storage = self.config.platform.skill_storage();
+        Ok(build_agent_tool_registry_report(
+            self.config.profile,
+            &registries,
+            &list_agent_tool_experience_records(skill_storage.as_ref()),
+        ))
     }
 
     pub fn runtime_metrics_report_from_events(
@@ -300,6 +360,7 @@ impl MemoryRuntime {
                         semantic_governance: None,
                         procedural_evolution,
                         procedural_promotions: Vec::new(),
+                        agent_tool_experience: None,
                     }
                 } else {
                     let storage = self.config.platform.skill_storage();
@@ -327,6 +388,7 @@ impl MemoryRuntime {
                         semantic_governance: None,
                         procedural_evolution,
                         procedural_promotions: Vec::new(),
+                        agent_tool_experience: None,
                     }
                 }
             }
@@ -403,6 +465,7 @@ impl MemoryRuntime {
                     semantic_governance: None,
                     procedural_evolution,
                     procedural_promotions: promotion_reports,
+                    agent_tool_experience: None,
                 }
             }
             MemoryWriteRequest::LongTermExtraction { extraction } => {
@@ -430,6 +493,7 @@ impl MemoryRuntime {
                     semantic_governance: None,
                     procedural_evolution: None,
                     procedural_promotions: Vec::new(),
+                    agent_tool_experience: None,
                 }
             }
             MemoryWriteRequest::Candidates { candidates } => {
@@ -526,6 +590,39 @@ impl MemoryRuntime {
                     semantic_governance: Some(semantic_governance),
                     procedural_evolution,
                     procedural_promotions: Vec::new(),
+                    agent_tool_experience: None,
+                }
+            }
+            MemoryWriteRequest::AgentToolUsageFeedback { feedback } => {
+                let storage = self.config.platform.skill_storage();
+                let agent_tool_registries = self.agent_tool_registries();
+                let governance =
+                    govern_agent_tool_usage_feedback(&agent_tool_registries, &feedback, now_secs);
+                let changed = if let Some(experience) = governance.experience.as_ref() {
+                    usize::from(write_agent_tool_experience_record(
+                        storage.as_ref(),
+                        experience,
+                    )?)
+                } else {
+                    0
+                };
+                MemoryWriteReport {
+                    accepted: governance.accepted,
+                    changed,
+                    operation: "write.agent_tool_usage_feedback",
+                    reason: governance.reason.clone(),
+                    lifecycle_report: self.finish_lifecycle_success_with_payload(
+                        lifecycle,
+                        RuntimeLifecycleEventKind::RuntimeLifecycle,
+                        RuntimeLifecycleEffect::RunMaintenance,
+                        changed > 0,
+                        "write.agent_tool_usage_feedback",
+                        &[("changed_count", changed.to_string())],
+                    )?,
+                    semantic_governance: None,
+                    procedural_evolution: None,
+                    procedural_promotions: Vec::new(),
+                    agent_tool_experience: Some(governance),
                 }
             }
         };
@@ -533,7 +630,10 @@ impl MemoryRuntime {
         Ok(report)
     }
 
-    pub fn list_skills(&self, request: MemorySkillListRequest) -> Result<MemorySkillListReport> {
+    pub fn list_runtime_skills(
+        &self,
+        request: RuntimeSkillListRequest,
+    ) -> Result<RuntimeSkillListReport> {
         self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
         let platform = self.config.platform.as_ref();
         let storage = platform.skill_storage();
@@ -542,10 +642,6 @@ impl MemoryRuntime {
             .into_iter()
             .collect();
         let runtime_records = list_runtime_skill_records(storage.as_ref());
-        let runtime_names: HashSet<String> = runtime_records
-            .iter()
-            .map(|record| record.name.clone())
-            .collect();
         let mut rows = Vec::new();
         let query = request
             .query
@@ -574,24 +670,6 @@ impl MemoryRuntime {
             rows.push(summary);
         }
 
-        for name in list_skill_names(storage.as_ref()) {
-            if runtime_names.contains(&name) || is_runtime_skill_name(&name) {
-                continue;
-            }
-            let Some(content) = get_skill_content(storage.as_ref(), &name) else {
-                continue;
-            };
-            let enabled = !disabled.contains(&name);
-            let summary = manual_skill_summary(&name, &content, enabled);
-            if !request.include_disabled && !summary.enabled {
-                continue;
-            }
-            if !skill_matches_query(&summary, Some(&content), None, query.as_deref()) {
-                continue;
-            }
-            rows.push(summary);
-        }
-
         rows.sort_by(|left, right| {
             right
                 .updated_at
@@ -602,44 +680,33 @@ impl MemoryRuntime {
         let total = rows.len();
         let active = rows.iter().filter(|skill| skill.enabled).count();
         let disabled_count = rows.iter().filter(|skill| !skill.enabled).count();
-        let runtime_learned = rows
-            .iter()
-            .filter(|skill| skill.origin == MemorySkillOrigin::RuntimeLearned)
-            .count();
-        let user_provided = rows
-            .iter()
-            .filter(|skill| skill.origin == MemorySkillOrigin::UserProvided)
-            .count();
         let skills = if request.limit == 0 {
             Vec::new()
         } else {
             rows.into_iter().take(request.limit).collect()
         };
         self.audit("inspect.skills", true, "skill_list_completed");
-        Ok(MemorySkillListReport {
+        Ok(RuntimeSkillListReport {
             total,
             active,
             disabled: disabled_count,
-            runtime_learned,
-            user_provided,
+            runtime_skills: total,
             skills,
         })
     }
 
-    pub fn get_skill(&self, request: MemorySkillDetailRequest) -> Result<MemorySkillDetailReport> {
+    pub fn get_runtime_skill(
+        &self,
+        request: RuntimeSkillDetailRequest,
+    ) -> Result<RuntimeSkillDetailReport> {
         self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
         let name = checked_skill_name(&request.name, "skill_detail")?;
+        if !is_runtime_skill_name(name) {
+            self.audit("inspect.skills", false, "runtime_skill_not_found");
+            return Err(Error::config("skill_detail", "runtime_skill_not_found"));
+        }
         let platform = self.config.platform.as_ref();
         let storage = platform.skill_storage();
-        if !list_skill_names(storage.as_ref())
-            .iter()
-            .any(|value| value == name)
-        {
-            self.audit("inspect.skills", false, "skill_not_found");
-            return Err(Error::config("skill_detail", "skill not found"));
-        }
-        let raw_content = get_skill_content(storage.as_ref(), name)
-            .ok_or_else(|| Error::config("skill_detail", "skill not found"))?;
         let meta_store = platform.skill_meta_store();
         let disabled: HashSet<String> = get_disabled_skills(meta_store.as_ref())
             .into_iter()
@@ -651,8 +718,9 @@ impl MemoryRuntime {
             let summary = runtime_skill_summary(&record, !disabled.contains(name));
             let lineage = render_runtime_skill_lineage(&record);
             let strategy_diffs = render_runtime_skill_strategy_diffs(&record);
+            let raw_content = render_runtime_skill_detail_content(&record);
             self.audit("inspect.skills", true, "skill_detail_completed");
-            return Ok(MemorySkillDetailReport {
+            return Ok(RuntimeSkillDetailReport {
                 summary,
                 summary_text: record.summary,
                 procedure_text: record.procedure,
@@ -665,47 +733,39 @@ impl MemoryRuntime {
             });
         }
 
-        let summary = manual_skill_summary(name, &raw_content, !disabled.contains(name));
-        self.audit("inspect.skills", true, "skill_detail_completed");
-        Ok(MemorySkillDetailReport {
-            summary,
-            summary_text: summarize_manual_skill(&raw_content),
-            procedure_text: raw_content.clone(),
-            raw_content,
-            citations: Vec::new(),
-            source_chat_id: None,
-            lineage: Vec::new(),
-            strategy_diffs: Vec::new(),
-            last_outcome_note: String::new(),
-        })
+        self.audit("inspect.skills", false, "runtime_skill_not_found");
+        Err(Error::config("skill_detail", "runtime_skill_not_found"))
     }
 
-    pub fn upsert_skill(
+    pub fn edit_runtime_skill(
         &self,
-        request: MemorySkillUpsertRequest,
-    ) -> Result<MemorySkillMutationReport> {
+        request: RuntimeSkillEditRequest,
+    ) -> Result<RuntimeSkillMutationReport> {
         self.ensure_visible("write.skills", self.capabilities.write)?;
-        let title = checked_non_empty(&request.title, "skill_upsert", "title must not be empty")?;
-        let topic = checked_non_empty(&request.topic, "skill_upsert", "topic must not be empty")?;
-        let summary = checked_non_empty(
-            &request.summary,
-            "skill_upsert",
-            "summary must not be empty",
-        )?;
+        let name = checked_skill_name(&request.name, "skill_edit")?;
+        if !is_runtime_skill_name(name) {
+            self.audit("write.skills", false, "runtime_skill_create_forbidden");
+            return Err(Error::config("skill_edit", "runtime_skill_not_found"));
+        }
+        let storage = self.config.platform.skill_storage();
+        let existing = list_runtime_skill_records(storage.as_ref())
+            .into_iter()
+            .find(|record| record.name == name);
+        if existing.is_none() {
+            self.audit("write.skills", false, "runtime_skill_create_forbidden");
+            return Err(Error::config("skill_edit", "runtime_skill_not_found"));
+        }
+        let title = checked_non_empty(&request.title, "skill_edit", "title must not be empty")?;
+        let topic = checked_non_empty(&request.topic, "skill_edit", "topic must not be empty")?;
+        let summary =
+            checked_non_empty(&request.summary, "skill_edit", "summary must not be empty")?;
         let procedure = checked_non_empty(
             &request.procedure,
-            "skill_upsert",
+            "skill_edit",
             "procedure must not be empty",
         )?;
-        let name = request
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| sdk_runtime_skill_name(topic));
         let write = RuntimeSkillWrite {
-            name,
+            name: name.to_string(),
             title: title.to_string(),
             topic: topic.to_string(),
             summary: summary.to_string(),
@@ -717,9 +777,8 @@ impl MemoryRuntime {
         let normalized = normalize_runtime_skill_write_names(vec![write])
             .into_iter()
             .next()
-            .ok_or_else(|| Error::config("skill_upsert", "skill write missing"))?;
+            .ok_or_else(|| Error::config("skill_edit", "skill write missing"))?;
         let stored_name = normalized.name.clone();
-        let storage = self.config.platform.skill_storage();
         let outcome = write_governed_runtime_skills(
             storage.as_ref(),
             &[normalized],
@@ -731,29 +790,39 @@ impl MemoryRuntime {
             outcome.submitted, outcome.accepted, outcome.rejected
         );
         self.audit("write.skills", accepted, &reason);
-        Ok(MemorySkillMutationReport {
+        Ok(RuntimeSkillMutationReport {
             accepted,
             changed: outcome.changed > 0,
             name: stored_name,
-            operation: "skill.upsert",
+            operation: "runtime_skill.edit",
             reason,
         })
     }
 
-    pub fn set_skill_enabled(
+    pub fn set_runtime_skill_enabled(
         &self,
-        request: MemorySkillSetEnabledRequest,
-    ) -> Result<MemorySkillMutationReport> {
+        request: RuntimeSkillSetEnabledRequest,
+    ) -> Result<RuntimeSkillMutationReport> {
         self.ensure_visible("write.skills", self.capabilities.write)?;
         let name = checked_skill_name(&request.name, "skill_set_enabled")?;
+        if !is_runtime_skill_name(name) {
+            self.audit("write.skills", false, "runtime_skill_not_found");
+            return Err(Error::config(
+                "skill_set_enabled",
+                "runtime_skill_not_found",
+            ));
+        }
         let platform = self.config.platform.as_ref();
         let storage = platform.skill_storage();
-        if !list_skill_names(storage.as_ref())
+        if !list_runtime_skill_records(storage.as_ref())
             .iter()
-            .any(|value| value == name)
+            .any(|record| record.name == name)
         {
-            self.audit("write.skills", false, "skill_not_found");
-            return Err(Error::config("skill_set_enabled", "skill not found"));
+            self.audit("write.skills", false, "runtime_skill_not_found");
+            return Err(Error::config(
+                "skill_set_enabled",
+                "runtime_skill_not_found",
+            ));
         }
         let meta_store = platform.skill_meta_store();
         let was_disabled = get_disabled_skills(meta_store.as_ref())
@@ -772,7 +841,7 @@ impl MemoryRuntime {
             "skill_enabled_state_unchanged"
         };
         self.audit("write.skills", true, reason);
-        Ok(MemorySkillMutationReport {
+        Ok(RuntimeSkillMutationReport {
             accepted: true,
             changed,
             name: name.to_string(),
@@ -781,20 +850,24 @@ impl MemoryRuntime {
         })
     }
 
-    pub fn delete_skill(
+    pub fn delete_runtime_skill(
         &self,
-        request: MemorySkillDeleteRequest,
-    ) -> Result<MemorySkillMutationReport> {
+        request: RuntimeSkillDeleteRequest,
+    ) -> Result<RuntimeSkillMutationReport> {
         self.ensure_visible("write.skills", self.capabilities.write)?;
         let name = checked_skill_name(&request.name, "skill_delete")?;
+        if !is_runtime_skill_name(name) {
+            self.audit("write.skills", false, "runtime_skill_not_found");
+            return Err(Error::config("skill_delete", "runtime_skill_not_found"));
+        }
         let platform = self.config.platform.as_ref();
         let storage = platform.skill_storage();
-        if !list_skill_names(storage.as_ref())
+        if !list_runtime_skill_records(storage.as_ref())
             .iter()
-            .any(|value| value == name)
+            .any(|record| record.name == name)
         {
-            self.audit("write.skills", false, "skill_not_found");
-            return Err(Error::config("skill_delete", "skill not found"));
+            self.audit("write.skills", false, "runtime_skill_not_found");
+            return Err(Error::config("skill_delete", "runtime_skill_not_found"));
         }
         delete_skill_record(storage.as_ref(), name)?;
         let meta_store = platform.skill_meta_store();
@@ -806,12 +879,12 @@ impl MemoryRuntime {
             set_skills_order(meta_store.as_ref(), &order)?;
         }
         self.audit("write.skills", true, "skill_deleted");
-        Ok(MemorySkillMutationReport {
+        Ok(RuntimeSkillMutationReport {
             accepted: true,
             changed: true,
             name: name.to_string(),
-            operation: "skill.delete",
-            reason: "skill_deleted".to_string(),
+            operation: "runtime_skill.delete",
+            reason: "runtime_skill_deleted".to_string(),
         })
     }
 
@@ -841,6 +914,19 @@ impl MemoryRuntime {
             &request.query,
             Some(&self.config.scope.chat_id),
             self.config.clock.now_secs(),
+            request.limit.max(1),
+        );
+        let agent_skill_hits = retrieve_agent_skill_hits(
+            &self.config.agent_skill_registry,
+            &request.query,
+            request.limit.max(1),
+        );
+        let agent_tool_experiences = list_agent_tool_experience_records(skill_storage.as_ref());
+        let agent_tool_registries = self.agent_tool_registries();
+        let agent_tool_selection = select_agent_tool_hints(
+            &agent_tool_registries,
+            &agent_tool_experiences,
+            &request.tool_registry_refs,
             request.limit.max(1),
         );
         let source_max_chars = self
@@ -874,6 +960,8 @@ impl MemoryRuntime {
         );
         let hit_count = procedural_hits
             .len()
+            .saturating_add(agent_skill_hits.len())
+            .saturating_add(agent_tool_selection.tool_hints.len())
             .saturating_add(working_recall_hit_count(&working));
         let telemetry_payload = [
             ("memory_hit", (hit_count > 0).to_string()),
@@ -891,6 +979,9 @@ impl MemoryRuntime {
         Ok(MemoryRecallReport {
             query: request.query,
             procedural_hits,
+            agent_skill_hits,
+            agent_tool_hints: agent_tool_selection.tool_hints,
+            tool_experience_status: agent_tool_selection.tool_experience_status,
             working,
             graph_rerank: graph.rerank,
             graph_gate: graph.gate,
@@ -923,25 +1014,87 @@ impl MemoryRuntime {
             request.pressure,
             self.config.runtime_budget.resource_snapshot.pressure,
         );
-        let system_memory_block =
-            render_sdk_projection_block(&context, Some(&runtime_awareness), render_max_chars);
-        let hit_count = prompt_context_hit_count(&context);
-        let system_memory_chars = system_memory_block.chars().count();
-        let projection_audit = build_projection_audit(
-            self,
-            &context,
-            &request,
-            &lifecycle,
-            render_max_chars,
-            system_memory_chars,
-            !system_memory_block.trim().is_empty(),
+        let runtime_private_context_allowed =
+            self.config.privacy_policy.private_plane_projection_allowed
+                && lifecycle.admission.private_depth_allowed;
+        let inhabited_subject_projection =
+            compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
+                context: &context,
+                now_secs: self.config.clock.now_secs(),
+                platform: runtime_awareness_profile_label(self.config.profile),
+                device_identity: self.config.subject_id.as_str(),
+                channel: self.config.scope.channel.as_str(),
+                chat_id: self.config.scope.chat_id.as_str(),
+                pressure: request.pressure,
+                render_budget_chars: render_max_chars,
+                runtime_private_context_allowed,
+                foreground_disclosure_allowed: false,
+                user_query: request.user_query.as_str(),
+            });
+        let agent_skill_hits =
+            retrieve_agent_skill_hits(&self.config.agent_skill_registry, &request.user_query, 4);
+        let agent_skill_projection_budget = render_max_chars.saturating_div(6).clamp(320, 1600);
+        let (agent_skill_hints, agent_skill_audit) = build_projected_agent_skill_hints(
+            &self.config.agent_skill_registry,
+            &agent_skill_hits,
+            agent_skill_projection_budget,
         );
-        let subject_projection =
-            build_subject_projection_report(&projection_audit, &request, &system_memory_block);
-        let projection_faithfulness =
-            build_projection_faithfulness_check(&subject_projection, &system_memory_block);
-        let private_echo_guard =
-            build_private_echo_guard_report(&projection_audit, &system_memory_block);
+        let skill_storage = self.config.platform.skill_storage();
+        let agent_tool_experiences = list_agent_tool_experience_records(skill_storage.as_ref());
+        let agent_tool_registries = self.agent_tool_registries();
+        let agent_tool_selection = select_agent_tool_hints(
+            &agent_tool_registries,
+            &agent_tool_experiences,
+            &request.tool_registry_refs,
+            5,
+        );
+        let mut runtime_projection = build_llm_runtime_projection_envelope(
+            projection_id(self, &request),
+            &context,
+            &runtime_awareness,
+            &inhabited_subject_projection,
+            render_max_chars,
+        );
+        attach_agent_skill_hints_to_runtime_projection(
+            &mut runtime_projection,
+            agent_skill_hints,
+            render_max_chars,
+        );
+        attach_agent_tool_hints_to_runtime_projection(
+            &mut runtime_projection,
+            agent_tool_selection.tool_hints.clone(),
+            render_max_chars,
+        );
+        let system_memory_block = runtime_projection.rendered_block.clone();
+        let hit_count = prompt_context_hit_count(&context)
+            .saturating_add(agent_skill_hits.len())
+            .saturating_add(agent_tool_selection.tool_hints.len());
+        let system_memory_chars = system_memory_block.chars().count();
+        let projection_audit = build_projection_audit(ProjectionAuditInput {
+            runtime: self,
+            context: &context,
+            lifecycle: &lifecycle,
+            render_budget_chars: render_max_chars,
+            system_memory_chars,
+            injected: !system_memory_block.trim().is_empty(),
+            runtime_projection: &runtime_projection,
+            agent_skill_audit,
+            agent_tool_audit: agent_tool_selection.audit,
+        });
+        let subject_projection = build_subject_projection_report(
+            &projection_audit,
+            &request,
+            &system_memory_block,
+            &runtime_projection,
+            Some(&inhabited_subject_projection),
+        );
+        let projection_faithfulness = build_projection_faithfulness_check(
+            &subject_projection,
+            &runtime_projection,
+            &system_memory_block,
+        );
+        let private_disclosure_integrity =
+            build_private_disclosure_integrity_report(&projection_audit, &runtime_projection);
         let telemetry_payload = [
             ("memory_hit", (hit_count > 0).to_string()),
             ("hit_count", hit_count.to_string()),
@@ -973,9 +1126,12 @@ impl MemoryRuntime {
             system_memory_block,
             context,
             audit: projection_audit,
+            life_projection: runtime_projection.subject_mount.clone(),
+            work_integrity: runtime_projection.work_integrity.clone(),
+            runtime_projection,
             subject_projection,
             projection_faithfulness,
-            private_echo_guard,
+            private_disclosure_integrity,
             lifecycle_report: self.finish_lifecycle_success_with_payload(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -1025,6 +1181,9 @@ impl MemoryRuntime {
         let skill_storage = platform.skill_storage();
         let continuity_capsule_store = platform.continuity_capsule_store();
         let memory_system_kind = self.memory_profile().memory_system_kind();
+        let include_private_runtime_projection =
+            self.config.privacy_policy.private_plane_projection_allowed
+                && lifecycle.admission.private_depth_allowed;
         load_prompt_memory_context(PromptMemoryContextParams {
             chat_id: &self.config.scope.chat_id,
             current_channel: &self.config.scope.channel,
@@ -1044,11 +1203,8 @@ impl MemoryRuntime {
                     .recent_messages_limit,
             ),
             load_long_term_memory: true,
-            include_private_garden_projection: self
-                .config
-                .privacy_policy
-                .private_plane_projection_allowed
-                && lifecycle.admission.private_depth_allowed,
+            include_private_runtime_projection,
+            include_private_garden_projection: include_private_runtime_projection,
             session_store: session_store.as_ref(),
             memory_store: memory_store.as_ref(),
             session_summary_store: session_summary_store.as_ref(),
@@ -1508,6 +1664,7 @@ impl MemoryRuntime {
                 runtime_skill_selected_ids: job.runtime_skill_selected_ids.clone(),
                 task_learning_selected_ids: job.task_learning_selected_ids.clone(),
                 reuse_outcome_note: job.reuse_outcome_note.clone(),
+                tool_usage_feedback: None,
                 pressure: job.pressure,
                 mode_input: job.mode_input,
             };
@@ -1760,6 +1917,8 @@ impl MemoryRuntime {
             working,
             hygiene,
             deferred_governance,
+            agent_skill_directory: self.config.agent_skill_registry.report(),
+            agent_tool_registry: self.agent_tool_registry_report()?,
             capabilities: self.capabilities.clone(),
             operator_action_report,
             lifecycle_report,
@@ -2182,37 +2341,173 @@ impl MemoryRuntime {
     }
 }
 
-fn render_sdk_projection_block(
+fn build_llm_runtime_projection_envelope(
+    projection_id: String,
     context: &crate::PromptMemoryContext,
-    runtime_awareness: Option<&str>,
+    runtime_awareness: &str,
+    inhabited_subject_projection: &InhabitedSubjectProjection,
     max_len: usize,
-) -> String {
-    let mut parts = Vec::new();
-    push_projection_part(&mut parts, runtime_awareness);
-    for (_name, value) in sdk_projection_text_parts(context) {
-        push_projection_part(&mut parts, value);
-    }
-    let joined = parts.join("\n\n");
-    truncate_to_char_boundary(&joined, max_len)
+) -> LLMRuntimeProjectionEnvelope {
+    let source_authority = context.classified_projection_sources();
+    let subject_mount = soul_life_projection_report(inhabited_subject_projection);
+    let boundary_protocol = runtime_disclosure_protocol_report(inhabited_subject_projection);
+    let work_integrity = work_integrity_report(inhabited_subject_projection);
+    let governed_memory_evidence = runtime_projection_source_blocks(
+        context,
+        &source_authority,
+        PromptProjectionSurfaceRole::PublicGrounding,
+        "public_grounding",
+        false,
+    );
+    let procedural_evidence = runtime_projection_source_blocks(
+        context,
+        &source_authority,
+        PromptProjectionSurfaceRole::ProceduralEvidence,
+        "procedural_evidence",
+        false,
+    );
+    let protected_private_runtime_context = inhabited_subject_projection
+        .soul_private_runtime_context
+        .iter()
+        .map(|item| RuntimeProjectionSourceBlock {
+            source_id: item.source_id.clone(),
+            role: item.role.clone(),
+            content: compact_runtime_projection_content(&item.content, 420),
+            evidence_refs: vec![format!("source:{}", item.source_id)],
+            protected: true,
+        })
+        .filter(|item| !item.content.trim().is_empty())
+        .collect::<Vec<_>>();
+    let operator_audit_excluded_source_ids = source_authority
+        .iter()
+        .filter(|source| {
+            source
+                .surface_roles
+                .contains(&PromptProjectionSurfaceRole::OperatorAudit)
+                || (!source.raw_audit_plaintext_allowed
+                    && source.authorities.iter().any(|authority| {
+                        matches!(
+                            authority,
+                            bm_core::memory::ProjectionSourceAuthority::PrivateInternal
+                        )
+                    }))
+        })
+        .map(|source| source.source_id.clone())
+        .collect::<Vec<_>>();
+    let mut section_names = vec![
+        "subject_mount".to_string(),
+        "governed_memory_evidence".to_string(),
+        "boundary_and_disclosure_protocol".to_string(),
+        "runtime_constraints".to_string(),
+        "work_integrity_covenant".to_string(),
+        "procedural_evidence".to_string(),
+        "protected_private_runtime_context".to_string(),
+    ];
+    section_names.sort();
+    section_names.dedup();
+
+    let mut envelope = LLMRuntimeProjectionEnvelope {
+        projection_id,
+        runtime_awareness: compact_runtime_projection_content(runtime_awareness, 700),
+        subject_mount,
+        boundary_protocol,
+        protected_private_runtime_context,
+        governed_memory_evidence,
+        procedural_evidence,
+        runtime_constraints: vec![
+            "Keep technical diagnostics on operator surfaces unless the user explicitly asks for diagnostics."
+                .to_string(),
+            "Use runtime limits only to size, prioritize, and trim the current reply.".to_string(),
+        ],
+        work_integrity,
+        operator_audit_excluded_source_ids,
+        agent_skill_hints: Vec::new(),
+        agent_tool_hints: Vec::new(),
+        section_names,
+        rendered_block: String::new(),
+    };
+    let rendered = render_llm_runtime_projection_envelope(&envelope);
+    envelope.rendered_block = truncate_to_char_boundary(rendered.trim(), max_len)
+        .trim()
+        .to_string();
+    envelope
 }
 
-fn build_projection_audit(
-    runtime: &MemoryRuntime,
-    context: &crate::PromptMemoryContext,
-    request: &MemoryProjectionRequest,
-    lifecycle: &RuntimeLifecycleReport,
+fn attach_agent_skill_hints_to_runtime_projection(
+    envelope: &mut LLMRuntimeProjectionEnvelope,
+    hints: Vec<bm_core::skills::ProjectedAgentSkillHint>,
+    max_len: usize,
+) {
+    envelope.agent_skill_hints = hints;
+    if !envelope.agent_skill_hints.is_empty()
+        && !envelope
+            .section_names
+            .iter()
+            .any(|name| name == "agent_skill_hints")
+    {
+        envelope.section_names.push("agent_skill_hints".to_string());
+        envelope.section_names.sort();
+        envelope.section_names.dedup();
+    }
+    let rendered = render_llm_runtime_projection_envelope(envelope);
+    envelope.rendered_block = truncate_to_char_boundary(rendered.trim(), max_len)
+        .trim()
+        .to_string();
+}
+
+fn attach_agent_tool_hints_to_runtime_projection(
+    envelope: &mut LLMRuntimeProjectionEnvelope,
+    hints: Vec<bm_core::skills::AgentToolHint>,
+    max_len: usize,
+) {
+    envelope.agent_tool_hints = hints;
+    if !envelope.agent_tool_hints.is_empty()
+        && !envelope
+            .section_names
+            .iter()
+            .any(|name| name == "agent_tool_hints")
+    {
+        envelope.section_names.push("agent_tool_hints".to_string());
+        envelope.section_names.sort();
+        envelope.section_names.dedup();
+    }
+    let rendered = render_llm_runtime_projection_envelope(envelope);
+    envelope.rendered_block = truncate_to_char_boundary(rendered.trim(), max_len)
+        .trim()
+        .to_string();
+}
+
+struct ProjectionAuditInput<'a> {
+    runtime: &'a MemoryRuntime,
+    context: &'a crate::PromptMemoryContext,
+    lifecycle: &'a RuntimeLifecycleReport,
     render_budget_chars: usize,
     system_memory_chars: usize,
     injected: bool,
-) -> MemoryProjectionAuditReport {
-    let private_policy_allowed = runtime
+    runtime_projection: &'a LLMRuntimeProjectionEnvelope,
+    agent_skill_audit: AgentSkillProjectionAudit,
+    agent_tool_audit: AgentToolProjectionAudit,
+}
+
+fn build_projection_audit(input: ProjectionAuditInput<'_>) -> MemoryProjectionAuditReport {
+    let runtime = input.runtime;
+    let context = input.context;
+    let runtime_projection = input.runtime_projection;
+    let render_budget_chars = input.render_budget_chars;
+    let system_memory_chars = input.system_memory_chars;
+    let injected = input.injected;
+    let agent_skill_audit = input.agent_skill_audit;
+    let agent_tool_audit = input.agent_tool_audit;
+    let private_policy_allowed = input
+        .runtime
         .config
         .privacy_policy
         .private_plane_projection_allowed;
-    let private_depth_allowed = lifecycle.admission.private_depth_allowed;
-    let private_allowed = private_policy_allowed && private_depth_allowed;
-    let private_reason = if private_allowed {
-        "allowed"
+    let private_depth_allowed = input.lifecycle.admission.private_depth_allowed;
+    let runtime_private_context_allowed = private_policy_allowed && private_depth_allowed;
+    let foreground_disclosure_allowed = false;
+    let private_reason = if runtime_private_context_allowed {
+        "runtime_private_context_allowed_foreground_disclosure_requires_protocol"
     } else if !private_policy_allowed {
         "privacy_policy_denied"
     } else {
@@ -2224,7 +2519,7 @@ fn build_projection_audit(
         .projection_source_budget
         .context_assembly_max_chars;
     MemoryProjectionAuditReport {
-        projection_id: projection_id(runtime, request),
+        projection_id: runtime_projection.projection_id.clone(),
         operation: "project".to_string(),
         profile: runtime.config.profile,
         identity: runtime.config.identity.clone(),
@@ -2238,13 +2533,338 @@ fn build_projection_audit(
         injected,
         truncated: system_memory_chars >= render_budget_chars && render_budget_chars > 0,
         private_gate: MemoryProjectionPrivateGateAudit {
-            allowed: private_allowed,
             privacy_policy_allowed: private_policy_allowed,
             lifecycle_private_depth_allowed: private_depth_allowed,
+            runtime_private_context_allowed,
+            foreground_disclosure_allowed,
             reason: private_reason.to_string(),
         },
-        sources: projection_source_audits(context),
-        sections: projection_section_audits(context),
+        source_authority: context.classified_projection_sources(),
+        agent_skills: agent_skill_audit,
+        agent_tools: agent_tool_audit,
+        sources: projection_source_audits(
+            context,
+            &runtime.config.agent_skill_registry,
+            &runtime.agent_tool_registries(),
+            runtime_projection,
+        ),
+        sections: projection_section_audits(runtime_projection),
+    }
+}
+
+fn soul_life_projection_report(
+    projection: &InhabitedSubjectProjection,
+) -> SoulLifeProjectionReport {
+    SoulLifeProjectionReport {
+        identity_mount: projection.subject_mount.identity_mount.clone(),
+        relationship_position: projection.subject_mount.relationship_position.clone(),
+        situated_now: projection.subject_mount.situated_now.clone(),
+        current_reasoning_basis: projection.subject_mount.current_reasoning_basis.clone(),
+        reply_stance: projection.subject_mount.reply_stance.clone(),
+        initiative_posture: projection.subject_mount.initiative_posture.clone(),
+        boundary_mode: projection.subject_mount.boundary_mode.clone(),
+        degraded_reason: projection.subject_mount.degraded_reason.clone(),
+        evidence_refs: projection.evidence_refs.clone(),
+    }
+}
+
+fn runtime_disclosure_protocol_report(
+    projection: &InhabitedSubjectProjection,
+) -> RuntimeDisclosureProtocolReport {
+    RuntimeDisclosureProtocolReport {
+        runtime_private_context_allowed: projection
+            .boundary_and_disclosure_protocol
+            .runtime_private_context_allowed,
+        foreground_disclosure_allowed: projection
+            .boundary_and_disclosure_protocol
+            .foreground_disclosure_allowed,
+        protected_sources: projection
+            .boundary_and_disclosure_protocol
+            .protected_sources
+            .clone(),
+        disclosure_rule: projection
+            .boundary_and_disclosure_protocol
+            .disclosure_rule
+            .clone(),
+        final_llm_privacy_judge_allowed: projection
+            .boundary_and_disclosure_protocol
+            .final_llm_privacy_judge_allowed,
+    }
+}
+
+fn work_integrity_report(projection: &InhabitedSubjectProjection) -> WorkIntegrityReport {
+    WorkIntegrityReport {
+        task_goal: projection.work_integrity_covenant.task_goal.clone(),
+        evidence_ceiling: projection.work_integrity_covenant.evidence_ceiling.clone(),
+        tool_permission_boundary: projection
+            .work_integrity_covenant
+            .tool_permission_boundary
+            .clone(),
+        uncertainty_rule: projection.work_integrity_covenant.uncertainty_rule.clone(),
+        no_obstruction_rule: projection
+            .work_integrity_covenant
+            .no_obstruction_rule
+            .clone(),
+    }
+}
+
+fn runtime_projection_source_blocks(
+    context: &crate::PromptMemoryContext,
+    sources: &[PromptProjectionSource],
+    role: PromptProjectionSurfaceRole,
+    rendered_role: &str,
+    protected: bool,
+) -> Vec<RuntimeProjectionSourceBlock> {
+    sources
+        .iter()
+        .filter(|source| source.loaded && source.surface_roles.contains(&role))
+        .filter_map(|source| {
+            projection_source_runtime_text(context, &source.source_id).map(|content| {
+                let evidence_refs = if source.evidence_refs.is_empty() {
+                    vec![format!("source:{}", source.source_id)]
+                } else {
+                    source
+                        .evidence_refs
+                        .iter()
+                        .map(|evidence| format!("{}:{evidence}", source.source_id))
+                        .collect()
+                };
+                RuntimeProjectionSourceBlock {
+                    source_id: source.source_id.clone(),
+                    role: rendered_role.to_string(),
+                    content: compact_runtime_projection_content(content, 420),
+                    evidence_refs,
+                    protected,
+                }
+            })
+        })
+        .filter(|block| !block.content.trim().is_empty())
+        .collect()
+}
+
+fn render_llm_runtime_projection_envelope(envelope: &LLMRuntimeProjectionEnvelope) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "## LLM Runtime Projection Envelope");
+    let _ = writeln!(out, "- Projection: {}", envelope.projection_id);
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Subject Mount");
+    let _ = writeln!(out, "- Identity: {}", envelope.subject_mount.identity_mount);
+    let _ = writeln!(
+        out,
+        "- Relationship: {}",
+        render_runtime_optional(&envelope.subject_mount.relationship_position)
+    );
+    let _ = writeln!(
+        out,
+        "- Situated now: {}",
+        render_runtime_optional(&envelope.subject_mount.situated_now)
+    );
+    let _ = writeln!(
+        out,
+        "- Reasoning basis: {}",
+        render_runtime_optional(&envelope.subject_mount.current_reasoning_basis)
+    );
+    let _ = writeln!(
+        out,
+        "- Reply stance: {}",
+        render_runtime_optional(&envelope.subject_mount.reply_stance)
+    );
+    let _ = writeln!(
+        out,
+        "- Initiative posture: {}",
+        render_runtime_optional(&envelope.subject_mount.initiative_posture)
+    );
+    let _ = writeln!(
+        out,
+        "- Boundary mode: {}",
+        render_runtime_optional(&envelope.subject_mount.boundary_mode)
+    );
+    if let Some(reason) = envelope.subject_mount.degraded_reason.as_deref() {
+        let _ = writeln!(out, "- Degraded reason: {reason}");
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Governed Memory Evidence");
+    render_runtime_source_blocks(&mut out, &envelope.governed_memory_evidence);
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Boundary And Disclosure Protocol");
+    let _ = writeln!(
+        out,
+        "- Runtime private context: {}",
+        allowed_label(envelope.boundary_protocol.runtime_private_context_allowed)
+    );
+    let _ = writeln!(
+        out,
+        "- Foreground private disclosure: {}",
+        allowed_label(envelope.boundary_protocol.foreground_disclosure_allowed)
+    );
+    let _ = writeln!(
+        out,
+        "- Final LLM privacy judge: {}",
+        allowed_label(envelope.boundary_protocol.final_llm_privacy_judge_allowed)
+    );
+    let _ = writeln!(
+        out,
+        "- Rule: {}",
+        envelope.boundary_protocol.disclosure_rule
+    );
+    if !envelope.boundary_protocol.protected_sources.is_empty() {
+        let _ = writeln!(
+            out,
+            "- Protected sources: {}",
+            envelope.boundary_protocol.protected_sources.join(", ")
+        );
+    }
+    let _ = writeln!(
+        out,
+        "- Allowed disclosure forms: summary, redacted_excerpt, explain_without_quote, refuse, defer"
+    );
+    let _ = writeln!(
+        out,
+        "- Forbidden disclosure forms: raw_dump, source_path, internal_title, private_raw_quote"
+    );
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Runtime Constraints");
+    let _ = writeln!(
+        out,
+        "- Awareness: {}",
+        render_runtime_optional(&envelope.runtime_awareness)
+    );
+    for constraint in &envelope.runtime_constraints {
+        let _ = writeln!(out, "- {constraint}");
+    }
+
+    if !envelope.protected_private_runtime_context.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Soul Private Runtime Context");
+        let _ = writeln!(
+            out,
+            "- Runtime private context: {}",
+            allowed_label(envelope.boundary_protocol.runtime_private_context_allowed)
+        );
+        let _ = writeln!(
+            out,
+            "- Foreground disclosure remains: {}",
+            allowed_label(envelope.boundary_protocol.foreground_disclosure_allowed)
+        );
+        render_runtime_source_blocks(&mut out, &envelope.protected_private_runtime_context);
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Work Integrity Covenant");
+    let _ = writeln!(
+        out,
+        "- Task goal: {}",
+        render_runtime_optional(&envelope.work_integrity.task_goal)
+    );
+    let _ = writeln!(
+        out,
+        "- Evidence ceiling: {}",
+        envelope.work_integrity.evidence_ceiling
+    );
+    let _ = writeln!(
+        out,
+        "- Tool boundary: {}",
+        envelope.work_integrity.tool_permission_boundary
+    );
+    let _ = writeln!(
+        out,
+        "- Uncertainty rule: {}",
+        envelope.work_integrity.uncertainty_rule
+    );
+    let _ = writeln!(
+        out,
+        "- No obstruction: {}",
+        envelope.work_integrity.no_obstruction_rule
+    );
+
+    if !envelope.procedural_evidence.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Procedural Evidence");
+        render_runtime_source_blocks(&mut out, &envelope.procedural_evidence);
+    }
+
+    if !envelope.agent_skill_hints.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Agent Skill Hints");
+        let _ = writeln!(
+            out,
+            "- These are read-only host-provided Agent Skill hints. The memory runtime may recall them, but execution and file/resource access remain host-owned."
+        );
+        for hint in &envelope.agent_skill_hints {
+            let _ = writeln!(
+                out,
+                "- {} [{} refs=agent_skill:{} fp={}]: {}",
+                hint.name, hint.reason, hint.package_id, hint.fingerprint, hint.prompt_snippet
+            );
+        }
+    }
+    if !envelope.agent_tool_hints.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "## Agent Tool Experience Hints");
+        let _ = writeln!(
+            out,
+            "- These are governed tool-use experience hints only. Host runtime must still choose exposed tools, provide full schemas, validate permissions, and execute tools."
+        );
+        for hint in &envelope.agent_tool_hints {
+            let constraints = if hint.constraints.is_empty() {
+                "none".to_string()
+            } else {
+                hint.constraints.join("; ")
+            };
+            let _ = writeln!(
+                out,
+                "- {} [registry={} experience={} fp={} confidence={:?} host_execution_required={}]: {} Constraints: {}",
+                hint.tool_id,
+                hint.registry_id,
+                hint.experience_id,
+                hint.schema_fingerprint,
+                hint.confidence,
+                hint.host_execution_required,
+                hint.reason,
+                constraints
+            );
+        }
+    }
+    out
+}
+
+fn render_runtime_source_blocks(out: &mut String, blocks: &[RuntimeProjectionSourceBlock]) {
+    if blocks.is_empty() {
+        let _ = writeln!(out, "- none");
+        return;
+    }
+    for block in blocks {
+        let refs = if block.evidence_refs.is_empty() {
+            "unscoped".to_string()
+        } else {
+            block.evidence_refs.join(",")
+        };
+        let protection = if block.protected { " protected" } else { "" };
+        let _ = writeln!(
+            out,
+            "- {} [{}{} refs={}]: {}",
+            block.source_id, block.role, protection, refs, block.content
+        );
+    }
+}
+
+fn render_runtime_optional(value: &str) -> String {
+    if value.trim().is_empty() {
+        "unavailable".to_string()
+    } else {
+        value.trim().to_string()
+    }
+}
+
+fn allowed_label(allowed: bool) -> &'static str {
+    if allowed {
+        "allowed"
+    } else {
+        "not_allowed"
     }
 }
 
@@ -2252,8 +2872,27 @@ fn build_subject_projection_report(
     audit: &MemoryProjectionAuditReport,
     request: &MemoryProjectionRequest,
     system_memory_block: &str,
+    runtime_projection: &LLMRuntimeProjectionEnvelope,
+    inhabited_subject_projection: Option<&InhabitedSubjectProjection>,
 ) -> SubjectProjectionReport {
     let mut evidence_refs = Vec::new();
+    if let Some(projection) = inhabited_subject_projection {
+        evidence_refs.extend(projection.evidence_refs.iter().cloned());
+    }
+    for block in runtime_projection
+        .governed_memory_evidence
+        .iter()
+        .chain(runtime_projection.procedural_evidence.iter())
+        .chain(runtime_projection.protected_private_runtime_context.iter())
+    {
+        evidence_refs.extend(block.evidence_refs.iter().cloned());
+    }
+    evidence_refs.extend(
+        runtime_projection
+            .agent_skill_hints
+            .iter()
+            .map(|hint| format!("agent_skill:{}", hint.package_id)),
+    );
     for source in &audit.sources {
         for selected_id in &source.selected_ids {
             evidence_refs.push(format!("{}:{selected_id}", source.plane));
@@ -2264,11 +2903,21 @@ fn build_subject_projection_report(
             evidence_refs.push(format!("section:{}", section.name));
         }
     }
+    evidence_refs.sort();
+    evidence_refs.dedup();
     if evidence_refs.is_empty() && !system_memory_block.trim().is_empty() {
         evidence_refs.push("synthesized:runtime_awareness".to_string());
     }
 
     let mut dropped_candidates = Vec::new();
+    if let Some(projection) = inhabited_subject_projection {
+        dropped_candidates.extend(projection.dropped_candidates.iter().map(|candidate| {
+            DroppedProjectionCandidate {
+                candidate_id: candidate.candidate_id.clone(),
+                reason: candidate.reason.clone(),
+            }
+        }));
+    }
     for source in &audit.sources {
         let dropped = source.candidate_count.saturating_sub(source.selected_count);
         if dropped > 0 {
@@ -2281,7 +2930,7 @@ fn build_subject_projection_report(
             });
         }
     }
-    if !audit.private_gate.allowed {
+    if !audit.private_gate.runtime_private_context_allowed {
         dropped_candidates.push(DroppedProjectionCandidate {
             candidate_id: "private_depth".to_string(),
             reason: audit.private_gate.reason.clone(),
@@ -2294,24 +2943,126 @@ fn build_subject_projection_report(
         });
     }
 
-    let profile_trim_reason = if audit.truncated {
+    let profile_trim_reason = if let Some(reason) =
+        inhabited_subject_projection.and_then(|projection| projection.profile_trim_reason.clone())
+    {
+        reason
+    } else if audit.truncated {
         "projection_render_budget".to_string()
     } else {
         String::new()
     };
+    let identity_mount = inhabited_subject_projection
+        .map(|projection| {
+            format!(
+                "{} | agent:{} owner:{} subject:{}",
+                projection.subject_mount.identity_mount,
+                audit.identity.agent_id,
+                audit.identity.owner_id,
+                audit.subject_id
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "agent:{} owner:{} subject:{}",
+                audit.identity.agent_id, audit.identity.owner_id, audit.subject_id
+            )
+        });
+    let relationship_position = inhabited_subject_projection
+        .map(|projection| {
+            format!(
+                "{} | scope:{} chat:{}",
+                projection.subject_mount.relationship_position,
+                audit.scope.channel,
+                audit.scope.chat_id
+            )
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("scope:{} chat:{}", audit.scope.channel, audit.scope.chat_id));
+    let situated_now = inhabited_subject_projection
+        .map(|projection| projection.subject_mount.situated_now.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| request.user_query.clone());
+    let subject_mount = inhabited_subject_projection
+        .map(|projection| SubjectProjectionMountReport {
+            identity_mount: projection.subject_mount.identity_mount.clone(),
+            relationship_position: projection.subject_mount.relationship_position.clone(),
+            situated_now: projection.subject_mount.situated_now.clone(),
+            current_reasoning_basis: projection.subject_mount.current_reasoning_basis.clone(),
+            reply_stance: projection.subject_mount.reply_stance.clone(),
+            initiative_posture: projection.subject_mount.initiative_posture.clone(),
+            boundary_mode: projection.subject_mount.boundary_mode.clone(),
+            degraded_reason: projection.subject_mount.degraded_reason.clone(),
+        })
+        .unwrap_or_else(|| SubjectProjectionMountReport {
+            identity_mount: identity_mount.clone(),
+            relationship_position: relationship_position.clone(),
+            situated_now: situated_now.clone(),
+            current_reasoning_basis: "projection_unavailable".to_string(),
+            reply_stance: "work_first".to_string(),
+            initiative_posture: "do_not_obstruct_user_work".to_string(),
+            boundary_mode: "privacy_policy_default".to_string(),
+            degraded_reason: Some("subject_projection_unavailable".to_string()),
+        });
+    let boundary_protocol = inhabited_subject_projection
+        .map(|projection| SubjectProjectionBoundaryProtocolReport {
+            runtime_private_context_allowed: projection
+                .boundary_and_disclosure_protocol
+                .runtime_private_context_allowed,
+            foreground_disclosure_allowed: projection
+                .boundary_and_disclosure_protocol
+                .foreground_disclosure_allowed,
+            protected_sources: projection
+                .boundary_and_disclosure_protocol
+                .protected_sources
+                .clone(),
+            disclosure_rule: projection
+                .boundary_and_disclosure_protocol
+                .disclosure_rule
+                .clone(),
+            final_llm_privacy_judge_allowed: projection
+                .boundary_and_disclosure_protocol
+                .final_llm_privacy_judge_allowed,
+        })
+        .unwrap_or_else(|| SubjectProjectionBoundaryProtocolReport {
+            runtime_private_context_allowed: audit.private_gate.runtime_private_context_allowed,
+            foreground_disclosure_allowed: audit.private_gate.foreground_disclosure_allowed,
+            protected_sources: Vec::new(),
+            disclosure_rule: audit.private_gate.reason.clone(),
+            final_llm_privacy_judge_allowed: false,
+        });
+    let work_integrity = inhabited_subject_projection
+        .map(|projection| SubjectProjectionWorkIntegrityReport {
+            task_goal: projection.work_integrity_covenant.task_goal.clone(),
+            evidence_ceiling: projection.work_integrity_covenant.evidence_ceiling.clone(),
+            tool_permission_boundary: projection
+                .work_integrity_covenant
+                .tool_permission_boundary
+                .clone(),
+            uncertainty_rule: projection.work_integrity_covenant.uncertainty_rule.clone(),
+            no_obstruction_rule: projection
+                .work_integrity_covenant
+                .no_obstruction_rule
+                .clone(),
+        })
+        .unwrap_or_else(|| SubjectProjectionWorkIntegrityReport {
+            task_goal: request.user_query.clone(),
+            evidence_ceiling: "only use available governed memory evidence".to_string(),
+            tool_permission_boundary: "respect runtime capability policy".to_string(),
+            uncertainty_rule: "state uncertainty instead of inventing memory".to_string(),
+            no_obstruction_rule: "complete the user work directly and stay task-focused"
+                .to_string(),
+        });
 
     SubjectProjectionReport {
         projection_id: audit.projection_id.clone(),
         profile: audit.profile,
-        identity_mount: format!(
-            "agent:{} owner:{} subject:{}",
-            audit.identity.agent_id, audit.identity.owner_id, audit.subject_id
-        ),
-        relationship_position: format!(
-            "scope:{} chat:{}",
-            audit.scope.channel, audit.scope.chat_id
-        ),
-        situated_now: request.user_query.clone(),
+        subject_mount,
+        boundary_protocol,
+        work_integrity,
+        identity_mount,
+        relationship_position,
+        situated_now,
         evidence_refs,
         budget_decisions: vec![
             ProjectionBudgetDecision {
@@ -2333,7 +3084,7 @@ fn build_subject_projection_report(
         ],
         privacy_decisions: vec![ProjectionPrivacyDecision {
             source_id: "private_depth".to_string(),
-            allowed: audit.private_gate.allowed,
+            allowed: audit.private_gate.foreground_disclosure_allowed,
             reason: audit.private_gate.reason.clone(),
         }],
         dropped_candidates,
@@ -2343,45 +3094,124 @@ fn build_subject_projection_report(
 
 fn build_projection_faithfulness_check(
     report: &SubjectProjectionReport,
+    runtime_projection: &LLMRuntimeProjectionEnvelope,
     system_memory_block: &str,
 ) -> ProjectionFaithfulnessCheck {
-    let unsupported_claims =
+    let checked_claims = projection_faithfulness_claims(report, runtime_projection);
+    let mut unsupported_claims =
         if system_memory_block.trim().is_empty() && !report.evidence_refs.is_empty() {
             vec!["projection_report_has_evidence_without_rendered_block".to_string()]
         } else {
             Vec::new()
         };
+    if report.evidence_refs.is_empty() {
+        unsupported_claims.push("projection_report_missing_evidence_refs".to_string());
+    }
+    for block in runtime_projection
+        .governed_memory_evidence
+        .iter()
+        .chain(runtime_projection.procedural_evidence.iter())
+        .chain(runtime_projection.protected_private_runtime_context.iter())
+    {
+        if block.evidence_refs.is_empty() && !block.content.trim().is_empty() {
+            unsupported_claims.push(format!("{}:missing_evidence_ref", block.source_id));
+        }
+    }
+    for hint in &runtime_projection.agent_skill_hints {
+        if hint.package_id.trim().is_empty() || hint.fingerprint.trim().is_empty() {
+            unsupported_claims.push(format!("{}:missing_agent_skill_ref", hint.name));
+        }
+    }
+    unsupported_claims.sort();
+    unsupported_claims.dedup();
     ProjectionFaithfulnessCheck {
         projection_id: report.projection_id.clone(),
         checked_refs: report.evidence_refs.clone(),
+        checked_claims,
         passed: unsupported_claims.is_empty() && !report.evidence_refs.is_empty(),
         unsupported_claims,
     }
 }
 
-fn build_private_echo_guard_report(
+fn build_private_disclosure_integrity_report(
     audit: &MemoryProjectionAuditReport,
-    system_memory_block: &str,
-) -> PrivateEchoGuardReport {
-    let blocked_source_ids = if audit.private_gate.allowed {
+    runtime_projection: &LLMRuntimeProjectionEnvelope,
+) -> PrivateDisclosureIntegrityReport {
+    let mut blocked_source_ids = if audit.private_gate.foreground_disclosure_allowed {
         Vec::new()
     } else {
         vec!["private_depth".to_string()]
     };
-    let private_echo_count = private_echo_count(system_memory_block);
-    PrivateEchoGuardReport {
+    blocked_source_ids.extend(
+        audit
+            .source_authority
+            .iter()
+            .filter(|source| source.loaded && !source.foreground_disclosure_allowed)
+            .map(|source| source.source_id.clone()),
+    );
+    blocked_source_ids.sort();
+    blocked_source_ids.dedup();
+    let mut redacted_source_ids = runtime_projection
+        .protected_private_runtime_context
+        .iter()
+        .map(|item| item.source_id.clone())
+        .collect::<Vec<_>>();
+    redacted_source_ids.extend(
+        runtime_projection
+            .operator_audit_excluded_source_ids
+            .clone(),
+    );
+    redacted_source_ids.sort();
+    redacted_source_ids.dedup();
+    let raw_private_violation_count =
+        raw_private_violation_count(&runtime_projection.rendered_block);
+    PrivateDisclosureIntegrityReport {
         checked_surfaces: vec![
             "prompt".to_string(),
-            "inspection_preview".to_string(),
-            "adapter_preview".to_string(),
+            "ui_api".to_string(),
+            "operator_raw".to_string(),
+            "gateway_raw_audit".to_string(),
+            "shared_fact_surface".to_string(),
         ],
         blocked_source_ids,
-        private_echo_count,
-        passed: private_echo_count == 0,
+        redacted_source_ids,
+        raw_private_violation_count,
+        passed: raw_private_violation_count == 0,
     }
 }
 
-fn private_echo_count(system_memory_block: &str) -> u32 {
+fn projection_faithfulness_claims(
+    report: &SubjectProjectionReport,
+    runtime_projection: &LLMRuntimeProjectionEnvelope,
+) -> Vec<String> {
+    let mut claims = vec![
+        "subject_mount.identity_mount".to_string(),
+        "subject_mount.relationship_position".to_string(),
+        "subject_mount.situated_now".to_string(),
+        "boundary_protocol.disclosure_rule".to_string(),
+        "work_integrity.task_goal".to_string(),
+    ];
+    claims.extend(
+        runtime_projection
+            .governed_memory_evidence
+            .iter()
+            .map(|block| format!("governed_memory_evidence.{}", block.source_id)),
+    );
+    claims.extend(
+        runtime_projection
+            .procedural_evidence
+            .iter()
+            .map(|block| format!("procedural_evidence.{}", block.source_id)),
+    );
+    if report.subject_mount.degraded_reason.is_some() {
+        claims.push("subject_mount.degraded_reason".to_string());
+    }
+    claims.sort();
+    claims.dedup();
+    claims
+}
+
+fn raw_private_violation_count(system_memory_block: &str) -> u32 {
     let lowered = system_memory_block.to_ascii_lowercase();
     let private_markers = [
         "private_raw:",
@@ -2671,7 +3501,10 @@ fn merge_promotion_and_write_evolution(
 }
 
 fn runtime_skill_write_source_requires_promotion(source: RuntimeSkillWriteSource) -> bool {
-    matches!(source.origin(), CoreRuntimeSkillOrigin::RuntimeLearned)
+    matches!(
+        source,
+        RuntimeSkillWriteSource::TaskLearning | RuntimeSkillWriteSource::ProgrammableReasoning
+    )
 }
 
 fn projection_id(runtime: &MemoryRuntime, request: &MemoryProjectionRequest) -> String {
@@ -2687,6 +3520,9 @@ fn projection_id(runtime: &MemoryRuntime, request: &MemoryProjectionRequest) -> 
 
 fn projection_source_audits(
     context: &crate::PromptMemoryContext,
+    agent_skill_registry: &AgentSkillRegistrySnapshot,
+    agent_tool_registries: &[AgentToolRegistrySnapshot],
+    runtime_projection: &LLMRuntimeProjectionEnvelope,
 ) -> Vec<MemoryProjectionSourceAudit> {
     let mut sources = vec![
         projection_source_audit(&context.shared_factual_recall_report),
@@ -2697,6 +3533,53 @@ fn projection_source_audits(
     if let Some(report) = context.task_recall_report.as_ref() {
         sources.push(projection_source_audit(report));
     }
+    let agent_skill_report = agent_skill_registry.report();
+    let selected_ids = runtime_projection
+        .agent_skill_hints
+        .iter()
+        .map(|hint| hint.package_id.clone())
+        .collect::<Vec<_>>();
+    sources.push(MemoryProjectionSourceAudit {
+        plane: "agent_skill".to_string(),
+        backend: "host_directory_read_only".to_string(),
+        candidate_count: agent_skill_report.active_packages,
+        selected_count: selected_ids.len(),
+        selected_ids,
+        miss_reason: if runtime_projection.agent_skill_hints.is_empty()
+            && agent_skill_report.active_packages > 0
+        {
+            Some("no_agent_skill_recall_match".to_string())
+        } else if agent_skill_report.active_packages == 0 {
+            Some("agent_skill_directory_empty_or_not_mounted".to_string())
+        } else {
+            None
+        },
+    });
+    let agent_tool_candidate_count = agent_tool_registries
+        .iter()
+        .map(|registry| registry.tools.len())
+        .sum::<usize>();
+    let agent_tool_selected_ids = runtime_projection
+        .agent_tool_hints
+        .iter()
+        .map(|hint| format!("{}:{}", hint.registry_id, hint.tool_id))
+        .collect::<Vec<_>>();
+    sources.push(MemoryProjectionSourceAudit {
+        plane: "agent_tool_experience".to_string(),
+        backend: "host_registry_experience_only".to_string(),
+        candidate_count: agent_tool_candidate_count,
+        selected_count: agent_tool_selected_ids.len(),
+        selected_ids: agent_tool_selected_ids,
+        miss_reason: if runtime_projection.agent_tool_hints.is_empty()
+            && agent_tool_candidate_count > 0
+        {
+            Some("no_governed_tool_experience".to_string())
+        } else if agent_tool_candidate_count == 0 {
+            Some("agent_tool_registry_empty_or_not_registered".to_string())
+        } else {
+            None
+        },
+    });
     sources
 }
 
@@ -2712,21 +3595,84 @@ fn projection_source_audit(report: &RecallSelectionReport) -> MemoryProjectionSo
 }
 
 fn projection_section_audits(
-    context: &crate::PromptMemoryContext,
+    runtime_projection: &LLMRuntimeProjectionEnvelope,
 ) -> Vec<MemoryProjectionSectionAudit> {
-    sdk_projection_text_parts(context)
-        .into_iter()
-        .map(|(name, value)| {
-            let chars = value
-                .map(|content| content.trim().chars().count())
-                .unwrap_or(0);
-            MemoryProjectionSectionAudit {
-                name: name.to_string(),
-                chars,
-                included: chars > 0,
-            }
+    runtime_projection
+        .section_names
+        .iter()
+        .map(|name| MemoryProjectionSectionAudit {
+            name: name.clone(),
+            chars: runtime_projection_section_chars(runtime_projection, name),
+            included: true,
         })
         .collect()
+}
+
+fn runtime_projection_section_chars(
+    runtime_projection: &LLMRuntimeProjectionEnvelope,
+    name: &str,
+) -> usize {
+    match name {
+        "subject_mount" => {
+            runtime_projection
+                .subject_mount
+                .identity_mount
+                .chars()
+                .count()
+                + runtime_projection
+                    .subject_mount
+                    .relationship_position
+                    .chars()
+                    .count()
+                + runtime_projection
+                    .subject_mount
+                    .situated_now
+                    .chars()
+                    .count()
+        }
+        "governed_memory_evidence" => runtime_projection
+            .governed_memory_evidence
+            .iter()
+            .map(|block| block.content.chars().count())
+            .sum(),
+        "boundary_and_disclosure_protocol" => runtime_projection
+            .boundary_protocol
+            .disclosure_rule
+            .chars()
+            .count(),
+        "runtime_constraints" => {
+            runtime_projection.runtime_awareness.chars().count()
+                + runtime_projection
+                    .runtime_constraints
+                    .iter()
+                    .map(|constraint| constraint.chars().count())
+                    .sum::<usize>()
+        }
+        "work_integrity_covenant" => {
+            runtime_projection.work_integrity.task_goal.chars().count()
+                + runtime_projection
+                    .work_integrity
+                    .evidence_ceiling
+                    .chars()
+                    .count()
+        }
+        "procedural_evidence" => runtime_projection
+            .procedural_evidence
+            .iter()
+            .map(|block| block.content.chars().count())
+            .sum(),
+        "protected_private_runtime_context" => runtime_projection
+            .protected_private_runtime_context
+            .iter()
+            .map(|block| block.content.chars().count())
+            .sum(),
+        "agent_skill_hints" => runtime_projection
+            .agent_skill_hints
+            .iter()
+            .map(|hint| hint.prompt_snippet.chars().count())
+            .sum(),
+        _ => 0,
+    }
 }
 
 fn render_runtime_awareness_block(
@@ -2736,7 +3682,7 @@ fn render_runtime_awareness_block(
 ) -> String {
     let pressure = max_pressure(request_pressure, observed_pressure);
     format!(
-        "## Runtime Awareness\n- Beetle Memory supplies runtime context for this conversation.\n- Memory sections below are contextual evidence for the assistant to use, not model training data, a separate model identity, or a reason to describe itself as a memory helper.\n- Resource pressure: {}.\n- Runtime profile: {}.\n- Technical diagnostics stay outside this model-facing projection and must not be presented as user-facing identity or training provenance.",
+        "## Runtime Awareness\n- Beetle Memory supplies memory context for this turn.\n- The sections below are current-turn grounding for the reply.\n- Resource pressure: {}.\n- Runtime profile: {}.",
         runtime_awareness_pressure_label(pressure),
         runtime_awareness_profile_label(profile),
     )
@@ -2805,76 +3751,45 @@ fn working_recall_hit_count(working: &crate::WorkingRecallInspection) -> usize {
         .saturating_add(usize::from(working.task_recall_text.is_some()))
 }
 
-fn sdk_projection_text_parts(
-    context: &crate::PromptMemoryContext,
-) -> [(&'static str, Option<&str>); 28] {
-    [
-        ("summary", context.summary_text.as_deref()),
-        ("message_summary", context.message_summary_text.as_deref()),
-        (
-            "personality_governance_gate",
-            context.personality_governance_gate_text.as_deref(),
-        ),
-        (
-            "self_authored_core",
-            context.self_authored_core_text.as_deref(),
-        ),
-        (
-            "relationship_constitution",
-            context.relationship_constitution_text.as_deref(),
-        ),
-        ("persona_priority", context.persona_priority_text.as_deref()),
-        ("long_term_memory", context.long_term_memory_text.as_deref()),
-        (
-            "continuity_capsule",
-            context.continuity_capsule_text.as_deref(),
-        ),
-        ("archive_evidence", context.archive_evidence_text.as_deref()),
-        ("runtime_skill", context.runtime_skill_text.as_deref()),
-        (
-            "recent_turn_observation",
-            context.recent_turn_observation_text.as_deref(),
-        ),
-        ("work_continuity", context.work_continuity_text.as_deref()),
-        ("execution_state", context.execution_state_text.as_deref()),
-        ("task_workspace", context.task_workspace_text.as_deref()),
-        ("task_recall", context.task_recall_text.as_deref()),
-        ("world_snapshot", context.world_snapshot_text.as_deref()),
-        ("world_sense", context.world_sense_text.as_deref()),
-        ("self_state", context.self_state_text.as_deref()),
-        (
-            "relationship_portfolio",
-            context.relationship_portfolio_text.as_deref(),
-        ),
-        ("self_model", context.self_model_text.as_deref()),
-        (
-            "autonomy_strategy",
-            context.autonomy_strategy_text.as_deref(),
-        ),
-        ("outer_voice", context.outer_voice_text.as_deref()),
-        ("inner_life", context.inner_life_text.as_deref()),
-        ("self_continuity", context.self_continuity_text.as_deref()),
-        (
-            "private_workspace",
-            context.private_workspace_text.as_deref(),
-        ),
-        ("private_garden", context.private_garden_text.as_deref()),
-        ("mental_privacy", context.mental_privacy_text.as_deref()),
-        (
-            "mental_privacy_adjudication",
-            context.mental_privacy_adjudication_text.as_deref(),
-        ),
-    ]
+fn projection_source_runtime_text<'a>(
+    context: &'a crate::PromptMemoryContext,
+    source_id: &str,
+) -> Option<&'a str> {
+    match source_id {
+        "summary" => context.summary_text.as_deref(),
+        "message_summary" => context.message_summary_text.as_deref(),
+        "long_term_memory" => context.long_term_memory_text.as_deref(),
+        "continuity_capsule" => context.continuity_capsule_text.as_deref(),
+        "archive_evidence" => context.archive_evidence_text.as_deref(),
+        "runtime_skill" => context.runtime_skill_text.as_deref(),
+        "recent_turn_observation" => context.recent_turn_observation_text.as_deref(),
+        "work_continuity" => context.work_continuity_text.as_deref(),
+        "execution_state" => context.execution_state_text.as_deref(),
+        "task_workspace" => context.task_workspace_text.as_deref(),
+        "task_recall" => context.task_recall_text.as_deref(),
+        "world_snapshot" => context.world_snapshot_text.as_deref(),
+        "world_sense" => context.world_sense_text.as_deref(),
+        "self_state" => context.self_state_text.as_deref(),
+        "self_model" => context.self_model_text.as_deref(),
+        "inner_life" => context.inner_life_text.as_deref(),
+        "self_continuity" => context.self_continuity_text.as_deref(),
+        "private_workspace" => context.private_workspace_text.as_deref(),
+        "private_garden" => context.private_garden_text.as_deref(),
+        "mental_privacy" => context.mental_privacy_text.as_deref(),
+        "mental_privacy_adjudication" => context.mental_privacy_adjudication_text.as_deref(),
+        _ => None,
+    }
 }
 
-fn push_projection_part(parts: &mut Vec<String>, value: Option<&str>) {
-    let Some(value) = value else {
-        return;
-    };
-    let trimmed = value.trim();
-    if !trimmed.is_empty() {
-        parts.push(trimmed.to_string());
-    }
+fn compact_runtime_projection_content(value: &str, max_len: usize) -> String {
+    let compact = value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_to_char_boundary(compact.trim(), max_len)
 }
 
 fn truncate_to_char_boundary(value: &str, max_len: usize) -> String {
@@ -3223,11 +4138,9 @@ fn checked_skill_name<'a>(value: &'a str, stage: &'static str) -> Result<&'a str
     Ok(trimmed)
 }
 
-fn runtime_skill_summary(record: &RuntimeSkillRecord, enabled: bool) -> MemorySkillSummary {
-    MemorySkillSummary {
+fn runtime_skill_summary(record: &RuntimeSkillRecord, enabled: bool) -> RuntimeSkillSummary {
+    RuntimeSkillSummary {
         name: record.name.clone(),
-        kind: MemorySkillKind::RuntimeSkill,
-        origin: sdk_skill_origin(record.origin),
         title: record.title.clone(),
         topic: record.topic.clone(),
         status: record.status.label().to_string(),
@@ -3242,54 +4155,19 @@ fn runtime_skill_summary(record: &RuntimeSkillRecord, enabled: bool) -> MemorySk
     }
 }
 
-fn manual_skill_summary(name: &str, content: &str, enabled: bool) -> MemorySkillSummary {
-    MemorySkillSummary {
-        name: name.to_string(),
-        kind: MemorySkillKind::ManualDocument,
-        origin: MemorySkillOrigin::UserProvided,
-        title: manual_skill_title(name, content),
-        topic: name.to_string(),
-        status: if enabled { "active" } else { "disabled" }.to_string(),
-        enabled,
-        quality_score: None,
-        use_count: 0,
-        validated_success_count: 0,
-        mismatch_count: 0,
-        revision_pending: false,
-        updated_at: 0,
-        last_used_at: None,
-    }
-}
-
-fn sdk_skill_origin(origin: CoreRuntimeSkillOrigin) -> MemorySkillOrigin {
-    match origin {
-        CoreRuntimeSkillOrigin::RuntimeLearned => MemorySkillOrigin::RuntimeLearned,
-        CoreRuntimeSkillOrigin::UserProvided => MemorySkillOrigin::UserProvided,
-    }
-}
-
-fn manual_skill_title(name: &str, content: &str) -> String {
-    content
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix('#').map(str::trim))
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| name.to_string())
-}
-
-fn summarize_manual_skill(content: &str) -> String {
-    let text = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect::<Vec<_>>()
-        .join(" ");
-    truncate_to_char_boundary(text.trim(), 240)
+fn render_runtime_skill_detail_content(record: &RuntimeSkillRecord) -> String {
+    format!(
+        "<!-- beetle:runtime-skill -->\n# {}\n\nType: procedural_runtime_skill\nOrigin: runtime_learned\nTopic: {}\nStatus: {}\n\n## Summary\n{}\n\n## Procedure\n{}\n",
+        record.title,
+        record.topic,
+        record.status.label(),
+        record.summary,
+        record.procedure
+    )
 }
 
 fn skill_matches_query(
-    summary: &MemorySkillSummary,
+    summary: &RuntimeSkillSummary,
     summary_text: Option<&str>,
     procedure_text: Option<&str>,
     query: Option<&str>,
@@ -3401,6 +4279,8 @@ pub struct MemoryRuntimeBuilder {
     provider_model_context_limit: Option<ProviderModelContextLimit>,
     runtime_budget: Option<RuntimeBudgetReport>,
     store_platform: Option<StorePlatform>,
+    agent_skill_dirs: Vec<AgentSkillDirConfig>,
+    agent_tool_registries: Vec<AgentToolRegistrySnapshot>,
 }
 
 impl Default for MemoryRuntimeBuilder {
@@ -3421,6 +4301,8 @@ impl Default for MemoryRuntimeBuilder {
             provider_model_context_limit: None,
             runtime_budget: None,
             store_platform: None,
+            agent_skill_dirs: Vec::new(),
+            agent_tool_registries: Vec::new(),
         }
     }
 }
@@ -3503,6 +4385,26 @@ impl MemoryRuntimeBuilder {
         self
     }
 
+    pub fn agent_skill_dirs(mut self, dirs: Vec<AgentSkillDirConfig>) -> Self {
+        self.agent_skill_dirs = dirs;
+        self
+    }
+
+    pub fn add_agent_skill_dir(mut self, dir: AgentSkillDirConfig) -> Self {
+        self.agent_skill_dirs.push(dir);
+        self
+    }
+
+    pub fn agent_tool_registries(mut self, registries: Vec<AgentToolRegistrySnapshot>) -> Self {
+        self.agent_tool_registries = registries;
+        self
+    }
+
+    pub fn agent_tool_registry(mut self, registry: AgentToolRegistrySnapshot) -> Self {
+        self.agent_tool_registries.push(registry);
+        self
+    }
+
     pub fn build(self) -> Result<MemoryRuntime> {
         let identity = self
             .identity
@@ -3553,6 +4455,16 @@ impl MemoryRuntimeBuilder {
                 })
             }
         };
+        let agent_skill_registry = build_agent_skill_registry_snapshot(
+            self.profile,
+            &self.agent_skill_dirs,
+            clock.now_secs(),
+        )
+        .map_err(|error| Error::config(error.stage(), error.to_string()))?;
+        for registry in &self.agent_tool_registries {
+            validate_agent_tool_registry_snapshot(self.profile, registry)
+                .map_err(|error| Error::config(error.stage(), error.to_string()))?;
+        }
         let config = MemoryRuntimeConfig {
             identity,
             subject_id,
@@ -3566,11 +4478,13 @@ impl MemoryRuntimeBuilder {
             privacy_policy: self.privacy_policy,
             audit_sink,
             runtime_budget,
+            agent_skill_registry,
         };
         let runtime = MemoryRuntime {
             config,
             capabilities,
             lifecycle: RuntimeLifecycleEngine,
+            agent_tool_registries: Mutex::new(self.agent_tool_registries),
         };
         let lifecycle = runtime.start_lifecycle(
             RuntimeLifecycleOperation::Open,

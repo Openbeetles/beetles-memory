@@ -81,6 +81,7 @@
       soul_regression: "个性稳定",
       procedural_reuse: "经验复用",
       privacy_refusal: "隐私保护",
+      agent_tool_experience: "工具经验",
     };
     return labels[value] ?? value;
   }
@@ -91,8 +92,15 @@
       memory_graph_nodes_empty: "还没有可展示的记忆关系",
       runtime_recall_graph_preview_not_persistent: "当前是预览结果，未写入长期记忆图",
       inspection_unavailable: "健康检查暂时不可用",
+      no_governed_tool_experience: "还没有可复用工具经验",
+      governed_tool_experience_available: "已有可复用工具经验",
+      recall_unavailable: "找记忆暂时不可用",
     };
     return labels[value] ?? value.replace(/_/g, " ");
+  }
+
+  function localLabel(zh: string, en: string): string {
+    return lang === "zh-CN" ? zh : en;
   }
 
   function surfaceTitle(surfaceId: string): string {
@@ -169,6 +177,9 @@
       { label: wb.skills, value: numberText(recall.runtimeSkillSelected) },
       { label: wb.evidence, value: numberText(recall.evidenceBacklinks) },
       { label: wb.highConfidence, value: recall.highConfidenceProjectionAllowed ? wb.yes : wb.previewOnly },
+      { label: localLabel("候选工具", "Tool hints"), value: numberText(recall.agentToolHints) },
+      { label: localLabel("工具经验", "Tool experience"), value: plainToken(recall.toolExperienceReason) },
+      { label: localLabel("首次用工具", "First-use tools"), value: recall.hostFallbackRequired ? localLabel("由宿主决定", "Host decides") : wb.yes },
     ];
   }
 
@@ -179,9 +190,12 @@
       { label: wb.systemChars, value: numberText(projection.systemMemoryChars) },
       { label: wb.sourceBudget, value: numberText(projection.sourceBudgetChars) },
       { label: wb.renderBudget, value: numberText(projection.renderBudgetChars) },
-      { label: wb.privateGate, value: boolText(projection.privateGateAllowed) },
+      { label: wb.privateRuntime, value: boolText(projection.runtimePrivateContextAllowed) },
+      { label: wb.publicDisclosure, value: boolText(projection.foregroundDisclosureAllowed) },
       { label: wb.faithfulness, value: boolText(projection.faithfulnessPassed) },
-      { label: wb.privateEcho, value: String(projection.privateEchoCount) },
+      { label: wb.privateEcho, value: String(projection.rawPrivateViolationCount) },
+      { label: localLabel("工具提示", "Tool hints"), value: numberText(projection.agentToolHints) },
+      { label: localLabel("旧工具经验", "Old tool experience"), value: numberText(projection.agentToolRejections) },
     ];
   }
 
@@ -206,6 +220,9 @@
       { label: wb.skills, value: numberText(soul.runtimeSkillRecords) },
       { label: wb.deferred, value: `${soul.deferredPending}/${soul.deferredTotal}` },
       { label: wb.failed, value: numberText(soul.deferredFailed) },
+      { label: localLabel("工具索引", "Tool registries"), value: `${numberText(soul.agentToolRegistries)} / ${numberText(soul.agentToolRegistryTools)}` },
+      { label: localLabel("工具经验", "Tool experience"), value: numberText(soul.agentToolExperiences) },
+      { label: localLabel("过期工具经验", "Stale tool experience"), value: numberText(soul.agentToolStaleExperiences) },
     ];
   }
 </script>
@@ -266,6 +283,8 @@
             <div><span>{wb.fixtures}</span><strong>{benchmark.passedFixtures}/{benchmark.totalFixtures}</strong></div>
             <div><span>{wb.passed}</span><strong>{boolText(benchmark.passed)}</strong></div>
             <div><span>{wb.failures}</span><strong>{benchmark.failures.length}</strong></div>
+            <div><span>{wb.soulStable}</span><strong>{boolText(benchmark.soulKernelJudge.releaseGatePassed)}</strong></div>
+            <div><span>{wb.contextStable}</span><strong>{boolText(benchmark.subjectProjectionJudge.releaseGatePassed)}</strong></div>
           </div>
           <KvStack items={baselineRows(benchmark.baseline)} />
           <div class="workbench-coverage-list">

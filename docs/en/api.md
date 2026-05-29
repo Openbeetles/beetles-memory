@@ -25,8 +25,10 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Project | `MemoryRuntime::project` | Build a bounded memory block for model context. |
 | Maintain | `MemoryRuntime::maintain` | Run explicit post-reply memory maintenance when an LLM client is configured. |
 | Inspect | `MemoryRuntime::inspect` | Return recall/operator/lifecycle inspection data. |
-| Skill List / Detail | `MemoryRuntime::list_skills` / `MemoryRuntime::get_skill` | List and inspect procedural memory / skill records without executing them. |
-| Skill Mutation | `MemoryRuntime::upsert_skill` / `MemoryRuntime::set_skill_enabled` / `MemoryRuntime::delete_skill` | Create, import, edit, enable, disable, or delete skills through procedural memory governance. |
+| Runtime Skill List / Detail | `MemoryRuntime::list_runtime_skills` / `MemoryRuntime::get_runtime_skill` | List and inspect runtime-learned procedural memory records without executing them. |
+| Runtime Skill Mutation | `MemoryRuntime::edit_runtime_skill` / `MemoryRuntime::set_runtime_skill_enabled` / `MemoryRuntime::delete_runtime_skill` | Edit, enable, disable, or delete existing runtime skills only; it does not create, import, or manage standard Agent Skills. |
+| Agent Skill Directory | `MemoryRuntimeBuilder::agent_skill_dirs` / `add_agent_skill_dir` | Hosts can mount standard Agent Skill directories for read-only SDK scanning; the SDK recalls and projects summaries only, and never adds, edits, or executes directory resources. |
+| Agent Tool Registry | `MemoryRuntimeBuilder::agent_tool_registry` / `MemoryRuntime::upsert_agent_tool_registry` | Hosts register tool indexes and fingerprints. The SDK returns `agent_tool_hints` only from governed tool experience; no experience means empty hints, not tool routing. |
 | Replay | `MemoryRuntime::replay` | Inspect turn ledger history for a chat. |
 | Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | Move continuity snapshots between scopes. |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
@@ -38,15 +40,16 @@ The most common SDK request types are:
 | Request type | Required fields | Notes |
 | --- | --- | --- |
 | `MemoryWriteRequest::Procedural` | `writes`, `source` | Each `RuntimeSkillWrite` includes `name`, `topic`, `title`, `summary`, `content`, `citations`, `source_chat_id`, and `observed_at`. |
+| `MemoryWriteRequest::AgentToolUsageFeedback` | `feedback` | Host reports tool execution observations with `registry_ref`; the SDK may turn repeated governed evidence into tool experience. |
 | `MemoryWriteRequest::LongTermExtraction` | `extraction` | Use when an extraction pipeline has produced a validated long-term memory extraction. |
-| `MemoryRecallRequest` | `query`, `limit` | Returns procedural hits plus working recall inspection data. |
-| `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input` | Returns `system_memory_block` bounded by `system_max_len`. |
-| `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, and operator inspection data. |
-| `MemorySkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | Returns `MemorySkillListReport` with total, active, disabled, runtime_learned, user_provided, and skill summaries. |
-| `MemorySkillDetailRequest` | `name` | Returns `MemorySkillDetailReport` with summary/procedure/citations/lineage/strategy diffs/raw content. |
-| `MemorySkillUpsertRequest` | `title`, `topic`, `summary`, `procedure` | Creates, imports, or edits a skill; `name` is optional and defaults from the normalized topic. |
-| `MemorySkillSetEnabledRequest` | `name`, `enabled` | Changes only the enabled state; it does not rewrite skill content. |
-| `MemorySkillDeleteRequest` | `name` | Deletes the procedural memory from skill storage without adding a console tombstone. |
+| `MemoryRecallRequest` | `query`, `limit`, `tool_registry_refs` | Returns runtime skill hits, standard Agent Skill hits, working recall inspection data, and experience-backed `agent_tool_hints`; without governed experience, hints are empty. |
+| `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `tool_registry_refs` | Returns `system_memory_block` bounded by `system_max_len`; standard Agent Skills enter only as read-only hint summaries, and Agent Tools enter only as experience hints without full schemas. |
+| `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, operator inspection data, the Agent Skill directory report, and the Agent Tool registry report. |
+| `RuntimeSkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | Returns `RuntimeSkillListReport` with total, active, disabled, runtime_skills, and runtime skill summaries. |
+| `RuntimeSkillDetailRequest` | `name` | Returns `RuntimeSkillDetailReport` with summary/procedure/citations/lineage/strategy diffs/raw content. |
+| `RuntimeSkillEditRequest` | `name`, `title`, `topic`, `summary`, `procedure`, `edit_reason` | Edits only an existing runtime skill whose name starts with `runtime_skill__`. |
+| `RuntimeSkillSetEnabledRequest` | `name`, `enabled` | Changes only the runtime skill enabled state; it does not rewrite skill content. |
+| `RuntimeSkillDeleteRequest` | `name` | Deletes the runtime procedural memory from skill storage without adding a console tombstone. |
 | `MemoryReplayRequest` | `chat_id`, `limit` | Inspection-only replay surface. |
 | `MemoryExportRequest` | `chat_id` | Exports a continuity snapshot. |
 | `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode is `BootstrapImport` or `FullRestore`. |
@@ -56,6 +59,46 @@ The most common SDK request types are:
 Generic adapter dispatch supports write, recall, project, inspect, recover, replay, export, import, capabilities, and close. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
 
 Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/tool/message surface.
+
+## Agent Tool API
+
+Agent Tools are host-owned executable tools. Beetle Memory does not manage, install, execute, or store complete tool schemas. The host registers only compact registry snapshots and fingerprints so Memory can bind historical tool experience to the current host tool contract.
+
+SDK and HTTP share the same semantics:
+
+- With governed experience, recall/project returns `agent_tool_hints` containing `tool_id`, `registry_id`, `schema_fingerprint`, the experience reason, permission/risk tags, and `host_execution_required=true`.
+- Without governed experience, Memory returns `agent_tool_hints=[]` and `tool_experience_status.reason="no_governed_tool_experience"`; the host decides cold-start tool exposure.
+- The host uses `tool_id` / `registry_ref` from the hint to fetch its own complete schema and then builds the real LLM tools payload.
+- A Memory hint is not authorization. Permissions, user confirmation, execution, error handling, and provider payloads remain host responsibilities.
+
+Standalone HTTP deployments expose these registry routes:
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/agent-tool-registries/{id}` | `PUT` | Register or replace a compact registry snapshot; payload `registry_id` must match the path id. |
+| `/agent-tool-registries` | `GET` | Return current registry snapshots and the registry report. |
+| `/agent-tool-registries/{id}` | `GET` | Return one registry snapshot. |
+| `/agent-tool-registries/{id}` | `DELETE` | Delete a registry snapshot. Historical experience remains stored, but future projection rejects it if the registry is missing or the fingerprint drifts. |
+
+`/memory/write` can submit:
+
+```json
+{
+  "tool_usage_feedback": {
+    "registry_ref": {
+      "registry_id": "host-tools",
+      "fingerprint": "current-fingerprint",
+      "scope": "global"
+    },
+    "observations": [],
+    "user_visible_result_summary": "Tool execution summary",
+    "reuse_outcome": "succeeded",
+    "operator_note": null
+  }
+}
+```
+
+`observations` must be structured execution summaries, not raw full results, secrets, or complete schemas.
 
 ## Console API
 
@@ -68,12 +111,11 @@ The Console API is only for standalone deployments that serve the Beetle Memory 
 | Route | Method | Purpose |
 | --- | --- | --- |
 | `/console/overview` | `GET` | System info, runtime shape, observable metrics, kernel summary, session overview, and current memory context. |
-| `/console/skills` | `GET` | Skill Memory list and summary counts. |
-| `/console/skills/{name}` | `GET` | Single Skill Memory detail. |
-| `/console/skills` | `POST` | Create or import a skill through `MemoryRuntime::upsert_skill`. |
-| `/console/skills/{name}` | `PATCH` | Edit a skill through `MemoryRuntime::upsert_skill`. |
-| `/console/skills/{name}/enabled` | `PATCH` | Enable or disable a skill. |
-| `/console/skills/{name}` | `DELETE` | Delete a Skill Memory record. |
+| `/console/skills` | `GET` | Runtime Skill list and summary counts. |
+| `/console/skills/{name}` | `GET` | Single runtime Skill detail. |
+| `/console/skills/{name}` | `PATCH` | Edit an existing runtime Skill. |
+| `/console/skills/{name}/enabled` | `PATCH` | Enable or disable a runtime Skill. |
+| `/console/skills/{name}` | `DELETE` | Delete a runtime Skill Memory record. |
 | `/console/llm-gateway` | `GET` | Return the LLM Gateway operator surface: OpenAI/Ollama/MCP endpoints, rule export commands, and smoke checks. |
 | `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | Run a backend-whitelisted LLM Gateway smoke check and return exit code, duration, and bounded stdout/stderr. |
 | `/console/transports` | `GET` | List configurable communication entries. |
@@ -89,7 +131,8 @@ Security boundaries:
 - List endpoints never return plaintext app_keys; they return `appKeyFingerprint`.
 - Device creation and key rotation return `appKeyOnce` only in that response.
 - The HTTP switch in the communication page controls the external memory HTTP API, not the HTTP console entry itself.
-- The Skill Memory page manages procedural memory. It does not execute skills and does not provide a marketplace, executor, or workflow runner.
+- The Skill page manages runtime procedural memory only. It does not create or import standard Agent Skills and does not provide a marketplace, executor, or workflow runner.
+- Standard Agent Skills are mounted read-only through the SDK builder or the standalone `BM_AGENT_SKILL_DIRS` deployment setting. Runtime scanning reads `SKILL.md` summaries, resource counts, and fingerprints; recall does not read or execute scripts/assets.
 - The LLM Gateway smoke runner accepts only backend-known smoke check IDs; it never executes arbitrary command strings supplied by the frontend.
 
 ## Capability Catalog

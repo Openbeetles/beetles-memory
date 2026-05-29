@@ -44,6 +44,7 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
         .recall(MemoryRecallRequest {
             query: "runtime lifecycle".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
     assert_eq!(
@@ -59,6 +60,7 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
     assert_eq!(
@@ -103,6 +105,7 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
         .recall(MemoryRecallRequest {
             query: "ollama transparent metrics".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
     runtime
@@ -112,6 +115,7 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
 

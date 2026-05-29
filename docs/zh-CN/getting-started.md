@@ -22,7 +22,8 @@ bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] 
 
 ```rust
 use bm_sdk::{
-    MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId, StoreBackendConfig, StorePlatform,
+    AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId,
+    StoreBackendConfig, StorePlatform,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
@@ -35,9 +36,15 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
         .store_platform(store)
+        .add_agent_skill_dir(AgentSkillDirConfig::read_only(
+            "./skills",
+            "host-project",
+        ))
         .build()
 }
 ```
+
+`add_agent_skill_dir` 是可选项。它把标准 Agent Skill 目录只读挂载给召回和投影使用，Beetle Memory 只读取 `SKILL.md` 摘要，不添加、不编辑、不导入、不删除、不执行这些 skill。
 
 ## 写入、召回、投影
 
@@ -67,6 +74,7 @@ assert!(write.accepted);
 let recall = runtime.recall(MemoryRecallRequest {
     query: "release artifacts".to_string(),
     limit: 4,
+    tool_registry_refs: Vec::new(),
 })?;
 assert!(!recall.procedural_hits.is_empty());
 
@@ -76,6 +84,7 @@ let projection = runtime.project(MemoryProjectionRequest {
     recent_messages_limit: 8,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
+    tool_registry_refs: Vec::new(),
 })?;
 assert!(projection.system_memory_block.len() <= 4096);
 ```
@@ -88,7 +97,6 @@ cargo run --manifest-path examples/server-runtime/Cargo.toml
 cargo run --manifest-path examples/linux-device/Cargo.toml
 cargo run --manifest-path examples/esp-standalone-memory/Cargo.toml
 cargo run --manifest-path examples/esp-embedded-sdk/Cargo.toml
-cargo run --manifest-path examples/memory-gateway/Cargo.toml
 ```
 
 ## 下一步文档

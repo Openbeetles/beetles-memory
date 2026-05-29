@@ -134,6 +134,15 @@ cargo run -p bm-http --features server-std --bin bm-http-console -- \
   --store-path target/bm-http-console-store
 ```
 
+To mount host-managed standard Agent Skill directories in standalone deployments, set `BM_AGENT_SKILL_DIRS` before starting the process. Use the platform path separator for multiple directories. The runtime scans them read-only for recall/projection and does not manage or execute their files.
+
+```bash
+BM_AGENT_SKILL_DIRS=/path/to/project/.agents/skills:/path/to/user/skills \
+  cargo run -p bm-http --features server-std --bin bm-http-console -- \
+  --addr 127.0.0.1:8718 \
+  --store-path target/bm-http-console-store
+```
+
 The HTTP shell frontend dev server uses port `5176` and proxies `/console/*` and `/memory/*` to `127.0.0.1:8718`. This verifies the HTTP shell only; the macOS desktop production shape should use the Tauri commands above:
 
 ```bash

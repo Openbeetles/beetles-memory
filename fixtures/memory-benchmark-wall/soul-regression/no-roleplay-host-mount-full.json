@@ -1,0 +1,84 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "soul-regression-no-roleplay-host-mount-full",
+  "class": "soul_regression",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "Host mount must be grounded in subject ownership and source authority, not appended persona roleplay text.",
+  "scenario": {
+    "user_goal": "Reject a superficial persona prompt while preserving the same subject through source-backed memory and relationship state.",
+    "evidence_refs": [
+      "crates/core/src/memory/subject_shell.rs",
+      "crates/core/src/agent/subject_state.rs",
+      "crates/core/src/memory/next_gen_contract.rs"
+    ],
+    "expected_surfaces": [
+      "Subject Mount",
+      "SourceAuthorityReport",
+      "SoulRegressionGateReport"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["projection_shape", "soul_life_semantics"],
+    "provided_keys": [
+      "subject_mount",
+      "source_authority",
+      "memory_ownership",
+      "relationship_position",
+      "model_provider_agnostic_subject",
+      "roleplay_prompt_rejected"
+    ],
+    "required_keys": [
+      "subject_mount",
+      "source_authority",
+      "memory_ownership",
+      "roleplay_prompt_rejected",
+      "model_provider_agnostic_subject"
+    ],
+    "forbidden_keys": [
+      "roleplay_prompt",
+      "persona_only_identity",
+      "model_provider_specific_soul"
+    ],
+    "observed_markers": [
+      "Subject Mount",
+      "roleplay prompt rejected",
+      "source authority required",
+      "model-provider-agnostic soul mount"
+    ],
+    "required_markers": [
+      "Subject Mount",
+      "roleplay prompt rejected",
+      "source authority required"
+    ],
+    "forbidden_markers": [
+      "just pretend to be",
+      "append persona prompt"
+    ]
+  },
+  "metrics": {
+    "accuracy_bps": 9500,
+    "evidence_precision_bps": 9300,
+    "projection_faithfulness_bps": 9300,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9000,
+    "soul_regression_count": 0,
+    "latency_ms": 120,
+    "token_budget": 3072,
+    "memory_bytes": 196608
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8800,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

@@ -2,10 +2,11 @@ use bm_entry::EntryRuntimeBaseConfig;
 use bm_llm_gateway::{
     handle_ollama_request, handle_ollama_request_with_services,
     serve_llm_gateway_http_stream_with_services, GatewayAuditOutcome, GatewayAuditStage,
-    GatewayConfig, GatewayProviderConfig, GatewayRuntime, GatewayScopeRequest,
-    GatewayScopeResolver, OllamaGatewayBody, OllamaGatewayRequest, OllamaMaintenanceLlmClient,
-    OllamaNativeUpstream, OllamaUpstreamRequest, OllamaUpstreamResponse, OpenAiCompatibleUpstream,
-    OpenAiGatewayServices, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
+    GatewayConfig, GatewayProjectionAuditStatus, GatewayProviderConfig, GatewayRuntime,
+    GatewayScopeRequest, GatewayScopeResolver, OllamaGatewayBody, OllamaGatewayRequest,
+    OllamaMaintenanceLlmClient, OllamaNativeUpstream, OllamaUpstreamRequest,
+    OllamaUpstreamResponse, OpenAiCompatibleUpstream, OpenAiGatewayServices, OpenAiUpstreamRequest,
+    OpenAiUpstreamResponse,
 };
 use bm_sdk::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy,
@@ -378,6 +379,10 @@ fn chat_non_streaming_injects_memory_into_existing_system_and_preserves_native_s
     assert!(system.contains("<beetle-memory-projection version=\"1\">"));
     assert_eq!(sent.body["messages"].as_array().expect("messages").len(), 2);
     assert_eq!(response.body.json()["message"]["content"], "ok");
+    assert!(response
+        .audit
+        .notes
+        .contains(&"gateway_host_tools_no_cold_route".to_string()));
 }
 
 #[test]
@@ -398,7 +403,12 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
             json!({
                 "model": "local",
                 "stream": false,
-                "messages": [{ "role": "user", "content": "call me Qingchuan" }]
+                "messages": [{
+                    "role": "user",
+                    "content": "call me Qingchuan",
+                    "speaker_id": "owner-human",
+                    "speaker_kind": "human"
+                }]
             }),
         ),
         &mut upstream,
@@ -427,19 +437,32 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
-    assert!(projection
+    let user_message = projection
         .context
         .recent_messages
         .iter()
-        .any(|message| message.content == "call me Qingchuan"));
-    assert!(projection
+        .find(|message| message.content == "call me Qingchuan")
+        .expect("user message persisted");
+    assert!(user_message.message_id.starts_with("msg_"));
+    assert!(user_message.observed_at > 0);
+    assert!(user_message.created_at >= user_message.observed_at);
+    assert_eq!(user_message.role, "user");
+    assert_eq!(user_message.speaker_id, "owner-human");
+    assert_eq!(user_message.speaker_kind, "human");
+    let assistant_message = projection
         .context
         .recent_messages
         .iter()
-        .any(|message| message.content == "ok"));
+        .find(|message| message.content == "ok")
+        .expect("assistant message persisted");
+    assert!(assistant_message.message_id.starts_with("msg_"));
+    assert_eq!(assistant_message.role, "assistant");
+    assert_eq!(assistant_message.speaker_id, "assistant");
+    assert_eq!(assistant_message.speaker_kind, "llm_agent");
 }
 
 #[test]
@@ -510,6 +533,7 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -574,6 +598,7 @@ fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() 
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -624,6 +649,16 @@ fn generate_injects_system_field_without_prompt_prefix_when_supported() {
     let system = sent.body["system"].as_str().expect("system");
     assert!(system.contains("Base generate system."));
     assert!(system.contains("<beetle-memory-projection version=\"1\">"));
+    assert_eq!(
+        response.audit.projection_record.status,
+        GatewayProjectionAuditStatus::NotRecorded
+    );
+    assert_eq!(
+        response.audit.projection_record.reason,
+        "raw_projection_recording_disabled"
+    );
+    assert!(response.audit.projection_record.projection_chars > 0);
+    assert!(response.audit.projection_record.block.is_none());
     assert!(!response
         .audit
         .notes

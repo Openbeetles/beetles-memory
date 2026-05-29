@@ -8,9 +8,9 @@ use bm_adapter::{
 };
 use bm_sdk::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
-    MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryRuntime, MemoryScope, Message,
-    NoopMemoryAuditSink, ProfileId, ResponseBody, StopReason, StoreBackendConfig, StorePlatform,
-    ToolChoicePolicy, ToolSpec,
+    MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemoryWriteRequest, Message, NoopMemoryAuditSink, ProfileId, ResponseBody, StopReason,
+    StoreBackendConfig, StorePlatform, ToolChoicePolicy, ToolSpec,
 };
 
 struct FixedClock;
@@ -74,6 +74,7 @@ fn recall_command_dispatches_through_memory_runtime() {
             AdapterCommand::Recall(MemoryRecallRequest {
                 query: "release".to_string(),
                 limit: 2,
+                tool_registry_refs: Vec::new(),
             }),
         ),
     )
@@ -103,6 +104,7 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
             AdapterCommand::Recall(MemoryRecallRequest {
                 query: "release".to_string(),
                 limit: 2,
+                tool_registry_refs: Vec::new(),
             }),
         ),
     )
@@ -155,6 +157,52 @@ fn json_decoder_covers_adapter_memory_operations() {
         let command =
             decode_json_adapter_command(operation, body, &options).expect("decode command");
         assert_eq!(command.operation(), operation);
+    }
+}
+
+#[test]
+fn json_decoder_accepts_agent_tool_usage_feedback_as_write_payload() {
+    let command = decode_json_adapter_command(
+        AdapterOperation::Write,
+        r#"{
+            "tool_usage_feedback": {
+                "registry_ref": {
+                    "registry_id": "host-tools",
+                    "fingerprint": "registry-fp",
+                    "scope": "global"
+                },
+                "observations": [{
+                    "observation_id": "obs-1",
+                    "registry_id": "host-tools",
+                    "tool_id": "pdf.extract",
+                    "schema_fingerprint": "schema-pdf-v1",
+                    "call_id": "call-1",
+                    "task_signature": "extract_pdf_text",
+                    "summary": "PDF extraction produced usable text.",
+                    "outcome": "succeeded",
+                    "error_code": null,
+                    "external_content": true,
+                    "private_content_used": false,
+                    "permission_tags": ["filesystem.read"],
+                    "risk_tags": ["external_content"],
+                    "started_at": 1800000000,
+                    "completed_at": 1800000001
+                }],
+                "user_visible_result_summary": "PDF extraction worked.",
+                "reuse_outcome": "succeeded",
+                "operator_note": null
+            }
+        }"#,
+        &AdapterJsonCommandOptions::new("test-adapter"),
+    )
+    .expect("decode feedback");
+
+    match command {
+        AdapterCommand::Write(MemoryWriteRequest::AgentToolUsageFeedback { feedback }) => {
+            assert_eq!(feedback.registry_ref.registry_id, "host-tools");
+            assert_eq!(feedback.observations[0].tool_id, "pdf.extract");
+        }
+        other => panic!("unexpected command: {other:?}"),
     }
 }
 

@@ -68,7 +68,7 @@ ESP profiles should use `StoreBackendConfig::embedded(profile)` or `in_memory(pr
 ## 4. Build The Runtime
 
 ```rust
-use bm_sdk::{MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId};
+use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId};
 
 let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
@@ -76,10 +76,13 @@ let runtime = MemoryRuntime::builder()
     .scope(MemoryScope::new("local", "chat-1")?)
     .profile(ProfileId::DesktopMacosEmbeddedSdk)
     .store_platform(store)
+    .add_agent_skill_dir(AgentSkillDirConfig::read_only("./skills", "host-project"))
     .build()?;
 ```
 
 `agent_id` identifies the agent instance. `owner_id` identifies the owner or tenant. `subject_id` binds the runtime to the active subject; when omitted, the SDK initializes the local subject from `owner_id`. `channel` and `chat_id` define the default memory scope for runtime operations.
+
+`add_agent_skill_dir` is optional and read-only. The host still owns standard Agent Skill add/edit/import/delete/execute flows; Beetle Memory only scans `SKILL.md` summaries for recall and projection.
 
 ## 5. Write Memory
 
@@ -117,6 +120,7 @@ use bm_sdk::{
 let recall = runtime.recall(MemoryRecallRequest {
     query: "release artifacts".to_string(),
     limit: 4,
+    tool_registry_refs: Vec::new(),
 })?;
 
 let projection = runtime.project(MemoryProjectionRequest {
@@ -125,6 +129,7 @@ let projection = runtime.project(MemoryProjectionRequest {
     recent_messages_limit: 8,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
+    tool_registry_refs: Vec::new(),
 })?;
 
 let memory_block = projection.system_memory_block;

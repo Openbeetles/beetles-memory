@@ -2900,14 +2900,11 @@ mod tests {
             "继续",
             Some("当前重点是长期记忆和 agent loop"),
             &[
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我们正在做长期记忆收口".to_string(),
-                },
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续按这个方向推进".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我们正在做长期记忆收口".to_string(),
+                ),
+                SessionMessage::synthetic("user".to_string(), "继续按这个方向推进".to_string()),
             ],
             4096,
             MemoryProfile::Standard,
@@ -2928,10 +2925,10 @@ mod tests {
             .build_recall_query(
                 "继续",
                 Some("当前重点是长期记忆和 agent loop"),
-                &[SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "上一轮重点是 Linux 侧长期记忆".to_string(),
-                }],
+                &[SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "上一轮重点是 Linux 侧长期记忆".to_string(),
+                )],
             );
         assert!(query.contains("继续"));
         assert!(query.contains("长期记忆"));
@@ -2981,10 +2978,10 @@ mod tests {
             "chat-1",
             "memory",
             Some("当前重点是 memory pipeline"),
-            &[SessionMessage {
-                role: "user".to_string(),
-                content: "继续把 memory pipeline 收掉".to_string(),
-            }],
+            &[SessionMessage::synthetic(
+                "user".to_string(),
+                "继续把 memory pipeline 收掉".to_string(),
+            )],
             220,
             MemoryProfile::Standard,
         )

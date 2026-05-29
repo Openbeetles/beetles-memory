@@ -206,10 +206,10 @@ impl SessionStore for HarnessSessionStore {
             .unwrap_or_else(|e| e.into_inner())
             .entry(chat_id.to_string())
             .or_default()
-            .push(SessionMessage {
-                role: role.to_string(),
-                content: content.to_string(),
-            });
+            .push(SessionMessage::synthetic(
+                role.to_string(),
+                content.to_string(),
+            ));
         Ok(())
     }
 
@@ -448,6 +448,7 @@ impl HarnessStores {
             participation_plan,
             recent_messages_limit: 8,
             load_long_term_memory: true,
+            include_private_runtime_projection: true,
             include_private_garden_projection: false,
             session_store: self.session.as_ref(),
             memory_store: self.memory.as_ref(),
@@ -912,35 +913,21 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
     stores.session.seed(
         CHAT_ID,
         vec![
-            SessionMessage {
-                role: "user".to_string(),
-                content: "When we do engineering review, keep the response in Chinese.".to_string(),
-            },
-            SessionMessage {
-                role: "assistant".to_string(),
-                content: "I will keep engineering review responses in Chinese and stay evidence-first."
-                    .to_string(),
-            },
-            SessionMessage {
-                role: "user".to_string(),
-                content: "For release readiness, validate the diff and run tests before claiming it."
-                    .to_string(),
-            },
-            SessionMessage {
-                role: "assistant".to_string(),
-                content: "Release readiness should cite test and analyzer evidence before any claim."
-                    .to_string(),
-            },
-            SessionMessage {
-                role: "user".to_string(),
-                content: "Remember this as the release checklist for later work.".to_string(),
-            },
-            SessionMessage {
-                role: "assistant".to_string(),
-                content:
-                    "I will use the release checklist before saying a memory or runtime change is ready."
-                        .to_string(),
-            },
+            SessionMessage::synthetic(
+                "user",
+                "When we do engineering review, keep the response in Chinese.",
+            ),
+            SessionMessage::synthetic("assistant".to_string(), "I will keep engineering review responses in Chinese and stay evidence-first."
+                    .to_string()),
+            SessionMessage::synthetic(
+                "user",
+                "For release readiness, validate the diff and run tests before claiming it.",
+            ),
+            SessionMessage::synthetic("assistant".to_string(), "Release readiness should cite test and analyzer evidence before any claim."
+                    .to_string()),
+            SessionMessage::synthetic("user".to_string(), "Remember this as the release checklist for later work.".to_string()),
+            SessionMessage::synthetic("assistant".to_string(), "I will use the release checklist before saying a memory or runtime change is ready."
+                        .to_string()),
         ],
     );
 
@@ -1580,10 +1567,10 @@ fn memory_harness_forget_scope_contract() {
     let stores = HarnessStores::default();
     stores.session.seed(
         CHAT_ID,
-        vec![SessionMessage {
-            role: "user".to_string(),
-            content: "remember my engineering language preference".to_string(),
-        }],
+        vec![SessionMessage::synthetic(
+            "user".to_string(),
+            "remember my engineering language preference".to_string(),
+        )],
     );
     let fact = factual_draft(
         LongTermMemoryKind::Preference,

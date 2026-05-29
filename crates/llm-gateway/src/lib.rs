@@ -1,5 +1,6 @@
 //! LLM protocol gateway contracts for Beetle Memory.
 
+mod agent_tools;
 mod audit;
 mod config;
 mod error;
@@ -18,6 +19,7 @@ mod server;
 
 pub use audit::{
     GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayAuditStageReport,
+    GatewayProjectionAuditRecord, GatewayProjectionAuditStatus,
 };
 pub use config::{
     GatewayAuditConfig, GatewayConfig, GatewayMaintenanceConfig, GatewayProjectionConfig,

@@ -1,0 +1,90 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "soul-regression-soul-life-slot-continuity-full",
+  "class": "soul_regression",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "Soul life slots are explicit facets carried through projection instead of one coarse self prompt.",
+  "scenario": {
+    "user_goal": "Keep personality, concerns, relationship posture, self-reflection, boundary protocol, and continuity facets stable across turns.",
+    "evidence_refs": [
+      "crates/core/src/memory/self_scope.rs",
+      "crates/core/src/memory/mental_privacy.rs",
+      "dev-docs/inhabited-subject-projection-refactor-plan.md"
+    ],
+    "expected_surfaces": [
+      "SoulLifeProjection",
+      "SubjectProjectionReport"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["soul_life_semantics"],
+    "provided_keys": [
+      "soul_life_facets",
+      "personality",
+      "concerns",
+      "relationship_posture",
+      "self_reflection",
+      "boundary_protocol",
+      "continuity_anchor",
+      "self_owned_update_candidates",
+      "single_turn_self_claim_rejected"
+    ],
+    "required_keys": [
+      "soul_life_facets",
+      "personality",
+      "concerns",
+      "relationship_posture",
+      "self_reflection",
+      "boundary_protocol",
+      "continuity_anchor",
+      "self_owned_update_candidates",
+      "single_turn_self_claim_rejected"
+    ],
+    "forbidden_keys": [
+      "single_coarse_self_prompt",
+      "single_turn_identity_claim",
+      "program_overwrites_soul_private_choice"
+    ],
+    "observed_markers": [
+      "mapped life facets",
+      "self-owned update candidate remains soul-owned",
+      "single-turn assistant self-claim rejected",
+      "continuity anchor preserved"
+    ],
+    "required_markers": [
+      "mapped life facets",
+      "self-owned update candidate remains soul-owned",
+      "single-turn assistant self-claim rejected"
+    ],
+    "forbidden_markers": [
+      "single prompt defines the soul",
+      "model provider creates a new soul"
+    ]
+  },
+  "metrics": {
+    "accuracy_bps": 9500,
+    "evidence_precision_bps": 9300,
+    "projection_faithfulness_bps": 9300,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9000,
+    "soul_regression_count": 0,
+    "latency_ms": 125,
+    "token_budget": 3200,
+    "memory_bytes": 200704
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8800,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

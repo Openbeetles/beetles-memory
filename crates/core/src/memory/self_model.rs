@@ -228,7 +228,7 @@ pub fn render_self_model_block(model: &SelfModel, max_len: usize) -> Option<Stri
     .collect::<Vec<_>>()
     .join("; ");
     if !personality_axes.is_empty() {
-        let _ = writeln!(out, "Personality axes: {}", personality_axes);
+        let _ = writeln!(out, "Continuity tendencies: {}", personality_axes);
     }
     let worldview = [
         (!normalized.value_orientation.is_empty())
@@ -1013,7 +1013,7 @@ mod tests {
         .unwrap();
         assert!(block.contains("## Self Continuity"));
         assert!(block.contains("explicit facts win"));
-        assert!(block.contains("Personality axes"));
+        assert!(block.contains("Continuity tendencies"));
         assert!(block.contains("Worldview frame"));
     }
 
@@ -1200,14 +1200,14 @@ mod tests {
     fn refresh_updates_private_model_without_touching_shared_fact_stores() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续把自我模型和事实层分开".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "这轮会接上 self-model store 和 prompt".to_string(),
-                },
+                SessionMessage::synthetic(
+                    "user".to_string(),
+                    "继续把自我模型和事实层分开".to_string(),
+                ),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "这轮会接上 self-model store 和 prompt".to_string(),
+                ),
             ],
         };
         let summary_store = StubSessionSummaryStore::default();

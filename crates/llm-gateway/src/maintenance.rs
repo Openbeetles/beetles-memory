@@ -133,6 +133,7 @@ impl GatewayMaintenancePlan {
                 runtime_skill_selected_ids: self.runtime_skill_selected_ids.clone(),
                 task_learning_selected_ids: self.task_learning_selected_ids.clone(),
                 reuse_outcome_note: snapshot.reuse_outcome_note,
+                tool_usage_feedback: None,
                 pressure: self.pressure,
                 mode_input: self.mode_input,
             },

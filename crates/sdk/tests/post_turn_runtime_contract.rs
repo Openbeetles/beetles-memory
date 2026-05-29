@@ -50,6 +50,7 @@ fn finalize_request(user: &str, assistant: Option<&str>) -> MemoryTurnFinalizeRe
         runtime_skill_selected_ids: Vec::new(),
         task_learning_selected_ids: Vec::new(),
         reuse_outcome_note: String::new(),
+        tool_usage_feedback: None,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -306,6 +307,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -367,6 +369,7 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -431,6 +434,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -492,6 +496,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -551,6 +556,7 @@ fn finalize_turn_uses_canonical_delta_external_content_boundary() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 

@@ -101,6 +101,7 @@ fn auth_required_runtime_rejects_arbitrary_authenticated_bool_and_loopback() {
             AdapterCommand::Recall(MemoryRecallRequest {
                 query: "release".to_string(),
                 limit: 2,
+                tool_registry_refs: Vec::new(),
             }),
         )
         .expect("entry response");
@@ -120,6 +121,7 @@ fn auth_required_runtime_rejects_arbitrary_authenticated_bool_and_loopback() {
             AdapterCommand::Recall(MemoryRecallRequest {
                 query: "release".to_string(),
                 limit: 2,
+                tool_registry_refs: Vec::new(),
             }),
         )
         .expect("entry response");

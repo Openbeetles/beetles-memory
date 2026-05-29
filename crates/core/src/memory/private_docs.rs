@@ -1172,14 +1172,11 @@ mod tests {
     fn refresh_updates_workspace_from_self_model_and_facts() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续把私有空间做起来".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "这轮会接 inner journal 和 private plan".to_string(),
-                },
+                SessionMessage::synthetic("user".to_string(), "继续把私有空间做起来".to_string()),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "这轮会接 inner journal 和 private plan".to_string(),
+                ),
             ],
         };
         let summary_store = StubSessionSummaryStore::default();

@@ -1,0 +1,93 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "subject-projection-inhabited-subject-mount-full",
+  "class": "subject_projection",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "Full profile requires an inhabited Subject Mount instead of a public flat list of internal memory sections.",
+  "scenario": {
+    "user_goal": "Mount the current LLM into the existing subject shell with traceable body, memory, relationship, disclosure, and work integrity context.",
+    "evidence_refs": [
+      "crates/core/src/memory/subject_shell.rs",
+      "crates/core/src/agent/subject_state.rs",
+      "crates/sdk/src/runtime.rs"
+    ],
+    "expected_surfaces": [
+      "Subject Mount",
+      "LLMRuntimeProjectionEnvelope",
+      "SubjectProjectionReport"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["projection_shape"],
+    "provided_keys": [
+      "subject_mount",
+      "body_ownership",
+      "memory_ownership",
+      "relationship_position",
+      "boundary_and_disclosure_protocol",
+      "work_integrity_covenant",
+      "source_authority"
+    ],
+    "required_keys": [
+      "subject_mount",
+      "body_ownership",
+      "memory_ownership",
+      "relationship_position",
+      "boundary_and_disclosure_protocol",
+      "work_integrity_covenant",
+      "source_authority"
+    ],
+    "forbidden_keys": [
+      "flat_internal_section_list_public_skeleton",
+      "roleplay_prompt",
+      "model_provider_soul_split"
+    ],
+    "observed_markers": [
+      "Subject Mount",
+      "body_ownership sourced",
+      "memory_ownership sourced",
+      "relationship_position sourced",
+      "Boundary And Disclosure Protocol",
+      "Work Integrity Covenant"
+    ],
+    "required_markers": [
+      "Subject Mount",
+      "Boundary And Disclosure Protocol",
+      "Work Integrity Covenant"
+    ],
+    "forbidden_markers": [
+      "Self State",
+      "Inner Life",
+      "Private Garden",
+      "Autonomy Strategy",
+      "Outer Voice",
+      "Inner Workspace"
+    ]
+  },
+  "metrics": {
+    "accuracy_bps": 9600,
+    "evidence_precision_bps": 9400,
+    "projection_faithfulness_bps": 9600,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9200,
+    "soul_regression_count": 0,
+    "latency_ms": 120,
+    "token_budget": 3200,
+    "memory_bytes": 200704
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 9000,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

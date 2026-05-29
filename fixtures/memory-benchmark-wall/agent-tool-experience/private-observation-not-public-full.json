@@ -1,0 +1,60 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "agent-tool-experience-private-observation-not-public-full",
+  "class": "agent_tool_experience",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "contract_baseline",
+  "description": "Private tool observations are not promoted into public agent-tool hints.",
+  "scenario": {
+    "user_goal": "A successful tool call used private material; memory must not project that private observation as a public tool hint.",
+    "evidence_refs": [
+      "crates/core/src/skills/agent_tool.rs",
+      "dev-docs/agent-tool-experience-registry-plan.md"
+    ],
+    "expected_surfaces": ["AgentToolExperienceGovernanceReport", "AgentToolProjectionAudit"]
+  },
+  "semantic_contract": {
+    "dimensions": ["agent_tool_experience_semantics", "privacy_runtime_semantics"],
+    "provided_keys": [
+      "agent_tool_private_observation_excluded",
+      "private_content_used",
+      "private_feedback_requires_private_governance"
+    ],
+    "required_keys": [
+      "agent_tool_private_observation_excluded",
+      "private_feedback_requires_private_governance"
+    ],
+    "forbidden_keys": ["private_tool_observation_projected"],
+    "observed_markers": [
+      "private observation not projected",
+      "private feedback requires private governance"
+    ],
+    "required_markers": ["private observation not projected"],
+    "forbidden_markers": ["private observation appears in AgentToolHint"]
+  },
+  "metrics": {
+    "accuracy_bps": 9650,
+    "evidence_precision_bps": 9400,
+    "projection_faithfulness_bps": 9300,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9000,
+    "soul_regression_count": 0,
+    "latency_ms": 105,
+    "token_budget": 3072,
+    "memory_bytes": 196608
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  }
+}

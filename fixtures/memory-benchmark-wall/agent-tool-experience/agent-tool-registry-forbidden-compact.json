@@ -1,0 +1,57 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "agent-tool-experience-agent-tool-registry-forbidden-compact",
+  "class": "agent_tool_experience",
+  "profile": "esp_standalone_memory",
+  "mode": "compact",
+  "evaluation_source": "contract_baseline",
+  "description": "Compact ESP profile rejects host agent-tool registry snapshots and keeps only runtime skill memory.",
+  "scenario": {
+    "user_goal": "Run compact memory without importing host tool registries or full tool schemas.",
+    "evidence_refs": [
+      "crates/core/src/skills/agent_tool.rs",
+      "dev-docs/agent-tool-experience-registry-plan.md"
+    ],
+    "expected_surfaces": ["ProfileGate", "RuntimeSkillMemory"]
+  },
+  "semantic_contract": {
+    "dimensions": ["agent_tool_experience_semantics"],
+    "provided_keys": [
+      "agent_tool_registry_forbidden_by_profile",
+      "runtime_skill_memory_only",
+      "host_tool_schema_not_embedded"
+    ],
+    "required_keys": ["agent_tool_registry_forbidden_by_profile"],
+    "forbidden_keys": ["full_agent_tool_schema_projection"],
+    "observed_markers": [
+      "agent_tool_registry_forbidden_by_profile",
+      "ESP compact profile keeps runtime skills only"
+    ],
+    "required_markers": ["agent_tool_registry_forbidden_by_profile"],
+    "forbidden_markers": ["LLM receives full host tool schemas from memory"]
+  },
+  "metrics": {
+    "accuracy_bps": 9600,
+    "evidence_precision_bps": 9300,
+    "projection_faithfulness_bps": 9200,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9100,
+    "soul_regression_count": 0,
+    "latency_ms": 40,
+    "token_budget": 512,
+    "memory_bytes": 32768
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 250,
+    "max_token_budget": 1024,
+    "max_memory_bytes": 65536
+  }
+}

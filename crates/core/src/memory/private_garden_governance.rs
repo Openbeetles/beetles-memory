@@ -1025,14 +1025,11 @@ mod tests {
     fn private_garden_governance_writes_and_deletes_docs() {
         let session_store = StubSessionStore {
             recent: vec![
-                SessionMessage {
-                    role: "user".to_string(),
-                    content: "继续整理你的内部空间".to_string(),
-                },
-                SessionMessage {
-                    role: "assistant".to_string(),
-                    content: "我会把零散草稿收束掉".to_string(),
-                },
+                SessionMessage::synthetic("user".to_string(), "继续整理你的内部空间".to_string()),
+                SessionMessage::synthetic(
+                    "assistant".to_string(),
+                    "我会把零散草稿收束掉".to_string(),
+                ),
             ],
         };
         let private_garden_store = StubPrivateGardenStore::default();

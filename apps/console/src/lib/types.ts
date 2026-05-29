@@ -16,11 +16,8 @@ export type Lang = "zh-CN" | "en";
 export type Theme = "light" | "dark";
 export type TransportId = "http" | "wss" | "mcp" | "a2a" | "llm-gateway";
 export type DeviceConfirmAction = "rotate_key" | "disable";
-export type SkillOrigin = "user_provided" | "runtime_learned";
-export type SkillKind = "runtime_skill" | "manual_document";
-export type SkillModal = "create" | "import" | "edit" | "delete" | null;
+export type SkillModal = "edit" | "delete" | null;
 export type SkillStatusFilter = "all" | "active" | "disabled" | "retired";
-export type SkillOriginFilter = "all" | SkillOrigin;
 
 export type Page = { id: PageId; label: string; count?: string; eyebrow: string; title: string };
 export type Transport = {
@@ -256,8 +253,16 @@ export type ConsoleApiMemoryBenchmarkReport = {
   baseline: ConsoleApiBenchmarkBaseline;
   classCoverage: ConsoleApiBenchmarkClassCoverage[];
   missingClasses: Array<{ class: string; mode: string }>;
+  soulKernelJudge: ConsoleApiBenchmarkPhaseJudge;
+  subjectProjectionJudge: ConsoleApiBenchmarkPhaseJudge;
+  agentToolExperienceJudge: ConsoleApiBenchmarkPhaseJudge;
   failures: ConsoleApiBenchmarkFailure[];
   passed: boolean;
+};
+export type ConsoleApiBenchmarkPhaseJudge = {
+  releaseGatePassed: boolean;
+  fixtureIds: string[];
+  blockedReasons: string[];
 };
 export type ConsoleApiWorkbenchBenchmarkWall = {
   status: ConsoleApiWorkbenchStatus;
@@ -277,6 +282,9 @@ export type ConsoleApiWorkbenchRecallInspector = {
   graphFailures: string[];
   graphSelectedIds: string[];
   staleFalsePositiveCount: number;
+  agentToolHints: number;
+  toolExperienceReason: string;
+  hostFallbackRequired: boolean;
 };
 export type ConsoleApiWorkbenchProjectionInspector = {
   status: ConsoleApiWorkbenchStatus;
@@ -286,7 +294,8 @@ export type ConsoleApiWorkbenchProjectionInspector = {
   renderBudgetChars: number;
   injected: boolean;
   truncated: boolean;
-  privateGateAllowed: boolean;
+  runtimePrivateContextAllowed: boolean;
+  foregroundDisclosureAllowed: boolean;
   privateGateReason: string;
   evidenceRefs: number;
   budgetDecisions: number;
@@ -294,8 +303,10 @@ export type ConsoleApiWorkbenchProjectionInspector = {
   droppedCandidates: number;
   faithfulnessPassed: boolean;
   unsupportedClaims: string[];
-  privateEchoGuardPassed: boolean;
-  privateEchoCount: number;
+  disclosureIntegrityPassed: boolean;
+  rawPrivateViolationCount: number;
+  agentToolHints: number;
+  agentToolRejections: number;
 };
 export type ConsoleApiWorkbenchSkillRef = {
   name: string;
@@ -309,7 +320,6 @@ export type ConsoleApiWorkbenchProceduralEvolution = {
   totalSkills: number;
   activeSkills: number;
   runtimeLearned: number;
-  userProvided: number;
   disabled: number;
   topSkills: ConsoleApiWorkbenchSkillRef[];
 };
@@ -336,6 +346,10 @@ export type ConsoleApiWorkbenchSoulHealth = {
   deferredPending: number;
   deferredFailed: number;
   safeActions: string[];
+  agentToolRegistries: number;
+  agentToolRegistryTools: number;
+  agentToolExperiences: number;
+  agentToolStaleExperiences: number;
 };
 export type ConsoleApiWorkbenchReport = {
   apiMap: ConsoleApiWorkbenchApiMap;
@@ -365,8 +379,6 @@ export type ConsoleApiMetric = {
 };
 export type ConsoleApiSkillSummary = {
   name: string;
-  kind: SkillKind;
-  origin: SkillOrigin;
   title: string;
   topic: string;
   status: StatusKind;
@@ -384,7 +396,6 @@ export type ConsoleApiSkillList = {
   active: number;
   disabled: number;
   runtimeLearned: number;
-  userProvided: number;
   skills: ConsoleApiSkillSummary[];
 };
 export type ConsoleApiSkillDetail = {

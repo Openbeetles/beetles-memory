@@ -262,29 +262,35 @@ pub use mental_privacy::{
     REL_PATH_MENTAL_PRIVACY_STATES,
 };
 pub use next_gen_contract::{
-    build_edge_memory_appliance_gate_report, build_memory_autopilot_gate_report,
-    build_next_gen_contract_matrix, build_privacy_vault_gate_report,
-    build_procedural_evolution_gate_report, build_soul_kernel2_gate_report,
-    build_temporal_memory_graph_from_evidence, build_temporal_memory_graph_gate_report,
-    build_vault_migration_preflight, build_workbench_gate_report,
-    compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
-    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, AutopilotAuditReport,
-    CompactGraphIndex, CompactMemoryGraph, CompactSoulProfile, ConsolidationProposal,
-    CoreRevisionDiff, DeviceSyncProposal, DeviceTrustRecord, DroppedProjectionCandidate,
-    EdgeMemoryApplianceGateReport, EdgeMemoryBudgetReport, EdgeRecoveryFixture,
-    EncryptedSnapshotEnvelope, EvidenceBacklink, GraphRecallRerankReport, ImportanceDecayModel,
-    MemoryAutopilotGateReport, MemoryAutopilotInput, MemoryAutopilotPlan, MemoryGraphEdge,
-    MemoryGraphEdgeKind, MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind,
-    MemoryHygieneDiff, MemoryOperationSkill, NextGenCapabilityContract, NextGenContractValidation,
-    NextGenPhase, PrivacyVaultGateReport, PrivateEchoGuardReport, PrivateMaterialRedactionReport,
-    ProceduralEvolutionGateReport, ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
+    build_core_revision_diff_from_record, build_edge_memory_appliance_gate_report,
+    build_memory_autopilot_gate_report, build_next_gen_contract_matrix,
+    build_privacy_vault_gate_report, build_procedural_evolution_gate_report,
+    build_relationship_boundary_audit_from_constitution_audit, build_soul_compact_digest,
+    build_soul_feedback_report_from_turn_ledger,
+    build_soul_growth_proposal_from_core_revision_record,
+    build_soul_growth_proposals_from_core_revision_ledger, build_soul_kernel2_gate_report,
+    build_soul_regression_suite_report, build_temporal_memory_graph_from_evidence,
+    build_temporal_memory_graph_gate_report, build_vault_migration_preflight,
+    build_workbench_gate_report, compile_edge_memory_budget_report,
+    plan_memory_autopilot_for_profile, promote_task_experience_to_procedure,
+    rerank_recall_with_temporal_graph, AutopilotAuditReport, CompactGraphIndex, CompactMemoryGraph,
+    CompactSoulProfile, ConsolidationProposal, CoreRevisionDiff, DeviceSyncProposal,
+    DeviceTrustRecord, DroppedProjectionCandidate, EdgeMemoryApplianceGateReport,
+    EdgeMemoryBudgetReport, EdgeRecoveryFixture, EncryptedSnapshotEnvelope, EvidenceBacklink,
+    GraphRecallRerankReport, ImportanceDecayModel, MemoryAutopilotGateReport, MemoryAutopilotInput,
+    MemoryAutopilotPlan, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence,
+    MemoryGraphNode, MemoryGraphNodeKind, MemoryHygieneDiff, MemoryOperationSkill,
+    NextGenCapabilityContract, NextGenContractValidation, NextGenPhase, PrivacyVaultGateReport,
+    PrivateDisclosureIntegrityGuard, PrivateMaterialRedactionReport, ProceduralEvolutionGateReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
     ProceduralMemoryPromotionReport, ProceduralMemoryRecordV2, ProcedureGenome,
     ProjectionBudgetDecision, ProjectionFaithfulnessCheck, ProjectionPrivacyDecision,
     RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest, SoulFeedbackReport,
     SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport, SoulRegressionSuite,
-    SubjectProjectionReport, TaskExperienceToProcedure, TemporalMemoryGraphBuildReport,
-    TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest, VaultMigrationPreflight,
-    WorkbenchApiMap, WorkbenchGateReport, WorkbenchSurface,
+    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
+    SubjectProjectionWorkIntegrityReport, TaskExperienceToProcedure,
+    TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest,
+    VaultMigrationPreflight, WorkbenchApiMap, WorkbenchGateReport, WorkbenchSurface,
 };
 pub(crate) use outer_voice::run_outer_voice_refresh_with_state;
 pub use outer_voice::{
@@ -365,7 +371,12 @@ pub use profile::{
     PromptParticipationPlan,
 };
 pub use prompt_context::{
-    load_prompt_memory_context, PromptMemoryContext, PromptMemoryContextParams, PromptRuntimeCarry,
+    compile_inhabited_subject_projection, load_prompt_memory_context,
+    BoundaryAndDisclosureProtocol, InhabitedSubjectDroppedCandidate, InhabitedSubjectMount,
+    InhabitedSubjectProjection, InhabitedSubjectProjectionInput, ProjectionSourceAuthority,
+    PromptMemoryContext, PromptMemoryContextParams, PromptProjectionSource,
+    PromptProjectionSurfaceRole, PromptRuntimeCarry, ProtectedRuntimeContext,
+    WorkIntegrityCovenant,
 };
 pub(crate) use prompt_sanitizer::{scrub_memory_prompt_block, scrub_private_source_echoes};
 #[cfg(all(
@@ -807,11 +818,64 @@ pub trait MemoryStore: Send + Sync {
     fn write_daily_note(&self, name: &str, content: &str) -> Result<()>;
 }
 
-/// 会话单条消息，JSONL 行格式（role + content）。
+/// 会话单条消息，JSONL 行格式必须带消息主键、时间和宿主内发言者元数据。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionMessage {
+    pub message_id: String,
     pub role: String,
     pub content: String,
+    pub observed_at: u64,
+    pub created_at: u64,
+    pub speaker_id: String,
+    pub speaker_kind: String,
+}
+
+impl SessionMessage {
+    pub fn new(
+        message_id: impl Into<String>,
+        role: impl Into<String>,
+        content: impl Into<String>,
+        observed_at: u64,
+        created_at: u64,
+        speaker_id: impl Into<String>,
+        speaker_kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            message_id: message_id.into(),
+            role: role.into(),
+            content: content.into(),
+            observed_at,
+            created_at,
+            speaker_id: speaker_id.into(),
+            speaker_kind: speaker_kind.into(),
+        }
+    }
+
+    pub fn synthetic(role: impl Into<String>, content: impl Into<String>) -> Self {
+        let role = role.into();
+        let content = content.into();
+        let (speaker_id, speaker_kind) = default_session_speaker_for_role(&role);
+        Self::new(
+            synthesize_session_message_id("synthetic", &role, &content, 1),
+            role,
+            content,
+            0,
+            0,
+            speaker_id,
+            speaker_kind,
+        )
+    }
+}
+
+pub fn default_session_speaker_for_role(role: &str) -> (String, String) {
+    match role {
+        "user" => ("user".to_string(), "human".to_string()),
+        "assistant" => ("assistant".to_string(), "llm_agent".to_string()),
+        "system" => ("system".to_string(), "system".to_string()),
+        "tool" => ("tool".to_string(), "tool".to_string()),
+        other if !other.trim().is_empty() => (other.to_string(), "external".to_string()),
+        _ => ("unknown".to_string(), "unknown".to_string()),
+    }
 }
 
 /// 带稳定 message_id 的会话消息记录。
@@ -820,20 +884,48 @@ pub struct SessionMessageRecord {
     pub message_id: String,
     pub role: String,
     pub content: String,
+    pub observed_at: u64,
+    pub created_at: u64,
+    pub speaker_id: String,
+    pub speaker_kind: String,
 }
 
 impl SessionMessageRecord {
     pub fn into_message(self) -> SessionMessage {
         SessionMessage {
+            message_id: self.message_id,
             role: self.role,
             content: self.content,
+            observed_at: self.observed_at,
+            created_at: self.created_at,
+            speaker_id: self.speaker_id,
+            speaker_kind: self.speaker_kind,
         }
     }
 
     pub fn as_message(&self) -> SessionMessage {
         SessionMessage {
+            message_id: self.message_id.clone(),
             role: self.role.clone(),
             content: self.content.clone(),
+            observed_at: self.observed_at,
+            created_at: self.created_at,
+            speaker_id: self.speaker_id.clone(),
+            speaker_kind: self.speaker_kind.clone(),
+        }
+    }
+}
+
+impl From<SessionMessage> for SessionMessageRecord {
+    fn from(message: SessionMessage) -> Self {
+        Self {
+            message_id: message.message_id,
+            role: message.role,
+            content: message.content,
+            observed_at: message.observed_at,
+            created_at: message.created_at,
+            speaker_id: message.speaker_id,
+            speaker_kind: message.speaker_kind,
         }
     }
 }
@@ -862,33 +954,16 @@ pub(crate) fn synthesize_session_message_id(
     session_message_id_hash_update(&mut hash, content.as_bytes());
     session_message_id_hash_update(&mut hash, &[0]);
     session_message_id_hash_update(&mut hash, &occurrence.to_le_bytes());
-    format!("legacy_{hash:016x}")
+    format!("msg_{hash:016x}")
 }
 
 pub(crate) fn synthesize_session_message_records(
-    chat_id: &str,
+    _chat_id: &str,
     messages: Vec<SessionMessage>,
 ) -> Vec<SessionMessageRecord> {
-    let mut seen = std::collections::HashMap::<(String, String), u32>::new();
     messages
         .into_iter()
-        .map(|message| {
-            let key = (message.role.clone(), message.content.clone());
-            let occurrence = seen
-                .entry(key)
-                .and_modify(|count| *count = count.saturating_add(1))
-                .or_insert(1);
-            SessionMessageRecord {
-                message_id: synthesize_session_message_id(
-                    chat_id,
-                    message.role.as_str(),
-                    message.content.as_str(),
-                    *occurrence,
-                ),
-                role: message.role,
-                content: message.content,
-            }
-        })
+        .map(SessionMessageRecord::from)
         .collect()
 }
 
@@ -904,7 +979,6 @@ pub trait SessionStore: Send + Sync {
     }
     fn load_recent(&self, chat_id: &str, n: usize) -> Result<Vec<SessionMessage>>;
     /// 返回最近 N 条消息及其稳定 message_id。
-    /// 默认实现会从 `load_recent` 合成 legacy 稳定 id；持久化实现应覆写为真正持久主键。
     fn load_recent_records(&self, chat_id: &str, n: usize) -> Result<Vec<SessionMessageRecord>> {
         self.load_recent(chat_id, n)
             .map(|messages| synthesize_session_message_records(chat_id, messages))

@@ -89,6 +89,7 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
 

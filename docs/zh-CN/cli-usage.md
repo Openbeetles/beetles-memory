@@ -32,12 +32,11 @@ Commands：
 | `replay` | 检查某个 chat 的 turn replay。 |
 | `export` | 导出 continuity snapshot。 |
 | `import` | 导入 continuity snapshot。 |
-| `skill-list` | 列出 Skill 记忆。 |
-| `skill-show` | 查看单条 Skill 记忆详情。 |
-| `skill-import` | 导入或新建 Skill 记忆。 |
-| `skill-edit` | 编辑已有 Skill 记忆。 |
-| `skill-enable` / `skill-disable` | 启用或停用 Skill 记忆。 |
-| `skill-delete` | 删除 Skill 记忆。 |
+| `skill-list` | 列出运行时 Skill 记忆。 |
+| `skill-show` | 查看单条运行时 Skill 记忆详情。 |
+| `skill-edit` | 编辑已有运行时 Skill 记忆。 |
+| `skill-enable` / `skill-disable` | 启用或停用运行时 Skill 记忆。 |
+| `skill-delete` | 删除运行时 Skill 记忆。 |
 | `close` | 关闭 runtime 并发出 lifecycle report。 |
 
 常用 options：
@@ -56,22 +55,38 @@ Commands：
 | `--limit <n>` | `8` |
 | `--max-len <n>` | `4096` |
 
-## Skill 记忆管理
+## 运行时 Skill 记忆管理
 
-这些命令只管理 procedural memory record，不执行 skill，也不提供插件安装器。
+这些命令只管理已经存在的运行时 procedural memory record，不执行 skill，也不提供插件安装器。标准 Agent Skill 目录由宿主自己管理；独立部署时可通过 `BM_AGENT_SKILL_DIRS` 挂载目录，运行时只扫描和召回，不新增、不编辑、不导入。
 
 ```bash
 cargo run -p bm-cli --bin bm -- \
-  memory skill-import \
+  memory write-procedural \
   --profile profile-server-linux-dev-full \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
+  --name runtime_skill__release_guard \
   --title "Release guard" \
   --topic release \
   --summary "Verify release artifacts before publishing." \
   --content "1. run gates
 2. inspect artifacts
 3. dry run publish"
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory skill-edit \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --chat chat-1 \
+  --name runtime_skill__release_guard \
+  --title "Release guard" \
+  --topic release \
+  --summary "Verify release artifacts and changelog before publishing." \
+  --content "1. run gates
+2. inspect artifacts
+3. inspect changelog"
 ```
 
 ```bash

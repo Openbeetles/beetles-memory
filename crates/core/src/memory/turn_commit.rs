@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bus::IngressKind;
 use crate::error::Result;
 
 use super::{
-    default_subject_id, SessionMessage, SessionMessageRecord, SessionStore, SubjectId,
-    MAX_SESSION_ENTRIES,
+    default_session_speaker_for_role, default_subject_id, synthesize_session_message_id,
+    SessionMessage, SessionMessageRecord, SessionStore, SubjectId, MAX_SESSION_ENTRIES,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +83,9 @@ pub struct TranscriptInputMessage {
     pub role: String,
     pub content: String,
     pub authority: MemoryEvidenceAuthority,
+    pub observed_at: u64,
+    pub speaker_id: String,
+    pub speaker_kind: String,
 }
 
 impl TranscriptInputMessage {
@@ -90,10 +94,15 @@ impl TranscriptInputMessage {
         content: impl Into<String>,
         authority: MemoryEvidenceAuthority,
     ) -> Self {
+        let role = role.into();
+        let (speaker_id, speaker_kind) = default_session_speaker_for_role(&role);
         Self {
-            role: role.into(),
+            role,
             content: content.into(),
             authority,
+            observed_at: 0,
+            speaker_id,
+            speaker_kind,
         }
     }
 
@@ -113,11 +122,41 @@ impl TranscriptInputMessage {
         self.role.eq_ignore_ascii_case(role)
     }
 
-    fn into_session_message(self) -> SessionMessage {
-        SessionMessage {
-            role: self.role,
-            content: self.content,
-        }
+    pub fn with_observed_at(mut self, observed_at: u64) -> Self {
+        self.observed_at = observed_at;
+        self
+    }
+
+    pub fn with_speaker(
+        mut self,
+        speaker_id: impl Into<String>,
+        speaker_kind: impl Into<String>,
+    ) -> Self {
+        self.speaker_id = speaker_id.into();
+        self.speaker_kind = speaker_kind.into();
+        self
+    }
+
+    fn into_session_message(
+        self,
+        message_id: String,
+        fallback_observed_at: u64,
+        created_at: u64,
+    ) -> SessionMessage {
+        let observed_at = if self.observed_at == 0 {
+            fallback_observed_at
+        } else {
+            self.observed_at
+        };
+        SessionMessage::new(
+            message_id,
+            self.role,
+            self.content,
+            observed_at,
+            created_at.max(observed_at),
+            self.speaker_id,
+            self.speaker_kind,
+        )
     }
 }
 
@@ -177,7 +216,7 @@ struct SessionTurnCommitInput {
     source: MemoryTurnSource,
     user_content: String,
     input_messages: Vec<TranscriptInputMessage>,
-    assistant_content: Option<String>,
+    assistant_message: Option<TranscriptInputMessage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,10 +232,15 @@ pub struct SessionTurnCommitReport {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedSessionMessage {
+    pub message_id: String,
     pub role: String,
     pub authority: MemoryEvidenceAuthority,
     pub content_chars: usize,
     pub content_bytes: usize,
+    pub observed_at: u64,
+    pub created_at: u64,
+    pub speaker_id: String,
+    pub speaker_kind: String,
 }
 
 fn commit_session_turn(
@@ -210,13 +254,8 @@ fn commit_session_turn(
     match input.delivery_status {
         MemoryTurnDeliveryStatus::Delivered => {
             push_user_delta(&mut messages, &recent_records, &input);
-            if let Some(assistant_content) = input.assistant_content.as_deref() {
-                push_if_not_empty(
-                    &mut messages,
-                    "assistant",
-                    assistant_content,
-                    MemoryEvidenceAuthority::AssistantUtterance,
-                );
+            if let Some(assistant_message) = input.assistant_message.clone() {
+                push_message_if_not_empty(&mut messages, assistant_message);
             }
         }
         MemoryTurnDeliveryStatus::UserOnly
@@ -240,18 +279,41 @@ fn commit_session_turn(
         });
     }
 
-    let committed_messages = messages
-        .iter()
-        .map(|message| CommittedSessionMessage {
-            role: message.role.clone(),
-            authority: message.authority,
-            content_chars: message.content.chars().count(),
-            content_bytes: message.content.len(),
+    let now = current_unix_secs();
+    let prepared_messages = messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let authority = message.authority;
+            let occurrence = u32::try_from(before_count.saturating_add(index).saturating_add(1))
+                .unwrap_or(u32::MAX);
+            let message_id = synthesize_session_message_id(
+                chat_id,
+                message.role.as_str(),
+                message.content.as_str(),
+                occurrence,
+            );
+            let session_message = message.into_session_message(message_id, now, now);
+            (session_message, authority)
         })
         .collect::<Vec<_>>();
-    let session_messages = messages
+    let committed_messages = prepared_messages
+        .iter()
+        .map(|(message, authority)| CommittedSessionMessage {
+            message_id: message.message_id.clone(),
+            role: message.role.clone(),
+            authority: *authority,
+            content_chars: message.content.chars().count(),
+            content_bytes: message.content.len(),
+            observed_at: message.observed_at,
+            created_at: message.created_at,
+            speaker_id: message.speaker_id.clone(),
+            speaker_kind: message.speaker_kind.clone(),
+        })
+        .collect::<Vec<_>>();
+    let session_messages = prepared_messages
         .into_iter()
-        .map(TranscriptInputMessage::into_session_message)
+        .map(|(message, _)| message)
         .collect::<Vec<_>>();
     session_store.append_batch(chat_id, &session_messages)?;
     let after_count = session_store.message_count(chat_id)?;
@@ -310,11 +372,11 @@ pub fn commit_canonical_turn_delta(
                 .map(|message| message.content.clone())
                 .unwrap_or_default(),
             input_messages: delta.input_messages.clone(),
-            assistant_content: delta
+            assistant_message: delta
                 .assistant_message
                 .as_ref()
                 .filter(|message| message.is_role("assistant"))
-                .map(|message| message.content.clone()),
+                .cloned(),
         },
     )
 }
@@ -376,16 +438,14 @@ pub fn canonical_user_delta(
     user_messages[overlap..].to_vec()
 }
 
-fn push_if_not_empty(
+fn push_message_if_not_empty(
     messages: &mut Vec<TranscriptInputMessage>,
-    role: &str,
-    content: &str,
-    authority: MemoryEvidenceAuthority,
+    message: TranscriptInputMessage,
 ) {
-    if content.trim().is_empty() {
+    if message.content.trim().is_empty() {
         return;
     }
-    messages.push(TranscriptInputMessage::new(role, content, authority));
+    messages.push(message);
 }
 
 fn skipped_reason(status: MemoryTurnDeliveryStatus) -> &'static str {
@@ -397,4 +457,11 @@ fn skipped_reason(status: MemoryTurnDeliveryStatus) -> &'static str {
         MemoryTurnDeliveryStatus::IncompleteStream => "incomplete_stream",
         MemoryTurnDeliveryStatus::RejectedByPolicy => "rejected_by_policy",
     }
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }

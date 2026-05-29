@@ -572,7 +572,7 @@ fn user_message_looks_like_full_history_duplicate(
         .iter()
         .map(|message| message.trim())
         .filter(|message| !message.is_empty())
-        .any(|message| lines.iter().any(|line| *line == message))
+        .any(|message| lines.contains(&message))
 }
 
 fn looks_like_assistant_identity_self_claim(content: &str) -> bool {
@@ -707,10 +707,10 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .entry(chat_id.to_string())
                 .or_default()
-                .push(SessionMessage {
-                    role: role.to_string(),
-                    content: content.to_string(),
-                });
+                .push(SessionMessage::synthetic(
+                    role.to_string(),
+                    content.to_string(),
+                ));
             Ok(())
         }
 

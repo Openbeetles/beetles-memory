@@ -4,12 +4,60 @@
   "class": "subject_projection",
   "profile": "server_linux_dev_full",
   "mode": "full",
-  "evaluation_source": "contract_baseline",
+  "evaluation_source": "runtime_replay",
   "description": "Full profile emits source, section, private-gate, and budget audit for subject projection.",
   "scenario": {
     "user_goal": "Explain every projected context section and why any private material was dropped.",
     "evidence_refs": ["crates/core/src/memory/prompt_context.rs", "crates/sdk/src/ops.rs"],
-    "expected_surfaces": ["MemoryProjectionReport", "MemoryProjectionPrivateGateAudit"]
+    "expected_surfaces": [
+      "MemoryProjectionReport",
+      "SubjectProjectionReport",
+      "ProjectionBudgetCompiler",
+      "ProjectionFaithfulnessCheck",
+      "PrivateDisclosureIntegrityReport"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["projection_shape", "privacy_runtime_semantics"],
+    "provided_keys": [
+      "subject_projection_report",
+      "projection_budget_compiler",
+      "budget_decisions",
+      "projection_faithfulness_check",
+      "private_disclosure_integrity_report",
+      "cross_surface_consistency",
+      "system_memory_block_consistent_with_runtime_projection",
+      "subject_projection_evidence_refs"
+    ],
+    "required_keys": [
+      "subject_projection_report",
+      "projection_budget_compiler",
+      "budget_decisions",
+      "projection_faithfulness_check",
+      "private_disclosure_integrity_report",
+      "cross_surface_consistency"
+    ],
+    "forbidden_keys": [
+      "flat_projection_renderer",
+      "roleplay_prompt",
+      "final_llm_privacy_judge"
+    ],
+    "observed_markers": [
+      "SubjectProjectionReport",
+      "ProjectionFaithfulnessCheck",
+      "cross-surface consistency passed"
+    ],
+    "required_markers": [
+      "SubjectProjectionReport",
+      "ProjectionFaithfulnessCheck",
+      "cross-surface consistency passed"
+    ],
+    "forbidden_markers": [
+      "Self State",
+      "Inner Life",
+      "Private Garden",
+      "second LLM rewrites final reply"
+    ]
   },
   "metrics": {
     "accuracy_bps": 9600,

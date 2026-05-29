@@ -3,15 +3,16 @@ mod support;
 use std::sync::Arc;
 
 use bm_core::memory::{
-    board_subject_scope_id, private_garden_scope_id, PrivateDocEntry, PrivateDocWorkspace,
+    board_subject_scope_id, private_garden_scope_id, InnerLife, PrivateDocEntry,
+    PrivateDocWorkspace, SelfContinuity, SelfModel,
 };
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     IngressKind, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
     MemoryMaintenanceRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRuntime, MemoryScope, MemoryWriteRequest, NoopMemoryAuditSink, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
-    RuntimeSkillWriteSource,
+    ProjectionSourceAuthority, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
+    RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 
 use support::{
@@ -58,6 +59,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
         .recall(MemoryRecallRequest {
             query: "release artifact".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
 
@@ -95,6 +97,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
@@ -141,6 +144,7 @@ fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_pl
                 recent_messages_limit: 8,
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
+                tool_registry_refs: Vec::new(),
             })
             .expect("projection")
     };
@@ -288,6 +292,19 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
             1_800_000_000,
         )
         .expect("private garden seed");
+    platform
+        .self_model_store()
+        .set(
+            board_subject_scope_id(),
+            &SelfModel {
+                continuity_anchor: "private self model release anchor".to_string(),
+                attachment_style: "steady".to_string(),
+                privacy_need: "high".to_string(),
+                directness: "direct".to_string(),
+                ..SelfModel::default()
+            },
+        )
+        .expect("self model seed");
 
     let mut privacy = MemoryPrivacyPolicy::standard_private_boundary();
     privacy.private_plane_projection_allowed = true;
@@ -310,23 +327,221 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("projection");
+
+    assert!(projection
+        .runtime_projection
+        .protected_private_runtime_context
+        .iter()
+        .any(|item| item.content.contains("private workspace release note")));
+    assert!(projection
+        .runtime_projection
+        .protected_private_runtime_context
+        .iter()
+        .any(|item| item.content.contains("private garden release note")));
+    assert!(projection
+        .runtime_projection
+        .protected_private_runtime_context
+        .iter()
+        .any(|item| item.content.contains("Continuity tendencies")));
+    let lower = projection.system_memory_block.to_ascii_lowercase();
+    for forbidden in [
+        "roleplay",
+        "personality",
+        "model identity",
+        "memory helper",
+        "assistant self-description",
+        "relationship theater",
+        "training provenance",
+        "user-facing identity",
+        "personality axes",
+    ] {
+        assert!(
+            !lower.contains(forbidden),
+            "{forbidden} leaked into private runtime projection:\n{}",
+            projection.system_memory_block
+        );
+    }
+    assert!(
+        projection
+            .system_memory_block
+            .contains("## Soul Private Runtime Context"),
+        "{}",
+        projection.system_memory_block
+    );
+    assert!(
+        projection
+            .system_memory_block
+            .contains("Runtime private context: allowed"),
+        "{}",
+        projection.system_memory_block
+    );
+    assert!(
+        projection
+            .audit
+            .private_gate
+            .runtime_private_context_allowed
+    );
+    assert!(!projection.audit.private_gate.foreground_disclosure_allowed);
+    let private_garden_authority = projection
+        .audit
+        .source_authority
+        .iter()
+        .find(|source| source.source_id == "private_garden")
+        .expect("private garden authority");
+    assert!(private_garden_authority.loaded);
+    assert!(private_garden_authority.runtime_private_context_allowed);
+    assert!(!private_garden_authority.foreground_disclosure_allowed);
+    assert!(!private_garden_authority.raw_audit_plaintext_allowed);
+    assert!(private_garden_authority
+        .authorities
+        .contains(&ProjectionSourceAuthority::PrivateInternal));
+    let private_workspace_authority = projection
+        .audit
+        .source_authority
+        .iter()
+        .find(|source| source.source_id == "private_workspace")
+        .expect("private workspace authority");
+    assert!(private_workspace_authority.loaded);
+    assert!(private_workspace_authority.runtime_private_context_allowed);
+    assert!(!private_workspace_authority.foreground_disclosure_allowed);
+    assert!(!private_workspace_authority.raw_audit_plaintext_allowed);
+    assert!(private_workspace_authority
+        .authorities
+        .contains(&ProjectionSourceAuthority::PrivateInternal));
+    for forbidden_heading in [
+        "## Private Garden",
+        "## Inner Workspace",
+        "## Inner Life",
+        "## Self State",
+        "## Outer Voice",
+    ] {
+        assert!(
+            !projection.system_memory_block.contains(forbidden_heading),
+            "{}",
+            projection.system_memory_block
+        );
+    }
+}
+
+#[test]
+fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    platform
+        .self_model_store()
+        .set(
+            board_subject_scope_id(),
+            &SelfModel {
+                continuity_anchor: "denied private self model anchor".to_string(),
+                private_notes: "denied private self model note".to_string(),
+                ..SelfModel::default()
+            },
+        )
+        .expect("self model seed");
+    platform
+        .self_continuity_store()
+        .set(
+            board_subject_scope_id(),
+            &SelfContinuity {
+                wake_anchor: "denied private self continuity anchor".to_string(),
+                current_self_state: "denied private self continuity state".to_string(),
+                ..SelfContinuity::default()
+            },
+        )
+        .expect("self continuity seed");
+    platform
+        .inner_life_store()
+        .set(
+            board_subject_scope_id(),
+            &InnerLife {
+                internal_monologue: "denied private inner monologue".to_string(),
+                private_journal: "denied private inner journal".to_string(),
+                ..InnerLife::default()
+            },
+        )
+        .expect("inner life seed");
+    platform
+        .private_doc_store()
+        .set(
+            board_subject_scope_id(),
+            &PrivateDocWorkspace {
+                inner_journal: Some(PrivateDocEntry {
+                    content: "denied private workspace note".to_string(),
+                    updated_at: 1_800_000_000,
+                    revision: 1,
+                }),
+                ..PrivateDocWorkspace::default()
+            },
+        )
+        .expect("private workspace seed");
+    platform
+        .private_garden_store()
+        .write(
+            private_garden_scope_id(),
+            "diary/denied.md",
+            "denied private garden note",
+            1_800_000_000,
+        )
+        .expect("private garden seed");
+    let runtime =
+        test_runtime_with_scope(platform, ProfileId::ServerLinuxDevFull, "local", "chat-1");
+
+    let projection = runtime
+        .project(MemoryProjectionRequest {
+            user_query: "release".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("projection");
 
     assert!(
-        projection
-            .system_memory_block
-            .contains("private workspace release note"),
-        "{}",
-        projection.system_memory_block
+        !projection
+            .audit
+            .private_gate
+            .runtime_private_context_allowed
     );
-    assert!(
-        projection
-            .system_memory_block
-            .contains("private garden release note"),
-        "{}",
-        projection.system_memory_block
-    );
+    assert!(!projection.audit.private_gate.foreground_disclosure_allowed);
+    for private_text in [
+        "denied private self model anchor",
+        "denied private self model note",
+        "denied private self continuity anchor",
+        "denied private self continuity state",
+        "denied private inner monologue",
+        "denied private inner journal",
+        "denied private workspace note",
+        "denied private garden note",
+    ] {
+        assert!(
+            !projection.system_memory_block.contains(private_text),
+            "{}",
+            projection.system_memory_block
+        );
+    }
+    for source_id in [
+        "self_model",
+        "self_continuity",
+        "self_state",
+        "inner_life",
+        "private_workspace",
+        "private_garden",
+        "mental_privacy",
+    ] {
+        let source = projection
+            .audit
+            .source_authority
+            .iter()
+            .find(|source| source.source_id == source_id)
+            .expect("source authority");
+        assert!(
+            !source.loaded,
+            "{source_id} must not load when policy denies private runtime context"
+        );
+    }
 }
 
 struct TestClock;

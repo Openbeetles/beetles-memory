@@ -134,6 +134,7 @@ fn run_operation(
             let report = runtime.recall(MemoryRecallRequest {
                 query: query.clone(),
                 limit: *limit,
+                tool_registry_refs: Vec::new(),
             })?;
             let skill_ids = report
                 .procedural_hits
@@ -161,6 +162,7 @@ fn run_operation(
                 recent_messages_limit: 8,
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
+                tool_registry_refs: Vec::new(),
             })?;
             Ok(OperationReport::new(
                 &report.lifecycle_report,

@@ -24,9 +24,6 @@ import type {
   Lang,
   OverviewCard,
   Page,
-  SkillKind,
-  SkillOrigin,
-  SkillOriginFilter,
   SkillStatusFilter,
   StaticDeviceId,
   StatusKind,
@@ -371,28 +368,16 @@ export function filterSkills(
   source: ConsoleApiSkillSummary[],
   search: string,
   statusFilter: SkillStatusFilter,
-  originFilter: SkillOriginFilter,
 ): ConsoleApiSkillSummary[] {
   const needle = search.trim().toLowerCase();
   return source.filter((skill) => {
-    if (originFilter !== "all" && skill.origin !== originFilter) return false;
     if (statusFilter === "active" && (!skill.enabled || skill.status === "retired")) return false;
     if (statusFilter === "disabled" && skill.enabled) return false;
     if (statusFilter === "retired" && skill.status !== "retired") return false;
     if (!needle) return true;
-    return [skill.name, skill.title, skill.topic, skill.status, skill.origin]
+    return [skill.name, skill.title, skill.topic, skill.status]
       .some((value) => value.toLowerCase().includes(needle));
   });
-}
-
-export function skillOriginLabel(t: ConsoleCopy, origin: SkillOrigin): string {
-  if (origin === "user_provided") return t.skillsPanel.userProvided;
-  return t.skillsPanel.runtimeLearned;
-}
-
-export function skillKindLabel(kind: SkillKind, currentLang: Lang): string {
-  if (kind === "runtime_skill") return "Runtime Skill";
-  return currentLang === "zh-CN" ? "手工文档" : "Manual Document";
 }
 
 export function skillQuality(skill: ConsoleApiSkillSummary): string {

@@ -199,11 +199,23 @@ fn should_load_recent_persona_evidence_for_prompt(
 }
 
 fn should_load_p3_subjective_projection(params: &PromptMemoryContextParams<'_>) -> bool {
+    if !params.include_private_runtime_projection {
+        return false;
+    }
     matches!(
         params.memory_system_kind,
         super::MemorySystemKind::LinuxFull
     ) && (params.participation_plan.load_l2_background_governance
         || params.participation_plan.load_l3_private_depth)
+}
+
+fn should_load_private_runtime_background(params: &PromptMemoryContextParams<'_>) -> bool {
+    params.include_private_runtime_projection
+        && params.participation_plan.load_l2_background_governance
+}
+
+fn should_load_private_runtime_depth(params: &PromptMemoryContextParams<'_>) -> bool {
+    params.include_private_runtime_projection && params.participation_plan.load_l3_private_depth
 }
 
 #[inline(never)]
@@ -355,6 +367,8 @@ pub(crate) fn load_constitutional_stage(
     seed: &PromptContextSeed,
     health: &mut PromptContextLoadHealth,
 ) -> Box<PromptConstitutionalStage> {
+    let load_private_background = should_load_private_runtime_background(params);
+    let load_private_depth = should_load_private_runtime_depth(params);
     let self_authored_core = params
         .participation_plan
         .load_l1_constitutional
@@ -383,9 +397,7 @@ pub(crate) fn load_constitutional_stage(
             })
         })
         .flatten();
-    let self_model = params
-        .participation_plan
-        .load_l2_background_governance
+    let self_model = load_private_background
         .then(|| {
             load_optional_with_health(health, "self_model", || {
                 params.self_model_store.get(seed.subject_id)
@@ -393,8 +405,9 @@ pub(crate) fn load_constitutional_stage(
             .map(Box::new)
         })
         .flatten();
-    let self_continuity = (params.participation_plan.load_l1_constitutional
-        || params.participation_plan.load_l2_background_governance)
+    let self_continuity = (params.include_private_runtime_projection
+        && (params.participation_plan.load_l1_constitutional
+            || params.participation_plan.load_l2_background_governance))
         .then(|| {
             load_optional_with_health(health, "self_continuity", || {
                 params.self_continuity_store.get(seed.subject_id)
@@ -447,9 +460,7 @@ pub(crate) fn load_constitutional_stage(
             .map(Box::new)
         })
         .flatten();
-    let inner_life = params
-        .participation_plan
-        .load_l3_private_depth
+    let inner_life = load_private_depth
         .then(|| {
             load_optional_with_health(health, "inner_life", || {
                 params.inner_life_store.get(seed.subject_id)
@@ -457,9 +468,7 @@ pub(crate) fn load_constitutional_stage(
             .map(Box::new)
         })
         .flatten();
-    let private_workspace = params
-        .participation_plan
-        .load_l3_private_depth
+    let private_workspace = load_private_depth
         .then(|| {
             load_optional_with_health(health, "private_workspace", || {
                 params.private_doc_store.get(seed.subject_id)
@@ -467,19 +476,21 @@ pub(crate) fn load_constitutional_stage(
             .map(Box::new)
         })
         .flatten();
-    let recent_private_garden_docs = if params.participation_plan.load_l3_private_depth {
-        load_vec_with_health(health, "private_garden", || {
-            params.private_garden_store.list(
-                private_garden_scope_id(),
-                prompt_private_garden_doc_limit(seed.profile),
-            )
-        })
-    } else {
-        Vec::new()
-    };
-    let mental_privacy_state = (!seed.reuse_stored_relationship_constitution
-        || params.participation_plan.load_l2_background_governance
-        || params.participation_plan.load_l3_private_depth)
+    let recent_private_garden_docs =
+        if load_private_depth && params.include_private_garden_projection {
+            load_vec_with_health(health, "private_garden", || {
+                params.private_garden_store.list(
+                    private_garden_scope_id(),
+                    prompt_private_garden_doc_limit(seed.profile),
+                )
+            })
+        } else {
+            Vec::new()
+        };
+    let mental_privacy_state = (params.include_private_runtime_projection
+        && (!seed.reuse_stored_relationship_constitution
+            || params.participation_plan.load_l2_background_governance
+            || params.participation_plan.load_l3_private_depth))
         .then(|| {
             load_optional_with_health(health, "mental_privacy_state", || {
                 params.mental_privacy_store.get(&seed.relationship_id)
@@ -573,9 +584,18 @@ pub(crate) fn load_private_projection_stage(
     constitutional: &PromptConstitutionalStage,
     health: &mut PromptContextLoadHealth,
 ) -> Box<PromptPrivateProjectionStage> {
-    let self_model_text = constitutional.self_model.as_ref().and_then(|model| {
-        render_self_model_block(model, memory_policy(seed.profile).self_model.render_max_len)
-    });
+    let load_private_background = should_load_private_runtime_background(params);
+    let load_private_depth = should_load_private_runtime_depth(params);
+    let self_model_text = load_private_background
+        .then(|| {
+            constitutional.self_model.as_ref().and_then(|model| {
+                render_self_model_block(
+                    model,
+                    memory_policy(seed.profile).self_model.render_max_len,
+                )
+            })
+        })
+        .flatten();
     let world_snapshot_text = params
         .participation_plan
         .load_l2_background_governance
@@ -650,15 +670,17 @@ pub(crate) fn load_private_projection_stage(
             })
         })
         .flatten();
-    let inner_life_text = constitutional.inner_life.as_ref().and_then(|inner_life| {
-        render_inner_life_block(
-            inner_life,
-            memory_policy(seed.profile).inner_life.render_max_len,
-        )
-    });
-    let self_continuity_text = params
-        .participation_plan
-        .load_l2_background_governance
+    let inner_life_text = load_private_depth
+        .then(|| {
+            constitutional.inner_life.as_ref().and_then(|inner_life| {
+                render_inner_life_block(
+                    inner_life,
+                    memory_policy(seed.profile).inner_life.render_max_len,
+                )
+            })
+        })
+        .flatten();
+    let self_continuity_text = load_private_background
         .then(|| {
             constitutional
                 .self_continuity
@@ -671,17 +693,20 @@ pub(crate) fn load_private_projection_stage(
                 })
         })
         .flatten();
-    let private_workspace_text = constitutional
-        .private_workspace
-        .as_ref()
-        .and_then(|workspace| {
-            render_private_doc_workspace_block(
-                workspace,
-                memory_policy(seed.profile).private_docs.render_max_len,
-            )
-        });
-    let private_garden_text = (params.participation_plan.load_l3_private_depth
-        && params.include_private_garden_projection)
+    let private_workspace_text = load_private_depth
+        .then(|| {
+            constitutional
+                .private_workspace
+                .as_ref()
+                .and_then(|workspace| {
+                    render_private_doc_workspace_block(
+                        workspace,
+                        memory_policy(seed.profile).private_docs.render_max_len,
+                    )
+                })
+        })
+        .flatten();
+    let private_garden_text = (load_private_depth && params.include_private_garden_projection)
         .then(|| {
             render_private_garden_block(
                 &constitutional.recent_private_garden_docs,
@@ -697,8 +722,9 @@ pub(crate) fn load_private_projection_stage(
         constitutional.private_workspace.as_deref(),
         &constitutional.recent_private_garden_docs,
     );
-    let mental_privacy_text = (params.participation_plan.load_l2_background_governance
-        || params.participation_plan.load_l3_private_depth)
+    let mental_privacy_text = (params.include_private_runtime_projection
+        && (params.participation_plan.load_l2_background_governance
+            || params.participation_plan.load_l3_private_depth))
         .then(|| {
             render_mental_privacy_boundary_block(
                 constitutional.mental_privacy_state.as_deref(),
@@ -707,9 +733,7 @@ pub(crate) fn load_private_projection_stage(
             )
         })
         .flatten();
-    let self_state_text = params
-        .participation_plan
-        .load_l2_background_governance
+    let self_state_text = load_private_background
         .then(|| {
             render_self_state_block(
                 &build_self_state(

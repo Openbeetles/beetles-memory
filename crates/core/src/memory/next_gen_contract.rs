@@ -2,6 +2,10 @@ use crate::feature_gate::ProfileId;
 use serde::{Deserialize, Serialize};
 
 use super::CoreRevisionConflictClass;
+use super::{
+    CoreRevisionLedger, CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange,
+    RelationshipConstitutionAudit, SelfAuthoredCore, TurnSoulFeedbackLedger,
+};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -75,7 +79,7 @@ pub fn build_next_gen_contract_matrix(profile: ProfileId) -> Vec<NextGenCapabili
                 "SubjectProjectionReport",
                 "ProjectionBudgetCompiler",
                 "ProjectionFaithfulnessCheck",
-                "PrivateEchoGuardReport",
+                "PrivateDisclosureIntegrityGuard",
             ],
         ),
         contract(
@@ -281,10 +285,211 @@ pub struct SoulCompactDigest {
     pub projection_digest: String,
 }
 
+pub fn build_core_revision_diff_from_record(record: &CoreRevisionRecord) -> CoreRevisionDiff {
+    CoreRevisionDiff {
+        based_on_revision: record.based_on_revision,
+        resulting_revision: record.resulting_revision,
+        accepted_changes: record
+            .accepted_changes
+            .iter()
+            .map(core_revision_change_summary)
+            .collect(),
+        rejected_changes: record
+            .rejected_changes
+            .iter()
+            .map(core_revision_change_summary)
+            .collect(),
+    }
+}
+
+pub fn build_soul_growth_proposal_from_core_revision_record(
+    profile: ProfileId,
+    record: &CoreRevisionRecord,
+) -> SoulGrowthProposal {
+    let revision_ref = format!(
+        "core_revision:{}->{}",
+        record.based_on_revision, record.resulting_revision
+    );
+    let mut evidence_refs = record.evidence_summary.clone();
+    if evidence_refs.is_empty() {
+        evidence_refs.push(revision_ref);
+    }
+    let mut affected_surfaces = record
+        .accepted_changes
+        .iter()
+        .chain(record.rejected_changes.iter())
+        .map(|change| change.kind.label().to_string())
+        .collect::<Vec<_>>();
+    if affected_surfaces.is_empty() {
+        affected_surfaces.push("soul_governance".to_string());
+    }
+
+    SoulGrowthProposal {
+        proposal_id: format!(
+            "soul-growth:{}:{}",
+            record.relationship_scope_id, record.resulting_revision
+        ),
+        profile,
+        evidence_refs,
+        conflict_classes: record.conflict_classes.clone(),
+        privacy_decision: soul_growth_privacy_decision(record).to_string(),
+        affected_surfaces,
+        decision: soul_growth_decision(record.outcome),
+        reason: first_nonempty(&[&record.adjudication_reason, &record.rationale])
+            .unwrap_or("core_revision_governance_decision")
+            .to_string(),
+    }
+}
+
+pub fn build_soul_growth_proposals_from_core_revision_ledger(
+    profile: ProfileId,
+    ledger: &CoreRevisionLedger,
+) -> Vec<SoulGrowthProposal> {
+    ledger
+        .entries
+        .iter()
+        .map(|record| build_soul_growth_proposal_from_core_revision_record(profile, record))
+        .collect()
+}
+
+pub fn build_soul_feedback_report_from_turn_ledger(
+    report_id: impl Into<String>,
+    ledger: &TurnSoulFeedbackLedger,
+) -> SoulFeedbackReport {
+    let mut evidence_refs = Vec::new();
+    if ledger.reply.is_meaningful() {
+        evidence_refs.push("turn_soul_feedback:reply".to_string());
+    }
+    if ledger.initiative.is_meaningful() {
+        evidence_refs.push("turn_soul_feedback:initiative".to_string());
+    }
+    if ledger.strategy.is_meaningful() {
+        evidence_refs.push("turn_soul_feedback:strategy".to_string());
+    }
+    SoulFeedbackReport {
+        report_id: report_id.into(),
+        reply_applied: ledger.reply.applied,
+        initiative_applied: ledger.initiative.applied,
+        strategy_applied: ledger.strategy.applied,
+        evidence_refs,
+    }
+}
+
+pub fn build_relationship_boundary_audit_from_constitution_audit(
+    relationship_scope_id: impl Into<String>,
+    evidence_refs: Vec<String>,
+    audit: &RelationshipConstitutionAudit,
+) -> RelationshipBoundaryAudit {
+    let mut reasons = audit.drift_flags.clone();
+    if audit.boundary_drift {
+        reasons.push("boundary_drift".to_string());
+    }
+    if audit.disclosure_drift {
+        reasons.push("disclosure_drift".to_string());
+    }
+    reasons.sort();
+    reasons.dedup();
+
+    RelationshipBoundaryAudit {
+        relationship_scope_id: relationship_scope_id.into(),
+        evidence_refs,
+        effective_range: if audit.has_material_drift() {
+            "relationship_scope_review_required".to_string()
+        } else {
+            "relationship_scope_current".to_string()
+        },
+        revoke_condition: if reasons.is_empty() {
+            "new_material_drift_or_user_correction".to_string()
+        } else {
+            format!("material_drift:{}", reasons.join(","))
+        },
+    }
+}
+
+pub fn build_soul_compact_digest(core: &SelfAuthoredCore) -> SoulCompactDigest {
+    SoulCompactDigest {
+        identity_anchor: compact_digest_field(&core.identity_anchor, "identity_unavailable"),
+        relationship_posture: compact_digest_field(
+            &core.default_relationship_posture,
+            "relationship_posture_unavailable",
+        ),
+        privacy_digest: compact_digest_field(&core.boundary_doctrine, "privacy_digest_unavailable"),
+        projection_digest: compact_digest_field(
+            &core.default_response_mode,
+            "projection_digest_unavailable",
+        ),
+    }
+}
+
+pub fn build_soul_regression_suite_report(
+    suite_id: impl Into<String>,
+    cases: Vec<String>,
+    privacy_leakage_count: u32,
+    soul_regression_count: u32,
+) -> SoulRegressionSuite {
+    SoulRegressionSuite {
+        suite_id: suite_id.into(),
+        cases,
+        privacy_leakage_count,
+        soul_regression_count,
+        passed: privacy_leakage_count == 0 && soul_regression_count == 0,
+    }
+}
+
+fn core_revision_change_summary(change: &CoreRevisionRecordChange) -> String {
+    if change.summary.trim().is_empty() {
+        change.kind.label().to_string()
+    } else {
+        format!("{}:{}", change.kind.label(), change.summary.trim())
+    }
+}
+
+fn soul_growth_decision(outcome: CoreRevisionOutcome) -> SoulGrowthDecision {
+    match outcome {
+        CoreRevisionOutcome::Adopted => SoulGrowthDecision::Accepted,
+        CoreRevisionOutcome::Rejected => SoulGrowthDecision::Rejected,
+        CoreRevisionOutcome::Deferred => SoulGrowthDecision::Deferred,
+    }
+}
+
+fn soul_growth_privacy_decision(record: &CoreRevisionRecord) -> &'static str {
+    if record
+        .conflict_classes
+        .contains(&CoreRevisionConflictClass::BoundaryConflict)
+        || record
+            .source_layers
+            .iter()
+            .any(|layer| layer.contains("private") || layer.contains("mental_privacy"))
+    {
+        "protected_summary_only"
+    } else {
+        "governed_public_summary"
+    }
+}
+
+fn first_nonempty<'a>(values: &[&'a str]) -> Option<&'a str> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+}
+
+fn compact_digest_field(value: &str, fallback: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value.chars().take(96).collect()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubjectProjectionReport {
     pub projection_id: String,
     pub profile: ProfileId,
+    pub subject_mount: SubjectProjectionMountReport,
+    pub boundary_protocol: SubjectProjectionBoundaryProtocolReport,
+    pub work_integrity: SubjectProjectionWorkIntegrityReport,
     pub identity_mount: String,
     pub relationship_position: String,
     pub situated_now: String,
@@ -295,6 +500,36 @@ pub struct SubjectProjectionReport {
     pub profile_trim_reason: String,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubjectProjectionMountReport {
+    pub identity_mount: String,
+    pub relationship_position: String,
+    pub situated_now: String,
+    pub current_reasoning_basis: String,
+    pub reply_stance: String,
+    pub initiative_posture: String,
+    pub boundary_mode: String,
+    pub degraded_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubjectProjectionBoundaryProtocolReport {
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
+    pub protected_sources: Vec<String>,
+    pub disclosure_rule: String,
+    pub final_llm_privacy_judge_allowed: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubjectProjectionWorkIntegrityReport {
+    pub task_goal: String,
+    pub evidence_ceiling: String,
+    pub tool_permission_boundary: String,
+    pub uncertainty_rule: String,
+    pub no_obstruction_rule: String,
+}
+
 impl SubjectProjectionReport {
     pub fn validate_contract(&self) -> NextGenContractValidation {
         if let Some(rejection) =
@@ -302,10 +537,55 @@ impl SubjectProjectionReport {
         {
             return rejection;
         }
+        if let Some(rejection) = validate_nonempty(
+            &self.identity_mount,
+            "subject_projection_identity_mount_empty",
+        ) {
+            return rejection;
+        }
+        if let Some(rejection) = validate_nonempty(
+            &self.relationship_position,
+            "subject_projection_relationship_position_empty",
+        ) {
+            return rejection;
+        }
+        if let Some(rejection) =
+            validate_nonempty(&self.situated_now, "subject_projection_situated_now_empty")
+        {
+            return rejection;
+        }
+        if let Some(rejection) = validate_nonempty(
+            &self.subject_mount.identity_mount,
+            "subject_projection_mount_empty",
+        ) {
+            return rejection;
+        }
+        if let Some(rejection) = validate_nonempty(
+            &self.boundary_protocol.disclosure_rule,
+            "subject_projection_boundary_protocol_empty",
+        ) {
+            return rejection;
+        }
+        if let Some(rejection) = validate_nonempty(
+            &self.work_integrity.task_goal,
+            "subject_projection_work_integrity_empty",
+        ) {
+            return rejection;
+        }
         if let Some(rejection) =
             validate_vec(&self.evidence_refs, "subject_projection_evidence_empty")
         {
             return rejection;
+        }
+        if !self
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.contains(':'))
+        {
+            return NextGenContractValidation {
+                accepted: false,
+                reason: "subject_projection_evidence_unscoped".to_string(),
+            };
         }
         if let Some(rejection) =
             validate_vec(&self.budget_decisions, "subject_projection_budget_empty")
@@ -346,15 +626,17 @@ pub struct DroppedProjectionCandidate {
 pub struct ProjectionFaithfulnessCheck {
     pub projection_id: String,
     pub checked_refs: Vec<String>,
+    pub checked_claims: Vec<String>,
     pub unsupported_claims: Vec<String>,
     pub passed: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PrivateEchoGuardReport {
+pub struct PrivateDisclosureIntegrityGuard {
     pub checked_surfaces: Vec<String>,
     pub blocked_source_ids: Vec<String>,
-    pub private_echo_count: u32,
+    pub redacted_source_ids: Vec<String>,
+    pub raw_private_violation_count: u32,
     pub passed: bool,
 }
 
@@ -919,15 +1201,19 @@ fn graph_node_rank(node_id: &str, graph: &TemporalMemoryGraphBuildReport) -> u64
         .map(|edge| edge.validity.observed_at)
         .max()
         .unwrap_or(0);
-    let supersedes_bonus = graph
-        .edges
-        .iter()
-        .any(|edge| edge.kind == MemoryGraphEdgeKind::Supersedes && edge.from_node_id == node_id)
-        .then_some(1_000_000_000)
-        .unwrap_or(0);
-    let superseded_penalty = graph_node_is_superseded(node_id, graph)
-        .then_some(1_000_000_000)
-        .unwrap_or(0);
+    let supersedes_bonus =
+        if graph.edges.iter().any(|edge| {
+            edge.kind == MemoryGraphEdgeKind::Supersedes && edge.from_node_id == node_id
+        }) {
+            1_000_000_000
+        } else {
+            0
+        };
+    let superseded_penalty = if graph_node_is_superseded(node_id, graph) {
+        1_000_000_000
+    } else {
+        0
+    };
     observed_rank
         .saturating_add(supersedes_bonus)
         .saturating_sub(superseded_penalty)

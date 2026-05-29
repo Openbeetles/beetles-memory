@@ -131,6 +131,7 @@ impl TryFrom<DesktopConsoleInvokeRequest> for DesktopConsoleRequest {
     fn try_from(value: DesktopConsoleInvokeRequest) -> std::result::Result<Self, Self::Error> {
         match value.method.as_str() {
             "GET" => Ok(Self::get(value.path)),
+            "PUT" => Ok(Self::put_json(value.path, value.body)),
             "POST" => Ok(Self::post_json(value.path, value.body)),
             "PATCH" => Ok(Self::patch_json(value.path, value.body)),
             "DELETE" => Ok(Self::delete(value.path)),
@@ -212,6 +213,14 @@ impl DesktopConsoleRequest {
         }
     }
 
+    pub fn put_json(path: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Put,
+            path: path.into(),
+            body: body.into(),
+        }
+    }
+
     pub fn patch_json(path: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             method: HttpMethod::Patch,
@@ -237,6 +246,11 @@ impl DesktopConsoleRequest {
             }
             HttpMethod::Post => {
                 let mut request = HttpRuntimeRequest::post_json(self.path, self.body);
+                request.authenticated = true;
+                request
+            }
+            HttpMethod::Put => {
+                let mut request = HttpRuntimeRequest::put_json(self.path, self.body);
                 request.authenticated = true;
                 request
             }

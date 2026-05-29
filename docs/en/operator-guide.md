@@ -23,19 +23,21 @@ Use inspect after migration dry-run/apply to confirm selected ids, recall planes
 
 Projection diagnostics come from `MemoryProjectionReport.audit`, including source planes, selected ids, section chars, budget, and private gate decisions. Conservative compaction comes from `MemoryRuntime::run_retention_compaction()`, whose report explicitly forbids host-side deletion of accepted memory.
 
-## Skill Memory Management
+## Runtime Skill And Standard Agent Skill
 
-Standalone consoles and CLI operators may manage Skill Memory, but they manage procedural memory records, not executors, marketplaces, or workflow runners.
+Standalone consoles and CLI operators manage runtime Skill Memory only: procedural memory records learned during runtime. They are not executors, marketplaces, workflow runners, or managers for standard Agent Skill directories.
 
 SDK entry points:
 
-- `MemoryRuntime::list_skills`
-- `MemoryRuntime::get_skill`
-- `MemoryRuntime::upsert_skill`
-- `MemoryRuntime::set_skill_enabled`
-- `MemoryRuntime::delete_skill`
+- `MemoryRuntime::list_runtime_skills`
+- `MemoryRuntime::get_runtime_skill`
+- `MemoryRuntime::edit_runtime_skill`
+- `MemoryRuntime::set_runtime_skill_enabled`
+- `MemoryRuntime::delete_runtime_skill`
 
-Every mutation enters `MemoryRuntime`, then core skill governance and the configured store backend. The HTTP console only routes `/console/skills*`; the CLI only calls the entry facade. Neither path reads or writes skill files directly.
+Every mutation enters `MemoryRuntime`, then core skill governance and the configured store backend. The HTTP console only routes runtime Skill view/edit/enable/delete operations under `/console/skills*`; the CLI only calls the entry facade. Neither path reads or writes skill files directly.
+
+Standard Agent Skills stay host-managed. The SDK provides `MemoryRuntimeBuilder::agent_skill_dirs` / `add_agent_skill_dir` for read-only mounts, and standalone HTTP/CLI deployments can use `BM_AGENT_SKILL_DIRS`. Recall and projection use only `SKILL.md` summaries, resource counts, and fingerprints; scripts are not executed, assets are not read, and the directory never becomes a memory-owned management object. ESP profiles reject standard Agent Skill directory mounts.
 
 ## Recover
 

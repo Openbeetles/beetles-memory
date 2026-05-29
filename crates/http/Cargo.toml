@@ -17,14 +17,36 @@ required-features = ["server-std"]
 
 [features]
 default = []
-server-std = ["bm-entry"]
-profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
-profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
-profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]
-profile-desktop-macos-embedded-sdk = ["bm-adapter/profile-desktop-macos-embedded-sdk"]
-profile-desktop-windows-embedded-sdk = ["bm-adapter/profile-desktop-windows-embedded-sdk"]
-profile-server-linux-memory-gateway = ["bm-adapter/profile-server-linux-memory-gateway"]
-profile-server-linux-dev-full = ["bm-adapter/profile-server-linux-dev-full"]
+server-std = ["dep:bm-entry"]
+replay-harness = ["bm-entry?/replay-harness"]
+profile-esp-standalone-memory = [
+    "bm-adapter/profile-esp-standalone-memory",
+    "bm-entry?/profile-esp-standalone-memory",
+]
+profile-esp-embedded-sdk = [
+    "bm-adapter/profile-esp-embedded-sdk",
+    "bm-entry?/profile-esp-embedded-sdk",
+]
+profile-linux-device-standalone-memory = [
+    "bm-adapter/profile-linux-device-standalone-memory",
+    "bm-entry?/profile-linux-device-standalone-memory",
+]
+profile-desktop-macos-embedded-sdk = [
+    "bm-adapter/profile-desktop-macos-embedded-sdk",
+    "bm-entry?/profile-desktop-macos-embedded-sdk",
+]
+profile-desktop-windows-embedded-sdk = [
+    "bm-adapter/profile-desktop-windows-embedded-sdk",
+    "bm-entry?/profile-desktop-windows-embedded-sdk",
+]
+profile-server-linux-memory-gateway = [
+    "bm-adapter/profile-server-linux-memory-gateway",
+    "bm-entry?/profile-server-linux-memory-gateway",
+]
+profile-server-linux-dev-full = [
+    "bm-adapter/profile-server-linux-dev-full",
+    "bm-entry?/profile-server-linux-dev-full",
+]
 
 [dependencies]
 bm-adapter.workspace = true

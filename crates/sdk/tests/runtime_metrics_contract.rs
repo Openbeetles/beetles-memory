@@ -47,6 +47,7 @@ fn finalize_request(turn_id: &str) -> MemoryTurnFinalizeRequest {
         runtime_skill_selected_ids: Vec::new(),
         task_learning_selected_ids: Vec::new(),
         reuse_outcome_note: String::new(),
+        tool_usage_feedback: None,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -77,6 +78,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
         .recall(MemoryRecallRequest {
             query: "runtime metrics".to_string(),
             limit: 4,
+            tool_registry_refs: Vec::new(),
         })
         .expect("recall");
     runtime
@@ -86,6 +88,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
         })
         .expect("project");
     runtime

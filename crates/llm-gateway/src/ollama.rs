@@ -8,6 +8,7 @@ use bm_sdk::{
 };
 use serde_json::{json, Map, Value};
 
+use crate::agent_tools::request_scoped_agent_tool_registry;
 use crate::maintenance::{
     run_text_maintenance, BoundedText, GatewayInputTranscript, GatewayMaintenancePlan,
     GatewayMaintenancePlanInput,
@@ -525,6 +526,19 @@ fn handle_chat(
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
     let runtime_budget = runtime.runtime().runtime_budget();
+    let tool_registry_refs = if let Some(registry) =
+        request_scoped_agent_tool_registry("ollama-compatible", body_object.get("tools"))
+    {
+        audit.record_note("gateway_host_tools_no_cold_route");
+        let registry_ref = registry.registry_ref();
+        runtime
+            .runtime()
+            .upsert_agent_tool_registry(registry)
+            .map_err(|error| GatewayError::projection_failed(error.to_string()))?;
+        vec![registry_ref]
+    } else {
+        Vec::new()
+    };
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
@@ -536,6 +550,7 @@ fn handle_chat(
                 .recent_messages_limit,
             pressure: config.projection.pressure,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs,
         })
         .map_err(|error| {
             audit.record_stage(GatewayAuditStage::Projection, GatewayAuditOutcome::Failed);
@@ -545,6 +560,7 @@ fn handle_chat(
         GatewayAuditStage::Projection,
         GatewayAuditOutcome::Succeeded,
     );
+    audit.record_projection(&config.audit, &projection)?;
 
     let stream = body_object
         .get("stream")
@@ -657,6 +673,19 @@ fn handle_generate(
         .unwrap_or(false);
     let provider_limit = provider_model_context_limit(provider, model_alias);
     let runtime_budget = runtime.runtime().runtime_budget();
+    let tool_registry_refs = if let Some(registry) =
+        request_scoped_agent_tool_registry("ollama-compatible", body_object.get("tools"))
+    {
+        audit.record_note("gateway_host_tools_no_cold_route");
+        let registry_ref = registry.registry_ref();
+        runtime
+            .runtime()
+            .upsert_agent_tool_registry(registry)
+            .map_err(|error| GatewayError::projection_failed(error.to_string()))?;
+        vec![registry_ref]
+    } else {
+        Vec::new()
+    };
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
@@ -668,6 +697,7 @@ fn handle_generate(
                 .recent_messages_limit,
             pressure: config.projection.pressure,
             mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs,
         })
         .map_err(|error| {
             audit.record_stage(GatewayAuditStage::Projection, GatewayAuditOutcome::Failed);
@@ -677,6 +707,7 @@ fn handle_generate(
         GatewayAuditStage::Projection,
         GatewayAuditOutcome::Succeeded,
     );
+    audit.record_projection(&config.audit, &projection)?;
 
     let stream = body_object
         .get("stream")
@@ -950,14 +981,55 @@ fn extract_chat_input_transcript(messages: Option<&Value>) -> Result<GatewayInpu
             transcript.latest_user_text = content.clone();
             transcript
                 .messages
-                .push(TranscriptInputMessage::user(content));
+                .push(transcript_message_with_gateway_speaker(
+                    TranscriptInputMessage::user(content),
+                    message,
+                    role,
+                ));
         } else if role.eq_ignore_ascii_case("assistant") {
             transcript
                 .messages
-                .push(TranscriptInputMessage::assistant(content));
+                .push(transcript_message_with_gateway_speaker(
+                    TranscriptInputMessage::assistant(content),
+                    message,
+                    role,
+                ));
         }
     }
     Ok(transcript)
+}
+
+fn transcript_message_with_gateway_speaker(
+    message: TranscriptInputMessage,
+    raw: &Value,
+    role: &str,
+) -> TranscriptInputMessage {
+    let Some(speaker_id) = raw
+        .get("speaker_id")
+        .or_else(|| raw.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return message;
+    };
+    let speaker_kind = raw
+        .get("speaker_kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_gateway_speaker_kind(role));
+    message.with_speaker(speaker_id, speaker_kind)
+}
+
+fn default_gateway_speaker_kind(role: &str) -> &'static str {
+    if role.eq_ignore_ascii_case("user") {
+        "human"
+    } else if role.eq_ignore_ascii_case("assistant") {
+        "llm_agent"
+    } else {
+        "external"
+    }
 }
 
 fn input_transcript_from_user_text(text: &str) -> GatewayInputTranscript {

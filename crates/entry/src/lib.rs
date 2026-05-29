@@ -22,14 +22,14 @@ pub use console::{
     EntryConsoleMemoryBenchmarkBaseline, EntryConsoleMemoryBenchmarkClassCoverage,
     EntryConsoleMemoryBenchmarkFailure, EntryConsoleMemoryBenchmarkMissingClass,
     EntryConsoleMemoryBenchmarkReport, EntryConsoleMetric, EntryConsoleOverview,
-    EntryConsoleRuntimeShape, EntryConsoleSession, EntryConsoleSkillDetail, EntryConsoleSkillList,
-    EntryConsoleSkillMutation, EntryConsoleSkillSetEnabled, EntryConsoleSkillSummary,
-    EntryConsoleSkillUpsert, EntryConsoleState, EntryConsoleSystemInfo, EntryConsoleTransport,
-    EntryConsoleTransportUpdate, EntryConsoleWorkbenchBenchmarkWall,
-    EntryConsoleWorkbenchProceduralEvolution, EntryConsoleWorkbenchProjectionInspector,
-    EntryConsoleWorkbenchRecallInspector, EntryConsoleWorkbenchReport,
-    EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth, EntryConsoleWorkbenchStatus,
-    EntryConsoleWorkbenchVaultMigration,
+    EntryConsoleRuntimeShape, EntryConsoleRuntimeSkillEdit, EntryConsoleSession,
+    EntryConsoleSkillDetail, EntryConsoleSkillList, EntryConsoleSkillMutation,
+    EntryConsoleSkillSetEnabled, EntryConsoleSkillSummary, EntryConsoleState,
+    EntryConsoleSystemInfo, EntryConsoleTransport, EntryConsoleTransportUpdate,
+    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchProceduralEvolution,
+    EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
+    EntryConsoleWorkbenchReport, EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth,
+    EntryConsoleWorkbenchStatus, EntryConsoleWorkbenchVaultMigration,
 };
 pub use error::EntryErrorKey;
 pub use idempotency::EntryIdempotencyCache;
