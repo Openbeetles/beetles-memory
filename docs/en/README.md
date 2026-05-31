@@ -15,3 +15,5 @@ Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus
 - [Replay and Migration](replay-and-migration.md)
 - [Operator Guide](operator-guide.md)
 - [Release Checklist](release-checklist.md)
+
+Memory Evidence System and Conversation Transcript Substrate release surfaces are covered by [API Surface](api.md) and [Replay and Migration](replay-and-migration.md). Transcript commit, lifecycle, redacted replay, and transcript export are SDK surfaces owned by `MemoryRuntime`.

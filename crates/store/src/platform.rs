@@ -362,6 +362,7 @@ const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
     "inner_conflict",
     "mental_privacy",
     "private_doc",
+    "conversation_transcript",
     "session_summary",
     "session",
     "long_term",
@@ -460,6 +461,10 @@ impl Platform for StorePlatform {
     }
 
     fn session_store(&self) -> Arc<dyn SessionStore> {
+        Arc::new(self.clone())
+    }
+
+    fn conversation_transcript_store(&self) -> Arc<dyn ConversationTranscriptStore> {
         Arc::new(self.clone())
     }
 
@@ -894,6 +899,109 @@ impl SessionStore for StorePlatform {
 
     fn list_chat_ids(&self) -> Result<Vec<String>> {
         self.engine.list_json_keys("session")
+    }
+}
+
+impl ConversationTranscriptStore for StorePlatform {
+    fn append_turn(&self, record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport> {
+        let key = record.key.turn_storage_key(&record.turn_id);
+        let before_count = self.list_turns(&record.key, usize::MAX)?.len();
+        if self
+            .json_get::<TranscriptTurnRecord>("conversation_transcript", &key)?
+            .is_some()
+        {
+            return Ok(TranscriptCommitReport {
+                key: record.key.clone(),
+                turn_id: record.turn_id.clone(),
+                sequence: record.sequence,
+                committed: false,
+                before_count,
+                after_count: before_count,
+                skipped_reason: Some("conversation_transcript_turn_already_committed".to_string()),
+            });
+        }
+        let mut record = record.clone();
+        if record.sequence == 0 {
+            record.sequence = u64::try_from(before_count)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+        }
+        let sequence = record.sequence;
+        self.json_put("conversation_transcript", &key, &record)?;
+        Ok(TranscriptCommitReport {
+            key: record.key,
+            turn_id: record.turn_id,
+            sequence,
+            committed: true,
+            before_count,
+            after_count: before_count.saturating_add(1),
+            skipped_reason: None,
+        })
+    }
+
+    fn get_turn(
+        &self,
+        key: &ConversationKey,
+        turn_id: &str,
+    ) -> Result<Option<TranscriptTurnRecord>> {
+        self.json_get::<TranscriptTurnRecord>(
+            "conversation_transcript",
+            &key.turn_storage_key(turn_id),
+        )
+    }
+
+    fn list_turns(&self, key: &ConversationKey, limit: usize) -> Result<Vec<TranscriptTurnRecord>> {
+        let prefix = key.turn_storage_key_prefix();
+        let mut records = Vec::new();
+        for record_key in self.engine.list_json_keys("conversation_transcript")? {
+            if !record_key.starts_with(&prefix) {
+                continue;
+            }
+            if let Some(record) =
+                self.json_get::<TranscriptTurnRecord>("conversation_transcript", &record_key)?
+            {
+                records.push(record);
+            }
+        }
+        records.sort_by(|left, right| {
+            left.sequence
+                .cmp(&right.sequence)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.turn_id.cmp(&right.turn_id))
+        });
+        if limit > 0 && records.len() > limit {
+            records = records[records.len() - limit..].to_vec();
+        }
+        Ok(records)
+    }
+
+    fn apply_lifecycle_request(
+        &self,
+        request: &TranscriptLifecycleRequest,
+    ) -> Result<TranscriptLifecycleReport> {
+        let mut affected_turns = 0usize;
+        let mut records = self.list_turns(&request.key, usize::MAX)?;
+        for record in &mut records {
+            let matches_turn = request
+                .turn_id
+                .as_ref()
+                .map(|turn_id| turn_id == &record.turn_id)
+                .unwrap_or(true);
+            if matches_turn {
+                record.apply_lifecycle_transition(request.transition, request.requested_at);
+                let record_key = request.key.turn_storage_key(&record.turn_id);
+                self.json_put("conversation_transcript", &record_key, record)?;
+                affected_turns = affected_turns.saturating_add(1);
+            }
+        }
+        Ok(TranscriptLifecycleReport {
+            key: request.key.clone(),
+            transition: request.transition,
+            affected_turns,
+            reason: request.reason.clone(),
+            requested_by: request.requested_by.clone(),
+            requested_at: request.requested_at,
+        })
     }
 }
 

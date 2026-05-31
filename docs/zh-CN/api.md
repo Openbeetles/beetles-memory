@@ -33,6 +33,39 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | 在 scope 间迁移 continuity snapshot。 |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | 控制 runtime lifecycle 并产生 lifecycle report。 |
 
+## Memory Evidence System
+
+Conversation Transcript Substrate 发布面是当前已落地的基础证据合同，用于 governed transcript commit、redacted replay、lifecycle review 和可迁移 evidence handling。它不是宿主任务系统，也不替代 Soul Governance、Subject Projection、Program Memory、procedural memory 或已接受的长期记忆平面。
+
+owner 仍然是 `MemoryRuntime`：宿主和 adapter 只提供 delivered turn delta、actor attribution 和 opaque host refs；Beetle Memory 负责提交 evidence、执行治理并返回 report。外部代码不能另写一套 transcript store，也不能从 raw conversation history 自行推断 memory facts。
+
+SDK transcript 操作：
+
+| 操作 | SDK surface | 用途 |
+| --- | --- | --- |
+| Transcript Commit | `MemoryRuntime::finalize_turn_and_maintain` + `CanonicalTurnDelta`；手动提交使用 `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport`，通过 `MemoryRuntime::commit_transcript` 调用 | 将 delivered turn 作为 governed evidence 提交到 `memory_space_id + channel_id + conversation_id`。 |
+| Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport`，通过 `MemoryRuntime::replay_transcript` 调用 | 通过 model context、host UI、operator audit 或 export 等分层视图读取 transcript evidence。 |
+| Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport`，通过 `MemoryRuntime::request_transcript_lifecycle` 调用 | 执行 archive、mask、delete raw content 或 lifecycle review，并产出 audit。 |
+| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport`，通过 `MemoryRuntime::export_transcript` 调用；`MemorySpaceExportRequest { include_private: false }` 默认 redacts raw transcript | 导出 redacted transcript slice；除非调用方明确请求 private material，否则 raw transcript 不进入公开 memory-space export。 |
+
+核心发布面概念：
+
+| 概念 | 合同 |
+| --- | --- |
+| `ConversationKey` | 由 `memory_space_id`、`channel_id` 和 `conversation_id` 组成；`chat_id` 只作为 legacy alias 或 migration source。 |
+| `ActorAttribution` | 保留 speaker、subject、actor subject、mounted subject、agent id 和 trigger source，不把它们压成一个身份。 |
+| `HostOpaqueRef` | 携带 task、project、ticket、document、order 等宿主对象引用，但 Memory 不解析宿主业务状态机。 |
+| `RedactedTranscriptSlice` | 分离 raw owner-only、model-context、host-UI、operator-audit 和 export 视图。 |
+| `TranscriptLifecycleRequest` | 必须产出 report 和 audit event；删除 raw transcript content 不会静默删除已接受的长期记忆。 |
+
+隐私和投影边界：
+
+- Transcript evidence 不会自动变成 canonical fact、soul mutation、procedural skill 或 task experience。
+- Assistant self-claim 在被对应记忆平面治理前，只是 low-authority transcript evidence。
+- `HostUi` replay 不得泄漏 private garden、inner-life、soul-private raw material、backend trace 或 operator-only audit 内容。
+- `ModelContext` replay 必须经过 privacy gate、profile budget 和模型可见 projection policy。
+- Host refs 默认保持 opaque；replay 可以展示 metadata 和 relation，不返回宿主对象 payload。
+
 ## Request Shapes
 
 最常用的 SDK request types：

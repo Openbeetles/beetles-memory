@@ -32,19 +32,14 @@ pub enum SubjectVisibility {
     AuditOnly,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubjectLifecycleState {
+    #[default]
     Active,
     Suspended,
     Migrating,
     Retired,
-}
-
-impl Default for SubjectLifecycleState {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -85,6 +85,7 @@ mod skill_routing;
 mod subject_shell;
 mod subject_space;
 mod temperament_continuity;
+mod transcript;
 mod turn_commit;
 mod turn_continuity_evidence;
 mod turn_ledger;
@@ -506,10 +507,19 @@ pub use temperament_continuity::{
     TemperamentContinuityRefreshOutcome, TEMPERAMENT_CONTINUITY_SYSTEM_CONTRACT,
     TEMPERAMENT_CONTINUITY_TOTAL_CHAR_LIMIT,
 };
+pub use transcript::{
+    ActorAttribution, CanonicalTurnTranscriptCommitReport, ConversationKey,
+    ConversationTranscriptStore, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    RedactedTranscriptMessage, RedactedTranscriptSlice, RedactedTranscriptTurn,
+    TranscriptCommitReport, TranscriptLifecycleReport, TranscriptLifecycleRequest,
+    TranscriptLifecycleState, TranscriptLifecycleTransition, TranscriptMessageRecord,
+    TranscriptRedactionState, TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnRecord,
+};
 pub use turn_commit::{
-    canonical_user_delta, commit_canonical_turn_delta, CanonicalTurnDelta, CommittedSessionMessage,
-    ConversationScope, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol,
-    MemoryTurnSource, SessionTurnCommitReport, ToolObservationDigest, TranscriptInputMessage,
+    canonical_user_delta, commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,
+    CanonicalTurnDelta, CommittedSessionMessage, ConversationScope, MemoryEvidenceAuthority,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitReport,
+    ToolObservationDigest, TranscriptInputMessage,
 };
 pub use turn_continuity_evidence::{
     TurnContinuityEvidence, TurnContinuityEvidenceStore, REL_PATH_TURN_CONTINUITY_EVIDENCE,

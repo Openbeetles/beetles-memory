@@ -4,18 +4,22 @@ use bm_sdk::{
     build_temporal_memory_graph_from_evidence, build_vault_migration_preflight,
     compile_edge_memory_budget_report, default_agent_subject_id, default_memory_space_id,
     plan_memory_autopilot_for_profile, promote_task_experience_to_procedure,
-    rerank_recall_with_temporal_graph, AgentSkillDirConfig, AgentSkillDirectoryReport,
-    AgentSkillProjectionAudit, AgentToolDescriptor, AgentToolExperienceGovernanceReport,
-    AgentToolHint, AgentToolObservationDigest, AgentToolProjectionAudit, AgentToolRegistryRef,
-    AgentToolRegistryReport, AgentToolRegistrySnapshot, AgentToolUsageFeedback,
-    LLMRuntimeProjectionEnvelope, MemoryAutopilotInput, MemoryCapabilityCatalog,
-    MemoryCapabilityPolicy, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
-    MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemoryWriteRequest,
-    PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
-    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
-    PromptParticipationPlan, SoulLifeProjectionReport, StoreBackendConfig, StorePlatform,
-    SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime, VaultManifest,
+    rerank_recall_with_temporal_graph, ActorAttribution, AgentSkillDirConfig,
+    AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentToolDescriptor,
+    AgentToolExperienceGovernanceReport, AgentToolHint, AgentToolObservationDigest,
+    AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
+    AgentToolRegistrySnapshot, AgentToolUsageFeedback, ConversationKey, HostOpaqueRef,
+    HostRefRelation, HostRefVisibility, LLMRuntimeProjectionEnvelope, MemoryAutopilotInput,
+    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGraphEvidence, MemoryGraphNodeKind,
+    MemoryIdentity, MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope,
+    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
+    MemoryTranscriptReplayRequest, MemoryWriteRequest, PostReplyMemoryMaintenanceContext,
+    PrivateDisclosureIntegrityReport, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
+    ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
+    RedactedTranscriptSlice, SoulLifeProjectionReport, StoreBackendConfig, StorePlatform,
+    SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
+    TranscriptLifecycleTransition, TranscriptReplayView, TranscriptTurnRecord, VaultManifest,
     WorkIntegrityReport, AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
     AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
@@ -66,6 +70,7 @@ fn post_reply_context_contract_is_sdk_importable<'a>(
     ctx
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sdk_runtime_contract_types_are_importable(
     _runtime: Option<MemoryRuntime>,
     _catalog: Option<MemoryCapabilityCatalog>,
@@ -77,6 +82,24 @@ fn sdk_runtime_contract_types_are_importable(
     _graph: Option<SubjectRelationshipGraph>,
     _scoped_runtime: Option<SubjectScopedRuntime>,
     _kind: Option<SubjectKind>,
+) {
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sdk_transcript_contract_types_are_importable(
+    _key: ConversationKey,
+    _actor: ActorAttribution,
+    _host_ref: HostOpaqueRef,
+    _relation: HostRefRelation,
+    _visibility: HostRefVisibility,
+    _turn: Option<TranscriptTurnRecord>,
+    _slice: Option<RedactedTranscriptSlice>,
+    _commit: Option<MemoryTranscriptCommitRequest>,
+    _replay: MemoryTranscriptReplayRequest,
+    _lifecycle: MemoryTranscriptLifecycleRequest,
+    _export: MemoryTranscriptExportRequest,
+    _transition: TranscriptLifecycleTransition,
+    _view: TranscriptReplayView,
 ) {
 }
 

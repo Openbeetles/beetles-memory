@@ -11,7 +11,7 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
     apply_long_term_memory_extraction, build_deferred_governance_queue_report,
-    build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta,
+    build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta_with_transcript,
     compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
     export_continuity_snapshot, govern_write_candidates, import_continuity_snapshot,
     inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
@@ -20,7 +20,7 @@ use bm_core::memory::{
     run_memory_retention_compaction, run_post_reply_memory_maintenance,
     run_private_garden_governance, write_governed_shared_memory_in_space, CanonicalTurnDelta,
     CompactMemoryGraph, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
-    ContinuitySnapshotMode, DeferredGovernanceJob, DeferredGovernanceJobStatus,
+    ContinuitySnapshotMode, ConversationKey, DeferredGovernanceJob, DeferredGovernanceJobStatus,
     DeferredGovernanceQueueReport, DroppedProjectionCandidate, GovernedWriteDecision,
     GraphRecallRerankReport, IngressKind, InhabitedSubjectProjection,
     InhabitedSubjectProjectionInput, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
@@ -36,6 +36,7 @@ use bm_core::memory::{
     SkillEvolutionReport, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
     SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, SubjectRegistry,
     SubjectRelationshipGraph, SubjectScopedRuntime, TemporalMemoryGraphGateReport,
+    TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptReplayView,
     WorkingRecallInspectionInput,
 };
 use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
@@ -75,14 +76,17 @@ use crate::{
     MemoryRuntimeSystemKind, MemorySpaceExportReport, MemorySpaceExportRequest,
     MemorySpaceImportReport, MemorySpaceImportRequest, MemorySpaceMigrateApplyReport,
     MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
-    MemorySpaceMigratePreviewRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
-    MemoryWriteReport, MemoryWriteRequest, PressureLevel, PrivateDisclosureIntegrityReport, Result,
-    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
-    RuntimeProjectionSourceBlock, RuntimeSkillDeleteRequest, RuntimeSkillDetailReport,
-    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListReport,
-    RuntimeSkillListRequest, RuntimeSkillMutationReport, RuntimeSkillReuseOutcome,
-    RuntimeSkillSetEnabledRequest, RuntimeSkillSummary, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    SoulLifeProjectionReport, WorkIntegrityReport,
+    MemorySpaceMigratePreviewRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
+    MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest,
+    MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
+    PressureLevel, PrivateDisclosureIntegrityReport, Result, RuntimeDisclosureProtocolReport,
+    RuntimeOperatorAction, RuntimeOperatorActionReport, RuntimeProjectionSourceBlock,
+    RuntimeSkillDeleteRequest, RuntimeSkillDetailReport, RuntimeSkillDetailRequest,
+    RuntimeSkillEditRequest, RuntimeSkillListReport, RuntimeSkillListRequest,
+    RuntimeSkillMutationReport, RuntimeSkillReuseOutcome, RuntimeSkillSetEnabledRequest,
+    RuntimeSkillSummary, RuntimeSkillWrite, RuntimeSkillWriteSource, SoulLifeProjectionReport,
+    WorkIntegrityReport,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,6 +190,7 @@ impl MemoryAuditEvent {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn for_scoped_runtime_operation(
         operation: impl Into<String>,
         profile: ProfileId,
@@ -1454,7 +1459,16 @@ impl MemoryRuntime {
         validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
-        let session_commit = commit_canonical_turn_delta(session_store.as_ref(), &request.turn)?;
+        let transcript_store = platform.conversation_transcript_store();
+        let core_report = commit_canonical_turn_delta_with_transcript(
+            session_store.as_ref(),
+            transcript_store.as_ref(),
+            &self.config.memory_space_id,
+            &request.turn,
+            Vec::new(),
+            self.config.clock.now_secs(),
+        )?;
+        let session_commit = core_report.session_commit;
 
         if !session_commit.committed {
             let lifecycle = self.start_lifecycle(
@@ -2018,6 +2032,154 @@ impl MemoryRuntime {
         })
     }
 
+    pub fn commit_transcript(
+        &self,
+        request: MemoryTranscriptCommitRequest,
+    ) -> Result<MemoryTranscriptCommitReport> {
+        self.ensure_visible("write.transcript", self.capabilities.write)?;
+        validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::SdkCall,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let key = ConversationKey::from_delta(&self.config.memory_space_id, &request.turn)?;
+        let platform = self.config.platform.as_ref();
+        let session_store = platform.session_store();
+        let transcript_store = platform.conversation_transcript_store();
+        let core_report = commit_canonical_turn_delta_with_transcript(
+            session_store.as_ref(),
+            transcript_store.as_ref(),
+            &self.config.memory_space_id,
+            &request.turn,
+            request.host_refs,
+            self.config.clock.now_secs(),
+        )?;
+        let changed = core_report.session_commit.committed;
+        self.audit("write.transcript", true, "transcript_commit_completed");
+        Ok(MemoryTranscriptCommitReport {
+            key,
+            session_commit: core_report.session_commit,
+            transcript_commit: core_report.transcript_commit,
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunMaintenance,
+                changed,
+                "transcript_commit_completed",
+            )?,
+        })
+    }
+
+    pub fn replay_transcript(
+        &self,
+        request: MemoryTranscriptReplayRequest,
+    ) -> Result<MemoryTranscriptReplayReport> {
+        self.ensure_visible("replay.transcript", self.capabilities.replay)?;
+        self.ensure_runtime_memory_space("replay.transcript", &request.memory_space_id)?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Replay,
+            RuntimeLifecycleTrigger::ReplayInspection,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let key = ConversationKey::new(
+            request.memory_space_id,
+            request.channel_id,
+            request.conversation_id,
+        )?;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let slice = transcript_store.redacted_replay(&key, request.limit.max(1), request.view)?;
+        self.audit("replay.transcript", true, "transcript_replay_completed");
+        Ok(MemoryTranscriptReplayReport {
+            slice,
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunReplayInspection,
+                false,
+                "transcript_replay_completed",
+            )?,
+        })
+    }
+
+    pub fn export_transcript(
+        &self,
+        request: MemoryTranscriptExportRequest,
+    ) -> Result<MemoryTranscriptExportReport> {
+        self.ensure_visible("export.transcript", self.capabilities.export)?;
+        self.ensure_runtime_memory_space("export.transcript", &request.memory_space_id)?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Export,
+            RuntimeLifecycleTrigger::SnapshotTransfer,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let key = ConversationKey::new(
+            request.memory_space_id,
+            request.channel_id,
+            request.conversation_id,
+        )?;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let slice = transcript_store.redacted_replay(
+            &key,
+            request.limit.max(1),
+            TranscriptReplayView::Export,
+        )?;
+        self.audit("export.transcript", true, "transcript_export_completed");
+        Ok(MemoryTranscriptExportReport {
+            slice,
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::ExportSnapshot,
+                false,
+                "transcript_export_completed",
+            )?,
+        })
+    }
+
+    pub fn request_transcript_lifecycle(
+        &self,
+        request: MemoryTranscriptLifecycleRequest,
+    ) -> Result<MemoryTranscriptLifecycleReport> {
+        self.ensure_visible("transcript.lifecycle", self.capabilities.write)?;
+        self.ensure_runtime_memory_space("transcript.lifecycle", &request.memory_space_id)?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::OperatorRequested,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let key = ConversationKey::new(
+            request.memory_space_id,
+            request.channel_id,
+            request.conversation_id,
+        )?;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let transcript =
+            transcript_store.apply_lifecycle_request(&CoreTranscriptLifecycleRequest {
+                key,
+                turn_id: request.turn_id,
+                transition: request.transition,
+                reason: request.reason,
+                requested_by: self.config.identity.owner_id.clone(),
+                requested_at: self.config.clock.now_secs(),
+            })?;
+        self.audit(
+            "transcript.lifecycle",
+            true,
+            "transcript_lifecycle_completed",
+        );
+        Ok(MemoryTranscriptLifecycleReport {
+            transcript,
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunMaintenance,
+                true,
+                "transcript_lifecycle_completed",
+            )?,
+        })
+    }
+
     pub fn export(&self, request: MemoryExportRequest) -> Result<MemoryExportReport> {
         self.ensure_visible("export", self.capabilities.export)?;
         let lifecycle = self.start_lifecycle(
@@ -2376,6 +2538,21 @@ impl MemoryRuntime {
         Err(Error::config(
             "memory_runtime_operation",
             format!("{operation} is not visible for current profile"),
+        ))
+    }
+
+    fn ensure_runtime_memory_space(
+        &self,
+        operation: &'static str,
+        memory_space_id: &str,
+    ) -> Result<()> {
+        if memory_space_id.trim() == self.config.memory_space_id {
+            return Ok(());
+        }
+        self.audit(operation, false, "memory_space_id_mismatch");
+        Err(Error::config(
+            "memory_runtime_memory_space",
+            format!("{operation} memory_space_id must match runtime memory_space_id"),
         ))
     }
 

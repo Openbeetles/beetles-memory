@@ -1,10 +1,13 @@
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
-    CanonicalTurnDelta, DeferredGovernanceQueueReport, MemoryHygieneInspection,
-    MemoryHygieneOutcome, PostTurnMemoryGovernanceReport, PostTurnSemanticGovernanceReport,
-    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck, SkillEvolutionReport,
-    SubjectProjectionReport, SubjectScopedRuntime, VaultManifest, VaultMigrationPreflight,
+    CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, HostOpaqueRef,
+    MemoryHygieneInspection, MemoryHygieneOutcome, PostTurnMemoryGovernanceReport,
+    PostTurnSemanticGovernanceReport, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck,
+    RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
+    SubjectProjectionReport, SubjectScopedRuntime, TranscriptCommitReport,
+    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptReplayView, VaultManifest,
+    VaultMigrationPreflight,
 };
 use bm_core::memory::{CompactMemoryGraph, GraphRecallRerankReport, TemporalMemoryGraphGateReport};
 use bm_core::skills::{
@@ -407,6 +410,65 @@ pub struct MemoryReplayRequest {
 pub struct MemoryReplayReport {
     pub chat_id: String,
     pub inspection: IntelligenceReplayInspection,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptCommitRequest {
+    pub turn: CanonicalTurnDelta,
+    pub host_refs: Vec<HostOpaqueRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptCommitReport {
+    pub key: ConversationKey,
+    pub session_commit: SessionTurnCommitReport,
+    pub transcript_commit: Option<TranscriptCommitReport>,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptReplayRequest {
+    pub memory_space_id: String,
+    pub channel_id: String,
+    pub conversation_id: String,
+    pub limit: usize,
+    pub view: TranscriptReplayView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptReplayReport {
+    pub slice: RedactedTranscriptSlice,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptLifecycleRequest {
+    pub memory_space_id: String,
+    pub channel_id: String,
+    pub conversation_id: String,
+    pub turn_id: Option<String>,
+    pub transition: TranscriptLifecycleTransition,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptLifecycleReport {
+    pub transcript: TranscriptLifecycleReport,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptExportRequest {
+    pub memory_space_id: String,
+    pub channel_id: String,
+    pub conversation_id: String,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptExportReport {
+    pub slice: RedactedTranscriptSlice,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 

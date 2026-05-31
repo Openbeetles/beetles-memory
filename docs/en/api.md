@@ -33,6 +33,39 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | Move continuity snapshots between scopes. |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
 
+## Memory Evidence System
+
+The Conversation Transcript Substrate release surface is the current base evidence contract for hosts that need governed transcript commit, redacted replay, lifecycle review, and migration-ready evidence handling. It is not a host task system and it does not replace Soul Governance, Subject Projection, Program Memory, procedural memory, or accepted long-term memory planes.
+
+The owner remains `MemoryRuntime`: hosts and adapters provide delivered turn deltas, actor attribution, and opaque host references; Beetle Memory commits evidence, applies governance, and returns reports. External code must not write a parallel transcript store or infer memory facts from raw conversation history.
+
+SDK-facing transcript operations:
+
+| Operation | SDK surface | Purpose |
+| --- | --- | --- |
+| Transcript Commit | `MemoryRuntime::finalize_turn_and_maintain` with `CanonicalTurnDelta`; manual commits use `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport` via `MemoryRuntime::commit_transcript` | Commit a delivered turn as governed evidence under `memory_space_id + channel_id + conversation_id`. |
+| Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport` via `MemoryRuntime::replay_transcript` | Read transcript evidence through a scoped view such as model context, host UI, operator audit, or export. |
+| Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport` via `MemoryRuntime::request_transcript_lifecycle` | Archive, mask, delete raw content, or run lifecycle review with audit output. |
+| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport` via `MemoryRuntime::export_transcript`; `MemorySpaceExportRequest { include_private: false }` redacts raw transcript by default | Export a redacted transcript slice, and keep raw transcript out of public memory-space exports unless the caller explicitly requests private material. |
+
+Core release-surface concepts:
+
+| Concept | Contract |
+| --- | --- |
+| `ConversationKey` | `memory_space_id`, `channel_id`, and `conversation_id`; `chat_id` is only a legacy alias or migration source. |
+| `ActorAttribution` | Preserves speaker, subject, actor subject, mounted subject, agent id, and trigger source without collapsing them into one identity. |
+| `HostOpaqueRef` | Carries host object references such as task, project, ticket, document, or order ids without letting Memory parse host business state machines. |
+| `RedactedTranscriptSlice` | Separates raw owner-only, model-context, host-UI, operator-audit, and export views. |
+| `TranscriptLifecycleRequest` | Produces reports and audit events; deleting raw transcript content does not silently delete accepted long-term memory. |
+
+Privacy and projection boundaries:
+
+- Transcript evidence is not automatically a canonical fact, soul mutation, procedural skill, or task experience.
+- Assistant self-claims remain low-authority transcript evidence until governed by the relevant memory plane.
+- `HostUi` replay must not expose private garden, inner-life, soul-private raw material, backend traces, or operator-only audit content.
+- `ModelContext` replay must pass through privacy gates, profile budget, and model-facing projection policy.
+- Host references stay opaque by default; replay can show metadata and relation, not host object payloads.
+
 ## Request Shapes
 
 The most common SDK request types are:
