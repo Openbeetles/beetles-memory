@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::orchestrator::PressureLevel;
 use crate::runtime::RuntimeLifecycleModeInput;
 
-use super::{CanonicalTurnDelta, SessionTurnCommitReport};
+use super::{CanonicalTurnDelta, PrivateGardenGovernanceManifestEntry, SessionTurnCommitReport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +32,8 @@ pub struct PostTurnPrivateGardenReport {
     pub writes: usize,
     pub moves: usize,
     pub deletes: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manifest: Vec<PrivateGardenGovernanceManifestEntry>,
     pub skipped_reason: Option<String>,
 }
 
@@ -45,6 +47,7 @@ impl PostTurnPrivateGardenReport {
             writes: 0,
             moves: 0,
             deletes: 0,
+            manifest: Vec::new(),
             skipped_reason: Some(reason.into()),
         }
     }
@@ -58,11 +61,21 @@ impl PostTurnPrivateGardenReport {
             writes: 0,
             moves: 0,
             deletes: 0,
+            manifest: Vec::new(),
             skipped_reason: Some(reason.into()),
         }
     }
 
     pub fn applied(writes: usize, moves: usize, deletes: usize) -> Self {
+        Self::applied_with_manifest(writes, moves, deletes, Vec::new())
+    }
+
+    pub fn applied_with_manifest(
+        writes: usize,
+        moves: usize,
+        deletes: usize,
+        manifest: Vec<PrivateGardenGovernanceManifestEntry>,
+    ) -> Self {
         Self {
             attempted: true,
             executed: true,
@@ -71,6 +84,7 @@ impl PostTurnPrivateGardenReport {
             writes,
             moves,
             deletes,
+            manifest,
             skipped_reason: None,
         }
     }

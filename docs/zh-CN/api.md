@@ -39,6 +39,8 @@ Conversation Transcript Substrate 发布面是当前已落地的基础证据合�
 
 owner 仍然是 `MemoryRuntime`：宿主和 adapter 只提供 delivered turn delta、actor attribution 和 opaque host refs；Beetle Memory 负责提交 evidence、执行治理并返回 report。外部代码不能另写一套 transcript store，也不能从 raw conversation history 自行推断 memory facts。
 
+`MemoryScope::new(channel, chat_id)` 仍是单 agent 默认接入形态。若宿主有区别于 legacy chat id 的稳定 conversation id，可使用 `MemoryScope::with_conversation_id(...)`；`finalize_turn_and_maintain` 和 `commit_transcript` 也会记住最近一次提交的 transcript conversation，供后续 recall、projection、maintenance 和 inspection 使用。
+
 SDK transcript 操作：
 
 | 操作 | SDK surface | 用途 |
@@ -46,7 +48,10 @@ SDK transcript 操作：
 | Transcript Commit | `MemoryRuntime::finalize_turn_and_maintain` + `CanonicalTurnDelta`；手动提交使用 `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport`，通过 `MemoryRuntime::commit_transcript` 调用 | 将 delivered turn 作为 governed evidence 提交到 `memory_space_id + channel_id + conversation_id`。 |
 | Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport`，通过 `MemoryRuntime::replay_transcript` 调用 | 通过 model context、host UI、operator audit 或 export 等分层视图读取 transcript evidence。 |
 | Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport`，通过 `MemoryRuntime::request_transcript_lifecycle` 调用 | 执行 archive、mask、delete raw content 或 lifecycle review，并产出 audit。 |
-| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport`，通过 `MemoryRuntime::export_transcript` 调用；`MemorySpaceExportRequest { include_private: false }` 默认 redacts raw transcript | 导出 redacted transcript slice；除非调用方明确请求 private material，否则 raw transcript 不进入公开 memory-space export。 |
+| Transcript Repair | `MemoryTranscriptRepairRequest` / `MemoryTranscriptRepairReport`，通过 `MemoryRuntime::repair_transcript` 调用 | 检查 Memory-owned evidence link 断裂，不扫描宿主业务数据库。 |
+| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport`，通过 `MemoryRuntime::export_transcript` 调用；`MemorySpaceExportRequest { include_private: false }` 默认 redacts raw transcript、`conversation_transcript_alias` 和 `conversation_transcript_derived_ref` manifest | 导出 redacted transcript slice；除非调用方明确请求 private material，否则 raw transcript 及其 owner/derived metadata 不进入公开 memory-space export。 |
+
+`MemoryTranscriptReplayRequest` 和 `MemoryTranscriptExportRequest` 接收 `limit` 与可选 `cursor`；对应 report 返回 `next_cursor` 和 `has_more`。SDK 调用方应通过 `MemoryRuntime` 分页 replay/export transcript，不应下沉到 core/store trait。Runtime profile budget 可以裁剪 page size、每 turn 可见 host refs、redaction items、lifecycle derived refs 和 repair issues 数量，但不能放宽 redaction、lifecycle 或 privacy policy。Lifecycle 和 repair report 的列表被裁剪时会设置 `profile_budget_applied=true`。
 
 核心发布面概念：
 
@@ -54,17 +59,23 @@ SDK transcript 操作：
 | --- | --- |
 | `ConversationKey` | 由 `memory_space_id`、`channel_id` 和 `conversation_id` 组成；`chat_id` 只作为 legacy alias 或 migration source。 |
 | `ActorAttribution` | 保留 speaker、subject、actor subject、mounted subject、agent id 和 trigger source，不把它们压成一个身份。 |
-| `HostOpaqueRef` | 携带 task、project、ticket、document、order 等宿主对象引用，但 Memory 不解析宿主业务状态机。 |
-| `RedactedTranscriptSlice` | 分离 raw owner-only、model-context、host-UI、operator-audit 和 export 视图。 |
-| `TranscriptLifecycleRequest` | 必须产出 report 和 audit event；删除 raw transcript content 不会静默删除已接受的长期记忆。 |
+| `HostOpaqueRef` | 携带 task、project、ticket、document、order 等宿主对象引用，但 Memory 不解析宿主业务状态机；`HostRefVisibility` 会按 replay/export view 执行，`label` 会在非 owner 允许视图外做字段级脱敏，并在 redaction report 中记录 `HostRefLabel`。 |
+| `RedactedTranscriptSlice` | 分离 raw owner-only、model-context、host-UI、operator-audit 和 export 视图，并返回结构化 `TranscriptRedactionReportItem` 以及 message/host ref 脱敏计数。 |
+| `TranscriptLifecycleRequest` | 必须产出 report 和 audit event；删除 raw transcript content 不会静默删除已接受的长期记忆。`TranscriptLifecycleReport` 会返回 affected turn ids、message ids、按视图脱敏后的 host refs、host-ref redaction items，以及已知的 Memory-owned derived refs。lifecycle request completed 不等于 transcript changed；没有命中 turn 时 `affected_turns=0`，SDK lifecycle report 必须是 `changed=false`。 |
+| `TranscriptEvidenceRef` / `DerivedMemoryRef` | Memory 自己的结构化 evidence reference，用于把 transcript evidence 连接到已接受的长期记忆、共享事实、程序性记忆、私域材料或 soul handoff。展示 citation 可以继续是字符串，但治理逻辑不应只靠字符串解析。 |
+| `TranscriptTurnPage` / `TranscriptRepairReport` | 提供有界 transcript 分页和 repair 诊断，用于发现 source turn 缺失、`MissingSourceMessage`、orphan derived ref、corrupt transcript record、mismatched source key、duplicate sequence/cursor evidence；repair report 必须 fail closed，不能掩盖断裂的 Memory-owned evidence link。 |
+| `TranscriptGovernanceBudget` | 由 runtime budget/profile owner 提供的 transcript page size、可见 host refs、redaction report items、lifecycle derived refs、repair issues 数量上限。Store backend 只负责持久化和分页，不拥有 profile budget policy。 |
 
 隐私和投影边界：
 
 - Transcript evidence 不会自动变成 canonical fact、soul mutation、procedural skill 或 task experience。
+- 通过 governed candidate write、手动 extraction 或自动 post-turn extraction 接受的长期记忆、共享事实、程序性 Skill、private garden 和 soul candidate handoff 会写入结构化 transcript-derived refs，供 lifecycle impact review 使用。
+- Runtime recall、projection、maintenance、long-term refresh 和 operator inspection 会优先消费 transcript-backed evidence，再退到 legacy `SessionStore(chat_id)` shadow；如果 transcript 已 mask、delete raw，或 legacy `chat_id` alias 不可信，这些路径会 fail closed，不会回退读取 session shadow 原文。
 - Assistant self-claim 在被对应记忆平面治理前，只是 low-authority transcript evidence。
 - `HostUi` replay 不得泄漏 private garden、inner-life、soul-private raw material、backend trace 或 operator-only audit 内容。
 - `ModelContext` replay 必须经过 privacy gate、profile budget 和模型可见 projection policy。
-- Host refs 默认保持 opaque；replay 可以展示 metadata 和 relation，不返回宿主对象 payload。
+- Host refs 默认保持 opaque；replay 可以展示 metadata 和 relation，不返回宿主对象 payload。`Export` 只返回 export-visible refs，`ModelContext` 只返回 model-context refs。
+- `MemoryRuntime::finalize_turn_and_maintain` 同时报告 session commit 和 transcript commit 状态；当 legacy session shadow 已有该 turn 但 transcript backfill 成功时，不会被误报成 no-op。
 
 ## Request Shapes
 

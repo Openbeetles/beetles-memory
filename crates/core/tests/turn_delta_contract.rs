@@ -87,6 +87,7 @@ fn canonical_turn_delta_is_idempotent_and_does_not_recommit_full_history() {
         subject: "subject-qingchuan".to_string(),
         delivery_status: MemoryTurnDeliveryStatus::Delivered,
         source: turn_source(),
+        actor: None,
         input_messages: vec![
             TranscriptInputMessage::user("你好"),
             TranscriptInputMessage::assistant("你好，我在。"),
@@ -141,6 +142,7 @@ fn canonical_turn_delta_persists_message_identity_time_and_speaker_metadata() {
         subject: "subject-qingchuan".to_string(),
         delivery_status: MemoryTurnDeliveryStatus::Delivered,
         source: turn_source(),
+        actor: None,
         input_messages: vec![TranscriptInputMessage::user("Human asks")
             .with_observed_at(1_800_000_001)
             .with_speaker("owner-human", "human")],

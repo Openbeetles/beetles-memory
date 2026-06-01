@@ -1,9 +1,11 @@
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
-    CanonicalTurnDelta, ConversationKey, HostOpaqueRef, HostRefRelation, HostRefVisibility,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, TranscriptInputMessage,
-    TranscriptLifecycleRequest, TranscriptLifecycleState, TranscriptLifecycleTransition,
-    TranscriptReplayView, TranscriptTurnRecord,
+    CanonicalTurnDelta, ConversationKey, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
+    HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
+    MemoryTurnProtocol, MemoryTurnSource, TranscriptConversationAlias, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleRequest, TranscriptLifecycleState,
+    TranscriptLifecycleTransition, TranscriptRepairIssueKind, TranscriptReplayView,
+    TranscriptTurnRecord,
 };
 use bm_core::platform::Platform;
 use bm_store::{StoreBackendConfig, StoreEventScope, StorePlatform};
@@ -46,6 +48,7 @@ fn delta(turn_id: &str, user: &str) -> CanonicalTurnDelta {
         subject: "subject-store".to_string(),
         delivery_status: MemoryTurnDeliveryStatus::Delivered,
         source: turn_source(),
+        actor: None,
         input_messages: vec![TranscriptInputMessage::user(user).with_speaker("owner", "human")],
         assistant_message: Some(TranscriptInputMessage::assistant("noted")),
         tool_observations: Vec::new(),
@@ -98,6 +101,39 @@ fn store_persists_transcript_by_memory_space_channel_and_conversation() {
 }
 
 #[test]
+fn store_resolves_conversation_transcript_alias_by_legacy_chat_id() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    store
+        .remember_conversation_alias(
+            &TranscriptConversationAlias::new(
+                "space-store",
+                "llm.gateway",
+                "legacy-chat-a",
+                "conversation-store",
+                10,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        store
+            .resolve_conversation_alias("space-store", "llm.gateway", "legacy-chat-a")
+            .unwrap()
+            .as_deref(),
+        Some("conversation-store")
+    );
+    assert!(store
+        .resolve_conversation_alias("space-store", "llm.gateway", "missing-chat")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn lifecycle_request_masks_raw_transcript_content_but_keeps_audit_key() {
     let platform = StorePlatform::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
@@ -122,6 +158,10 @@ fn lifecycle_request_masks_raw_transcript_content_but_keeps_audit_key() {
         .unwrap();
 
     assert_eq!(report.affected_turns, 1);
+    assert_eq!(report.affected_turn_ids, vec!["turn-1".to_string()]);
+    assert_eq!(report.affected_message_ids.len(), 2);
+    assert!(report.affected_host_refs.is_empty());
+    assert!(report.derived_memory_refs.is_empty());
     let loaded = store.get_turn(&key, "turn-1").unwrap().unwrap();
     assert_eq!(loaded.lifecycle_state, TranscriptLifecycleState::RawDeleted);
 
@@ -130,6 +170,165 @@ fn lifecycle_request_masks_raw_transcript_content_but_keeps_audit_key() {
         .unwrap();
     assert_eq!(replay.turns[0].input_messages[0].content, None);
     assert_eq!(replay.audit.redacted_messages, 2);
+    assert_eq!(replay.redactions.len(), 2);
+}
+
+#[test]
+fn lifecycle_report_includes_memory_owned_derived_refs_for_affected_turns() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let record =
+        TranscriptTurnRecord::from_delta(&key, 1, &delta("turn-1", "derive me"), Vec::new(), 10)
+            .unwrap();
+    let message = record.input_messages[0].clone();
+    store.append_turn(&record).unwrap();
+
+    let derived = DerivedMemoryRef {
+        plane: DerivedMemoryPlane::LongTerm,
+        store_key: "long_term:preference:response_style".to_string(),
+        subject_id: Some("subject-store".to_string()),
+        source: TranscriptEvidenceRef {
+            memory_space_id: key.memory_space_id.clone(),
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            turn_id: "turn-1".to_string(),
+            message_id: Some(message.message_id),
+            subject_id: Some("subject-store".to_string()),
+            authority: Some(MemoryEvidenceAuthority::UserAsserted),
+        },
+        created_at: 11,
+    };
+    store.append_derived_memory_ref(&key, &derived).unwrap();
+
+    let report = store
+        .apply_lifecycle_request(&TranscriptLifecycleRequest {
+            key: key.clone(),
+            turn_id: Some("turn-1".to_string()),
+            transition: TranscriptLifecycleTransition::Mask,
+            reason: "review_derived_memory".to_string(),
+            requested_by: "owner".to_string(),
+            requested_at: 20,
+        })
+        .unwrap();
+
+    assert_eq!(report.affected_turn_ids, vec!["turn-1".to_string()]);
+    assert_eq!(report.derived_memory_refs, vec![derived]);
+}
+
+#[test]
+fn transcript_list_page_returns_bounded_cursor_pages() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    store
+        .append_turn(
+            &TranscriptTurnRecord::from_delta(&key, 1, &delta("turn-1", "first"), Vec::new(), 10)
+                .unwrap(),
+        )
+        .unwrap();
+    store
+        .append_turn(
+            &TranscriptTurnRecord::from_delta(&key, 2, &delta("turn-2", "second"), Vec::new(), 11)
+                .unwrap(),
+        )
+        .unwrap();
+
+    let first = store.list_turns_page(&key, None, 1).unwrap();
+    assert_eq!(first.turns[0].turn_id, "turn-1");
+    assert!(first.has_more);
+    let second = store
+        .list_turns_page(&key, first.next_cursor.as_deref(), 1)
+        .unwrap();
+    assert_eq!(second.turns[0].turn_id, "turn-2");
+    assert!(!second.has_more);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn transcript_repair_report_flags_missing_derived_source_turn() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let derived = DerivedMemoryRef {
+        plane: DerivedMemoryPlane::LongTerm,
+        store_key: "long_term:missing-source".to_string(),
+        subject_id: Some("subject-store".to_string()),
+        source: TranscriptEvidenceRef {
+            memory_space_id: key.memory_space_id.clone(),
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            turn_id: "missing-turn".to_string(),
+            message_id: Some("missing-message".to_string()),
+            subject_id: Some("subject-store".to_string()),
+            authority: Some(MemoryEvidenceAuthority::UserAsserted),
+        },
+        created_at: 11,
+    };
+    store.append_derived_memory_ref(&key, &derived).unwrap();
+
+    let report = store.repair_report(&key).unwrap();
+    assert!(report.fail_closed);
+    assert_eq!(report.checked_turns, 0);
+    assert_eq!(report.checked_derived_refs, 1);
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(
+        report.issues[0].kind,
+        TranscriptRepairIssueKind::MissingSourceTurn
+    );
+    assert_eq!(report.issues[0].turn_id, "missing-turn");
+}
+
+#[test]
+fn transcript_repair_report_flags_missing_derived_source_message() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let record = transcript_record(&key, "turn-without-message", "present message");
+    store.append_turn(&record).unwrap();
+    let derived = DerivedMemoryRef {
+        plane: DerivedMemoryPlane::LongTerm,
+        store_key: "long_term:missing-message".to_string(),
+        subject_id: Some("subject-store".to_string()),
+        source: TranscriptEvidenceRef {
+            memory_space_id: key.memory_space_id.clone(),
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            turn_id: "turn-without-message".to_string(),
+            message_id: Some("missing-message".to_string()),
+            subject_id: Some("subject-store".to_string()),
+            authority: Some(MemoryEvidenceAuthority::UserAsserted),
+        },
+        created_at: 11,
+    };
+    store.append_derived_memory_ref(&key, &derived).unwrap();
+
+    let report = store.repair_report(&key).unwrap();
+
+    assert!(report.fail_closed);
+    assert_eq!(report.checked_turns, 1);
+    assert_eq!(report.checked_derived_refs, 1);
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(
+        report.issues[0].kind,
+        TranscriptRepairIssueKind::MissingSourceMessage
+    );
+    assert_eq!(
+        report.issues[0].message_id.as_deref(),
+        Some("missing-message")
+    );
 }
 
 #[test]
@@ -199,16 +398,36 @@ fn snapshot_export_import_carries_conversation_transcript_namespace() {
     )
     .unwrap();
     let key = ConversationKey::new("space-snapshot", "llm.gateway", "conversation-store").unwrap();
-    source
-        .conversation_transcript_store()
-        .append_turn(&transcript_record(&key, "turn-snapshot", "snapshot me"))
-        .unwrap();
+    let store = source.conversation_transcript_store();
+    let record = transcript_record(&key, "turn-snapshot", "snapshot me");
+    let message = record.input_messages[0].clone();
+    store.append_turn(&record).unwrap();
+    let derived = DerivedMemoryRef {
+        plane: DerivedMemoryPlane::ArchiveEvidence,
+        store_key: "archive:conversation-store:turn-snapshot".to_string(),
+        subject_id: Some("subject-store".to_string()),
+        source: TranscriptEvidenceRef {
+            memory_space_id: key.memory_space_id.clone(),
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            turn_id: "turn-snapshot".to_string(),
+            message_id: Some(message.message_id),
+            subject_id: Some("subject-store".to_string()),
+            authority: Some(MemoryEvidenceAuthority::UserAsserted),
+        },
+        created_at: 12,
+    };
+    store.append_derived_memory_ref(&key, &derived).unwrap();
 
     let snapshot = source.export_store_snapshot().unwrap();
     assert!(snapshot
         .json_docs
         .iter()
         .any(|doc| doc.namespace == "conversation_transcript"));
+    assert!(snapshot
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == "conversation_transcript_derived_ref"));
 
     let target = StorePlatform::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
@@ -224,4 +443,9 @@ fn snapshot_export_import_carries_conversation_transcript_namespace() {
         replay.turns[0].input_messages[0].content.as_deref(),
         Some("snapshot me")
     );
+    let derived_refs = target
+        .conversation_transcript_store()
+        .list_derived_memory_refs(&key, Some("turn-snapshot"))
+        .unwrap();
+    assert_eq!(derived_refs, vec![derived]);
 }

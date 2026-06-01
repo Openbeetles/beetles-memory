@@ -363,6 +363,8 @@ const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
     "mental_privacy",
     "private_doc",
     "conversation_transcript",
+    "conversation_transcript_alias",
+    "conversation_transcript_derived_ref",
     "session_summary",
     "session",
     "long_term",
@@ -939,6 +941,23 @@ impl ConversationTranscriptStore for StorePlatform {
         })
     }
 
+    fn remember_conversation_alias(&self, alias: &TranscriptConversationAlias) -> Result<()> {
+        self.json_put("conversation_transcript_alias", &alias.storage_key(), alias)
+    }
+
+    fn resolve_conversation_alias(
+        &self,
+        memory_space_id: &str,
+        channel_id: &str,
+        chat_id: &str,
+    ) -> Result<Option<String>> {
+        let key =
+            TranscriptConversationAlias::storage_key_for(memory_space_id, channel_id, chat_id);
+        Ok(self
+            .json_get::<TranscriptConversationAlias>("conversation_transcript_alias", &key)?
+            .map(|alias| alias.conversation_id))
+    }
+
     fn get_turn(
         &self,
         key: &ConversationKey,
@@ -975,11 +994,60 @@ impl ConversationTranscriptStore for StorePlatform {
         Ok(records)
     }
 
+    fn append_derived_memory_ref(
+        &self,
+        key: &ConversationKey,
+        derived: &DerivedMemoryRef,
+    ) -> Result<()> {
+        validate_derived_ref_matches_key(key, derived)?;
+        let record_key = transcript_derived_ref_storage_key(key, derived)?;
+        self.json_put("conversation_transcript_derived_ref", &record_key, derived)
+    }
+
+    fn list_derived_memory_refs(
+        &self,
+        key: &ConversationKey,
+        turn_id: Option<&str>,
+    ) -> Result<Vec<DerivedMemoryRef>> {
+        let prefix = transcript_derived_ref_storage_key_prefix(key);
+        let mut refs = Vec::new();
+        for record_key in self
+            .engine
+            .list_json_keys("conversation_transcript_derived_ref")?
+        {
+            if !record_key.starts_with(&prefix) {
+                continue;
+            }
+            let Some(derived) = self
+                .json_get::<DerivedMemoryRef>("conversation_transcript_derived_ref", &record_key)?
+            else {
+                continue;
+            };
+            if turn_id
+                .map(|turn_id| derived.source.turn_id == turn_id)
+                .unwrap_or(true)
+            {
+                refs.push(derived);
+            }
+        }
+        refs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.store_key.cmp(&right.store_key))
+                .then_with(|| left.source.turn_id.cmp(&right.source.turn_id))
+                .then_with(|| left.source.message_id.cmp(&right.source.message_id))
+        });
+        Ok(refs)
+    }
+
     fn apply_lifecycle_request(
         &self,
         request: &TranscriptLifecycleRequest,
     ) -> Result<TranscriptLifecycleReport> {
         let mut affected_turns = 0usize;
+        let mut affected_turn_ids = Vec::new();
+        let mut affected_message_ids = Vec::new();
+        let mut affected_host_refs = Vec::new();
         let mut records = self.list_turns(&request.key, usize::MAX)?;
         for record in &mut records {
             let matches_turn = request
@@ -988,21 +1056,86 @@ impl ConversationTranscriptStore for StorePlatform {
                 .map(|turn_id| turn_id == &record.turn_id)
                 .unwrap_or(true);
             if matches_turn {
+                affected_turn_ids.push(record.turn_id.clone());
+                for message in &record.input_messages {
+                    affected_message_ids.push(message.message_id.clone());
+                }
+                if let Some(message) = &record.assistant_message {
+                    affected_message_ids.push(message.message_id.clone());
+                }
+                affected_host_refs.extend(record.host_refs.clone());
                 record.apply_lifecycle_transition(request.transition, request.requested_at);
                 let record_key = request.key.turn_storage_key(&record.turn_id);
                 self.json_put("conversation_transcript", &record_key, record)?;
                 affected_turns = affected_turns.saturating_add(1);
             }
         }
+        let derived_memory_refs = self
+            .list_derived_memory_refs(&request.key, None)?
+            .into_iter()
+            .filter(|derived| affected_turn_ids.contains(&derived.source.turn_id))
+            .collect::<Vec<_>>();
         Ok(TranscriptLifecycleReport {
             key: request.key.clone(),
             transition: request.transition,
             affected_turns,
+            affected_turn_ids,
+            affected_message_ids,
+            affected_host_refs,
+            redacted_host_refs: 0,
+            host_ref_redactions: Vec::new(),
+            derived_memory_refs,
+            profile_budget_applied: false,
             reason: request.reason.clone(),
             requested_by: request.requested_by.clone(),
             requested_at: request.requested_at,
         })
     }
+}
+
+fn validate_derived_ref_matches_key(
+    key: &ConversationKey,
+    derived: &DerivedMemoryRef,
+) -> Result<()> {
+    if derived.source.memory_space_id != key.memory_space_id
+        || derived.source.channel_id != key.channel_id
+        || derived.source.conversation_id != key.conversation_id
+    {
+        return Err(Error::config(
+            "conversation_transcript_derived_ref",
+            "derived memory ref source does not match conversation key",
+        ));
+    }
+    if derived.source.turn_id.trim().is_empty() {
+        return Err(Error::config(
+            "conversation_transcript_derived_ref",
+            "derived memory ref turn_id must not be empty",
+        ));
+    }
+    if derived.store_key.trim().is_empty() {
+        return Err(Error::config(
+            "conversation_transcript_derived_ref",
+            "derived memory ref store_key must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn transcript_derived_ref_storage_key_prefix(key: &ConversationKey) -> String {
+    format!("{}__derived_ref__", key.storage_key())
+}
+
+fn transcript_derived_ref_storage_key(
+    key: &ConversationKey,
+    derived: &DerivedMemoryRef,
+) -> Result<String> {
+    let payload = serde_json::to_string(derived)
+        .map_err(|error| Error::config("conversation_transcript_derived_ref", error.to_string()))?;
+    Ok(format!(
+        "{}{}",
+        transcript_derived_ref_storage_key_prefix(key),
+        stable_hash_hex(&payload)
+    ))
 }
 
 impl LongTermMemoryStore for StorePlatform {

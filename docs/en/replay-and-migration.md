@@ -62,7 +62,9 @@ Release-surface replay views:
 | `OperatorAudit` | Diagnostics and compliance review | Structured reasons, refs, and audit markers by default, not full raw content. |
 | `Export` | Migration and portability | Controlled by `include_private`, profile, permission, and retention policy. |
 
-Deleting or masking raw transcript content must report downstream impact separately from accepted long-term, procedural, private, or soul-related memory planes. Redacted replay must fail closed: when a view cannot prove a field is visible, it returns a redaction marker and audit reason instead of raw content.
+Deleting or masking raw transcript content must report downstream impact separately from accepted long-term, shared factual, procedural, private, or soul-related memory planes. Lifecycle reports expose host refs through the SDK's operator-audit view, so internal/model-only refs and raw labels are redacted before the report leaves the runtime. Redacted replay must fail closed: when a view cannot prove a field is visible, it returns a redaction marker and audit reason instead of raw content. SDK runtime consumers use transcript-backed evidence ahead of the legacy session shadow, so a masked transcript or untrusted legacy alias is not rehydrated from `SessionStore(chat_id)`.
+
+SDK transcript replay/export requests support bounded cursor pages through `cursor`, `next_cursor`, and `has_more`. Host ref visibility is view-aware, and host ref `label` is field-redacted outside owner-approved views with `HostRefLabel` in the redaction report.
 
 ## Memory-Space Migration Dry-Run
 
@@ -100,7 +102,11 @@ and subject remap state. Apply does not rewrite subject keys yet; if source and
 target spaces differ, the manifest reports `subject_remap.required=true` and
 `applied=false`.
 
-When transcript evidence is present in memory-space storage, `include_private=false` removes raw transcript documents from export by default. Migration diagnostics must preserve the split between raw transcript, redacted transcript slices, accepted memory planes, and opaque host refs. Host object payloads are not exported by Beetle Memory; only `HostOpaqueRef` metadata and relation are portable.
+When transcript evidence is present in memory-space storage, `include_private=false` removes raw transcript documents and `conversation_transcript_derived_ref` manifests from export by default. Migration diagnostics must preserve the split between raw transcript, redacted transcript slices, accepted memory planes, derived refs, and opaque host refs. Host object payloads are not exported by Beetle Memory; only `HostOpaqueRef` metadata and relation are portable when the ref is visible for the requested view. `RedactedTranscriptSlice` reports message and host-ref redactions so callers can audit what was omitted without seeing the raw material. `TranscriptLifecycleReport.derived_memory_refs` is the review list for accepted Memory material that came from the affected transcript evidence.
+
+Transcript replay and migration tooling can use `TranscriptTurnPage` for bounded paging. `MemoryTranscriptRepairRequest` exposes SDK-level transcript repair inspection, and `TranscriptRepairReport` checks Memory-owned derived refs against transcript source turns/messages. Missing source turns, `MissingSourceMessage`, orphan derived refs, corrupt transcript records, mismatched source keys, and duplicate sequence/cursor evidence are fail-closed repair issues instead of a clean report with hidden evidence loss.
+
+Compact profiles may return fewer transcript turns, host refs, redaction report items, lifecycle derived refs, or repair issues according to `TranscriptGovernanceBudget`. Replay audit records `ProfileBudget` when replay redactions are budget-limited; lifecycle and repair reports set `profile_budget_applied=true` when their report lists are clipped. This is quantity clipping only: profile budget does not make private data visible, skip lifecycle audit, or authorize host business deletion.
 
 ## Harness And Proposal Sandbox
 

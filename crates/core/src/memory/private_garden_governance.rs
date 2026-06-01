@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::llm::{LlmClient, LlmHttpClient, Message, ToolChoicePolicy};
 use crate::orchestrator::PressureLevel;
 use crate::util::{scrub_credentials, truncate_content_to_max};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -56,7 +56,49 @@ pub enum PrivateGardenGovernanceOutcome {
         writes: usize,
         moves: usize,
         deletes: usize,
+        manifest: Vec<PrivateGardenGovernanceManifestEntry>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateGardenGovernanceManifestAction {
+    Write,
+    Move,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateGardenGovernanceManifestEntry {
+    pub action: PrivateGardenGovernanceManifestAction,
+    pub scope_id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_before: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_after: Option<u32>,
+    pub store_key: String,
+}
+
+fn private_garden_manifest_entry(
+    action: PrivateGardenGovernanceManifestAction,
+    scope_id: &str,
+    path: &str,
+    from_path: Option<String>,
+    revision_before: Option<u32>,
+    revision_after: Option<u32>,
+) -> PrivateGardenGovernanceManifestEntry {
+    PrivateGardenGovernanceManifestEntry {
+        action,
+        scope_id: scope_id.to_string(),
+        path: path.to_string(),
+        from_path,
+        revision_before,
+        revision_after,
+        store_key: format!("private_garden:{scope_id}::{path}"),
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -291,34 +333,74 @@ pub(crate) fn run_private_garden_governance_with_state(
             if writes.is_empty() && moves.is_empty() && deletes.is_empty() {
                 return Ok(PrivateGardenGovernanceOutcome::Skipped);
             }
+            let scope_id = private_garden_scope_id().to_string();
+            let mut manifest = Vec::with_capacity(writes.len() + moves.len() + deletes.len());
             for path in &deletes {
                 crate::platform::task_wdt::feed_current_task();
-                let _ = ctx
+                let revision_before = ctx
                     .private_garden_store
-                    .delete(private_garden_scope_id(), path)?;
+                    .read(&scope_id, path)?
+                    .map(|doc| doc.revision);
+                let deleted = ctx.private_garden_store.delete(&scope_id, path)?;
+                if deleted {
+                    manifest.push(private_garden_manifest_entry(
+                        PrivateGardenGovernanceManifestAction::Delete,
+                        &scope_id,
+                        path,
+                        None,
+                        revision_before,
+                        None,
+                    ));
+                }
             }
             for move_action in &moves {
                 crate::platform::task_wdt::feed_current_task();
-                let _ = ctx.private_garden_store.move_doc(
-                    private_garden_scope_id(),
+                let revision_before = ctx
+                    .private_garden_store
+                    .read(&scope_id, &move_action.from_path)?
+                    .map(|doc| doc.revision);
+                if let Some(record) = ctx.private_garden_store.move_doc(
+                    &scope_id,
                     &move_action.from_path,
                     &move_action.to_path,
                     input.now_secs,
-                )?;
+                )? {
+                    manifest.push(private_garden_manifest_entry(
+                        PrivateGardenGovernanceManifestAction::Move,
+                        &scope_id,
+                        &record.path,
+                        Some(move_action.from_path.clone()),
+                        revision_before,
+                        Some(record.revision),
+                    ));
+                }
             }
             for write in &writes {
                 crate::platform::task_wdt::feed_current_task();
-                let _ = ctx.private_garden_store.write(
-                    private_garden_scope_id(),
+                let revision_before = ctx
+                    .private_garden_store
+                    .read(&scope_id, &write.path)?
+                    .map(|doc| doc.revision);
+                let record = ctx.private_garden_store.write(
+                    &scope_id,
                     &write.path,
                     &write.content,
                     input.now_secs,
                 )?;
+                manifest.push(private_garden_manifest_entry(
+                    PrivateGardenGovernanceManifestAction::Write,
+                    &scope_id,
+                    &record.path,
+                    None,
+                    revision_before,
+                    Some(record.revision),
+                ));
             }
             Ok(PrivateGardenGovernanceOutcome::Updated {
                 writes: writes.len(),
                 moves: moves.len(),
                 deletes: deletes.len(),
+                manifest,
             })
         }
         Err(error) => {
@@ -1065,14 +1147,20 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            outcome,
-            PrivateGardenGovernanceOutcome::Updated {
-                writes: 1,
-                moves: 1,
-                deletes: 1
-            }
-        );
+        let PrivateGardenGovernanceOutcome::Updated {
+            writes,
+            moves,
+            deletes,
+            manifest,
+        } = outcome
+        else {
+            panic!("expected private garden update");
+        };
+        assert_eq!(writes, 1);
+        assert_eq!(moves, 1);
+        assert_eq!(deletes, 1);
+        assert_eq!(manifest.len(), 3);
+        assert!(manifest.iter().all(|entry| !entry.store_key.is_empty()));
         assert!(private_garden_store
             .read("chat-1", "scratch/old.md")
             .unwrap()

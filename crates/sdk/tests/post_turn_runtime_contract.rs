@@ -40,6 +40,7 @@ fn finalize_request(user: &str, assistant: Option<&str>) -> MemoryTurnFinalizeRe
             subject: "subject-default".to_string(),
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
             source: turn_source(),
+            actor: None,
             input_messages: vec![TranscriptInputMessage::user(user)],
             assistant_message: assistant.map(TranscriptInputMessage::assistant),
             tool_observations: Vec::new(),

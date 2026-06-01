@@ -12,7 +12,7 @@ pub use bm_core::budget::{
     compile_runtime_budget, AdapterRuntimeBudget, LlmGatewayBudget, MaintenanceBudget,
     MemoryCoreBudget, ProjectionRenderBudget, ProjectionSourceBudget, ProviderModelContextLimit,
     RuntimeBudgetInput, RuntimeBudgetReport, RuntimeDeploymentRole, RuntimeJobBudget,
-    StaticPlatformManifest, StoreRuntimeBudget,
+    StaticPlatformManifest, StoreRuntimeBudget, TranscriptGovernanceBudget,
 };
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{
@@ -41,21 +41,24 @@ pub use bm_core::memory::{
     primary_human_subject_id, private_garden_scope_id, system_governor_subject_id,
     ActorAttribution, CanonicalTurnDelta, CommittedSessionMessage, ConversationKey,
     ConversationScope, DeferredGovernanceJob, DeferredGovernanceJobStatus,
-    DeferredGovernanceJobSummary, DeferredGovernanceQueueReport, GovernedWriteDecision,
-    HostOpaqueRef, HostRefRelation, HostRefVisibility, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryPlaneGovernanceReport, MemoryPrivacyClass,
-    MemorySemanticJudgmentSource, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain, PostTurnPrivateGardenReport,
-    PostTurnSemanticGovernanceReport, PrivateDocEntry, PrivateDocWorkspace,
-    PrivateGardenAdmissionDecision, RedactedTranscriptSlice, SessionTurnCommitReport,
+    DeferredGovernanceJobSummary, DeferredGovernanceQueueReport, DerivedMemoryPlane,
+    DerivedMemoryRef, GovernedWriteDecision, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryPlaneGovernanceReport,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemoryTurnDeliveryStatus, MemoryTurnProtocol,
+    MemoryTurnSource, MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateDocEntry,
+    PrivateDocWorkspace, PrivateGardenAdmissionDecision, PrivateGardenGovernanceManifestAction,
+    PrivateGardenGovernanceManifestEntry, RedactedTranscriptSlice, SessionTurnCommitReport,
     SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SoulCandidateDisposition,
     SoulCandidateHandoffReport, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
     SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
     SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulSurface, SubjectVisibility,
-    TranscriptCommitReport, TranscriptInputMessage, TranscriptLifecycleState,
-    TranscriptLifecycleTransition, TranscriptRedactionState, TranscriptReplayView,
-    TranscriptTurnRecord,
+    TranscriptCommitReport, TranscriptConversationAlias, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleState, TranscriptLifecycleTransition,
+    TranscriptRedactionReason, TranscriptRedactionReportItem, TranscriptRedactionState,
+    TranscriptRepairIssue, TranscriptRepairIssueKind, TranscriptRepairReport,
+    TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage, TranscriptTurnRecord,
 };
 pub use bm_core::memory::{
     build_core_revision_diff_from_record,
@@ -149,8 +152,9 @@ pub use ops::{
     MemorySpaceMigrationPlaneReport, MemorySpaceMigrationPrivacyReport,
     MemorySpaceSubjectRemapReport, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
     MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
-    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest,
-    MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
+    MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
+    MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
     PrivateDisclosureIntegrityReport, RuntimeDisclosureProtocolReport, RuntimeOperatorAction,
     RuntimeOperatorActionReport, RuntimeProjectionSourceBlock, RuntimeSkillDeleteRequest,
     RuntimeSkillDetailReport, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
@@ -495,6 +499,8 @@ fn is_private_snapshot_namespace(namespace: &str) -> bool {
             | "mental_privacy"
             | "private_doc"
             | "conversation_transcript"
+            | "conversation_transcript_alias"
+            | "conversation_transcript_derived_ref"
             | "private_garden"
     )
 }
@@ -507,4 +513,6 @@ fn is_private_snapshot_key(key: &str) -> bool {
         || key.contains("self_model")
         || key.contains("self_continuity")
         || key.contains("conversation_transcript")
+        || key.contains("conversation_transcript_alias")
+        || key.contains("conversation_transcript_derived_ref")
 }

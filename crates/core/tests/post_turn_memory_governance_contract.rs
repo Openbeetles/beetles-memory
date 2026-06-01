@@ -96,6 +96,7 @@ fn turn_delta(
         subject: "subject-default".to_string(),
         delivery_status,
         source: turn_source(),
+        actor: None,
         input_messages,
         assistant_message: assistant_message.map(TranscriptInputMessage::assistant),
         tool_observations: Vec::new(),
@@ -262,6 +263,7 @@ fn private_garden_freeform_report_is_not_governed_write_decision() {
         writes: 1,
         moves: 0,
         deletes: 0,
+        manifest: Vec::new(),
         skipped_reason: None,
     };
 

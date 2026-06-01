@@ -1,13 +1,13 @@
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
     CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, HostOpaqueRef,
-    MemoryHygieneInspection, MemoryHygieneOutcome, PostTurnMemoryGovernanceReport,
+    MemoryHygieneInspection, MemoryHygieneOutcome, PostTurnPrivateGardenReport,
     PostTurnSemanticGovernanceReport, PrivateMaterialRedactionReport,
     ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck,
     RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
     SubjectProjectionReport, SubjectScopedRuntime, TranscriptCommitReport,
-    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptReplayView, VaultManifest,
-    VaultMigrationPreflight,
+    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRepairReport,
+    TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
 };
 use bm_core::memory::{CompactMemoryGraph, GraphRecallRerankReport, TemporalMemoryGraphGateReport};
 use bm_core::skills::{
@@ -344,8 +344,14 @@ pub struct MemoryTurnFinalizeRequest {
     pub mode_input: RuntimeLifecycleModeInput,
 }
 
-pub type MemoryTurnFinalizeReport =
-    PostTurnMemoryGovernanceReport<MemoryMaintenanceReport, RuntimeLifecycleReport>;
+pub struct MemoryTurnFinalizeReport {
+    pub session_commit: SessionTurnCommitReport,
+    pub transcript_commit: Option<TranscriptCommitReport>,
+    pub maintenance: Option<MemoryMaintenanceReport>,
+    pub private_garden_self_work: PostTurnPrivateGardenReport,
+    pub semantic_governance: PostTurnSemanticGovernanceReport,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
 
 #[derive(Clone, Debug)]
 pub struct MemoryDeferredGovernanceRunRequest {
@@ -433,12 +439,15 @@ pub struct MemoryTranscriptReplayRequest {
     pub channel_id: String,
     pub conversation_id: String,
     pub limit: usize,
+    pub cursor: Option<String>,
     pub view: TranscriptReplayView,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryTranscriptReplayReport {
     pub slice: RedactedTranscriptSlice,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -459,16 +468,32 @@ pub struct MemoryTranscriptLifecycleReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptRepairRequest {
+    pub memory_space_id: String,
+    pub channel_id: String,
+    pub conversation_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptRepairReport {
+    pub transcript: TranscriptRepairReport,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryTranscriptExportRequest {
     pub memory_space_id: String,
     pub channel_id: String,
     pub conversation_id: String,
     pub limit: usize,
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryTranscriptExportReport {
     pub slice: RedactedTranscriptSlice,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 

@@ -168,6 +168,16 @@ pub struct LlmGatewayBudget {
     pub maintenance_reply_max_chars: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptGovernanceBudget {
+    pub transcript_page_size: usize,
+    pub host_refs_per_turn: usize,
+    pub redaction_items_per_page: usize,
+    pub derived_refs_per_report: usize,
+    pub repair_issues_per_report: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeBudgetReport {
@@ -185,6 +195,7 @@ pub struct RuntimeBudgetReport {
     pub maintenance_budget: MaintenanceBudget,
     pub runtime_job_budget: RuntimeJobBudget,
     pub llm_gateway_budget: LlmGatewayBudget,
+    pub transcript_governance_budget: TranscriptGovernanceBudget,
     pub limited_by: Vec<String>,
     pub unavailable_reasons: Vec<String>,
 }
@@ -448,6 +459,37 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         maintenance_user_max_chars: maintenance_budget.user_input_max_chars,
         maintenance_reply_max_chars: maintenance_budget.reply_input_max_chars,
     };
+    let transcript_governance_budget = TranscriptGovernanceBudget {
+        transcript_page_size: scale_usize(
+            ceiling.transcript_governance_budget.transcript_page_size,
+            source_scale,
+        )
+        .max(1),
+        host_refs_per_turn: scale_usize(
+            ceiling.transcript_governance_budget.host_refs_per_turn,
+            source_scale,
+        )
+        .max(1),
+        redaction_items_per_page: scale_usize(
+            ceiling
+                .transcript_governance_budget
+                .redaction_items_per_page,
+            source_scale,
+        )
+        .max(1),
+        derived_refs_per_report: scale_usize(
+            ceiling.transcript_governance_budget.derived_refs_per_report,
+            source_scale,
+        )
+        .max(1),
+        repair_issues_per_report: scale_usize(
+            ceiling
+                .transcript_governance_budget
+                .repair_issues_per_report,
+            source_scale,
+        )
+        .max(1),
+    };
     let report_id = report_id(
         input.profile,
         input.resource_snapshot.source,
@@ -471,6 +513,7 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         maintenance_budget,
         runtime_job_budget,
         llm_gateway_budget,
+        transcript_governance_budget,
         limited_by,
         unavailable_reasons,
     }
@@ -548,6 +591,7 @@ struct ProfileBudgetCeiling {
     maintenance_budget: MaintenanceBudget,
     runtime_job_budget: RuntimeJobBudget,
     llm_gateway_budget: LlmGatewayBudget,
+    transcript_governance_budget: TranscriptGovernanceBudget,
     p0_min_records: usize,
     p0_min_recall_items: usize,
     p0_min_events: usize,
@@ -733,6 +777,13 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             maintenance_user_max_chars: spec.maintenance_chars,
             maintenance_reply_max_chars: spec.maintenance_chars,
         },
+        transcript_governance_budget: TranscriptGovernanceBudget {
+            transcript_page_size: max_usize(spec.source_chars / 256, 4),
+            host_refs_per_turn: max_usize(spec.http_body_max_bytes / (8 * 1024), 1),
+            redaction_items_per_page: max_usize(spec.source_chars / 128, 8),
+            derived_refs_per_report: max_usize(spec.records / 512, 4),
+            repair_issues_per_report: max_usize(spec.events / 512, 4),
+        },
         p0_min_records: 64,
         p0_min_recall_items: 4,
         p0_min_events: 64,
@@ -799,5 +850,22 @@ mod tests {
         render_budgets.sort_unstable();
         render_budgets.dedup();
         assert!(render_budgets.len() >= 6);
+    }
+
+    #[test]
+    fn transcript_governance_budget_is_profile_specific() {
+        let compact = RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
+            .transcript_governance_budget;
+        let server = RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
+            .transcript_governance_budget;
+
+        assert!(compact.transcript_page_size > 0);
+        assert!(compact.host_refs_per_turn > 0);
+        assert!(compact.redaction_items_per_page > 0);
+        assert!(compact.derived_refs_per_report > 0);
+        assert!(compact.repair_issues_per_report > 0);
+        assert!(compact.transcript_page_size < server.transcript_page_size);
+        assert!(compact.derived_refs_per_report < server.derived_refs_per_report);
+        assert!(compact.repair_issues_per_report < server.repair_issues_per_report);
     }
 }

@@ -46,8 +46,28 @@ if ! rg -n 'projection_render_budget|projection_render_chars_for_request' crates
   fail "projection render must consume projection_render_budget"
 fi
 
+for file in crates/core/src/budget.rs crates/sdk/src/lib.rs; do
+  if ! rg -n 'TranscriptGovernanceBudget' "$file" >/dev/null; then
+    fail "transcript governance ceilings must be owned by RuntimeBudgetReport and exported by SDK"
+  fi
+done
+
+for file in crates/core/src/budget.rs crates/sdk/src/runtime.rs; do
+  if ! rg -n 'transcript_governance_budget' "$file" >/dev/null; then
+    fail "SDK transcript replay/lifecycle/repair must consume transcript_governance_budget"
+  fi
+done
+
+if rg -n 'profile.*transcript_page|transcript_page_size|host_refs_per_turn|derived_refs_per_report|repair_issues_per_report' crates/store/src; then
+  fail "StorePlatform must not own transcript governance profile budgets"
+fi
+
 if ! rg -n 'eight_profiles_have_distinct_budget_reports' crates/core/src/budget.rs >/dev/null; then
   fail "runtime budget tests must cover profile-specific compiled reports"
+fi
+
+if ! rg -n 'transcript_governance_budget_is_profile_owned_and_runtime_enforced' crates/sdk/tests/runtime_budget_contract.rs >/dev/null; then
+  fail "runtime budget tests must cover transcript governance budget ownership"
 fi
 
 echo "check_runtime_budget_contracts: ok"

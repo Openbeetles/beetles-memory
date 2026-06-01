@@ -10,8 +10,8 @@ use bm_core::memory::LongTermMemoryKind;
 use bm_core::platform::{Platform as _, ResponseBody};
 use bm_sdk::{
     LongTermMemoryDraft, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy,
-    MemoryRuntime, MemoryScope, NoopMemoryAuditSink, ProfileId, Result, StoreBackendConfig,
-    StorePlatform,
+    MemoryRuntime, MemoryScope, NoopMemoryAuditSink, ProfileId, Result, RuntimeBudgetReport,
+    StoreBackendConfig, StorePlatform,
 };
 
 struct FixedMemoryClock {
@@ -133,6 +133,29 @@ pub fn test_runtime_with_identity_scope_and_subject(
         .scope(MemoryScope::new(channel, chat_id).expect("scope"))
         .profile(profile)
         .store_platform(platform)
+        .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(NoopMemoryAuditSink))
+        .build()
+        .expect("runtime")
+}
+
+pub fn test_runtime_with_scope_subject_and_budget(
+    platform: StorePlatform,
+    profile: ProfileId,
+    channel: &str,
+    chat_id: &str,
+    subject_id: &str,
+    runtime_budget: RuntimeBudgetReport,
+) -> MemoryRuntime {
+    MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .subject_id(subject_id)
+        .scope(MemoryScope::new(channel, chat_id).expect("scope"))
+        .profile(profile)
+        .store_platform(platform)
+        .runtime_budget(runtime_budget)
         .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())

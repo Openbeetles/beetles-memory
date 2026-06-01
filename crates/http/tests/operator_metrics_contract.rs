@@ -65,6 +65,7 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
             subject: default_agent_subject_id("operator-metrics-agent"),
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
             source: turn_source(),
+            actor: None,
             input_messages: vec![TranscriptInputMessage::user("记住 operator queue 必须可见")],
             assistant_message: Some(TranscriptInputMessage::assistant("已记录。")),
             tool_observations: Vec::new(),

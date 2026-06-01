@@ -223,11 +223,12 @@ pub use long_term::{
     MAX_LONG_TERM_MEMORY_KEYWORDS, MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
 };
 pub use long_term_extraction::{
-    apply_long_term_memory_extraction, build_long_term_memory_extraction_input,
-    evaluate_long_term_memory_extraction_turn, mark_long_term_memory_extraction_deferred,
-    mark_long_term_memory_extraction_processed, mark_long_term_memory_extraction_requested,
-    parse_long_term_memory_extraction_response, persist_long_term_memory_extraction_state,
-    run_long_term_memory_refresh, LongTermMemoryExtractionState,
+    apply_long_term_memory_extraction, apply_long_term_memory_extraction_with_report,
+    build_long_term_memory_extraction_input, evaluate_long_term_memory_extraction_turn,
+    mark_long_term_memory_extraction_deferred, mark_long_term_memory_extraction_processed,
+    mark_long_term_memory_extraction_requested, parse_long_term_memory_extraction_response,
+    persist_long_term_memory_extraction_state, run_long_term_memory_refresh,
+    LongTermMemoryExtractionApplyReport, LongTermMemoryExtractionState,
     LongTermMemoryExtractionStateStore, LongTermMemoryExtractionTurnDecision,
     LongTermMemoryExtractionTurnInput, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
     ParsedLongTermMemoryExtraction, LONG_TERM_MEMORY_EXTRACTION_BATCH,
@@ -358,6 +359,7 @@ pub use private_garden::{
 pub(crate) use private_garden_governance::run_private_garden_governance_with_state;
 pub use private_garden_governance::{
     run_private_garden_governance, PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
+    PrivateGardenGovernanceManifestAction, PrivateGardenGovernanceManifestEntry,
     PrivateGardenGovernanceOutcome, PRIVATE_GARDEN_GOVERNANCE_SYSTEM_PROMPT,
 };
 pub(crate) use profile::{
@@ -508,12 +510,16 @@ pub use temperament_continuity::{
     TEMPERAMENT_CONTINUITY_TOTAL_CHAR_LIMIT,
 };
 pub use transcript::{
-    ActorAttribution, CanonicalTurnTranscriptCommitReport, ConversationKey,
-    ConversationTranscriptStore, HostOpaqueRef, HostRefRelation, HostRefVisibility,
-    RedactedTranscriptMessage, RedactedTranscriptSlice, RedactedTranscriptTurn,
-    TranscriptCommitReport, TranscriptLifecycleReport, TranscriptLifecycleRequest,
-    TranscriptLifecycleState, TranscriptLifecycleTransition, TranscriptMessageRecord,
-    TranscriptRedactionState, TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnRecord,
+    filter_host_refs_for_transcript_view, ActorAttribution, CanonicalTurnTranscriptCommitReport,
+    ConversationKey, ConversationTranscriptStore, DerivedMemoryPlane, DerivedMemoryRef,
+    HostOpaqueRef, HostRefRelation, HostRefVisibility, RedactedTranscriptMessage,
+    RedactedTranscriptSlice, RedactedTranscriptTurn, TranscriptCommitReport,
+    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptLifecycleReport,
+    TranscriptLifecycleRequest, TranscriptLifecycleState, TranscriptLifecycleTransition,
+    TranscriptMessageRecord, TranscriptRedactionReason, TranscriptRedactionReportItem,
+    TranscriptRedactionState, TranscriptRepairIssue, TranscriptRepairIssueKind,
+    TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage,
+    TranscriptTurnRecord,
 };
 pub use turn_commit::{
     canonical_user_delta, commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,
@@ -906,6 +912,7 @@ pub struct SessionMessageRecord {
     pub created_at: u64,
     pub speaker_id: String,
     pub speaker_kind: String,
+    pub transcript_ref: Option<transcript::TranscriptEvidenceRef>,
 }
 
 impl SessionMessageRecord {
@@ -944,6 +951,7 @@ impl From<SessionMessage> for SessionMessageRecord {
             created_at: message.created_at,
             speaker_id: message.speaker_id,
             speaker_kind: message.speaker_kind,
+            transcript_ref: None,
         }
     }
 }

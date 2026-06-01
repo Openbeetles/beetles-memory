@@ -35,6 +35,7 @@ fn finalize_request(turn_id: &str) -> MemoryTurnFinalizeRequest {
             subject: default_agent_subject_id("agent-main"),
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
             source: turn_source(),
+            actor: None,
             input_messages: vec![TranscriptInputMessage::user(
                 "记住 runtime metrics 必须来自 SDK report",
             )],

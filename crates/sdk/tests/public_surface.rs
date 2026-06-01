@@ -8,20 +8,23 @@ use bm_sdk::{
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentToolDescriptor,
     AgentToolExperienceGovernanceReport, AgentToolHint, AgentToolObservationDigest,
     AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
-    AgentToolRegistrySnapshot, AgentToolUsageFeedback, ConversationKey, HostOpaqueRef,
-    HostRefRelation, HostRefVisibility, LLMRuntimeProjectionEnvelope, MemoryAutopilotInput,
-    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGraphEvidence, MemoryGraphNodeKind,
-    MemoryIdentity, MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope,
+    AgentToolRegistrySnapshot, AgentToolUsageFeedback, ConversationKey, DerivedMemoryPlane,
+    DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    LLMRuntimeProjectionEnvelope, MemoryAutopilotInput, MemoryCapabilityCatalog,
+    MemoryCapabilityPolicy, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
+    MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope,
     MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
-    MemoryTranscriptReplayRequest, MemoryWriteRequest, PostReplyMemoryMaintenanceContext,
-    PrivateDisclosureIntegrityReport, PrivateMaterialRedactionReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
-    ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
-    RedactedTranscriptSlice, SoulLifeProjectionReport, StoreBackendConfig, StorePlatform,
-    SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
-    TranscriptLifecycleTransition, TranscriptReplayView, TranscriptTurnRecord, VaultManifest,
-    WorkIntegrityReport, AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
-    AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
+    MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest, MemoryWriteRequest,
+    PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
+    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
+    PromptParticipationPlan, RedactedTranscriptSlice, SoulLifeProjectionReport, StoreBackendConfig,
+    StorePlatform, SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
+    TranscriptEvidenceRef, TranscriptLifecycleTransition, TranscriptRedactionReason,
+    TranscriptRedactionReportItem, TranscriptRepairIssue, TranscriptRepairIssueKind,
+    TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage,
+    TranscriptTurnRecord, VaultManifest, WorkIntegrityReport, AGENT_TOOL_NO_EXPERIENCE_REASON,
+    AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH, AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
 
 fn prompt_context_contract_is_sdk_importable<'a>(
@@ -97,10 +100,48 @@ fn sdk_transcript_contract_types_are_importable(
     _commit: Option<MemoryTranscriptCommitRequest>,
     _replay: MemoryTranscriptReplayRequest,
     _lifecycle: MemoryTranscriptLifecycleRequest,
+    _repair: MemoryTranscriptRepairRequest,
     _export: MemoryTranscriptExportRequest,
     _transition: TranscriptLifecycleTransition,
+    _redaction_reason: TranscriptRedactionReason,
+    _redaction_item: Option<TranscriptRedactionReportItem>,
+    _replay_audit: Option<TranscriptReplayAudit>,
+    _evidence_ref: Option<TranscriptEvidenceRef>,
+    _derived_plane: Option<DerivedMemoryPlane>,
+    _derived_ref: Option<DerivedMemoryRef>,
+    _turn_page: Option<TranscriptTurnPage>,
+    _repair_report: Option<TranscriptRepairReport>,
+    _repair_issue: Option<TranscriptRepairIssue>,
+    _repair_kind: TranscriptRepairIssueKind,
     _view: TranscriptReplayView,
 ) {
+}
+
+#[test]
+fn transcript_replay_export_page_requests_are_public() {
+    let replay = MemoryTranscriptReplayRequest {
+        memory_space_id: "space".to_string(),
+        channel_id: "channel".to_string(),
+        conversation_id: "conversation".to_string(),
+        limit: 1,
+        cursor: Some("1:turn-a".to_string()),
+        view: TranscriptReplayView::HostUi,
+    };
+    let export = MemoryTranscriptExportRequest {
+        memory_space_id: replay.memory_space_id.clone(),
+        channel_id: replay.channel_id.clone(),
+        conversation_id: replay.conversation_id.clone(),
+        limit: replay.limit,
+        cursor: replay.cursor.clone(),
+    };
+    let repair = MemoryTranscriptRepairRequest {
+        memory_space_id: replay.memory_space_id.clone(),
+        channel_id: replay.channel_id.clone(),
+        conversation_id: replay.conversation_id.clone(),
+    };
+
+    assert_eq!(export.cursor.as_deref(), Some("1:turn-a"));
+    assert_eq!(repair.conversation_id, "conversation");
 }
 
 fn sdk_projection_report_set_types_are_importable(

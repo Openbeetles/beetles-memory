@@ -119,6 +119,7 @@ impl GatewayMaintenancePlan {
                     subject: self.runtime.runtime().subject_id().to_string(),
                     delivery_status: snapshot.delivery_status,
                     source: self.turn_source.clone(),
+                    actor: None,
                     input_messages: self.input_messages.clone(),
                     assistant_message: if snapshot.reply_content.trim().is_empty() {
                         None

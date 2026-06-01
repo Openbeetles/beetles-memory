@@ -39,6 +39,8 @@ The Conversation Transcript Substrate release surface is the current base eviden
 
 The owner remains `MemoryRuntime`: hosts and adapters provide delivered turn deltas, actor attribution, and opaque host references; Beetle Memory commits evidence, applies governance, and returns reports. External code must not write a parallel transcript store or infer memory facts from raw conversation history.
 
+`MemoryScope::new(channel, chat_id)` remains the single-agent default. Hosts that have a stable conversation id distinct from the legacy chat id can set `MemoryScope::with_conversation_id(...)`; `finalize_turn_and_maintain` and `commit_transcript` also remember the last committed transcript conversation for subsequent recall, projection, maintenance, and inspection calls.
+
 SDK-facing transcript operations:
 
 | Operation | SDK surface | Purpose |
@@ -46,7 +48,10 @@ SDK-facing transcript operations:
 | Transcript Commit | `MemoryRuntime::finalize_turn_and_maintain` with `CanonicalTurnDelta`; manual commits use `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport` via `MemoryRuntime::commit_transcript` | Commit a delivered turn as governed evidence under `memory_space_id + channel_id + conversation_id`. |
 | Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport` via `MemoryRuntime::replay_transcript` | Read transcript evidence through a scoped view such as model context, host UI, operator audit, or export. |
 | Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport` via `MemoryRuntime::request_transcript_lifecycle` | Archive, mask, delete raw content, or run lifecycle review with audit output. |
-| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport` via `MemoryRuntime::export_transcript`; `MemorySpaceExportRequest { include_private: false }` redacts raw transcript by default | Export a redacted transcript slice, and keep raw transcript out of public memory-space exports unless the caller explicitly requests private material. |
+| Transcript Repair | `MemoryTranscriptRepairRequest` / `MemoryTranscriptRepairReport` via `MemoryRuntime::repair_transcript` | Inspect broken Memory-owned evidence links without scanning host business databases. |
+| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport` via `MemoryRuntime::export_transcript`; `MemorySpaceExportRequest { include_private: false }` redacts raw transcript, `conversation_transcript_alias`, and `conversation_transcript_derived_ref` manifests by default | Export a redacted transcript slice, and keep raw transcript plus transcript owner/derived metadata out of public memory-space exports unless the caller explicitly requests private material. |
+
+`MemoryTranscriptReplayRequest` and `MemoryTranscriptExportRequest` take `limit` plus optional `cursor`; their reports return `next_cursor` and `has_more`. SDK callers should page through transcript replay/export through `MemoryRuntime` instead of reaching into the core/store trait. Runtime profile budgets may clamp page size, visible host refs per turn, redaction items, lifecycle derived refs, and repair issues, but they do not relax redaction, lifecycle, or privacy policy. Lifecycle and repair reports set `profile_budget_applied=true` when those report lists are clipped.
 
 Core release-surface concepts:
 
@@ -54,17 +59,23 @@ Core release-surface concepts:
 | --- | --- |
 | `ConversationKey` | `memory_space_id`, `channel_id`, and `conversation_id`; `chat_id` is only a legacy alias or migration source. |
 | `ActorAttribution` | Preserves speaker, subject, actor subject, mounted subject, agent id, and trigger source without collapsing them into one identity. |
-| `HostOpaqueRef` | Carries host object references such as task, project, ticket, document, or order ids without letting Memory parse host business state machines. |
-| `RedactedTranscriptSlice` | Separates raw owner-only, model-context, host-UI, operator-audit, and export views. |
-| `TranscriptLifecycleRequest` | Produces reports and audit events; deleting raw transcript content does not silently delete accepted long-term memory. |
+| `HostOpaqueRef` | Carries host object references such as task, project, ticket, document, or order ids without letting Memory parse host business state machines; `HostRefVisibility` is enforced per replay/export view, and `label` is field-redacted outside owner-approved views with `HostRefLabel` in the redaction report. |
+| `RedactedTranscriptSlice` | Separates raw owner-only, model-context, host-UI, operator-audit, and export views, and returns structured `TranscriptRedactionReportItem` entries plus `TranscriptReplayAudit` counts for redacted messages and host refs. |
+| `TranscriptLifecycleRequest` | Produces reports and audit events; deleting raw transcript content does not silently delete accepted long-term memory. `TranscriptLifecycleReport` includes affected turn ids, message ids, view-sanitized host refs, host-ref redaction items, and Memory-owned derived refs when they are known. A completed lifecycle request is not the same as a changed transcript: no matching turns means `affected_turns=0` and the SDK lifecycle report has `changed=false`. |
+| `TranscriptEvidenceRef` / `DerivedMemoryRef` | Structured Memory-owned evidence references for linking transcript evidence to accepted long-term, shared factual, procedural, private, or soul-handoff material. Display citations may still be strings, but governance should not depend on string parsing alone. |
+| `TranscriptTurnPage` / `TranscriptRepairReport` | Bounded transcript paging and repair diagnostics for missing derived-ref source turns, `MissingSourceMessage`, orphan derived ref, corrupt transcript record, mismatched source key, or duplicate sequence/cursor evidence. Repair reports fail closed instead of hiding broken Memory-owned evidence links. |
+| `TranscriptGovernanceBudget` | Runtime-budget/profile-owned ceilings for transcript page size, visible host refs, redaction report items, lifecycle derived refs, and repair issues. Store backends persist and page data; they do not own profile budget policy. |
 
 Privacy and projection boundaries:
 
 - Transcript evidence is not automatically a canonical fact, soul mutation, procedural skill, or task experience.
+- Accepted long-term, shared factual, procedural skill, private garden, and soul-candidate handoff writes produced through governed candidate writes, manual extraction, or automatic post-turn extraction record structured transcript-derived refs for lifecycle impact review.
+- Runtime recall, projection, maintenance, long-term refresh, and operator inspection use transcript-backed evidence before the legacy `SessionStore(chat_id)` shadow; if transcript content is masked, raw-deleted, or its legacy `chat_id` alias cannot be trusted, these paths fail closed instead of falling back to the session shadow.
 - Assistant self-claims remain low-authority transcript evidence until governed by the relevant memory plane.
 - `HostUi` replay must not expose private garden, inner-life, soul-private raw material, backend traces, or operator-only audit content.
 - `ModelContext` replay must pass through privacy gates, profile budget, and model-facing projection policy.
-- Host references stay opaque by default; replay can show metadata and relation, not host object payloads.
+- Host references stay opaque by default; replay can show metadata and relation, not host object payloads. `Export` returns only export-visible refs, and `ModelContext` returns only model-context refs.
+- `MemoryRuntime::finalize_turn_and_maintain` reports both session commit and transcript commit status, so transcript backfill is not treated as a no-op when the legacy session shadow already contains the turn.
 
 ## Request Shapes
 

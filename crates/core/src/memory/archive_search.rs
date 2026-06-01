@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     render_turn_observation_ledger_block, render_turn_persona_ledger_block, MemoryStore,
-    SessionStore, TurnLedger, TurnLedgerStore, MAX_SESSION_ENTRIES,
+    SessionStore, TranscriptEvidenceRef, TurnLedger, TurnLedgerStore, MAX_SESSION_ENTRIES,
 };
 
 pub const MAX_ARCHIVE_SEARCH_LIMIT: usize = 8;
@@ -109,6 +109,14 @@ impl std::str::FromStr for ArchiveRecordSource {
 pub struct ArchiveRecordLocator {
     pub source: ArchiveRecordSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_space_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -124,6 +132,28 @@ impl ArchiveRecordLocator {
     pub fn record_id(&self) -> String {
         match self.source {
             ArchiveRecordSource::Transcript => {
+                if let (
+                    Some(memory_space_id),
+                    Some(channel_id),
+                    Some(conversation_id),
+                    Some(turn_id),
+                ) = (
+                    self.memory_space_id.as_deref(),
+                    self.channel_id.as_deref(),
+                    self.conversation_id.as_deref(),
+                    self.turn_id.as_deref(),
+                ) {
+                    if let Some(message_id) = self.message_id.as_deref() {
+                        return format!(
+                            "transcript|{}|{}|{}|turn|{}|msg|{}",
+                            memory_space_id, channel_id, conversation_id, turn_id, message_id
+                        );
+                    }
+                    return format!(
+                        "transcript|{}|{}|{}|turn|{}",
+                        memory_space_id, channel_id, conversation_id, turn_id
+                    );
+                }
                 if let Some(message_id) = self.message_id.as_deref() {
                     format!(
                         "transcript|{}|msg|{}",
@@ -155,6 +185,28 @@ impl ArchiveRecordLocator {
     pub fn citation(&self) -> String {
         match self.source {
             ArchiveRecordSource::Transcript => {
+                if let (
+                    Some(memory_space_id),
+                    Some(channel_id),
+                    Some(conversation_id),
+                    Some(turn_id),
+                ) = (
+                    self.memory_space_id.as_deref(),
+                    self.channel_id.as_deref(),
+                    self.conversation_id.as_deref(),
+                    self.turn_id.as_deref(),
+                ) {
+                    return TranscriptEvidenceRef {
+                        memory_space_id: memory_space_id.to_string(),
+                        channel_id: channel_id.to_string(),
+                        conversation_id: conversation_id.to_string(),
+                        turn_id: turn_id.to_string(),
+                        message_id: self.message_id.clone(),
+                        subject_id: None,
+                        authority: None,
+                    }
+                    .display_citation();
+                }
                 if let Some(message_id) = self.message_id.as_deref() {
                     format!(
                         "transcript:{}#message_id={}",
@@ -186,16 +238,40 @@ impl ArchiveRecordLocator {
         let head = parts.next()?;
         match head {
             "transcript" => {
-                let chat_id = parts.next()?.trim();
-                let identity = parts.next()?.trim();
+                let rest = parts.map(str::trim).collect::<Vec<_>>();
+                if rest.len() >= 5 && rest[3] == "turn" {
+                    let message_id = if rest.get(5) == Some(&"msg") {
+                        rest.get(6).map(|value| (*value).to_string())
+                    } else {
+                        None
+                    };
+                    return Some(Self {
+                        source: ArchiveRecordSource::Transcript,
+                        memory_space_id: Some(rest[0].to_string()),
+                        channel_id: Some(rest[1].to_string()),
+                        conversation_id: Some(rest[2].to_string()),
+                        turn_id: Some(rest[4].to_string()),
+                        chat_id: None,
+                        message_id,
+                        message_index: None,
+                        note_name: None,
+                        req_id: None,
+                    });
+                }
+                let chat_id = rest.first()?.trim();
+                let identity = rest.get(1)?.trim();
                 let (message_id, message_index) = if identity == "msg" {
-                    let message_id = parts.next()?.trim();
+                    let message_id = rest.get(2)?.trim();
                     (Some(message_id.to_string()), None)
                 } else {
                     (None, identity.parse::<usize>().ok())
                 };
                 Some(Self {
                     source: ArchiveRecordSource::Transcript,
+                    memory_space_id: None,
+                    channel_id: None,
+                    conversation_id: None,
+                    turn_id: None,
                     chat_id: Some(chat_id.to_string()),
                     message_id,
                     message_index,
@@ -207,6 +283,10 @@ impl ArchiveRecordLocator {
                 let note_name = parts.next()?.trim();
                 Some(Self {
                     source: ArchiveRecordSource::DailyNote,
+                    memory_space_id: None,
+                    channel_id: None,
+                    conversation_id: None,
+                    turn_id: None,
                     chat_id: None,
                     message_id: None,
                     message_index: None,
@@ -219,6 +299,10 @@ impl ArchiveRecordLocator {
                 let req_id = parts.next()?.trim();
                 Some(Self {
                     source: ArchiveRecordSource::TurnLog,
+                    memory_space_id: None,
+                    channel_id: None,
+                    conversation_id: None,
+                    turn_id: None,
                     chat_id: Some(chat_id.to_string()),
                     message_id: None,
                     message_index: None,
@@ -525,14 +609,7 @@ fn collect_live_archive_candidates(
                     continue;
                 }
                 let title = format!("{} in {}", message.role.to_uppercase(), chat_id);
-                let locator = ArchiveRecordLocator {
-                    source: ArchiveRecordSource::Transcript,
-                    chat_id: Some(chat_id.clone()),
-                    message_id: Some(message.message_id.clone()),
-                    message_index: Some(index),
-                    note_name: None,
-                    req_id: None,
-                };
+                let locator = archive_transcript_locator_from_message(chat_id, message, index);
                 let mut cues = vec!["recent transcript".to_string()];
                 if query.preferred_chat_id == Some(chat_id.as_str()) {
                     cues.push("current chat".to_string());
@@ -572,6 +649,10 @@ fn collect_live_archive_candidates(
             }
             let locator = ArchiveRecordLocator {
                 source: ArchiveRecordSource::DailyNote,
+                memory_space_id: None,
+                channel_id: None,
+                conversation_id: None,
+                turn_id: None,
                 chat_id: None,
                 message_id: None,
                 message_index: None,
@@ -608,6 +689,10 @@ fn collect_live_archive_candidates(
             let title = format!("{} turn in {}", ledger.status.label(), chat_id);
             let locator = ArchiveRecordLocator {
                 source: ArchiveRecordSource::TurnLog,
+                memory_space_id: None,
+                channel_id: None,
+                conversation_id: None,
+                turn_id: None,
                 chat_id: Some(chat_id.clone()),
                 message_id: None,
                 message_index: None,
@@ -634,6 +719,28 @@ fn collect_live_archive_candidates(
     }
 
     Ok(candidates)
+}
+
+fn archive_transcript_locator_from_message(
+    chat_id: &str,
+    message: &super::SessionMessageRecord,
+    index: usize,
+) -> ArchiveRecordLocator {
+    let source = message.transcript_ref.as_ref();
+    ArchiveRecordLocator {
+        source: ArchiveRecordSource::Transcript,
+        memory_space_id: source.map(|source| source.memory_space_id.clone()),
+        channel_id: source.map(|source| source.channel_id.clone()),
+        conversation_id: source.map(|source| source.conversation_id.clone()),
+        turn_id: source.map(|source| source.turn_id.clone()),
+        chat_id: Some(chat_id.to_string()),
+        message_id: source
+            .and_then(|source| source.message_id.clone())
+            .or_else(|| Some(message.message_id.clone())),
+        message_index: Some(index),
+        note_name: None,
+        req_id: None,
+    }
 }
 
 #[cfg(all(feature = "sqlite-index", not(test)))]
@@ -946,6 +1053,10 @@ fn map_archive_sqlite_candidate_row(
     let chat_id = row.get::<_, Option<String>>(2)?;
     let locator = ArchiveRecordLocator {
         source,
+        memory_space_id: None,
+        channel_id: None,
+        conversation_id: None,
+        turn_id: None,
         chat_id: chat_id.clone(),
         message_id: row.get::<_, Option<String>>(3)?,
         message_index: row
@@ -1946,13 +2057,17 @@ pub fn archive_get_default_content_len() -> usize {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::memory::{SessionMessage, TurnLedger, TurnLedgerStatus};
+    use crate::memory::{
+        MemoryEvidenceAuthority, SessionMessage, SessionMessageRecord, TranscriptEvidenceRef,
+        TurnLedger, TurnLedgerStatus,
+    };
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     #[derive(Default)]
     struct StubSessionStore {
         chats: Mutex<HashMap<String, Vec<SessionMessage>>>,
+        records: Mutex<HashMap<String, Vec<SessionMessageRecord>>>,
     }
 
     impl SessionStore for StubSessionStore {
@@ -1967,6 +2082,25 @@ mod tests {
             Ok(items.into_iter().skip(start).collect())
         }
 
+        fn load_recent_records(
+            &self,
+            chat_id: &str,
+            n: usize,
+        ) -> Result<Vec<SessionMessageRecord>> {
+            let guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(items) = guard.get(chat_id).cloned() {
+                let start = items.len().saturating_sub(n);
+                return Ok(items.into_iter().skip(start).collect());
+            }
+            drop(guard);
+            self.load_recent(chat_id, n).map(|messages| {
+                messages
+                    .into_iter()
+                    .map(SessionMessageRecord::from)
+                    .collect()
+            })
+        }
+
         fn clear(&self, _chat_id: &str) -> Result<()> {
             unreachable!()
         }
@@ -1979,6 +2113,16 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>();
+            for id in self
+                .records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+            {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
             ids.sort();
             Ok(ids)
         }
@@ -2152,6 +2296,62 @@ mod tests {
             build_archive_search_miss_reason(prepared, &terms, result.report.candidate_count, &[]),
             Some("no_substantive_archive_match".to_string())
         );
+    }
+
+    #[test]
+    fn live_archive_transcript_hit_preserves_structured_transcript_evidence_ref() {
+        let session_store = StubSessionStore::default();
+        let transcript_ref = TranscriptEvidenceRef {
+            memory_space_id: "space-a".to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            turn_id: "turn-a".to_string(),
+            message_id: Some("message-a".to_string()),
+            subject_id: Some("subject-default".to_string()),
+            authority: Some(MemoryEvidenceAuthority::UserAsserted),
+        };
+        let mut record = SessionMessageRecord::from(SessionMessage::new(
+            "message-a",
+            "user",
+            "当前主模型已经切到 OpenAI",
+            10,
+            10,
+            "user",
+            "human",
+        ));
+        record.transcript_ref = Some(transcript_ref.clone());
+        session_store
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("chat-a".to_string(), vec![record]);
+        let memory_store = StubMemoryStore::default();
+        let turn_ledger_store = StubTurnLedgerStore::default();
+
+        let hit = search_archive_records(
+            &session_store,
+            &memory_store,
+            &turn_ledger_store,
+            ArchiveSearchQuery {
+                query: "OpenAI 主模型",
+                preferred_chat_id: Some("chat-a"),
+                chat_id_filter: None,
+                sources: &[ArchiveRecordSource::Transcript],
+                limit: 4,
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("structured transcript hit");
+        let parsed = TranscriptEvidenceRef::parse_display_citation(&hit.citation)
+            .expect("archive citation should stay structured");
+
+        assert_eq!(parsed.memory_space_id, transcript_ref.memory_space_id);
+        assert_eq!(parsed.channel_id, transcript_ref.channel_id);
+        assert_eq!(parsed.conversation_id, transcript_ref.conversation_id);
+        assert_eq!(parsed.turn_id, transcript_ref.turn_id);
+        assert_eq!(parsed.message_id, transcript_ref.message_id);
     }
 
     #[test]
@@ -2382,6 +2582,10 @@ mod tests {
             &turn_ledger_store,
             &ArchiveRecordLocator {
                 source: ArchiveRecordSource::TurnLog,
+                memory_space_id: None,
+                channel_id: None,
+                conversation_id: None,
+                turn_id: None,
                 chat_id: Some("chat-a".to_string()),
                 message_id: None,
                 message_index: None,

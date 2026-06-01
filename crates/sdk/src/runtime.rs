@@ -5,39 +5,46 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::budget::{
     compile_runtime_budget, ProviderModelContextLimit, RuntimeBudgetInput, RuntimeBudgetReport,
-    StaticPlatformManifest,
+    StaticPlatformManifest, TranscriptGovernanceBudget,
 };
 use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
-    apply_long_term_memory_extraction, build_deferred_governance_queue_report,
+    apply_long_term_memory_extraction_with_report, build_deferred_governance_queue_report,
     build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta_with_transcript,
     compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
-    export_continuity_snapshot, govern_write_candidates, import_continuity_snapshot,
-    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
-    load_prompt_memory_context, promote_task_experience_to_procedure, relationship_scope,
-    rerank_recall_with_temporal_graph, run_long_term_memory_refresh,
+    export_continuity_snapshot, filter_host_refs_for_transcript_view, govern_write_candidates,
+    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
+    inspect_working_recall, load_prompt_memory_context, promote_task_experience_to_procedure,
+    relationship_scope, rerank_recall_with_temporal_graph, run_long_term_memory_refresh,
     run_memory_retention_compaction, run_post_reply_memory_maintenance,
     run_private_garden_governance, write_governed_shared_memory_in_space, CanonicalTurnDelta,
     CompactMemoryGraph, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
-    ContinuitySnapshotMode, ConversationKey, DeferredGovernanceJob, DeferredGovernanceJobStatus,
-    DeferredGovernanceQueueReport, DroppedProjectionCandidate, GovernedWriteDecision,
-    GraphRecallRerankReport, IngressKind, InhabitedSubjectProjection,
-    InhabitedSubjectProjectionInput, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
-    LongTermMemoryRefreshRequestOutcome, MemoryGraphEvidence, MemoryGraphNodeKind,
-    MemoryHygieneContext, MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
+    ContinuitySnapshotMode, ConversationKey, ConversationTranscriptStore, DeferredGovernanceJob,
+    DeferredGovernanceJobStatus, DeferredGovernanceQueueReport, DerivedMemoryPlane,
+    DerivedMemoryRef, DroppedProjectionCandidate, GovernedWriteDecision, GraphRecallRerankReport,
+    IngressKind, InhabitedSubjectProjection, InhabitedSubjectProjectionInput, LongTermMemoryDraft,
+    LongTermMemoryKind, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    LongTermMemoryRefreshRequestOutcome, LongTermMemorySourceScope, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryHygieneContext,
+    MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
     PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
     PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateGardenGovernanceContext,
-    PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome, ProceduralMemoryPromotionPolicy,
+    PrivateGardenGovernanceInput, PrivateGardenGovernanceManifestEntry,
+    PrivateGardenGovernanceOutcome, ProceduralMemoryPromotionPolicy,
     ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
     ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
     PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate,
-    RecallSelectionReport, SharedFactWriteGovernanceContext, SharedMemoryWriteSource,
-    SkillEvolutionReport, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
-    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, SubjectRegistry,
-    SubjectRelationshipGraph, SubjectScopedRuntime, TemporalMemoryGraphGateReport,
-    TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptReplayView,
-    WorkingRecallInspectionInput,
+    RecallSelectionReport, RedactedTranscriptSlice, SessionMessage, SessionMessageRecord,
+    SessionStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
+    SharedMemoryWriteSource, SkillEvolutionReport, SubjectProjectionBoundaryProtocolReport,
+    SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
+    SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime, TemporalMemoryGraphGateReport,
+    TranscriptConversationAlias, TranscriptEvidenceRef,
+    TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
+    TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptRedactionReason,
+    TranscriptRedactionReportItem, TranscriptRepairReport as CoreTranscriptRepairReport,
+    TranscriptReplayView, WorkingRecallInspectionInput,
 };
 use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
 use bm_core::platform::Platform;
@@ -78,9 +85,10 @@ use crate::{
     MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
     MemorySpaceMigratePreviewRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
     MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
-    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest,
-    MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest,
-    PressureLevel, PrivateDisclosureIntegrityReport, Result, RuntimeDisclosureProtocolReport,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
+    MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
+    MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, PressureLevel,
+    PrivateDisclosureIntegrityReport, Result, RuntimeDisclosureProtocolReport,
     RuntimeOperatorAction, RuntimeOperatorActionReport, RuntimeProjectionSourceBlock,
     RuntimeSkillDeleteRequest, RuntimeSkillDetailReport, RuntimeSkillDetailRequest,
     RuntimeSkillEditRequest, RuntimeSkillListReport, RuntimeSkillListRequest,
@@ -119,6 +127,7 @@ impl MemoryIdentity {
 pub struct MemoryScope {
     pub channel: String,
     pub chat_id: String,
+    pub conversation_id: Option<String>,
 }
 
 impl MemoryScope {
@@ -131,7 +140,27 @@ impl MemoryScope {
         if chat_id.trim().is_empty() {
             return Err(Error::config("memory_scope", "chat_id must not be empty"));
         }
-        Ok(Self { channel, chat_id })
+        Ok(Self {
+            channel,
+            chat_id,
+            conversation_id: None,
+        })
+    }
+
+    pub fn with_conversation_id(mut self, conversation_id: impl Into<String>) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        if conversation_id.trim().is_empty() {
+            return Err(Error::config(
+                "memory_scope",
+                "conversation_id must not be empty",
+            ));
+        }
+        self.conversation_id = Some(conversation_id.trim().to_string());
+        Ok(self)
+    }
+
+    pub fn conversation_id_or_chat_id(&self) -> &str {
+        self.conversation_id.as_deref().unwrap_or(&self.chat_id)
     }
 }
 
@@ -203,7 +232,7 @@ impl MemoryAuditEvent {
     ) -> Self {
         let memory_space_id = memory_space_id.into();
         let subject_id = subject_id.into();
-        let conversation_id = Some(scope.chat_id.clone());
+        let conversation_id = Some(scope.conversation_id_or_chat_id().to_string());
         Self {
             operation: operation.into(),
             profile,
@@ -249,6 +278,7 @@ pub struct MemoryRuntime {
     pub(crate) capabilities: MemoryCapabilityCatalog,
     lifecycle: RuntimeLifecycleEngine,
     agent_tool_registries: Mutex<Vec<AgentToolRegistrySnapshot>>,
+    last_conversation_id: Mutex<Option<String>>,
 }
 
 impl MemoryRuntime {
@@ -364,6 +394,83 @@ impl MemoryRuntime {
 
     pub fn retention_quota_report(&self) -> bm_core::budget::RuntimeRetentionQuotaReport {
         self.config.runtime_budget.retention_quota_report()
+    }
+
+    fn remember_conversation_id_from_delta(&self, turn: &CanonicalTurnDelta) -> Result<()> {
+        let conversation_id = turn
+            .conversation
+            .conversation_id
+            .as_deref()
+            .unwrap_or(turn.conversation.chat_id.as_str())
+            .trim();
+        if conversation_id.is_empty() {
+            return Ok(());
+        }
+        let alias = TranscriptConversationAlias::new(
+            self.config.memory_space_id.clone(),
+            turn.conversation.channel.clone(),
+            turn.conversation.chat_id.clone(),
+            conversation_id.to_string(),
+            self.config.clock.now_secs(),
+        )?;
+        self.config
+            .platform
+            .conversation_transcript_store()
+            .remember_conversation_alias(&alias)?;
+        *self
+            .last_conversation_id
+            .lock()
+            .expect("last conversation id state poisoned") = Some(conversation_id.to_string());
+        Ok(())
+    }
+
+    fn active_transcript_key(
+        &self,
+        transcript_store: &dyn ConversationTranscriptStore,
+    ) -> Result<ConversationKey> {
+        let last_conversation_id = self
+            .last_conversation_id
+            .lock()
+            .expect("last conversation id state poisoned")
+            .clone();
+        let conversation_id = if let Some(conversation_id) = last_conversation_id {
+            conversation_id
+        } else if let Some(conversation_id) = self.config.scope.conversation_id.clone() {
+            conversation_id
+        } else if let Some(conversation_id) = transcript_store.resolve_conversation_alias(
+            &self.config.memory_space_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+        )? {
+            conversation_id
+        } else {
+            self.config.scope.chat_id.clone()
+        };
+        ConversationKey::new(
+            self.config.memory_space_id.clone(),
+            self.config.scope.channel.clone(),
+            conversation_id,
+        )
+    }
+
+    fn transcript_backed_session_store(
+        &self,
+        fallback: Arc<dyn SessionStore>,
+        view: TranscriptReplayView,
+    ) -> Arc<dyn SessionStore> {
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        match self.active_transcript_key(transcript_store.as_ref()) {
+            Ok(key) => Arc::new(TranscriptBackedSessionStore {
+                fallback,
+                transcript_store,
+                key,
+                view,
+            }),
+            Err(error) => Arc::new(TranscriptKeyUnavailableSessionStore {
+                fallback,
+                reason: error.to_string(),
+            }),
+        }
     }
 
     pub fn write(&self, request: MemoryWriteRequest) -> Result<MemoryWriteReport> {
@@ -524,12 +631,20 @@ impl MemoryRuntime {
             MemoryWriteRequest::LongTermExtraction { extraction } => {
                 let store = self.config.platform.long_term_memory_store();
                 let skill_storage = self.config.platform.skill_storage();
-                let changed = apply_long_term_memory_extraction(
+                let extraction_report = apply_long_term_memory_extraction_with_report(
                     store.as_ref(),
                     skill_storage.as_ref(),
                     &extraction,
                     now_secs,
                 )?;
+                record_long_term_extraction_derived_memory_refs(
+                    self.config.platform.as_ref(),
+                    &self.config.subject_id,
+                    &extraction_report.accepted_upserts,
+                    &extraction_report.accepted_skill_writes,
+                    now_secs,
+                )?;
+                let changed = extraction_report.changed;
                 MemoryWriteReport {
                     accepted: true,
                     changed,
@@ -552,45 +667,55 @@ impl MemoryRuntime {
             }
             MemoryWriteRequest::Candidates { candidates } => {
                 let semantic_governance = govern_write_candidates(&candidates);
-                let accepted_drafts = candidates
+                let accepted_candidates = candidates
                     .iter()
                     .filter(|candidate| {
-                        semantic_governance.plane_reports.iter().any(|report| {
-                            report.decision == GovernedWriteDecision::Accepted
-                                && report
-                                    .evidence_refs
-                                    .iter()
-                                    .any(|item| item == &candidate.candidate_id)
-                        })
-                    })
-                    .filter_map(|candidate| {
-                        let target = candidate.governed_target().unwrap_or(&candidate.target);
-                        candidate.to_long_term_draft_for_target(
-                            target,
-                            &self.config.scope.chat_id,
-                            now_secs,
+                        candidate_semantically_accepted(
+                            candidate,
+                            &semantic_governance.plane_reports,
                         )
                     })
                     .collect::<Vec<_>>();
-                let accepted_skill_writes = candidates
+                let accepted_draft_pairs = accepted_candidates
                     .iter()
-                    .filter(|candidate| {
-                        semantic_governance.plane_reports.iter().any(|report| {
-                            report.decision == GovernedWriteDecision::Accepted
-                                && report
-                                    .evidence_refs
-                                    .iter()
-                                    .any(|item| item == &candidate.candidate_id)
-                        })
-                    })
                     .filter_map(|candidate| {
                         let target = candidate.governed_target().unwrap_or(&candidate.target);
-                        candidate.to_runtime_skill_write_for_target(
-                            target,
-                            &self.config.scope.chat_id,
-                            now_secs,
-                        )
+                        candidate
+                            .to_long_term_draft_for_target(
+                                target,
+                                &self.config.scope.chat_id,
+                                now_secs,
+                            )
+                            .map(|draft| (*candidate, draft))
                     })
+                    .collect::<Vec<_>>();
+                let accepted_drafts = accepted_draft_pairs
+                    .iter()
+                    .map(|(_, draft)| draft.clone())
+                    .collect::<Vec<_>>();
+                let accepted_skill_pairs = accepted_candidates
+                    .iter()
+                    .filter_map(|candidate| {
+                        let target = candidate.governed_target().unwrap_or(&candidate.target);
+                        candidate
+                            .to_runtime_skill_write_for_target(
+                                target,
+                                &self.config.scope.chat_id,
+                                now_secs,
+                            )
+                            .map(|write| (*candidate, write))
+                    })
+                    .collect::<Vec<_>>();
+                let accepted_skill_writes = accepted_skill_pairs
+                    .iter()
+                    .map(|(_, write)| write.clone())
+                    .collect::<Vec<_>>();
+                let accepted_skill_writes =
+                    normalize_runtime_skill_write_names(accepted_skill_writes);
+                let accepted_normalized_skill_pairs = accepted_skill_pairs
+                    .iter()
+                    .zip(accepted_skill_writes.iter())
+                    .map(|((candidate, _), write)| (*candidate, write.clone()))
                     .collect::<Vec<_>>();
                 let shared_fact_governance = if accepted_drafts.is_empty() {
                     None
@@ -619,23 +744,60 @@ impl MemoryRuntime {
                     .as_ref()
                     .map(|outcome| outcome.changed)
                     .unwrap_or(0);
-                let (skill_changed, procedural_evolution) = if accepted_skill_writes.is_empty() {
-                    (0, None)
-                } else {
-                    let storage = self.config.platform.skill_storage();
-                    let writes = normalize_runtime_skill_write_names(accepted_skill_writes);
-                    let outcome = write_governed_runtime_skills(
-                        storage.as_ref(),
-                        &writes,
-                        RuntimeSkillWriteSource::Manual,
-                    )?;
-                    (
-                        outcome.changed,
-                        Some(build_skill_evolution_report_from_write_outcome(
-                            &writes, &outcome,
-                        )),
-                    )
-                };
+                let governed_draft_pairs = shared_fact_governance
+                    .as_ref()
+                    .map(|outcome| {
+                        accepted_draft_pairs
+                            .iter()
+                            .zip(outcome.reports.iter())
+                            .filter_map(|((candidate, draft), report)| {
+                                matches!(report.action, SharedMemoryWriteAction::Accepted)
+                                    .then(|| (*candidate, draft.clone()))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let (skill_changed, procedural_evolution, governed_skill_pairs) =
+                    if accepted_skill_writes.is_empty() {
+                        (0, None, Vec::new())
+                    } else {
+                        let storage = self.config.platform.skill_storage();
+                        let outcome = write_governed_runtime_skills(
+                            storage.as_ref(),
+                            &accepted_skill_writes,
+                            RuntimeSkillWriteSource::Manual,
+                        )?;
+                        let governed_skill_pairs = accepted_normalized_skill_pairs
+                            .iter()
+                            .zip(outcome.reports.iter())
+                            .filter_map(|((candidate, write), report)| {
+                                matches!(report.action, RuntimeSkillWriteAction::Accepted)
+                                    .then(|| (*candidate, write.clone()))
+                            })
+                            .collect::<Vec<_>>();
+                        let procedural_evolution = build_skill_evolution_report_from_write_outcome(
+                            &accepted_skill_writes,
+                            &outcome,
+                        );
+                        (
+                            outcome.changed,
+                            Some(procedural_evolution),
+                            governed_skill_pairs,
+                        )
+                    };
+                record_candidate_derived_memory_refs(
+                    self.config.platform.as_ref(),
+                    &self.config.subject_id,
+                    &governed_draft_pairs,
+                    &governed_skill_pairs,
+                    now_secs,
+                )?;
+                record_soul_handoff_derived_memory_refs(
+                    self.config.platform.as_ref(),
+                    &self.config.subject_id,
+                    &candidates,
+                    now_secs,
+                )?;
                 let changed = long_term_changed + skill_changed;
                 MemoryWriteReport {
                     accepted: semantic_governance.rejected_count == 0,
@@ -967,7 +1129,10 @@ impl MemoryRuntime {
             RuntimeLifecycleModeInput::default(),
         );
         let platform = self.config.platform.as_ref();
-        let session_store = platform.session_store();
+        let session_store = self.transcript_backed_session_store(
+            platform.session_store(),
+            TranscriptReplayView::ModelContext,
+        );
         let memory_store = platform.memory_store();
         let session_summary_store = platform.session_summary_store();
         let long_term_memory_store = platform.long_term_memory_store();
@@ -1220,7 +1385,10 @@ impl MemoryRuntime {
         lifecycle: &RuntimeLifecycleReport,
     ) -> crate::PromptMemoryContext {
         let platform = self.config.platform.as_ref();
-        let session_store = platform.session_store();
+        let session_store = self.transcript_backed_session_store(
+            platform.session_store(),
+            TranscriptReplayView::ModelContext,
+        );
         let memory_store = platform.memory_store();
         let session_summary_store = platform.session_summary_store();
         let long_term_memory_store = platform.long_term_memory_store();
@@ -1337,7 +1505,10 @@ impl MemoryRuntime {
             });
         }
         let platform = self.config.platform.as_ref();
-        let session_store = platform.session_store();
+        let session_store = self.transcript_backed_session_store(
+            platform.session_store(),
+            TranscriptReplayView::RawOwnerOnly,
+        );
         let memory_store = platform.memory_store();
         let session_summary_store = platform.session_summary_store();
         let execution_state_store = platform.execution_state_store();
@@ -1457,6 +1628,7 @@ impl MemoryRuntime {
     ) -> Result<MemoryTurnFinalizeReport> {
         self.ensure_visible("write.turn", self.capabilities.write)?;
         validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
+        self.remember_conversation_id_from_delta(&request.turn)?;
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
         let transcript_store = platform.conversation_transcript_store();
@@ -1468,9 +1640,13 @@ impl MemoryRuntime {
             Vec::new(),
             self.config.clock.now_secs(),
         )?;
+        let transcript_commit = core_report.transcript_commit;
+        let transcript_committed = transcript_commit
+            .as_ref()
+            .is_some_and(|report| report.committed);
         let session_commit = core_report.session_commit;
 
-        if !session_commit.committed {
+        if !session_commit.committed && !transcript_committed {
             let lifecycle = self.start_lifecycle(
                 RuntimeLifecycleOperation::Maintain,
                 RuntimeLifecycleTrigger::PostReply,
@@ -1488,6 +1664,7 @@ impl MemoryRuntime {
             )?;
             return Ok(MemoryTurnFinalizeReport {
                 session_commit,
+                transcript_commit,
                 maintenance: None,
                 private_garden_self_work: PostTurnPrivateGardenReport::skipped(
                     "turn_not_committed",
@@ -1502,6 +1679,7 @@ impl MemoryRuntime {
         let Some(http) = http else {
             return self.finalize_turn_without_maintenance(
                 session_commit,
+                transcript_commit,
                 &request,
                 "maintenance_http_unavailable",
             );
@@ -1514,6 +1692,7 @@ impl MemoryRuntime {
             } else {
                 return self.finalize_turn_without_maintenance(
                     session_commit,
+                    transcript_commit,
                     &request,
                     "maintenance_llm_unavailable",
                 );
@@ -1521,6 +1700,7 @@ impl MemoryRuntime {
         if !self.capabilities.maintenance.visible {
             return self.finalize_turn_without_maintenance(
                 session_commit,
+                transcript_commit,
                 &request,
                 "maintenance_not_visible",
             );
@@ -1531,6 +1711,7 @@ impl MemoryRuntime {
         let lifecycle_report = maintenance.lifecycle_report.clone();
         Ok(MemoryTurnFinalizeReport {
             session_commit,
+            transcript_commit,
             maintenance: Some(maintenance),
             private_garden_self_work,
             semantic_governance,
@@ -1549,7 +1730,10 @@ impl MemoryRuntime {
         PostTurnSemanticGovernanceReport,
     )> {
         let platform = self.config.platform.as_ref();
-        let session_store = platform.session_store();
+        let session_store = self.transcript_backed_session_store(
+            platform.session_store(),
+            TranscriptReplayView::RawOwnerOnly,
+        );
         let session_summary_store = platform.session_summary_store();
         let finalize_user_content = latest_user_content(&request.turn);
         let finalize_assistant_content = assistant_content(&request.turn);
@@ -1614,7 +1798,18 @@ impl MemoryRuntime {
                 writes,
                 moves,
                 deletes,
-            } => PostTurnPrivateGardenReport::applied(writes, moves, deletes),
+                manifest,
+            } => {
+                record_private_garden_derived_memory_refs(
+                    platform,
+                    &self.config.memory_space_id,
+                    &self.config.subject_id,
+                    &request.turn,
+                    &manifest,
+                    self.config.clock.now_secs(),
+                )?;
+                PostTurnPrivateGardenReport::applied_with_manifest(writes, moves, deletes, manifest)
+            }
         };
         let memory_store = platform.memory_store();
         let long_term_memory_store = platform.long_term_memory_store();
@@ -1647,6 +1842,15 @@ impl MemoryRuntime {
                 self.memory_profile(),
             );
             outcome.persist(extraction_state_store.as_ref(), &self.config.scope.chat_id);
+            if let LongTermMemoryRefreshOutcome::Processed { apply_report, .. } = &outcome {
+                record_long_term_extraction_derived_memory_refs(
+                    platform,
+                    &self.config.subject_id,
+                    &apply_report.accepted_upserts,
+                    &apply_report.accepted_skill_writes,
+                    self.config.clock.now_secs(),
+                )?;
+            }
             Some(outcome)
         } else {
             None
@@ -1659,6 +1863,7 @@ impl MemoryRuntime {
     fn finalize_turn_without_maintenance(
         &self,
         session_commit: bm_core::memory::SessionTurnCommitReport,
+        transcript_commit: Option<bm_core::memory::TranscriptCommitReport>,
         request: &MemoryTurnFinalizeRequest,
         reason: &'static str,
     ) -> Result<MemoryTurnFinalizeReport> {
@@ -1680,16 +1885,27 @@ impl MemoryRuntime {
             lifecycle,
             RuntimeLifecycleEventKind::RuntimeLifecycle,
             RuntimeLifecycleEffect::Noop,
-            session_commit.committed,
+            session_commit.committed
+                || transcript_commit
+                    .as_ref()
+                    .is_some_and(|report| report.committed),
             reason,
             &[
                 ("finalize_request", "true".to_string()),
                 ("finalize_committed", session_commit.committed.to_string()),
+                (
+                    "transcript_committed",
+                    transcript_commit
+                        .as_ref()
+                        .is_some_and(|report| report.committed)
+                        .to_string(),
+                ),
                 ("deferred_governance_job", "true".to_string()),
             ],
         )?;
         Ok(MemoryTurnFinalizeReport {
             session_commit,
+            transcript_commit,
             maintenance: None,
             private_garden_self_work: PostTurnPrivateGardenReport::skipped(reason),
             semantic_governance: PostTurnSemanticGovernanceReport::deferred(
@@ -1850,7 +2066,10 @@ impl MemoryRuntime {
             });
         }
         let platform = self.config.platform.as_ref();
-        let session_store = platform.session_store();
+        let session_store = self.transcript_backed_session_store(
+            platform.session_store(),
+            TranscriptReplayView::OperatorAudit,
+        );
         let memory_store = platform.memory_store();
         let session_summary_store = platform.session_summary_store();
         let turn_ledger_store = platform.turn_ledger_store();
@@ -1920,7 +2139,10 @@ impl MemoryRuntime {
             self.mode_input_for_request(request.mode_input, request.pressure),
         );
         let platform = self.config.platform.as_ref();
-        let session_store = platform.session_store();
+        let session_store = self.transcript_backed_session_store(
+            platform.session_store(),
+            TranscriptReplayView::OperatorAudit,
+        );
         let memory_store = platform.memory_store();
         let session_summary_store = platform.session_summary_store();
         let long_term_memory_store = platform.long_term_memory_store();
@@ -2038,6 +2260,7 @@ impl MemoryRuntime {
     ) -> Result<MemoryTranscriptCommitReport> {
         self.ensure_visible("write.transcript", self.capabilities.write)?;
         validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
+        self.remember_conversation_id_from_delta(&request.turn)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::SdkCall,
@@ -2055,7 +2278,11 @@ impl MemoryRuntime {
             request.host_refs,
             self.config.clock.now_secs(),
         )?;
-        let changed = core_report.session_commit.committed;
+        let changed = core_report.session_commit.committed
+            || core_report
+                .transcript_commit
+                .as_ref()
+                .is_some_and(|report| report.committed);
         self.audit("write.transcript", true, "transcript_commit_completed");
         Ok(MemoryTranscriptCommitReport {
             key,
@@ -2088,10 +2315,22 @@ impl MemoryRuntime {
             request.conversation_id,
         )?;
         let transcript_store = self.config.platform.conversation_transcript_store();
-        let slice = transcript_store.redacted_replay(&key, request.limit.max(1), request.view)?;
+        let limit = transcript_replay_limit(&self.config.runtime_budget, request.limit);
+        let (mut slice, next_cursor, has_more) = transcript_store.redacted_replay_page(
+            &key,
+            request.cursor.as_deref(),
+            limit,
+            request.view,
+        )?;
+        apply_transcript_governance_budget_to_slice(
+            &mut slice,
+            self.config.runtime_budget.transcript_governance_budget,
+        );
         self.audit("replay.transcript", true, "transcript_replay_completed");
         Ok(MemoryTranscriptReplayReport {
             slice,
+            next_cursor,
+            has_more,
             lifecycle_report: self.finish_lifecycle_success(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -2119,14 +2358,22 @@ impl MemoryRuntime {
             request.conversation_id,
         )?;
         let transcript_store = self.config.platform.conversation_transcript_store();
-        let slice = transcript_store.redacted_replay(
+        let limit = transcript_replay_limit(&self.config.runtime_budget, request.limit);
+        let (mut slice, next_cursor, has_more) = transcript_store.redacted_replay_page(
             &key,
-            request.limit.max(1),
+            request.cursor.as_deref(),
+            limit,
             TranscriptReplayView::Export,
         )?;
+        apply_transcript_governance_budget_to_slice(
+            &mut slice,
+            self.config.runtime_budget.transcript_governance_budget,
+        );
         self.audit("export.transcript", true, "transcript_export_completed");
         Ok(MemoryTranscriptExportReport {
             slice,
+            next_cursor,
+            has_more,
             lifecycle_report: self.finish_lifecycle_success(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -2154,7 +2401,7 @@ impl MemoryRuntime {
             request.conversation_id,
         )?;
         let transcript_store = self.config.platform.conversation_transcript_store();
-        let transcript =
+        let mut transcript =
             transcript_store.apply_lifecycle_request(&CoreTranscriptLifecycleRequest {
                 key,
                 turn_id: request.turn_id,
@@ -2163,6 +2410,15 @@ impl MemoryRuntime {
                 requested_by: self.config.identity.owner_id.clone(),
                 requested_at: self.config.clock.now_secs(),
             })?;
+        sanitize_transcript_lifecycle_report_for_view(
+            &mut transcript,
+            TranscriptReplayView::OperatorAudit,
+        );
+        apply_transcript_lifecycle_budget(
+            &mut transcript,
+            self.config.runtime_budget.transcript_governance_budget,
+        );
+        let transcript_changed = transcript.affected_turns > 0;
         self.audit(
             "transcript.lifecycle",
             true,
@@ -2174,8 +2430,43 @@ impl MemoryRuntime {
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
                 RuntimeLifecycleEffect::RunMaintenance,
-                true,
+                transcript_changed,
                 "transcript_lifecycle_completed",
+            )?,
+        })
+    }
+
+    pub fn repair_transcript(
+        &self,
+        request: MemoryTranscriptRepairRequest,
+    ) -> Result<MemoryTranscriptRepairReport> {
+        self.ensure_visible("repair.transcript", self.capabilities.inspection)?;
+        self.ensure_runtime_memory_space("repair.transcript", &request.memory_space_id)?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Inspect,
+            RuntimeLifecycleTrigger::ReplayInspection,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let key = ConversationKey::new(
+            request.memory_space_id,
+            request.channel_id,
+            request.conversation_id,
+        )?;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let mut transcript = transcript_store.repair_report(&key)?;
+        apply_transcript_repair_budget(
+            &mut transcript,
+            self.config.runtime_budget.transcript_governance_budget,
+        );
+        self.audit("repair.transcript", true, "transcript_repair_completed");
+        Ok(MemoryTranscriptRepairReport {
+            transcript,
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::Inspect,
+                false,
+                "transcript_repair_completed",
             )?,
         })
     }
@@ -4079,6 +4370,20 @@ fn validate_turn_scope(
             "turn conversation chat_id must match runtime scope",
         ));
     }
+    if let Some(scope_conversation_id) = scope.conversation_id.as_deref() {
+        let turn_conversation_id = turn
+            .conversation
+            .conversation_id
+            .as_deref()
+            .unwrap_or(turn.conversation.chat_id.as_str())
+            .trim();
+        if turn_conversation_id != scope_conversation_id {
+            return Err(Error::config(
+                "canonical_turn_delta",
+                "turn conversation_id must match runtime scope",
+            ));
+        }
+    }
     if turn.subject.trim().is_empty() {
         return Err(Error::config(
             "canonical_turn_delta",
@@ -4389,6 +4694,634 @@ fn checked_skill_name<'a>(value: &'a str, stage: &'static str) -> Result<&'a str
         return Err(Error::config(stage, "skill name empty or contains .. / \\"));
     }
     Ok(trimmed)
+}
+
+fn transcript_replay_limit(runtime_budget: &RuntimeBudgetReport, requested_limit: usize) -> usize {
+    requested_limit.max(1).min(
+        runtime_budget
+            .transcript_governance_budget
+            .transcript_page_size
+            .max(1),
+    )
+}
+
+fn apply_transcript_governance_budget_to_slice(
+    slice: &mut RedactedTranscriptSlice,
+    budget: TranscriptGovernanceBudget,
+) {
+    let host_ref_limit = budget.host_refs_per_turn.max(1);
+    let mut profile_budget_limited = false;
+    for turn in &mut slice.turns {
+        let original_len = turn.host_refs.len();
+        if original_len <= host_ref_limit {
+            continue;
+        }
+        for index in host_ref_limit..original_len {
+            slice.redactions.push(TranscriptRedactionReportItem {
+                turn_id: turn.turn_id.clone(),
+                message_id: None,
+                host_ref_index: Some(index),
+                reason: TranscriptRedactionReason::ProfileBudget,
+                source_authority: None,
+                view: slice.view,
+            });
+        }
+        turn.host_refs.truncate(host_ref_limit);
+        slice.audit.redacted_host_refs = slice
+            .audit
+            .redacted_host_refs
+            .saturating_add(original_len.saturating_sub(host_ref_limit));
+        profile_budget_limited = true;
+    }
+
+    let redaction_limit = budget.redaction_items_per_page.max(1);
+    if slice.redactions.len() > redaction_limit {
+        slice.redactions.truncate(redaction_limit);
+        profile_budget_limited = true;
+    }
+    slice.audit.redaction_reasons = transcript_redaction_reasons(&slice.redactions);
+    if profile_budget_limited
+        && !slice
+            .audit
+            .redaction_reasons
+            .contains(&TranscriptRedactionReason::ProfileBudget)
+    {
+        slice
+            .audit
+            .redaction_reasons
+            .push(TranscriptRedactionReason::ProfileBudget);
+    }
+}
+
+fn apply_transcript_lifecycle_budget(
+    report: &mut CoreTranscriptLifecycleReport,
+    budget: TranscriptGovernanceBudget,
+) {
+    let host_ref_limit = budget.host_refs_per_turn.max(1);
+    if report.affected_host_refs.len() > host_ref_limit {
+        for index in host_ref_limit..report.affected_host_refs.len() {
+            report
+                .host_ref_redactions
+                .push(TranscriptRedactionReportItem {
+                    turn_id: report
+                        .affected_turn_ids
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "*".to_string()),
+                    message_id: None,
+                    host_ref_index: Some(index),
+                    reason: TranscriptRedactionReason::ProfileBudget,
+                    source_authority: None,
+                    view: TranscriptReplayView::OperatorAudit,
+                });
+        }
+        report.redacted_host_refs = report.redacted_host_refs.saturating_add(
+            report
+                .affected_host_refs
+                .len()
+                .saturating_sub(host_ref_limit),
+        );
+        report.affected_host_refs.truncate(host_ref_limit);
+        report.profile_budget_applied = true;
+    }
+    let derived_ref_limit = budget.derived_refs_per_report.max(1);
+    if report.derived_memory_refs.len() > derived_ref_limit {
+        report.derived_memory_refs.truncate(derived_ref_limit);
+        report.profile_budget_applied = true;
+    }
+    let redaction_limit = budget.redaction_items_per_page.max(1);
+    if report.host_ref_redactions.len() > redaction_limit {
+        report.host_ref_redactions.truncate(redaction_limit);
+        report.profile_budget_applied = true;
+    }
+}
+
+fn sanitize_transcript_lifecycle_report_for_view(
+    report: &mut CoreTranscriptLifecycleReport,
+    view: TranscriptReplayView,
+) {
+    if report.affected_host_refs.is_empty() {
+        return;
+    }
+    let turn_id = report
+        .affected_turn_ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "*".to_string());
+    let (host_refs, mut redactions, redacted_count) =
+        filter_host_refs_for_transcript_view(&turn_id, &report.affected_host_refs, view);
+    report.affected_host_refs = host_refs;
+    report.redacted_host_refs = report.redacted_host_refs.saturating_add(redacted_count);
+    report.host_ref_redactions.append(&mut redactions);
+}
+
+fn apply_transcript_repair_budget(
+    report: &mut CoreTranscriptRepairReport,
+    budget: TranscriptGovernanceBudget,
+) {
+    let issue_limit = budget.repair_issues_per_report.max(1);
+    if report.issues.len() > issue_limit {
+        report.issues.truncate(issue_limit);
+        report.profile_budget_applied = true;
+    }
+}
+
+fn transcript_redaction_reasons(
+    redactions: &[TranscriptRedactionReportItem],
+) -> Vec<TranscriptRedactionReason> {
+    let mut reasons = Vec::new();
+    for redaction in redactions {
+        if !reasons.contains(&redaction.reason) {
+            reasons.push(redaction.reason);
+        }
+    }
+    reasons
+}
+
+struct TranscriptBackedSessionStore {
+    fallback: Arc<dyn SessionStore>,
+    transcript_store: Arc<dyn ConversationTranscriptStore>,
+    key: ConversationKey,
+    view: TranscriptReplayView,
+}
+
+impl TranscriptBackedSessionStore {
+    fn load_transcript_messages(&self, limit: usize) -> Result<Option<Vec<SessionMessage>>> {
+        if limit == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let slice = self
+            .transcript_store
+            .redacted_replay(&self.key, limit, self.view)?;
+        if slice.audit.source_turns == 0 {
+            return Ok(None);
+        }
+        let mut messages = redacted_transcript_slice_to_session_messages(&slice);
+        if messages.len() > limit {
+            let keep_from = messages.len().saturating_sub(limit);
+            messages = messages.split_off(keep_from);
+        }
+        Ok(Some(messages))
+    }
+
+    fn load_transcript_records(&self, limit: usize) -> Result<Option<Vec<SessionMessageRecord>>> {
+        if limit == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let slice = self
+            .transcript_store
+            .redacted_replay(&self.key, limit, self.view)?;
+        if slice.audit.source_turns == 0 {
+            return Ok(None);
+        }
+        let mut records = redacted_transcript_slice_to_session_records(&slice, &self.key);
+        if records.len() > limit {
+            let keep_from = records.len().saturating_sub(limit);
+            records = records.split_off(keep_from);
+        }
+        Ok(Some(records))
+    }
+}
+
+struct TranscriptKeyUnavailableSessionStore {
+    fallback: Arc<dyn SessionStore>,
+    reason: String,
+}
+
+impl TranscriptKeyUnavailableSessionStore {
+    fn unavailable<T>(&self) -> Result<T> {
+        Err(Error::config(
+            "conversation_transcript_key_unavailable",
+            self.reason.clone(),
+        ))
+    }
+}
+
+impl SessionStore for TranscriptKeyUnavailableSessionStore {
+    fn append(&self, chat_id: &str, role: &str, content: &str) -> Result<()> {
+        self.fallback.append(chat_id, role, content)
+    }
+
+    fn append_batch(&self, chat_id: &str, messages: &[SessionMessage]) -> Result<()> {
+        self.fallback.append_batch(chat_id, messages)
+    }
+
+    fn load_recent(&self, _chat_id: &str, _n: usize) -> Result<Vec<SessionMessage>> {
+        self.unavailable()
+    }
+
+    fn load_recent_records(&self, _chat_id: &str, _n: usize) -> Result<Vec<SessionMessageRecord>> {
+        self.unavailable()
+    }
+
+    fn message_count(&self, _chat_id: &str) -> Result<usize> {
+        self.unavailable()
+    }
+
+    fn clear(&self, chat_id: &str) -> Result<()> {
+        self.fallback.clear(chat_id)
+    }
+
+    fn list_chat_ids(&self) -> Result<Vec<String>> {
+        self.unavailable()
+    }
+
+    fn delete(&self, chat_id: &str) -> Result<()> {
+        self.fallback.delete(chat_id)
+    }
+}
+
+impl SessionStore for TranscriptBackedSessionStore {
+    fn append(&self, chat_id: &str, role: &str, content: &str) -> Result<()> {
+        self.fallback.append(chat_id, role, content)
+    }
+
+    fn append_batch(&self, chat_id: &str, messages: &[SessionMessage]) -> Result<()> {
+        self.fallback.append_batch(chat_id, messages)
+    }
+
+    fn load_recent(&self, chat_id: &str, n: usize) -> Result<Vec<SessionMessage>> {
+        match self.load_transcript_messages(n)? {
+            Some(messages) => Ok(messages),
+            None => self.fallback.load_recent(chat_id, n),
+        }
+    }
+
+    fn load_recent_records(&self, chat_id: &str, n: usize) -> Result<Vec<SessionMessageRecord>> {
+        match self.load_transcript_records(n)? {
+            Some(records) => Ok(records),
+            None => self.fallback.load_recent_records(chat_id, n),
+        }
+    }
+
+    fn message_count(&self, chat_id: &str) -> Result<usize> {
+        match self.load_transcript_messages(usize::MAX)? {
+            Some(messages) => Ok(messages.len()),
+            None => self.fallback.message_count(chat_id),
+        }
+    }
+
+    fn clear(&self, chat_id: &str) -> Result<()> {
+        self.fallback.clear(chat_id)
+    }
+
+    fn list_chat_ids(&self) -> Result<Vec<String>> {
+        self.fallback.list_chat_ids()
+    }
+
+    fn delete(&self, chat_id: &str) -> Result<()> {
+        self.fallback.delete(chat_id)
+    }
+}
+
+fn redacted_transcript_slice_to_session_messages(
+    slice: &bm_core::memory::RedactedTranscriptSlice,
+) -> Vec<SessionMessage> {
+    let mut messages = Vec::new();
+    for turn in &slice.turns {
+        for message in &turn.input_messages {
+            if let Some(content) = message.content.as_deref() {
+                messages.push(session_message_from_transcript_message(message, content));
+            }
+        }
+        if let Some(message) = turn.assistant_message.as_ref() {
+            if let Some(content) = message.content.as_deref() {
+                messages.push(session_message_from_transcript_message(message, content));
+            }
+        }
+    }
+    messages
+}
+
+fn redacted_transcript_slice_to_session_records(
+    slice: &bm_core::memory::RedactedTranscriptSlice,
+    key: &ConversationKey,
+) -> Vec<SessionMessageRecord> {
+    let mut records = Vec::new();
+    for turn in &slice.turns {
+        for message in &turn.input_messages {
+            if let Some(content) = message.content.as_deref() {
+                records.push(session_record_from_transcript_message(
+                    key,
+                    &turn.turn_id,
+                    message,
+                    content,
+                ));
+            }
+        }
+        if let Some(message) = turn.assistant_message.as_ref() {
+            if let Some(content) = message.content.as_deref() {
+                records.push(session_record_from_transcript_message(
+                    key,
+                    &turn.turn_id,
+                    message,
+                    content,
+                ));
+            }
+        }
+    }
+    records
+}
+
+fn session_message_from_transcript_message(
+    message: &bm_core::memory::RedactedTranscriptMessage,
+    content: &str,
+) -> SessionMessage {
+    SessionMessage::new(
+        message.message_id.clone(),
+        message.role.clone(),
+        content.to_string(),
+        message.observed_at,
+        message.observed_at,
+        message.actor.speaker_id.clone(),
+        message.actor.speaker_kind.clone(),
+    )
+}
+
+fn session_record_from_transcript_message(
+    key: &ConversationKey,
+    turn_id: &str,
+    message: &bm_core::memory::RedactedTranscriptMessage,
+    content: &str,
+) -> SessionMessageRecord {
+    let mut record =
+        SessionMessageRecord::from(session_message_from_transcript_message(message, content));
+    record.transcript_ref = Some(TranscriptEvidenceRef {
+        memory_space_id: key.memory_space_id.clone(),
+        channel_id: key.channel_id.clone(),
+        conversation_id: key.conversation_id.clone(),
+        turn_id: turn_id.to_string(),
+        message_id: Some(message.message_id.clone()),
+        subject_id: None,
+        authority: Some(message.authority),
+    });
+    record
+}
+
+fn candidate_semantically_accepted(
+    candidate: &MemoryWriteCandidate,
+    plane_reports: &[MemoryPlaneGovernanceReport],
+) -> bool {
+    let candidate_id = candidate.candidate_id.trim();
+    !candidate_id.is_empty()
+        && plane_reports.iter().any(|report| {
+            report.decision == GovernedWriteDecision::Accepted
+                && report
+                    .evidence_refs
+                    .iter()
+                    .any(|evidence_ref| evidence_ref == candidate_id)
+        })
+}
+
+fn record_long_term_extraction_derived_memory_refs(
+    platform: &dyn Platform,
+    subject_id: &str,
+    accepted_upserts: &[LongTermMemoryDraft],
+    accepted_skill_writes: &[RuntimeSkillWrite],
+    now_secs: u64,
+) -> Result<()> {
+    let transcript_store = platform.conversation_transcript_store();
+    for draft in accepted_upserts {
+        let Some(stable_id) = draft.stable_id() else {
+            continue;
+        };
+        let plane = long_term_extraction_derived_plane(draft);
+        let store_key = match plane {
+            DerivedMemoryPlane::SharedFact => format!("shared_fact:{stable_id}"),
+            _ => format!("long_term:{stable_id}"),
+        };
+        for source in transcript_evidence_refs_from_display_citations(
+            &draft.supporting_citations,
+            subject_id,
+            None,
+        ) {
+            append_candidate_derived_memory_ref(
+                transcript_store.as_ref(),
+                plane,
+                &store_key,
+                subject_id,
+                source,
+                now_secs,
+            )?;
+        }
+    }
+    for write in accepted_skill_writes {
+        let name = write.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let store_key = format!("runtime_skill:{name}");
+        for source in
+            transcript_evidence_refs_from_display_citations(&write.citations, subject_id, None)
+        {
+            append_candidate_derived_memory_ref(
+                transcript_store.as_ref(),
+                DerivedMemoryPlane::ProceduralSkill,
+                &store_key,
+                subject_id,
+                source,
+                now_secs,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn long_term_extraction_derived_plane(draft: &LongTermMemoryDraft) -> DerivedMemoryPlane {
+    if draft.kind == LongTermMemoryKind::Fact
+        || matches!(draft.source_scope, Some(LongTermMemorySourceScope::World))
+    {
+        DerivedMemoryPlane::SharedFact
+    } else {
+        DerivedMemoryPlane::LongTerm
+    }
+}
+
+fn record_private_garden_derived_memory_refs(
+    platform: &dyn Platform,
+    memory_space_id: &str,
+    subject_id: &str,
+    turn: &CanonicalTurnDelta,
+    manifest: &[PrivateGardenGovernanceManifestEntry],
+    now_secs: u64,
+) -> Result<()> {
+    if manifest.is_empty() {
+        return Ok(());
+    }
+    let transcript_store = platform.conversation_transcript_store();
+    let conversation_id = turn
+        .conversation
+        .conversation_id
+        .clone()
+        .unwrap_or_else(|| turn.conversation.chat_id.clone());
+    let source = TranscriptEvidenceRef {
+        memory_space_id: memory_space_id.to_string(),
+        channel_id: turn.conversation.channel.clone(),
+        conversation_id,
+        turn_id: turn.turn_id.clone(),
+        message_id: None,
+        subject_id: Some(subject_id.to_string()),
+        authority: Some(MemoryEvidenceAuthority::PrivateGardenInternal),
+    };
+    for entry in manifest {
+        append_candidate_derived_memory_ref(
+            transcript_store.as_ref(),
+            DerivedMemoryPlane::PrivateGarden,
+            &entry.store_key,
+            subject_id,
+            source.clone(),
+            now_secs,
+        )?;
+    }
+    Ok(())
+}
+
+fn record_candidate_derived_memory_refs(
+    platform: &dyn Platform,
+    subject_id: &str,
+    accepted_draft_pairs: &[(&MemoryWriteCandidate, LongTermMemoryDraft)],
+    accepted_skill_pairs: &[(&MemoryWriteCandidate, RuntimeSkillWrite)],
+    now_secs: u64,
+) -> Result<()> {
+    let transcript_store = platform.conversation_transcript_store();
+    for (candidate, draft) in accepted_draft_pairs {
+        let Some(stable_id) = draft.stable_id() else {
+            continue;
+        };
+        let target = candidate.governed_target().unwrap_or(&candidate.target);
+        let plane = if target.domain() == MemoryWriteDomain::Program {
+            DerivedMemoryPlane::SharedFact
+        } else {
+            DerivedMemoryPlane::LongTerm
+        };
+        let store_key = match plane {
+            DerivedMemoryPlane::SharedFact => format!("shared_fact:{stable_id}"),
+            _ => format!("long_term:{stable_id}"),
+        };
+        for source in candidate_transcript_evidence_refs(candidate, subject_id) {
+            append_candidate_derived_memory_ref(
+                transcript_store.as_ref(),
+                plane,
+                &store_key,
+                subject_id,
+                source,
+                now_secs,
+            )?;
+        }
+    }
+    for (candidate, write) in accepted_skill_pairs {
+        let name = write.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let store_key = format!("runtime_skill:{name}");
+        for source in candidate_transcript_evidence_refs(candidate, subject_id) {
+            append_candidate_derived_memory_ref(
+                transcript_store.as_ref(),
+                DerivedMemoryPlane::ProceduralSkill,
+                &store_key,
+                subject_id,
+                source,
+                now_secs,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn record_soul_handoff_derived_memory_refs(
+    platform: &dyn Platform,
+    subject_id: &str,
+    candidates: &[MemoryWriteCandidate],
+    now_secs: u64,
+) -> Result<()> {
+    let transcript_store = platform.conversation_transcript_store();
+    for candidate in candidates {
+        let target = candidate.governed_target().unwrap_or(&candidate.target);
+        let surface = match target {
+            MemoryCandidateTarget::Soul { surface } => surface.trim(),
+            _ => continue,
+        };
+        if surface.is_empty() {
+            continue;
+        }
+        let candidate_id = candidate.candidate_id.trim();
+        let store_key = if candidate_id.is_empty() {
+            format!("soul_handoff:{surface}")
+        } else {
+            format!("soul_handoff:{surface}:{candidate_id}")
+        };
+        for source in candidate_transcript_evidence_refs(candidate, subject_id) {
+            append_candidate_derived_memory_ref(
+                transcript_store.as_ref(),
+                DerivedMemoryPlane::SoulCandidateHandoff,
+                &store_key,
+                subject_id,
+                source,
+                now_secs,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn append_candidate_derived_memory_ref(
+    transcript_store: &dyn bm_core::memory::ConversationTranscriptStore,
+    plane: DerivedMemoryPlane,
+    store_key: &str,
+    subject_id: &str,
+    source: TranscriptEvidenceRef,
+    now_secs: u64,
+) -> Result<()> {
+    let key = ConversationKey::new(
+        source.memory_space_id.clone(),
+        source.channel_id.clone(),
+        source.conversation_id.clone(),
+    )?;
+    transcript_store.append_derived_memory_ref(
+        &key,
+        &DerivedMemoryRef {
+            plane,
+            store_key: store_key.to_string(),
+            subject_id: Some(subject_id.to_string()),
+            source,
+            created_at: now_secs,
+        },
+    )
+}
+
+fn candidate_transcript_evidence_refs(
+    candidate: &MemoryWriteCandidate,
+    subject_id: &str,
+) -> Vec<TranscriptEvidenceRef> {
+    transcript_evidence_refs_from_display_citations(
+        &candidate.evidence_refs,
+        subject_id,
+        Some(candidate.authority),
+    )
+}
+
+fn transcript_evidence_refs_from_display_citations(
+    citations: &[String],
+    subject_id: &str,
+    authority: Option<MemoryEvidenceAuthority>,
+) -> Vec<TranscriptEvidenceRef> {
+    let mut sources = Vec::new();
+    for value in citations {
+        let Some(mut source) = TranscriptEvidenceRef::parse_display_citation(value) else {
+            continue;
+        };
+        if source.subject_id.is_none() {
+            source.subject_id = Some(subject_id.to_string());
+        }
+        if source.authority.is_none() {
+            source.authority = authority;
+        }
+        if !sources.iter().any(|existing| existing == &source) {
+            sources.push(source);
+        }
+    }
+    sources
 }
 
 fn runtime_skill_summary(record: &RuntimeSkillRecord, enabled: bool) -> RuntimeSkillSummary {
@@ -4731,7 +5664,7 @@ impl MemoryRuntimeBuilder {
                 relationship_scope: Some(relationship_scope(
                     &scope.channel,
                     &scope.chat_id,
-                    Some(scope.chat_id.clone()),
+                    Some(scope.conversation_id_or_chat_id().to_string()),
                 )),
                 projection_policy: "subject_aware_default".to_string(),
                 write_policy: "subject_candidate_then_space_governance".to_string(),
@@ -4830,6 +5763,7 @@ impl MemoryRuntimeBuilder {
             capabilities,
             lifecycle: RuntimeLifecycleEngine,
             agent_tool_registries: Mutex::new(self.agent_tool_registries),
+            last_conversation_id: Mutex::new(None),
         };
         let lifecycle = runtime.start_lifecycle(
             RuntimeLifecycleOperation::Open,

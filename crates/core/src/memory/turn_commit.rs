@@ -6,9 +6,9 @@ use crate::error::Result;
 
 use super::{
     default_session_speaker_for_role, default_subject_id, synthesize_session_message_id,
-    CanonicalTurnTranscriptCommitReport, ConversationKey, ConversationTranscriptStore,
-    HostOpaqueRef, SessionMessage, SessionMessageRecord, SessionStore, SubjectId,
-    TranscriptCommitReport, TranscriptTurnRecord, MAX_SESSION_ENTRIES,
+    ActorAttribution, CanonicalTurnTranscriptCommitReport, ConversationKey,
+    ConversationTranscriptStore, HostOpaqueRef, SessionMessage, SessionMessageRecord, SessionStore,
+    SubjectId, TranscriptCommitReport, TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +200,8 @@ pub struct CanonicalTurnDelta {
     pub subject: SubjectId,
     pub delivery_status: MemoryTurnDeliveryStatus,
     pub source: MemoryTurnSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<ActorAttribution>,
     #[serde(default)]
     pub input_messages: Vec<TranscriptInputMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

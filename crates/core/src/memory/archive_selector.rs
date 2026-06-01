@@ -302,6 +302,10 @@ mod tests {
     ) -> ArchiveSearchHit {
         let locator = ArchiveRecordLocator {
             source,
+            memory_space_id: None,
+            channel_id: None,
+            conversation_id: None,
+            turn_id: None,
             chat_id: Some("chat-1".to_string()),
             message_id: None,
             message_index: Some(0),

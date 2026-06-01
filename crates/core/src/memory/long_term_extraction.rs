@@ -8,7 +8,10 @@ use crate::error::Result;
 use crate::llm::{LlmClient, LlmHttpClient, Message, ToolChoicePolicy};
 use crate::orchestrator::PressureLevel;
 use crate::platform::SkillStorage;
-use crate::skills::{write_governed_runtime_skills, RuntimeSkillWrite, RuntimeSkillWriteSource};
+use crate::skills::{
+    write_governed_runtime_skills, RuntimeSkillWrite, RuntimeSkillWriteAction,
+    RuntimeSkillWriteSource,
+};
 use crate::util::{scrub_credentials, truncate_content_to_max};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -23,7 +26,8 @@ use super::{
     LongTermMemoryKind, LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
     LongTermMemoryStaleHint, LongTermMemoryStore, MemoryEvidenceAuthority, MemoryGovernanceContext,
     MemoryGovernanceInput, MemoryProfile, MemoryStore, SessionMessage, SessionStore,
-    SessionSummaryStore, SharedMemoryWriteSource, TurnLedgerStore, MAX_LONG_TERM_MEMORY_ITEMS,
+    SessionSummaryStore, SharedMemoryWriteAction, SharedMemoryWriteSource, TurnLedgerStore,
+    MAX_LONG_TERM_MEMORY_ITEMS,
 };
 
 /// 长期记忆提取状态存储路径（相对状态根）。
@@ -156,6 +160,14 @@ pub struct ParsedLongTermMemoryExtraction {
     pub upserts: Vec<LongTermMemoryDraft>,
     pub deletes: Vec<LongTermMemorySlot>,
     pub skill_writes: Vec<RuntimeSkillWrite>,
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct LongTermMemoryExtractionApplyReport {
+    pub changed: usize,
+    pub deleted_slots: Vec<LongTermMemorySlot>,
+    pub accepted_upserts: Vec<LongTermMemoryDraft>,
+    pub accepted_skill_writes: Vec<RuntimeSkillWrite>,
 }
 
 #[derive(Deserialize)]
@@ -714,30 +726,77 @@ pub fn apply_long_term_memory_extraction(
     extraction: &ParsedLongTermMemoryExtraction,
     now_secs: u64,
 ) -> Result<usize> {
+    Ok(
+        apply_long_term_memory_extraction_with_report(store, skill_storage, extraction, now_secs)?
+            .changed,
+    )
+}
+
+pub fn apply_long_term_memory_extraction_with_report(
+    store: &dyn LongTermMemoryStore,
+    skill_storage: &dyn SkillStorage,
+    extraction: &ParsedLongTermMemoryExtraction,
+    now_secs: u64,
+) -> Result<LongTermMemoryExtractionApplyReport> {
     let mut changed = 0usize;
+    let mut deleted_slots = Vec::new();
     for slot in &extraction.deletes {
         if store.delete_slot(slot)? {
             changed += 1;
+            deleted_slots.push(slot.clone());
         }
     }
+    let mut accepted_upserts = Vec::new();
     if !extraction.upserts.is_empty() {
-        changed += write_governed_shared_memory(
+        let outcome = write_governed_shared_memory(
             store,
             &extraction.upserts,
             now_secs,
             SharedMemoryWriteSource::Extraction,
-        )?
-        .changed;
+        )?;
+        changed += outcome.changed;
+        let accepted = outcome
+            .reports
+            .iter()
+            .filter(|report| report.action == SharedMemoryWriteAction::Accepted)
+            .map(|report| (report.kind.clone(), report.topic.clone()))
+            .collect::<HashSet<_>>();
+        accepted_upserts.extend(
+            extraction
+                .upserts
+                .iter()
+                .filter_map(LongTermMemoryDraft::normalized)
+                .filter(|draft| accepted.contains(&(draft.kind.clone(), draft.topic.clone()))),
+        );
     }
+    let mut accepted_skill_writes = Vec::new();
     if !extraction.skill_writes.is_empty() {
-        changed += write_governed_runtime_skills(
+        let outcome = write_governed_runtime_skills(
             skill_storage,
             &extraction.skill_writes,
             RuntimeSkillWriteSource::Extraction,
-        )?
-        .changed;
+        )?;
+        changed += outcome.changed;
+        let accepted_topics = outcome
+            .reports
+            .iter()
+            .filter(|report| report.action == RuntimeSkillWriteAction::Accepted)
+            .map(|report| report.topic.trim().to_string())
+            .collect::<HashSet<_>>();
+        accepted_skill_writes.extend(
+            extraction
+                .skill_writes
+                .iter()
+                .filter(|write| accepted_topics.contains(write.topic.trim()))
+                .cloned(),
+        );
     }
-    Ok(changed)
+    Ok(LongTermMemoryExtractionApplyReport {
+        changed,
+        deleted_slots,
+        accepted_upserts,
+        accepted_skill_writes,
+    })
 }
 
 pub fn prepare_long_term_memory_extraction(
@@ -1243,6 +1302,7 @@ pub enum LongTermMemoryRefreshOutcome {
         previous_state: Option<LongTermMemoryExtractionState>,
         next_state: LongTermMemoryExtractionState,
         changed_count: usize,
+        apply_report: LongTermMemoryExtractionApplyReport,
     },
     Failed {
         previous_state: Option<LongTermMemoryExtractionState>,
@@ -1290,8 +1350,9 @@ pub fn run_long_term_memory_refresh(
     }
 
     match extract_long_term_memory(http, llm, &ctx, chat_id, profile) {
-        Ok(changed_count) => {
+        Ok(apply_report) => {
             let after_count = ctx.session_store.message_count(chat_id).unwrap_or(0);
+            let changed_count = apply_report.changed;
             LongTermMemoryRefreshOutcome::Processed {
                 next_state: mark_long_term_memory_extraction_processed(
                     previous_state.as_ref(),
@@ -1299,6 +1360,7 @@ pub fn run_long_term_memory_refresh(
                 ),
                 previous_state,
                 changed_count,
+                apply_report,
             }
         }
         Err(error) => LongTermMemoryRefreshOutcome::Failed {
@@ -1335,13 +1397,13 @@ fn extract_long_term_memory(
     ctx: &LongTermMemoryRefreshContext<'_>,
     chat_id: &str,
     profile: MemoryProfile,
-) -> Result<usize> {
+) -> Result<LongTermMemoryExtractionApplyReport> {
     let policy = memory_policy(profile).long_term_extraction;
     let recent = ctx
         .session_store
         .load_recent(chat_id, policy.recent_message_count)?;
     if recent.len() < 2 {
-        return Ok(0);
+        return Ok(LongTermMemoryExtractionApplyReport::default());
     }
     let session_summary = ctx.session_summary_store.get(chat_id).ok().flatten();
     let archive_query = recent
@@ -1438,9 +1500,9 @@ fn extract_long_term_memory(
         && extraction.deletes.is_empty()
         && extraction.skill_writes.is_empty()
     {
-        return Ok(0);
+        return Ok(LongTermMemoryExtractionApplyReport::default());
     }
-    apply_long_term_memory_extraction(
+    apply_long_term_memory_extraction_with_report(
         ctx.long_term_memory_store,
         ctx.skill_storage,
         &extraction,
@@ -2707,6 +2769,7 @@ mod tests {
             }),
             next_state: LongTermMemoryExtractionState::default(),
             changed_count: 0,
+            apply_report: LongTermMemoryExtractionApplyReport::default(),
         };
 
         outcome.persist(&store, "chat-1");
