@@ -8,13 +8,14 @@ use bm_sdk::{
     LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
     MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemorySemanticJudgmentSource, MemorySpaceExportRequest,
-    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
-    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, TranscriptEvidenceRef, TranscriptInputMessage,
-    TranscriptLifecycleTransition, TranscriptRedactionReason, TranscriptReplayView,
+    MemoryRecallRequest, MemoryReplayRequest, MemorySemanticJudgmentSource,
+    MemorySpaceExportRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptRedactionReason,
+    TranscriptReplayView,
 };
 
 use support::{
@@ -114,6 +115,62 @@ fn finalize_turn_commits_conversation_transcript_in_runtime_memory_space() {
         Some("记住我是青川")
     );
     assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+}
+
+#[test]
+fn desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
+    for profile in [
+        ProfileId::DesktopMacosStandaloneMemory,
+        ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopWindowsEmbeddedSdk,
+    ] {
+        let platform = empty_store_platform(profile);
+        let runtime = test_runtime_with_scope_and_subject(
+            platform,
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        );
+
+        runtime
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn: finalize_request("桌面写入聊天", "桌面读回聊天。").turn,
+                host_refs: vec![host_ref_with_visibility("UI-1", HostRefVisibility::HostUi)],
+            })
+            .expect("desktop transcript commit should be allowed");
+
+        let replay = runtime
+            .replay_transcript(MemoryTranscriptReplayRequest {
+                memory_space_id: runtime.memory_space_id().to_string(),
+                channel_id: "llm.gateway".to_string(),
+                conversation_id: "conversation-a".to_string(),
+                limit: 10,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .expect("desktop HostUi transcript read should be allowed");
+
+        assert_eq!(replay.slice.view, TranscriptReplayView::HostUi);
+        assert_eq!(replay.slice.turns.len(), 1);
+        assert_eq!(
+            replay.slice.turns[0].input_messages[0].content.as_deref(),
+            Some("桌面写入聊天")
+        );
+        assert_eq!(replay.slice.turns[0].host_refs.len(), 1);
+        assert_eq!(replay.slice.turns[0].host_refs[0].business_ref_id, "UI-1");
+
+        assert!(
+            runtime
+                .replay(MemoryReplayRequest {
+                    chat_id: "chat-a".to_string(),
+                    limit: 10,
+                })
+                .is_err(),
+            "desktop HostUi transcript read must not enable intelligence replay for {}",
+            profile.as_str()
+        );
+    }
 }
 
 #[test]

@@ -53,6 +53,8 @@ SDK-facing transcript operations:
 
 `MemoryTranscriptReplayRequest` and `MemoryTranscriptExportRequest` take `limit` plus optional `cursor`; their reports return `next_cursor` and `has_more`. SDK callers should page through transcript replay/export through `MemoryRuntime` instead of reaching into the core/store trait. Runtime profile budgets may clamp page size, visible host refs per turn, redaction items, lifecycle derived refs, and repair issues, but they do not relax redaction, lifecycle, or privacy policy. Lifecycle and repair reports set `profile_budget_applied=true` when those report lists are clipped.
 
+`HostUi` transcript replay is the safe conversation readback surface for host UI. It is governed by `capabilities.transcript_replay`, not by the debug/inspection-oriented `capabilities.replay` used by `MemoryRuntime::replay`.
+
 Core release-surface concepts:
 
 | Concept | Contract |
@@ -187,6 +189,7 @@ Every runtime exposes a `MemoryCapabilityCatalog`. Visibility is derived from th
 let capabilities = runtime.capabilities();
 assert!(capabilities.write.visible);
 assert!(capabilities.recall.visible);
+assert!(capabilities.transcript_replay.visible);
 ```
 
 Use the CLI to render a stable platform snapshot:

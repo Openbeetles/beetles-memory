@@ -66,6 +66,8 @@ require_fixed "has_more" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-mig
 require_fixed "lifecycle_request_without_affected_turns_reports_noop" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "host_ref_label_is_redacted_for_non_owner_views" dev-docs/conversation-transcript-governance-hardening-plan.md crates/core/tests/conversation_transcript_contract.rs
 require_fixed "transcript_replay_export_page_requests_are_public" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/public_surface.rs
+require_fixed "desktop_profiles_can_read_host_ui_transcript_without_debug_replay" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
+require_fixed "transcript_replay" dev-docs/sdk-profile-contract-plan.md crates/sdk/src/capability.rs crates/sdk/src/runtime.rs crates/sdk/tests/capability_catalog.rs
 require_fixed "conversation_transcript_derived_ref" crates/store/src/platform.rs crates/store/tests/conversation_transcript_store_contract.rs
 require_fixed "TranscriptBackedSessionStore" crates/sdk/src/runtime.rs dev-docs/conversation-transcript-governance-hardening-plan.md
 require_fixed "with_conversation_id" crates/sdk/src/runtime.rs docs/en/api.md docs/zh-CN/api.md

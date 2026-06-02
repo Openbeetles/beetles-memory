@@ -53,6 +53,8 @@ SDK transcript 操作：
 
 `MemoryTranscriptReplayRequest` 和 `MemoryTranscriptExportRequest` 接收 `limit` 与可选 `cursor`；对应 report 返回 `next_cursor` 和 `has_more`。SDK 调用方应通过 `MemoryRuntime` 分页 replay/export transcript，不应下沉到 core/store trait。Runtime profile budget 可以裁剪 page size、每 turn 可见 host refs、redaction items、lifecycle derived refs 和 repair issues 数量，但不能放宽 redaction、lifecycle 或 privacy policy。Lifecycle 和 repair report 的列表被裁剪时会设置 `profile_budget_applied=true`。
 
+`HostUi` transcript replay 是宿主 UI 读回聊天记录的安全视图，由 `capabilities.transcript_replay` 控制，不依赖 `MemoryRuntime::replay` 使用的 debug/inspection `capabilities.replay`。
+
 核心发布面概念：
 
 | 概念 | 合同 |
@@ -187,6 +189,7 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 let capabilities = runtime.capabilities();
 assert!(capabilities.write.visible);
 assert!(capabilities.recall.visible);
+assert!(capabilities.transcript_replay.visible);
 ```
 
 通过 CLI 输出稳定 platform snapshot：

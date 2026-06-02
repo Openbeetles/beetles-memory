@@ -66,6 +66,8 @@ Deleting or masking raw transcript content must report downstream impact separat
 
 SDK transcript replay/export requests support bounded cursor pages through `cursor`, `next_cursor`, and `has_more`. Host ref visibility is view-aware, and host ref `label` is field-redacted outside owner-approved views with `HostRefLabel` in the redaction report.
 
+`HostUi` transcript replay is controlled by the SDK `transcript_replay` capability. Desktop and embedded SDK hosts can commit a transcript turn and read that same conversation back for UI display without enabling `MemoryRuntime::replay`, replay harnesses, raw owner replay, or deep inspection.
+
 ## Memory-Space Migration Dry-Run
 
 Use memory-space migration when replacing a host memory implementation or moving a configured SDK store:

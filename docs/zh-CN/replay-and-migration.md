@@ -66,6 +66,8 @@ pub struct ConversationKey {
 
 SDK transcript replay/export request 通过 `cursor`、`next_cursor` 和 `has_more` 支持有界分页。Host ref visibility 会按 view 执行，host ref 的 `label` 只在 owner 允许视图中保留，其他视图会做字段级脱敏，并在 redaction report 中记录 `HostRefLabel`。
 
+`HostUi` transcript replay 由 SDK `transcript_replay` capability 控制。桌面和 embedded SDK 宿主可以提交 transcript turn 后，把同一个 conversation 读回给 UI 展示；这不要求打开 `MemoryRuntime::replay`、replay harness、raw owner replay 或 deep inspection。
+
 ## Memory-space 迁移 dry-run
 
 替换宿主记忆实现或迁移一份已配置 SDK store 时，使用 memory-space migration：

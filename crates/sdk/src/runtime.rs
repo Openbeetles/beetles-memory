@@ -2302,7 +2302,10 @@ impl MemoryRuntime {
         &self,
         request: MemoryTranscriptReplayRequest,
     ) -> Result<MemoryTranscriptReplayReport> {
-        self.ensure_visible("replay.transcript", self.capabilities.replay)?;
+        self.ensure_visible(
+            "replay.transcript",
+            self.transcript_replay_visibility(request.view),
+        )?;
         self.ensure_runtime_memory_space("replay.transcript", &request.memory_space_id)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Replay,
@@ -2830,6 +2833,20 @@ impl MemoryRuntime {
             "memory_runtime_operation",
             format!("{operation} is not visible for current profile"),
         ))
+    }
+
+    fn transcript_replay_visibility(
+        &self,
+        view: TranscriptReplayView,
+    ) -> MemoryOperationVisibility {
+        match view {
+            TranscriptReplayView::HostUi => self.capabilities.transcript_replay,
+            TranscriptReplayView::ModelContext => self.capabilities.projection,
+            TranscriptReplayView::OperatorAudit => self.capabilities.inspection,
+            TranscriptReplayView::Export | TranscriptReplayView::RawOwnerOnly => {
+                self.capabilities.export
+            }
+        }
     }
 
     fn ensure_runtime_memory_space(

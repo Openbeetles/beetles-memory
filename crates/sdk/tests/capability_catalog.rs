@@ -45,6 +45,7 @@ fn esp_standalone_and_embedded_sdk_have_distinct_visible_catalogs() {
     assert!(!embedded.lifecycle.maintain_full.visible);
     assert!(!embedded.lifecycle.maintain_lightweight.visible);
     assert!(embedded.lifecycle.operator_diagnosis.visible);
+    assert!(embedded.transcript_replay.visible);
     assert!(!embedded.replay.visible);
     assert!(!embedded.sqlite_index_recall.archive.visible);
     assert!(!embedded.communication_adapter.visible);
@@ -54,6 +55,36 @@ fn esp_standalone_and_embedded_sdk_have_distinct_visible_catalogs() {
     assert!(embedded.validation.proposal_preview.visible);
     assert!(!embedded.validation.compact_proposal_sandbox.visible);
     assert!(!embedded.validation.proposal_submission.visible);
+}
+
+#[test]
+fn desktop_profiles_allow_safe_transcript_replay_without_debug_replay() {
+    let policy = MemoryCapabilityPolicy::strict_profile();
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+
+    for profile in [
+        ProfileId::DesktopMacosStandaloneMemory,
+        ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopWindowsEmbeddedSdk,
+    ] {
+        let catalog =
+            resolve_memory_capabilities(profile, &policy, &privacy).expect("desktop catalog");
+        assert!(
+            catalog.transcript_replay.visible,
+            "{} should allow HostUi transcript replay",
+            profile.as_str()
+        );
+        assert!(
+            !catalog.replay.visible,
+            "{} should keep intelligence replay disabled",
+            profile.as_str()
+        );
+        assert!(
+            !catalog.lifecycle.replay_inspection.visible,
+            "{} should keep replay inspection disabled",
+            profile.as_str()
+        );
+    }
 }
 
 #[test]

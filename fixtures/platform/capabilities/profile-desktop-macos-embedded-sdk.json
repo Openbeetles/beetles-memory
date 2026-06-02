@@ -23,6 +23,7 @@
     "projection": true,
     "maintenance": false,
     "inspection": true,
+    "transcript_replay": true,
     "replay": false,
     "export": false,
     "import": false
