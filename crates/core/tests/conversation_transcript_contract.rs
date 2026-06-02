@@ -279,7 +279,7 @@ fn host_ref_visibility_is_enforced_and_reported_per_replay_view() {
     let host_ui = RedactedTranscriptSlice::from_records(
         key.clone(),
         TranscriptReplayView::HostUi,
-        &[record.clone()],
+        std::slice::from_ref(&record),
     );
     assert_eq!(
         host_ui.turns[0]
@@ -299,7 +299,7 @@ fn host_ref_visibility_is_enforced_and_reported_per_replay_view() {
     let model = RedactedTranscriptSlice::from_records(
         key.clone(),
         TranscriptReplayView::ModelContext,
-        &[record.clone()],
+        std::slice::from_ref(&record),
     );
     assert_eq!(model.turns[0].host_refs.len(), 1);
     assert_eq!(model.turns[0].host_refs[0].business_ref_id, "model");
@@ -330,7 +330,7 @@ fn host_ref_label_is_redacted_for_non_owner_views() {
     let owner = RedactedTranscriptSlice::from_records(
         key.clone(),
         TranscriptReplayView::RawOwnerOnly,
-        &[record.clone()],
+        std::slice::from_ref(&record),
     );
     assert!(owner.turns[0]
         .host_refs
@@ -340,7 +340,7 @@ fn host_ref_label_is_redacted_for_non_owner_views() {
     let host_ui = RedactedTranscriptSlice::from_records(
         key.clone(),
         TranscriptReplayView::HostUi,
-        &[record.clone()],
+        std::slice::from_ref(&record),
     );
     assert_eq!(host_ui.turns[0].host_refs[0].business_ref_id, "host");
     assert_eq!(
@@ -353,7 +353,7 @@ fn host_ref_label_is_redacted_for_non_owner_views() {
     let model = RedactedTranscriptSlice::from_records(
         key.clone(),
         TranscriptReplayView::ModelContext,
-        &[record.clone()],
+        std::slice::from_ref(&record),
     );
     assert_eq!(model.turns[0].host_refs[0].business_ref_id, "model");
     assert!(model.turns[0].host_refs[0].label.is_none());
@@ -361,7 +361,7 @@ fn host_ref_label_is_redacted_for_non_owner_views() {
     let operator = RedactedTranscriptSlice::from_records(
         key.clone(),
         TranscriptReplayView::OperatorAudit,
-        &[record.clone()],
+        std::slice::from_ref(&record),
     );
     assert!(operator.turns[0]
         .host_refs

@@ -6,6 +6,24 @@ cd "$ROOT"
 
 source "$ROOT/scripts/lib_contract_checks.sh"
 
+assert_feature_set_rejected() {
+  local package="$1"
+  local feature_set="$2"
+  local expected="$3"
+  local output
+
+  if output="$(cargo check -p "$package" --no-default-features --features "$feature_set" 2>&1)"; then
+    echo "FAIL: $package feature set should have been rejected: $feature_set" >&2
+    exit 1
+  fi
+
+  if ! grep -q "$expected" <<<"$output"; then
+    echo "FAIL: $package feature set rejected for unexpected reason: $feature_set" >&2
+    echo "$output" >&2
+    exit 1
+  fi
+}
+
 cargo test -p bm-http --features server-std --test http_runtime_contract
 cargo test -p bm-http --features server-std --test http_backend_contract
 cargo test -p bm-wss --features server-std --test wss_runtime_contract
@@ -56,6 +74,27 @@ if cargo tree -p bm-entry --no-default-features --features profile-esp-embedded-
   cat /tmp/bm-deployment-contract-hit >&2
   exit 1
 fi
+
+if cargo tree -p bm-http --no-default-features --features profile-esp-standalone-memory | rg -n 'bm-ollama-transparent|rusqlite|axum|tokio|hyper|tungstenite' >/tmp/bm-deployment-contract-hit 2>/dev/null; then
+  echo "FAIL: ESP standalone HTTP contract must not pull desktop, sqlite, or server-heavy deps" >&2
+  cat /tmp/bm-deployment-contract-hit >&2
+  exit 1
+fi
+
+if cargo tree -p bm-http --no-default-features --features profile-esp-embedded-sdk | rg -n 'bm-ollama-transparent|rusqlite|axum|tokio|hyper|tungstenite' >/tmp/bm-deployment-contract-hit 2>/dev/null; then
+  echo "FAIL: ESP embedded SDK HTTP contract must not pull desktop, sqlite, or server-heavy deps" >&2
+  cat /tmp/bm-deployment-contract-hit >&2
+  exit 1
+fi
+
+assert_feature_set_rejected bm-http "server-std,profile-esp-standalone-memory" "server-std is forbidden for ESP profiles"
+assert_feature_set_rejected bm-http "server-std,profile-esp-embedded-sdk" "server-std is forbidden for ESP profiles"
+assert_feature_set_rejected bm-wss "server-std,profile-esp-standalone-memory" "server-std is forbidden for ESP profiles"
+assert_feature_set_rejected bm-wss "server-std,profile-esp-embedded-sdk" "server-std is forbidden for ESP profiles"
+assert_feature_set_rejected bm-mcp "server-stdio,profile-esp-standalone-memory" "server-stdio is forbidden for ESP profiles"
+assert_feature_set_rejected bm-mcp "server-stdio,profile-esp-embedded-sdk" "server-stdio is forbidden for ESP profiles"
+assert_feature_set_rejected bm-a2a "bridge-http,profile-esp-standalone-memory" "bridge-http is forbidden for ESP profiles"
+assert_feature_set_rejected bm-a2a "bridge-http,profile-esp-embedded-sdk" "bridge-http is forbidden for ESP profiles"
 
 rm -f /tmp/bm-deployment-contract-hit
 echo "check_deployment_runtime_contract: ok"

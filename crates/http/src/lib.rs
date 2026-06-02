@@ -1,5 +1,14 @@
 //! HTTP adapter contracts for Beetle Memory.
 
+#[cfg(all(
+    feature = "server-std",
+    any(
+        feature = "profile-esp-standalone-memory",
+        feature = "profile-esp-embedded-sdk"
+    )
+))]
+compile_error!("bm-http server-std is forbidden for ESP profiles; use bm-sdk or a compact client transport instead.");
+
 use bm_adapter::{AdapterErrorKey, AdapterOperation, TransportKind};
 
 #[cfg(feature = "server-std")]

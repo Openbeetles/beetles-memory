@@ -1,5 +1,14 @@
 //! MCP adapter contracts for Beetle Memory.
 
+#[cfg(all(
+    feature = "server-stdio",
+    any(
+        feature = "profile-esp-standalone-memory",
+        feature = "profile-esp-embedded-sdk"
+    )
+))]
+compile_error!("bm-mcp server-stdio is forbidden for ESP profiles.");
+
 use bm_adapter::AdapterOperation;
 
 #[cfg(feature = "server-stdio")]

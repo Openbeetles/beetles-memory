@@ -17,7 +17,7 @@ required-features = ["server-std"]
 
 [features]
 default = []
-server-std = ["dep:bm-entry"]
+server-std = ["dep:bm-entry", "dep:bm-ollama-transparent"]
 replay-harness = ["bm-entry?/replay-harness"]
 profile-esp-standalone-memory = [
     "bm-adapter/profile-esp-standalone-memory",
@@ -51,7 +51,7 @@ profile-server-linux-dev-full = [
 [dependencies]
 bm-adapter.workspace = true
 bm-entry = { version = "0.1.0", path = "../entry", optional = true }
-bm-ollama-transparent.workspace = true
+bm-ollama-transparent = { workspace = true, optional = true }
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

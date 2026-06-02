@@ -51,9 +51,9 @@ for row in "${compact_checks[@]}"; do
   package="${row%% *}"
   features="${row#* }"
   tree="$(cargo tree -p "$package" --no-default-features --features "$features")"
-  if grep -Eq 'bm-llm-gateway|reqwest|axum|hyper|tower' <<<"$tree"; then
+  if grep -Eq 'bm-llm-gateway|bm-ollama-transparent|reqwest|axum|hyper|tower' <<<"$tree"; then
     echo "$tree" >&2
-    fail "$package $features must not compile gateway/server-client dependencies"
+    fail "$package $features must not compile gateway/desktop/server-client dependencies"
   fi
 done
 

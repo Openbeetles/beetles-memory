@@ -1,5 +1,14 @@
 //! WSS adapter contracts for Beetle Memory.
 
+#[cfg(all(
+    feature = "server-std",
+    any(
+        feature = "profile-esp-standalone-memory",
+        feature = "profile-esp-embedded-sdk"
+    )
+))]
+compile_error!("bm-wss server-std is forbidden for ESP profiles; use client-compact only when the ESP profile explicitly permits a lightweight WSS client.");
+
 use bm_adapter::AdapterOperation;
 
 #[cfg(any(feature = "server-std", feature = "client-compact"))]

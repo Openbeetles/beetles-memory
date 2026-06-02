@@ -750,10 +750,10 @@ impl MemoryRuntime {
                         accepted_draft_pairs
                             .iter()
                             .zip(outcome.reports.iter())
-                            .filter_map(|((candidate, draft), report)| {
+                            .filter(|&((_candidate, _draft), report)| {
                                 matches!(report.action, SharedMemoryWriteAction::Accepted)
-                                    .then(|| (*candidate, draft.clone()))
                             })
+                            .map(|((candidate, draft), _report)| (*candidate, draft.clone()))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
@@ -770,10 +770,10 @@ impl MemoryRuntime {
                         let governed_skill_pairs = accepted_normalized_skill_pairs
                             .iter()
                             .zip(outcome.reports.iter())
-                            .filter_map(|((candidate, write), report)| {
+                            .filter(|&((_candidate, _write), report)| {
                                 matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                                    .then(|| (*candidate, write.clone()))
                             })
+                            .map(|((candidate, write), _report)| (*candidate, write.clone()))
                             .collect::<Vec<_>>();
                         let procedural_evolution = build_skill_evolution_report_from_write_outcome(
                             &accepted_skill_writes,

@@ -315,38 +315,44 @@ pub struct TranscriptMessageRecord {
     pub actor: ActorAttribution,
 }
 
+struct TranscriptMessageInput<'a> {
+    key: &'a ConversationKey,
+    turn_id: &'a str,
+    sequence: u64,
+    message: &'a TranscriptInputMessage,
+    fallback_observed_at: u64,
+    created_at: u64,
+    subject_id: &'a str,
+    turn_actor: Option<&'a ActorAttribution>,
+}
+
 impl TranscriptMessageRecord {
-    pub fn from_input(
-        key: &ConversationKey,
-        turn_id: &str,
-        sequence: u64,
-        message: &TranscriptInputMessage,
-        fallback_observed_at: u64,
-        created_at: u64,
-        subject_id: &str,
-        turn_actor: Option<&ActorAttribution>,
-    ) -> Self {
-        let occurrence = u32::try_from(sequence).unwrap_or(u32::MAX);
-        let observed_at = if message.observed_at == 0 {
-            fallback_observed_at
+    fn from_input(input: TranscriptMessageInput<'_>) -> Self {
+        let occurrence = u32::try_from(input.sequence).unwrap_or(u32::MAX);
+        let observed_at = if input.message.observed_at == 0 {
+            input.fallback_observed_at
         } else {
-            message.observed_at
+            input.message.observed_at
         };
         Self {
             message_id: synthesize_session_message_id(
-                &key.storage_key(),
-                &message.role,
-                &message.content,
+                &input.key.storage_key(),
+                &input.message.role,
+                &input.message.content,
                 occurrence,
             ),
-            turn_id: turn_id.to_string(),
-            sequence,
-            role: message.role.clone(),
-            content: message.content.clone(),
-            authority: message.authority,
+            turn_id: input.turn_id.to_string(),
+            sequence: input.sequence,
+            role: input.message.role.clone(),
+            content: input.message.content.clone(),
+            authority: input.message.authority,
             observed_at,
-            created_at: created_at.max(observed_at),
-            actor: ActorAttribution::from_message_with_turn_actor(message, subject_id, turn_actor),
+            created_at: input.created_at.max(observed_at),
+            actor: ActorAttribution::from_message_with_turn_actor(
+                input.message,
+                input.subject_id,
+                input.turn_actor,
+            ),
         }
     }
 
@@ -432,32 +438,32 @@ impl TranscriptTurnRecord {
             .iter()
             .enumerate()
             .map(|(index, message)| {
-                TranscriptMessageRecord::from_input(
+                TranscriptMessageRecord::from_input(TranscriptMessageInput {
                     key,
-                    &delta.turn_id,
-                    u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
+                    turn_id: &delta.turn_id,
+                    sequence: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
                     message,
-                    now_secs,
-                    now_secs,
-                    &delta.subject,
-                    Some(&actor),
-                )
+                    fallback_observed_at: now_secs,
+                    created_at: now_secs,
+                    subject_id: &delta.subject,
+                    turn_actor: Some(&actor),
+                })
             })
             .collect::<Vec<_>>();
         let assistant_message = if delta.delivery_status == MemoryTurnDeliveryStatus::Delivered {
             delta.assistant_message.as_ref().map(|message| {
-                TranscriptMessageRecord::from_input(
+                TranscriptMessageRecord::from_input(TranscriptMessageInput {
                     key,
-                    &delta.turn_id,
-                    u64::try_from(input_messages.len())
+                    turn_id: &delta.turn_id,
+                    sequence: u64::try_from(input_messages.len())
                         .unwrap_or(u64::MAX)
                         .saturating_add(1),
                     message,
-                    now_secs,
-                    now_secs,
-                    &delta.subject,
-                    Some(&actor),
-                )
+                    fallback_observed_at: now_secs,
+                    created_at: now_secs,
+                    subject_id: &delta.subject,
+                    turn_actor: Some(&actor),
+                })
             })
         } else {
             None

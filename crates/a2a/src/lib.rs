@@ -1,5 +1,14 @@
 //! A2A bridge contracts for Beetle Memory.
 
+#[cfg(all(
+    feature = "bridge-http",
+    any(
+        feature = "profile-esp-standalone-memory",
+        feature = "profile-esp-embedded-sdk"
+    )
+))]
+compile_error!("bm-a2a bridge-http is forbidden for ESP profiles.");
+
 use bm_adapter::AdapterOperation;
 
 #[cfg(feature = "bridge-http")]
