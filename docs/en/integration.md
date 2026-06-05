@@ -200,7 +200,46 @@ It only runs SDK-owned hygiene, factual evidence metadata compaction, and runtim
 skill governance, and reports `host_direct_deletion_allowed=false`; quota
 pressure must not let hosts delete accepted memory.
 
-## 9. Host Turn Lifecycle
+## 9. Manage Accepted Long-Term Memory
+
+When users later ask to inspect, correct, delete, forget, or restrict long-term memory, hosts should call the long-term memory control surface. Hosts may own natural-language command interpretation and UI display, but they must not maintain a shadow memory editor in their own local database.
+
+```rust
+use bm_sdk::{
+    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermTarget, LongTermMemoryQuery,
+    RuntimeLifecycleModeInput,
+};
+
+let page = runtime.list_long_term_memory(MemoryLongTermListRequest {
+    query: LongTermMemoryQuery {
+        topic: Some("preferred_editor".to_string()),
+        limit: 8,
+        ..LongTermMemoryQuery::default()
+    },
+    cursor: None,
+    limit: 8,
+    view: MemoryLongTermControlView::HostUi,
+})?;
+
+if let Some(record) = page.records.first() {
+    let report = runtime.mutate_long_term_memory(MemoryLongTermMutationRequest {
+        operation: MemoryLongTermMutation::Delete {
+            target: MemoryLongTermTarget::RecordId(record.record.id.clone()),
+        },
+        reason: "user requested deletion".to_string(),
+        dry_run: false,
+        mode_input: RuntimeLifecycleModeInput::default(),
+    })?;
+    assert!(report.accepted);
+}
+```
+
+Bulk `forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. Use `MemoryLongTermPolicyRequest` for "do not remember this kind of thing again" or pausing future long-term memory updates for a scope; policies do not retroactively delete accepted records.
+
+Transcript lifecycle raw delete/mask only affects conversation evidence. It reports affected `DerivedMemoryRef` values, but revoking the corresponding long-term memory still goes through `mutate_long_term_memory`. Runtime Skill edit/delete only manages procedural runtime skill memory and is not the control surface for ordinary long-term memory.
+
+## 10. Host Turn Lifecycle
 
 A complete SDK host turn uses one public path:
 
@@ -214,7 +253,7 @@ A complete SDK host turn uses one public path:
 
 Generic host fixtures and Beetle-derived fixtures under `fixtures/sdk-host-readiness/` follow this same path. Beetle-derived data is legacy-shaped evidence only, not a special SDK branch.
 
-## 10. Migration Dry-Run, Import, And Replay
+## 11. Migration Dry-Run, Import, And Replay
 
 ```rust
 use bm_sdk::{

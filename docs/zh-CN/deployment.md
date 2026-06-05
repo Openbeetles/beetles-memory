@@ -70,8 +70,12 @@ Crate 声明的 memory routes：
 | `/memory/replay` | `POST` | replay contract |
 | `/memory/export` | `POST` | export contract |
 | `/memory/import` | `POST` | import contract |
+| `/memory/long-term/list` | `POST` | accepted long-term memory list/search |
+| `/memory/long-term/detail` | `POST` | accepted long-term memory detail |
+| `/memory/long-term/mutate` | `POST` | accepted long-term memory mutation |
+| `/memory/long-term/policy` | `POST` | long-term governance policy mutation |
 
-`server-std` decoder 使用共享 JSON adapter decoder，支持 write、recall、project、maintain、inspect、recover、replay、export、import、capabilities、close。`Subscribe` 是 stream operation，不是 HTTP memory command。`Maintain` 需要通过 `handle_http_request_with_services` 注入 LLM/HTTP services；`handle_http_request` 不注入 services，会对 maintain 返回结构化拒绝。
+`server-std` decoder 使用共享 JSON adapter decoder，支持 write、recall、project、maintain、inspect、recover、replay、export、import、long-term list/detail/mutate/policy、capabilities、close。`Subscribe` 是 stream operation，不是 HTTP memory command。`Maintain` 需要通过 `handle_http_request_with_services` 注入 LLM/HTTP services；`handle_http_request` 不注入 services，会对 maintain 返回结构化拒绝。
 
 Standard-library HTTP helper 会读取这些 headers：
 
@@ -175,6 +179,10 @@ Inbound command frame kinds：
 - `command.project`
 - `command.inspect`
 - `command.replay`
+- `command.long_term.list`
+- `command.long_term.detail`
+- `command.long_term.mutate`
+- `command.long_term.policy`
 - `command.capabilities`
 
 Subscription frame kinds：
@@ -207,6 +215,10 @@ Tool specs 包含：
 - `memory_inspect`
 - `memory_replay`
 - `memory_write_candidate`
+- `memory_long_term_list`
+- `memory_long_term_detail`
+- `memory_long_term_mutate`
+- `memory_long_term_policy`
 - `memory_export`
 - `memory_import`
 
@@ -248,6 +260,10 @@ Bridge message names：
 - `memory_write_candidate`
 - `memory_recall_request`
 - `memory_projection_request`
+- `memory_long_term_list_request`
+- `memory_long_term_detail_request`
+- `memory_long_term_mutation_request`
+- `memory_long_term_policy_request`
 - `memory_report`
 - `memory_migration_chunk`
 - `runtime_lifecycle_event`

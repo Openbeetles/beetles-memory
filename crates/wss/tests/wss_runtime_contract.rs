@@ -93,6 +93,7 @@ fn wss_runtime_decodes_declared_command_operations() {
         ("command.project", r#"{"query":"release","max_len":1024}"#),
         ("command.inspect", r#"{"query":"release","max_len":1024}"#),
         ("command.replay", r#"{"chat_id":"chat-1","limit":2}"#),
+        ("command.long_term.list", r#"{"query":{},"limit":2}"#),
         ("command.capabilities", r#"{}"#),
     ];
 

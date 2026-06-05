@@ -23,6 +23,19 @@ assert!(report.capabilities.inspection.visible);
 
 Projection 诊断来自 `MemoryProjectionReport.audit`，包括 source plane、selected ids、section chars、budget 和 private gate。保守压缩来自 `MemoryRuntime::run_retention_compaction()`，该 report 明确宿主不能直接删除已接受记忆。
 
+## 长期记忆控制
+
+Operator 可以通过 SDK 查看和治理已接受长期记忆：
+
+- `MemoryRuntime::list_long_term_memory`
+- `MemoryRuntime::get_long_term_memory`
+- `MemoryRuntime::mutate_long_term_memory`
+- `MemoryRuntime::mutate_memory_governance_policy`
+
+这些入口返回 affected records、tombstones、transcript refs、projection impact、deferred governance impact、policy decision 和 lifecycle report。Operator surface 可以展示 report 或发起下一步治理，但不能读取 `long_term` namespace 后直接改内容。
+
+`forget_by_query` 必须先 dry-run preview，再用 confirmation token 执行。`mutate_memory_governance_policy` 用于 pause/resume/suppress 未来长期记忆写入；policy 不会自动删除已有 accepted memory。Transcript lifecycle report 中的 `DerivedMemoryRef` 只是影响清单，撤销派生长期记忆仍需调用 `mutate_long_term_memory`。
+
 ## 运行时 Skill 与标准 Agent Skill
 
 独立部署配置台和 CLI 只管理运行时 Skill 记忆，也就是系统运行中沉淀出来的 procedural memory record。它们不是执行器、插件市场或 workflow runner，也不管理标准 Agent Skill 目录。

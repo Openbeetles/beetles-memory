@@ -10,7 +10,9 @@ use crate::schema::STORE_SCHEMA_VERSION;
 pub enum MemoryStoreEventKind {
     MemoryWrite,
     MemoryMerge,
+    MemoryControl,
     MemoryDelete,
+    MemoryPolicy,
     MemoryMaintenance,
     MemoryProjection,
     RuntimeLifecycle,
@@ -22,7 +24,9 @@ impl MemoryStoreEventKind {
         match self {
             Self::MemoryWrite => "memory.write",
             Self::MemoryMerge => "memory.merge",
+            Self::MemoryControl => "memory.control",
             Self::MemoryDelete => "memory.delete",
+            Self::MemoryPolicy => "memory.policy",
             Self::MemoryMaintenance => "memory.maintenance",
             Self::MemoryProjection => "memory.projection",
             Self::RuntimeLifecycle => "runtime.lifecycle",

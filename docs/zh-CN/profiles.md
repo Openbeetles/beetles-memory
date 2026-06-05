@@ -36,6 +36,7 @@ cargo run -p bm-cli --bin bm -- \
 - `profile-server-linux-dev-full` 是开发 profile，不能当成嵌入式默认 profile。
 - `llm_gateway_server` 只属于 server Linux memory gateway / dev-full profile；ESP、device 与 desktop embedded SDK profile 不暴露这个 entry surface。
 - Profile catalog 表达某个 surface 是否被该 profile 允许。运行时 `EntryCapabilityView.visible` 是 profile allowed、enabled capability policy 和 `EntryTransportConfig` 三者共同生效后的结果。
+- 长期记忆控制能力分为 `long_term_control_inspect`、`long_term_control_mutation`、`long_term_control_policy` 和 `long_term_control_bulk_forget`。所有 profile 都应能暴露 targeted inspect/mutation/policy 或返回结构化拒绝；destructive bulk forget 只在 desktop/server 等有足够 operator surface 的 profile 可见，ESP compact profile 默认隐藏。
 
 ## Snapshot Fixtures
 

@@ -27,6 +27,9 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Inspect | `MemoryRuntime::inspect` | 返回 recall/operator/lifecycle inspection 数据。 |
 | Runtime Skill List / Detail | `MemoryRuntime::list_runtime_skills` / `MemoryRuntime::get_runtime_skill` | 列出和查看运行时沉淀的 procedural memory record，不执行 skill。 |
 | Runtime Skill Mutation | `MemoryRuntime::edit_runtime_skill` / `MemoryRuntime::set_runtime_skill_enabled` / `MemoryRuntime::delete_runtime_skill` | 只允许编辑、启停、删除已存在的运行时 Skill；不提供新建、导入或托管标准 Agent Skill。 |
+| Long-Term Memory List / Detail | `MemoryRuntime::list_long_term_memory` / `MemoryRuntime::get_long_term_memory` | 列出、搜索、查看已接受的长期记忆，返回脱敏 view、evidence summary、revision/tombstone 信息。 |
+| Long-Term Memory Mutation | `MemoryRuntime::mutate_long_term_memory` | 对已接受长期记忆执行 correct、supersede、delete、forget_by_query、mark_stale、change_scope，并返回 affected records、tombstone、projection impact 和 lifecycle report。 |
+| Long-Term Governance Policy | `MemoryRuntime::mutate_memory_governance_policy` | 暂停、恢复或 suppress 后续长期记忆更新；影响未来写入治理，不静默删除已接受记忆。 |
 | Agent Skill Directory | `MemoryRuntimeBuilder::agent_skill_dirs` / `add_agent_skill_dir` | 宿主把标准 Agent Skill 目录交给 SDK 只读扫描；SDK 只召回和投影摘要，不添加、不编辑、不执行目录资源。 |
 | Agent Tool Registry | `MemoryRuntimeBuilder::agent_tool_registry` / `MemoryRuntime::upsert_agent_tool_registry` | 宿主注册工具索引和 fingerprint；SDK 只基于已治理工具经验返回 `agent_tool_hints`，无经验返回空，不做工具路由。 |
 | Replay | `MemoryRuntime::replay` | 检查某个 chat 的 turn ledger 历史。 |
@@ -96,15 +99,44 @@ SDK transcript 操作：
 | `RuntimeSkillEditRequest` | `name`, `title`, `topic`, `summary`, `procedure`, `edit_reason` | 只能编辑已存在且名称以 `runtime_skill__` 开头的运行时 Skill。 |
 | `RuntimeSkillSetEnabledRequest` | `name`, `enabled` | 只改变运行时 Skill 启用状态，不改内容。 |
 | `RuntimeSkillDeleteRequest` | `name` | 从 skill storage 删除该运行时 procedural memory，不建立配置台墓碑。 |
+| `MemoryLongTermListRequest` | `query`, `limit`, `view` | 通过 `MemoryRuntime::list_long_term_memory` 读取 accepted long-term memory 列表；支持 `cursor` 分页，默认面向 `HostUi` 脱敏 embedded record 的 source metadata。 |
+| `MemoryLongTermDetailRequest` | `target`, `view` | 通过 record id、slot 或 transcript derived ref 查看一条长期记忆及 revision/tombstone/evidence refs。 |
+| `MemoryLongTermMutationRequest` | `operation`, `reason`, `dry_run`, `mode_input` | 执行 correct、supersede、delete、forget_by_query、mark_stale 或 change_scope；批量 forget 必须先 dry-run preview 并带 confirmation token。 |
+| `MemoryLongTermPolicyRequest` | `operation`, `reason`, `dry_run`, `mode_input` | 执行 pause、resume、suppress 或 remove_suppression；被 policy 拦截的后续写入会进入 SDK governance report。 |
 | `MemoryReplayRequest` | `chat_id`, `limit` | 只做 inspection 的 replay surface。 |
 | `MemoryExportRequest` | `chat_id` | 导出 continuity snapshot。 |
 | `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode 是 `BootstrapImport` 或 `FullRestore`。 |
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | 执行可恢复 lifecycle recovery。 |
 | `MemoryCloseRequest` | `reason` | 发出 close lifecycle report。 |
 
-通用 adapter dispatch 支持 write、recall、project、inspect、recover、replay、export、import、capabilities、close。Maintain 只在调用方通过 `AdapterRuntimeServices` 显式提供 LLM/HTTP services 时执行；未注入 services 的 dispatch 会返回结构化拒绝。
+通用 adapter dispatch 支持 write、recall、project、inspect、recover、replay、export、import、long-term list/detail/mutate/policy、capabilities、close。Maintain 只在调用方通过 `AdapterRuntimeServices` 显式提供 LLM/HTTP services 时执行；未注入 services 的 dispatch 会返回结构化拒绝。
 
 Transport helper crates 会对其声明的 memory operations 使用共享 JSON adapter decoder；subscribe 这类 stream-only operation 仍属于 transport-specific 行为。每种协议的 route/frame/tool/message 表面见 [部署文档](deployment.md)。
+
+## Accepted Long-Term Memory Control
+
+Beetle Memory 已接受的长期记忆真源在 `MemoryRuntime`。宿主可以把用户自然语言命令映射成 SDK request，但不能在自己的 SQLite、本地 JSON 或 UI state 中维护一套“看起来已删除/已修改”的 shadow memory。
+
+控制面和自动写入面是两条不同路径：
+
+- `MemoryWriteRequest::Candidates` / `LongTermExtraction` 负责把候选内容交给 Memory 治理、合并和写入。
+- `MemoryLongTermMutationRequest` 负责用户或 operator 对已接受长期记忆做 correction、supersede、delete、forget、scope change。
+- `MemoryLongTermPolicyRequest` 负责“以后不要记这类事情”或“暂停这个范围的长期记忆更新”。
+- Transcript lifecycle 的 `DeleteRaw` / `Mask` 只处理 conversation evidence；它会报告 `DerivedMemoryRef` impact，但不会自动删除 accepted long-term memory。要撤销派生长期记忆，必须再调用长期记忆控制面。
+- Runtime Skill 管理面只管理 procedural memory 中的 runtime skill，不等同普通长期记忆的 edit/delete。
+
+所有 mutation report 都必须可用于审计：affected records、tombstones、transcript refs、projection impact、deferred governance impact、policy decision 和 lifecycle report 由 SDK 返回。Profile 不允许某项操作时，SDK 返回结构化拒绝；宿主不得 fallback 到本地 DB 直接改 store。
+
+长期记忆控制能力由 `MemoryCapabilityCatalog` 暴露：
+
+```rust
+let capabilities = runtime.capabilities();
+assert!(capabilities.long_term_control_inspect.visible);
+assert!(capabilities.long_term_control_mutation.visible);
+assert!(capabilities.long_term_control_policy.visible);
+```
+
+`long_term_control_bulk_forget` 是高风险能力。低配或 embedded profile 可以只开放 targeted inspect/mutation/policy，并隐藏 destructive bulk forget。
 
 ## Agent Tool API
 

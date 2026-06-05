@@ -1283,6 +1283,10 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
+pub trait LongTermMemoryDraftAdmissionPolicy: Send + Sync {
+    fn accepts_long_term_draft(&self, draft: &LongTermMemoryDraft) -> bool;
+}
+
 pub struct LongTermMemoryRefreshContext<'a> {
     pub memory_store: &'a dyn MemoryStore,
     pub session_store: &'a dyn SessionStore,
@@ -1291,6 +1295,7 @@ pub struct LongTermMemoryRefreshContext<'a> {
     pub extraction_state_store: &'a dyn LongTermMemoryExtractionStateStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
     pub skill_storage: &'a dyn SkillStorage,
+    pub draft_admission_policy: Option<&'a dyn LongTermMemoryDraftAdmissionPolicy>,
 }
 
 pub enum LongTermMemoryRefreshOutcome {
@@ -1494,8 +1499,13 @@ fn extract_long_term_memory(
             now_secs,
         );
     }
-    let extraction =
+    let mut extraction =
         prepare_long_term_memory_extraction(ctx.long_term_memory_store, &parsed, chat_id);
+    if let Some(admission) = ctx.draft_admission_policy {
+        extraction
+            .upserts
+            .retain(|draft| admission.accepts_long_term_draft(draft));
+    }
     if extraction.upserts.is_empty()
         && extraction.deletes.is_empty()
         && extraction.skill_writes.is_empty()
@@ -2808,6 +2818,7 @@ mod tests {
             extraction_state_store: &extraction_state_store,
             turn_ledger_store: &turn_ledger_store,
             skill_storage: &skill_storage,
+            draft_admission_policy: None,
         };
         let mut http = DummyHttpClient;
         let outcome = run_long_term_memory_refresh(

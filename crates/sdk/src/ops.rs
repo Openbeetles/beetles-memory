@@ -1,11 +1,18 @@
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
-    CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, HostOpaqueRef,
-    MemoryHygieneInspection, MemoryHygieneOutcome, PostTurnPrivateGardenReport,
-    PostTurnSemanticGovernanceReport, PrivateMaterialRedactionReport,
+    CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, DerivedMemoryRef,
+    HostOpaqueRef, LongTermMemoryQuery, MemoryGovernancePolicyMutation,
+    MemoryGovernancePolicyMutationReport as CoreMemoryGovernancePolicyMutationReport,
+    MemoryHygieneInspection, MemoryHygieneOutcome, MemoryLongTermAffectedRecord,
+    MemoryLongTermControlDecision, MemoryLongTermControlView,
+    MemoryLongTermDetailReport as CoreMemoryLongTermDetailReport,
+    MemoryLongTermListReport as CoreMemoryLongTermListReport, MemoryLongTermMutation,
+    MemoryLongTermMutationReport as CoreMemoryLongTermMutationReport, MemoryLongTermTarget,
+    MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryProjectionImpactReport,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateMaterialRedactionReport,
     ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck,
     RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
-    SubjectProjectionReport, SubjectScopedRuntime, TranscriptCommitReport,
+    SubjectProjectionReport, SubjectScopedRuntime, TranscriptCommitReport, TranscriptEvidenceRef,
     TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRepairReport,
     TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
 };
@@ -30,6 +37,7 @@ use crate::{
     RuntimeLifecycleTrigger,
 };
 use bm_core::memory::PromptProjectionSource;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillListRequest {
@@ -113,6 +121,72 @@ pub struct RuntimeSkillSetEnabledRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillDeleteRequest {
     pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermListRequest {
+    pub query: LongTermMemoryQuery,
+    pub cursor: Option<String>,
+    pub limit: usize,
+    pub view: MemoryLongTermControlView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermDetailRequest {
+    pub target: MemoryLongTermTarget,
+    pub view: MemoryLongTermControlView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermMutationRequest {
+    pub operation: MemoryLongTermMutation,
+    pub reason: String,
+    pub dry_run: bool,
+    pub mode_input: RuntimeLifecycleModeInput,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermPolicyRequest {
+    pub operation: MemoryGovernancePolicyMutation,
+    pub reason: String,
+    pub dry_run: bool,
+    pub mode_input: RuntimeLifecycleModeInput,
+}
+
+pub type MemoryLongTermListReport = CoreMemoryLongTermListReport;
+pub type MemoryLongTermDetailReport = CoreMemoryLongTermDetailReport;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryLongTermMutationReport {
+    pub accepted: bool,
+    pub dry_run: bool,
+    pub operation: &'static str,
+    pub target_report: MemoryLongTermTargetResolutionReport,
+    pub affected_records: Vec<MemoryLongTermAffectedRecord>,
+    pub tombstones: Vec<MemoryLongTermTombstoneRef>,
+    pub evidence_refs: Vec<DerivedMemoryRef>,
+    pub transcript_refs: Vec<TranscriptEvidenceRef>,
+    pub policy_decision: MemoryLongTermControlDecision,
+    pub projection_impact: MemoryProjectionImpactReport,
+    pub deferred_governance_impact: bm_core::memory::MemoryDeferredGovernanceImpactReport,
+    pub lifecycle_report: RuntimeLifecycleReport,
+    pub audit_event_id: Option<String>,
+    pub reason: String,
+    pub core_report: CoreMemoryLongTermMutationReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernancePolicyMutationReport {
+    pub accepted: bool,
+    pub dry_run: bool,
+    pub operation: &'static str,
+    pub policy_id: Option<String>,
+    pub affected_future_writes: String,
+    pub policy_decision: MemoryLongTermControlDecision,
+    pub lifecycle_report: RuntimeLifecycleReport,
+    pub audit_event_id: Option<String>,
+    pub reason: String,
+    pub core_report: CoreMemoryGovernancePolicyMutationReport,
 }
 
 #[derive(Clone, Debug)]
@@ -647,6 +721,8 @@ pub struct MemoryCloseReport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeOperatorAction {
     InspectMemoryStatus,
+    LongTermMemoryControl,
+    LongTermMemoryPolicyControl,
     RecoverSoulKernel,
     CloseRuntime,
 }
@@ -655,6 +731,8 @@ impl RuntimeOperatorAction {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InspectMemoryStatus => "inspect_memory_status",
+            Self::LongTermMemoryControl => "long_term_memory_control",
+            Self::LongTermMemoryPolicyControl => "long_term_memory_policy_control",
             Self::RecoverSoulKernel => "recover_soul_kernel",
             Self::CloseRuntime => "close_runtime",
         }

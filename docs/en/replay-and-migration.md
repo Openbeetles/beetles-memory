@@ -68,6 +68,8 @@ SDK transcript replay/export requests support bounded cursor pages through `curs
 
 `HostUi` transcript replay is controlled by the SDK `transcript_replay` capability. Desktop and embedded SDK hosts can commit a transcript turn and read that same conversation back for UI display without enabling `MemoryRuntime::replay`, replay harnesses, raw owner replay, or deep inspection.
 
+`TranscriptLifecycleReport.derived_memory_refs` can be used as the target source for the next long-term memory control action. For example, after raw transcript content is masked or deleted, the report lists affected `DerivedMemoryRef` values; a host or operator that wants to revoke the corresponding accepted long-term memory should pass the ref through `MemoryLongTermTarget::TranscriptDerivedRef` and call `MemoryRuntime::mutate_long_term_memory`. Transcript lifecycle never automatically cascades deletion into accepted long-term memory, shared facts, procedural skills, private garden material, or soul handoffs.
+
 ## Memory-Space Migration Dry-Run
 
 Use memory-space migration when replacing a host memory implementation or moving a configured SDK store:

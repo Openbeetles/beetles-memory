@@ -70,6 +70,26 @@ pub fn tool_specs() -> Vec<McpToolSpec> {
             AdapterOperation::Write,
             &["name", "topic", "title", "summary", "content"],
         ),
+        tool(
+            "memory_long_term_list",
+            AdapterOperation::LongTermList,
+            &["query", "limit"],
+        ),
+        tool(
+            "memory_long_term_detail",
+            AdapterOperation::LongTermDetail,
+            &["target"],
+        ),
+        tool(
+            "memory_long_term_mutate",
+            AdapterOperation::LongTermMutate,
+            &["operation", "reason", "dry_run"],
+        ),
+        tool(
+            "memory_long_term_policy",
+            AdapterOperation::LongTermPolicy,
+            &["operation", "reason", "dry_run"],
+        ),
         tool("memory_export", AdapterOperation::Export, &["chat_id"]),
         tool(
             "memory_import",

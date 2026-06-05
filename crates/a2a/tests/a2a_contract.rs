@@ -26,4 +26,8 @@ fn bridge_messages_are_memory_report_or_request_only() {
     assert!(operations.contains(&AdapterOperation::Write));
     assert!(operations.contains(&AdapterOperation::Recall));
     assert!(operations.contains(&AdapterOperation::Project));
+    assert!(operations.contains(&AdapterOperation::LongTermList));
+    assert!(operations.contains(&AdapterOperation::LongTermDetail));
+    assert!(operations.contains(&AdapterOperation::LongTermMutate));
+    assert!(operations.contains(&AdapterOperation::LongTermPolicy));
 }

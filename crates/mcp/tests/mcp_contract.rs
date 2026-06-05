@@ -10,6 +10,15 @@ fn tool_schema_maps_to_adapter_commands_not_memory_planes() {
     assert!(tools
         .iter()
         .any(|tool| tool.name == "memory_project" && tool.operation == AdapterOperation::Project));
+    assert!(tools.iter().any(|tool| {
+        tool.name == "memory_long_term_list" && tool.operation == AdapterOperation::LongTermList
+    }));
+    assert!(tools.iter().any(|tool| {
+        tool.name == "memory_long_term_mutate" && tool.operation == AdapterOperation::LongTermMutate
+    }));
+    assert!(tools.iter().any(|tool| {
+        tool.name == "memory_long_term_policy" && tool.operation == AdapterOperation::LongTermPolicy
+    }));
     for tool in tools {
         assert!(!tool.schema_fields.contains(&"plane".to_string()));
         assert!(!tool.schema_fields.contains(&"store_schema".to_string()));

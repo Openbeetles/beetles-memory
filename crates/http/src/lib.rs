@@ -108,6 +108,10 @@ const ROUTES: &[RouteSpec] = &[
     memory_post("/memory/replay", AdapterOperation::Replay),
     memory_post("/memory/export", AdapterOperation::Export),
     memory_post("/memory/import", AdapterOperation::Import),
+    memory_post("/memory/long-term/list", AdapterOperation::LongTermList),
+    memory_post("/memory/long-term/detail", AdapterOperation::LongTermDetail),
+    memory_post("/memory/long-term/mutate", AdapterOperation::LongTermMutate),
+    memory_post("/memory/long-term/policy", AdapterOperation::LongTermPolicy),
 ];
 
 const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
@@ -1357,6 +1361,42 @@ fn render_report(report: AdapterSdkReport) -> String {
             "system_memory_block": report.system_memory_block,
             "agent_tool_hints": report.runtime_projection.agent_tool_hints,
             "agent_tools": report.audit.agent_tools,
+        })
+        .to_string(),
+        AdapterSdkReport::LongTermList(report) => json!({
+            "status": "accepted",
+            "records": report.records,
+            "total_visible": report.total_visible,
+            "next_cursor": report.next_cursor,
+        })
+        .to_string(),
+        AdapterSdkReport::LongTermDetail(report) => json!({
+            "status": "accepted",
+            "record": report.record,
+            "revisions": report.revisions,
+            "tombstone": report.tombstone,
+            "transcript_refs": report.transcript_refs,
+        })
+        .to_string(),
+        AdapterSdkReport::LongTermMutate(report) => json!({
+            "status": "accepted",
+            "accepted": report.accepted,
+            "operation": report.operation,
+            "affected_records": report.affected_records,
+            "tombstones": report.tombstones,
+            "transcript_refs": report.transcript_refs,
+            "policy_decision": report.policy_decision,
+            "lifecycle": report.lifecycle_report.result_summary,
+        })
+        .to_string(),
+        AdapterSdkReport::LongTermPolicy(report) => json!({
+            "status": "accepted",
+            "accepted": report.accepted,
+            "operation": report.operation,
+            "policy_id": report.policy_id,
+            "affected_future_writes": report.affected_future_writes,
+            "policy_decision": report.policy_decision,
+            "lifecycle": report.lifecycle_report.result_summary,
         })
         .to_string(),
         other => json!({

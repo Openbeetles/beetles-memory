@@ -68,6 +68,8 @@ SDK transcript replay/export request 通过 `cursor`、`next_cursor` 和 `has_mo
 
 `HostUi` transcript replay 由 SDK `transcript_replay` capability 控制。桌面和 embedded SDK 宿主可以提交 transcript turn 后，把同一个 conversation 读回给 UI 展示；这不要求打开 `MemoryRuntime::replay`、replay harness、raw owner replay 或 deep inspection。
 
+`TranscriptLifecycleReport.derived_memory_refs` 可以作为下一步长期记忆控制的 target 来源。比如 raw transcript 被 mask 或 delete 后，report 会列出受影响的 `DerivedMemoryRef`；宿主或 operator 若要撤销某条 accepted long-term memory，应把对应 `DerivedMemoryRef` 传给 `MemoryLongTermTarget::TranscriptDerivedRef`，再调用 `MemoryRuntime::mutate_long_term_memory`。Transcript lifecycle 不会自动级联删除 accepted long-term memory、shared fact、procedural skill、private garden 或 soul handoff。
+
 ## Memory-space 迁移 dry-run
 
 替换宿主记忆实现或迁移一份已配置 SDK store 时，使用 memory-space migration：

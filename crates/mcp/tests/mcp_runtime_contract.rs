@@ -60,6 +60,7 @@ fn mcp_tool_server_decodes_declared_memory_tools() {
         ("memory_project", r#"{"query":"release","max_len":1024}"#),
         ("memory_inspect", r#"{"query":"release"}"#),
         ("memory_replay", r#"{"chat_id":"chat-1","limit":2}"#),
+        ("memory_long_term_list", r#"{"query":{},"limit":2}"#),
         (
             "memory_write_candidate",
             r#"{"name":"runtime_skill__mcp_write","topic":"mcp","title":"MCP write","summary":"MCP write summary","content":"1. Decode MCP tool payload.\n2. Dispatch through EntryRuntime."}"#,

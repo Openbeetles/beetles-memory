@@ -8,9 +8,10 @@ use bm_adapter::{
 };
 use bm_sdk::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
-    MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemoryWriteRequest, Message, NoopMemoryAuditSink, ProfileId, ResponseBody, StopReason,
-    StoreBackendConfig, StorePlatform, ToolChoicePolicy, ToolSpec,
+    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest, MemoryPrivacyPolicy,
+    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest, Message,
+    NoopMemoryAuditSink, ProfileId, ResponseBody, StopReason, StoreBackendConfig, StorePlatform,
+    ToolChoicePolicy, ToolSpec,
 };
 
 struct FixedClock;
@@ -119,6 +120,37 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
 }
 
 #[test]
+fn long_term_list_command_dispatches_through_memory_runtime() {
+    let runtime = runtime();
+    let response = dispatch_adapter_command(
+        &runtime,
+        envelope(
+            AdapterOperation::LongTermList,
+            AdapterCommand::LongTermList(MemoryLongTermListRequest {
+                query: bm_sdk::LongTermMemoryQuery::default(),
+                cursor: None,
+                limit: 10,
+                view: MemoryLongTermControlView::HostUi,
+            }),
+        ),
+    )
+    .expect("dispatch");
+
+    match response {
+        AdapterResponse::Accepted {
+            request_id,
+            audit_id,
+            report: AdapterSdkReport::LongTermList(report),
+        } => {
+            assert_eq!(request_id, "req-1");
+            assert_eq!(audit_id, "audit-1");
+            assert_eq!(report.total_visible, 0);
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
 fn json_decoder_covers_adapter_memory_operations() {
     let options =
         AdapterJsonCommandOptions::new("test-adapter").with_default_source_chat_id("chat-1");
@@ -149,6 +181,14 @@ fn json_decoder_covers_adapter_memory_operations() {
         (
             AdapterOperation::Import,
             r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,
+        ),
+        (
+            AdapterOperation::LongTermList,
+            r#"{"query":{"kind":"project"},"limit":10}"#,
+        ),
+        (
+            AdapterOperation::LongTermPolicy,
+            r#"{"operation":{"suppress":{"selector":{"kind":"preference","topic_pattern":"temporary-*"},"duration":"until_manual_resume"}},"reason":"operator suppression"}"#,
         ),
         (AdapterOperation::Close, r#"{"reason":"operator close"}"#),
     ];

@@ -1007,6 +1007,7 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
             extraction_state_store: &stores.extraction_state,
             turn_ledger_store: &stores.turn_ledger,
             skill_storage: stores.skills.as_ref(),
+            draft_admission_policy: None,
         },
         CHAT_ID,
         PressureLevel::Normal,

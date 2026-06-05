@@ -26,7 +26,11 @@
     "transcript_replay": true,
     "replay": false,
     "export": true,
-    "import": true
+    "import": true,
+    "long_term_control_inspect": true,
+    "long_term_control_mutation": true,
+    "long_term_control_policy": true,
+    "long_term_control_bulk_forget": false
   },
   "lifecycle": {
     "recover": true,

@@ -46,6 +46,10 @@ pub struct PlatformMemoryOperationSnapshot {
     pub replay: bool,
     pub export: bool,
     pub import: bool,
+    pub long_term_control_inspect: bool,
+    pub long_term_control_mutation: bool,
+    pub long_term_control_policy: bool,
+    pub long_term_control_bulk_forget: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -156,6 +160,10 @@ pub fn platform_capability_snapshot(
             replay: catalog.replay.visible,
             export: catalog.export.visible,
             import: catalog.import.visible,
+            long_term_control_inspect: catalog.long_term_control_inspect.visible,
+            long_term_control_mutation: catalog.long_term_control_mutation.visible,
+            long_term_control_policy: catalog.long_term_control_policy.visible,
+            long_term_control_bulk_forget: catalog.long_term_control_bulk_forget.visible,
         },
         lifecycle: PlatformLifecycleSnapshot {
             recover: catalog.lifecycle.recover.visible,

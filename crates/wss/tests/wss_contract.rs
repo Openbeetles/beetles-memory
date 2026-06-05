@@ -16,6 +16,10 @@ fn inbound_messages_map_to_adapter_commands() {
     assert!(operations.contains(&AdapterOperation::Project));
     assert!(operations.contains(&AdapterOperation::Inspect));
     assert!(operations.contains(&AdapterOperation::Replay));
+    assert!(operations.contains(&AdapterOperation::LongTermList));
+    assert!(operations.contains(&AdapterOperation::LongTermDetail));
+    assert!(operations.contains(&AdapterOperation::LongTermMutate));
+    assert!(operations.contains(&AdapterOperation::LongTermPolicy));
     assert!(operations.contains(&AdapterOperation::Capabilities));
 }
 

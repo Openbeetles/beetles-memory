@@ -10,7 +10,8 @@ use bm_core::budget::{
 use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
-    apply_long_term_memory_extraction_with_report, build_deferred_governance_queue_report,
+    apply_long_term_memory_control_mutation, apply_long_term_memory_extraction_with_report,
+    apply_long_term_memory_governance_policy_mutation, build_deferred_governance_queue_report,
     build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta_with_transcript,
     compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
     export_continuity_snapshot, filter_host_refs_for_transcript_view, govern_write_candidates,
@@ -23,11 +24,16 @@ use bm_core::memory::{
     ContinuitySnapshotMode, ConversationKey, ConversationTranscriptStore, DeferredGovernanceJob,
     DeferredGovernanceJobStatus, DeferredGovernanceQueueReport, DerivedMemoryPlane,
     DerivedMemoryRef, DroppedProjectionCandidate, GovernedWriteDecision, GraphRecallRerankReport,
-    IngressKind, InhabitedSubjectProjection, InhabitedSubjectProjectionInput, LongTermMemoryDraft,
-    LongTermMemoryKind, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    IngressKind, InhabitedSubjectProjection, InhabitedSubjectProjectionInput,
+    LongTermMemoryControlDetailRequest as CoreLongTermMemoryControlDetailRequest,
+    LongTermMemoryControlListRequest as CoreLongTermMemoryControlListRequest,
+    LongTermMemoryControlMutationRequest as CoreLongTermMemoryControlMutationRequest,
+    LongTermMemoryDraft, LongTermMemoryDraftAdmissionPolicy, LongTermMemoryKind,
+    LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
     LongTermMemoryRefreshRequestOutcome, LongTermMemorySourceScope, MemoryCandidateTarget,
     MemoryEvidenceAuthority, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryHygieneContext,
-    MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
+    MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryPlaneGovernanceReport,
+    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain, ParsedLongTermMemoryExtraction,
     PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
     PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateGardenGovernanceContext,
     PrivateGardenGovernanceInput, PrivateGardenGovernanceManifestEntry,
@@ -73,8 +79,11 @@ use crate::{
     resolve_memory_capabilities, Error, LLMRuntimeProjectionEnvelope, LlmClient,
     MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
     MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest, MemoryExportReport,
-    MemoryExportRequest, MemoryImportReport, MemoryImportRequest, MemoryInspectionReport,
-    MemoryInspectionRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
+    MemoryExportRequest, MemoryGovernancePolicyMutationReport, MemoryImportReport,
+    MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
+    MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
+    MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
     MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionAuditReport,
     MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
     MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallReport,
@@ -331,6 +340,158 @@ impl MemoryRuntime {
             .lock()
             .expect("agent tool registry state poisoned")
             .clone()
+    }
+
+    pub fn list_long_term_memory(
+        &self,
+        request: MemoryLongTermListRequest,
+    ) -> Result<MemoryLongTermListReport> {
+        self.ensure_visible(
+            "long_term_control.inspect",
+            self.capabilities.long_term_control_inspect,
+        )?;
+        let store = self.config.platform.long_term_memory_store();
+        let control_store = self.config.platform.long_term_memory_control_store();
+        bm_core::memory::list_long_term_memory_control_page(
+            store.as_ref(),
+            control_store.as_ref(),
+            CoreLongTermMemoryControlListRequest {
+                query: request.query,
+                cursor: request.cursor,
+                limit: request.limit,
+                view: request.view,
+            },
+        )
+    }
+
+    pub fn get_long_term_memory(
+        &self,
+        request: MemoryLongTermDetailRequest,
+    ) -> Result<MemoryLongTermDetailReport> {
+        self.ensure_visible(
+            "long_term_control.inspect",
+            self.capabilities.long_term_control_inspect,
+        )?;
+        let store = self.config.platform.long_term_memory_store();
+        let control_store = self.config.platform.long_term_memory_control_store();
+        bm_core::memory::get_long_term_memory_control_detail(
+            store.as_ref(),
+            control_store.as_ref(),
+            CoreLongTermMemoryControlDetailRequest {
+                target: request.target,
+                view: request.view,
+            },
+        )
+    }
+
+    pub fn mutate_long_term_memory(
+        &self,
+        request: MemoryLongTermMutationRequest,
+    ) -> Result<MemoryLongTermMutationReport> {
+        let visibility = self.long_term_mutation_visibility(&request.operation);
+        self.ensure_visible("long_term_control.mutation", visibility)?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::OperatorAction,
+            RuntimeLifecycleTrigger::OperatorRequested,
+            request.mode_input,
+        );
+        let store = self.config.platform.long_term_memory_store();
+        let control_store = self.config.platform.long_term_memory_control_store();
+        let core_report = apply_long_term_memory_control_mutation(
+            store.as_ref(),
+            control_store.as_ref(),
+            CoreLongTermMemoryControlMutationRequest {
+                operation: request.operation,
+                reason: request.reason,
+                dry_run: request.dry_run,
+                actor_subject_id: Some(self.config.scoped_runtime.actor_subject_id.clone()),
+                memory_space_id: Some(self.config.memory_space_id.clone()),
+                now_secs: self.config.clock.now_secs(),
+            },
+        )?;
+        let lifecycle_report = self.finish_lifecycle_success_with_payload(
+            lifecycle,
+            RuntimeLifecycleEventKind::OperatorAction,
+            RuntimeLifecycleEffect::RecordOperatorAction,
+            !core_report.dry_run && !core_report.affected_records.is_empty(),
+            format!(
+                "{} accepted={} affected={}",
+                core_report.operation,
+                core_report.accepted,
+                core_report.affected_records.len()
+            ),
+            &[
+                (
+                    "action",
+                    RuntimeOperatorAction::LongTermMemoryControl
+                        .as_str()
+                        .to_string(),
+                ),
+                ("operation", core_report.operation.to_string()),
+                ("accepted", core_report.accepted.to_string()),
+                (
+                    "affected_records",
+                    core_report.affected_records.len().to_string(),
+                ),
+            ],
+        )?;
+        Ok(memory_long_term_mutation_report_from_core(
+            core_report,
+            lifecycle_report,
+        ))
+    }
+
+    pub fn mutate_memory_governance_policy(
+        &self,
+        request: MemoryLongTermPolicyRequest,
+    ) -> Result<MemoryGovernancePolicyMutationReport> {
+        self.ensure_visible(
+            "long_term_control.policy",
+            self.capabilities.long_term_control_policy,
+        )?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::OperatorAction,
+            RuntimeLifecycleTrigger::OperatorRequested,
+            request.mode_input,
+        );
+        let control_store = self.config.platform.long_term_memory_control_store();
+        let core_report = apply_long_term_memory_governance_policy_mutation(
+            control_store.as_ref(),
+            request.operation,
+            request.reason,
+            request.dry_run,
+            self.config.clock.now_secs(),
+        )?;
+        let lifecycle_report = self.finish_lifecycle_success_with_payload(
+            lifecycle,
+            RuntimeLifecycleEventKind::OperatorAction,
+            RuntimeLifecycleEffect::RecordOperatorAction,
+            !core_report.dry_run && core_report.accepted,
+            format!(
+                "{} accepted={} policy={}",
+                core_report.operation,
+                core_report.accepted,
+                core_report.policy_id.as_deref().unwrap_or("")
+            ),
+            &[
+                (
+                    "action",
+                    RuntimeOperatorAction::LongTermMemoryPolicyControl
+                        .as_str()
+                        .to_string(),
+                ),
+                ("operation", core_report.operation.to_string()),
+                ("accepted", core_report.accepted.to_string()),
+                (
+                    "policy_id",
+                    core_report.policy_id.clone().unwrap_or_default(),
+                ),
+            ],
+        )?;
+        Ok(memory_governance_policy_report_from_core(
+            core_report,
+            lifecycle_report,
+        ))
     }
 
     pub fn upsert_agent_tool_registry(
@@ -631,6 +792,13 @@ impl MemoryRuntime {
             MemoryWriteRequest::LongTermExtraction { extraction } => {
                 let store = self.config.platform.long_term_memory_store();
                 let skill_storage = self.config.platform.skill_storage();
+                let (upserts, suppressed_long_term_policy_ids, suppressed_draft_count) =
+                    self.filter_long_term_drafts_by_policy(extraction.upserts.clone(), now_secs)?;
+                let extraction = ParsedLongTermMemoryExtraction {
+                    upserts,
+                    deletes: extraction.deletes,
+                    skill_writes: extraction.skill_writes,
+                };
                 let extraction_report = apply_long_term_memory_extraction_with_report(
                     store.as_ref(),
                     skill_storage.as_ref(),
@@ -645,11 +813,20 @@ impl MemoryRuntime {
                     now_secs,
                 )?;
                 let changed = extraction_report.changed;
+                let policy_reason = if suppressed_draft_count > 0 {
+                    format!(
+                        "; suppressed_by_long_term_policy={}, policy_ids={}",
+                        suppressed_draft_count,
+                        suppressed_long_term_policy_ids.join("|")
+                    )
+                } else {
+                    String::new()
+                };
                 MemoryWriteReport {
                     accepted: true,
                     changed,
                     operation: "write.long_term_extraction",
-                    reason: "long_term_extraction_applied".to_string(),
+                    reason: format!("long_term_extraction_applied{policy_reason}"),
                     lifecycle_report: self.finish_lifecycle_success_with_payload(
                         lifecycle,
                         RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -689,6 +866,8 @@ impl MemoryRuntime {
                             .map(|draft| (*candidate, draft))
                     })
                     .collect::<Vec<_>>();
+                let (accepted_draft_pairs, suppressed_long_term_policy_ids, suppressed_draft_count) =
+                    self.filter_long_term_draft_pairs_by_policy(accepted_draft_pairs, now_secs)?;
                 let accepted_drafts = accepted_draft_pairs
                     .iter()
                     .map(|(_, draft)| draft.clone())
@@ -799,16 +978,26 @@ impl MemoryRuntime {
                     now_secs,
                 )?;
                 let changed = long_term_changed + skill_changed;
+                let policy_reason = if suppressed_draft_count > 0 {
+                    format!(
+                        ", suppressed_by_long_term_policy={}, policy_ids={}",
+                        suppressed_draft_count,
+                        suppressed_long_term_policy_ids.join("|")
+                    )
+                } else {
+                    String::new()
+                };
                 MemoryWriteReport {
                     accepted: semantic_governance.rejected_count == 0,
                     changed,
                     operation: "write.candidates",
                     reason: format!(
-                        "submitted={}, accepted={}, rejected={}, deferred={}",
+                        "submitted={}, accepted={}, rejected={}, deferred={}{}",
                         semantic_governance.proposal_count,
                         semantic_governance.accepted_count,
                         semantic_governance.rejected_count,
-                        semantic_governance.deferred_count
+                        semantic_governance.deferred_count,
+                        policy_reason
                     ),
                     lifecycle_report: self.finish_lifecycle_success_with_payload(
                         lifecycle,
@@ -1825,6 +2014,8 @@ impl MemoryRuntime {
                 .as_deref()
                 .is_some_and(|content| !content.trim().is_empty());
         let long_term_refresh = if semantic_refresh_allowed {
+            let draft_admission_policy =
+                self.long_term_draft_admission_policy(self.config.clock.now_secs())?;
             let outcome = run_long_term_memory_refresh(
                 http,
                 governance_llm,
@@ -1836,6 +2027,9 @@ impl MemoryRuntime {
                     extraction_state_store: extraction_state_store.as_ref(),
                     turn_ledger_store: turn_ledger_store.as_ref(),
                     skill_storage: skill_storage.as_ref(),
+                    draft_admission_policy: draft_admission_policy
+                        .as_ref()
+                        .map(|policy| policy as &dyn LongTermMemoryDraftAdmissionPolicy),
                 },
                 &self.config.scope.chat_id,
                 pressure,
@@ -2849,6 +3043,143 @@ impl MemoryRuntime {
         }
     }
 
+    fn long_term_mutation_visibility(
+        &self,
+        operation: &MemoryLongTermMutation,
+    ) -> MemoryOperationVisibility {
+        match operation {
+            MemoryLongTermMutation::ForgetByQuery { .. } => {
+                self.capabilities.long_term_control_bulk_forget
+            }
+            MemoryLongTermMutation::Correct { .. }
+            | MemoryLongTermMutation::Supersede { .. }
+            | MemoryLongTermMutation::Delete { .. }
+            | MemoryLongTermMutation::MarkStale { .. }
+            | MemoryLongTermMutation::ChangeScope { .. } => {
+                self.capabilities.long_term_control_mutation
+            }
+        }
+    }
+
+    fn filter_long_term_draft_pairs_by_policy<'a>(
+        &self,
+        pairs: Vec<(&'a MemoryWriteCandidate, LongTermMemoryDraft)>,
+        now_secs: u64,
+    ) -> Result<(
+        Vec<(&'a MemoryWriteCandidate, LongTermMemoryDraft)>,
+        Vec<String>,
+        usize,
+    )> {
+        if pairs.is_empty() {
+            return Ok((pairs, Vec::new(), 0));
+        }
+        let control_store = self.config.platform.long_term_memory_control_store();
+        let policies = control_store.list_long_term_governance_policies(usize::MAX)?;
+        if policies.is_empty() {
+            return Ok((pairs, Vec::new(), 0));
+        }
+        let mut kept = Vec::with_capacity(pairs.len());
+        let mut policy_ids = HashSet::new();
+        let mut blocked = 0usize;
+        for (candidate, draft) in pairs {
+            if let Some(policy) = self.matching_long_term_write_policy(&policies, &draft, now_secs)
+            {
+                blocked += 1;
+                policy_ids.insert(policy.policy_id.clone());
+                continue;
+            }
+            kept.push((candidate, draft));
+        }
+        let mut policy_ids = policy_ids.into_iter().collect::<Vec<_>>();
+        policy_ids.sort();
+        Ok((kept, policy_ids, blocked))
+    }
+
+    fn filter_long_term_drafts_by_policy(
+        &self,
+        drafts: Vec<LongTermMemoryDraft>,
+        now_secs: u64,
+    ) -> Result<(Vec<LongTermMemoryDraft>, Vec<String>, usize)> {
+        if drafts.is_empty() {
+            return Ok((drafts, Vec::new(), 0));
+        }
+        let control_store = self.config.platform.long_term_memory_control_store();
+        let policies = control_store.list_long_term_governance_policies(usize::MAX)?;
+        if policies.is_empty() {
+            return Ok((drafts, Vec::new(), 0));
+        }
+        let mut kept = Vec::with_capacity(drafts.len());
+        let mut policy_ids = HashSet::new();
+        let mut blocked = 0usize;
+        for draft in drafts {
+            if let Some(policy) = self.matching_long_term_write_policy(&policies, &draft, now_secs)
+            {
+                blocked += 1;
+                policy_ids.insert(policy.policy_id.clone());
+                continue;
+            }
+            kept.push(draft);
+        }
+        let mut policy_ids = policy_ids.into_iter().collect::<Vec<_>>();
+        policy_ids.sort();
+        Ok((kept, policy_ids, blocked))
+    }
+
+    fn matching_long_term_write_policy<'a>(
+        &self,
+        policies: &'a [MemoryLongTermGovernancePolicy],
+        draft: &LongTermMemoryDraft,
+        now_secs: u64,
+    ) -> Option<&'a MemoryLongTermGovernancePolicy> {
+        let normalized = draft.normalized()?;
+        let source_scope = runtime_inferred_long_term_source_scope(&normalized);
+        let subject_ids = [
+            self.config.subject_id.as_str(),
+            self.config.scoped_runtime.mounted_subject_id.as_str(),
+            self.config.scoped_runtime.actor_subject_id.as_str(),
+        ];
+        policies.iter().find(|policy| {
+            long_term_governance_policy_blocks_future_write(policy, now_secs)
+                && subject_ids.iter().any(|subject_id| {
+                    policy.matches_candidate(
+                        Some(self.config.memory_space_id.as_str()),
+                        Some(*subject_id),
+                        &normalized.kind,
+                        &normalized.topic,
+                        normalized.source_chat_id.as_deref(),
+                        source_scope,
+                    )
+                })
+        })
+    }
+
+    fn long_term_draft_admission_policy(
+        &self,
+        now_secs: u64,
+    ) -> Result<Option<RuntimeLongTermDraftAdmissionPolicy>> {
+        let control_store = self.config.platform.long_term_memory_control_store();
+        let policies = control_store.list_long_term_governance_policies(usize::MAX)?;
+        if policies
+            .iter()
+            .all(|policy| !long_term_governance_policy_blocks_future_write(policy, now_secs))
+        {
+            return Ok(None);
+        }
+        let mut subject_ids = vec![
+            self.config.subject_id.clone(),
+            self.config.scoped_runtime.mounted_subject_id.clone(),
+            self.config.scoped_runtime.actor_subject_id.clone(),
+        ];
+        subject_ids.sort();
+        subject_ids.dedup();
+        Ok(Some(RuntimeLongTermDraftAdmissionPolicy {
+            memory_space_id: self.config.memory_space_id.clone(),
+            subject_ids,
+            policies,
+            now_secs,
+        }))
+    }
+
     fn ensure_runtime_memory_space(
         &self,
         operation: &'static str,
@@ -2898,6 +3229,145 @@ impl MemoryRuntime {
             }
             MemoryRuntimeSystemKind::LinuxFull => PromptParticipationPlan::full(),
         }
+    }
+}
+
+struct RuntimeLongTermDraftAdmissionPolicy {
+    memory_space_id: String,
+    subject_ids: Vec<String>,
+    policies: Vec<MemoryLongTermGovernancePolicy>,
+    now_secs: u64,
+}
+
+impl LongTermMemoryDraftAdmissionPolicy for RuntimeLongTermDraftAdmissionPolicy {
+    fn accepts_long_term_draft(&self, draft: &LongTermMemoryDraft) -> bool {
+        !self.policies.iter().any(|policy| {
+            long_term_governance_policy_blocks_future_write(policy, self.now_secs)
+                && runtime_long_term_policy_matches_draft(
+                    policy,
+                    &self.memory_space_id,
+                    &self.subject_ids,
+                    draft,
+                )
+        })
+    }
+}
+
+fn long_term_governance_policy_blocks_future_write(
+    policy: &MemoryLongTermGovernancePolicy,
+    now_secs: u64,
+) -> bool {
+    match policy.kind.as_str() {
+        "pause" => policy
+            .expires_at
+            .is_none_or(|expires_at| expires_at > now_secs),
+        "suppress" => policy
+            .duration
+            .as_ref()
+            .is_some_and(|duration| match duration {
+                bm_core::memory::MemoryGovernanceSuppressionDuration::UntilManualResume => true,
+                bm_core::memory::MemoryGovernanceSuppressionDuration::UntilUnixSecs(expires_at) => {
+                    *expires_at > now_secs
+                }
+            }),
+        _ => false,
+    }
+}
+
+fn runtime_long_term_policy_matches_draft(
+    policy: &MemoryLongTermGovernancePolicy,
+    memory_space_id: &str,
+    subject_ids: &[String],
+    draft: &LongTermMemoryDraft,
+) -> bool {
+    let Some(normalized) = draft.normalized() else {
+        return false;
+    };
+    let source_scope = runtime_inferred_long_term_source_scope(&normalized);
+    subject_ids.iter().any(|subject_id| {
+        policy.matches_candidate(
+            Some(memory_space_id),
+            Some(subject_id.as_str()),
+            &normalized.kind,
+            &normalized.topic,
+            normalized.source_chat_id.as_deref(),
+            source_scope,
+        )
+    })
+}
+
+fn runtime_inferred_long_term_source_scope(
+    draft: &LongTermMemoryDraft,
+) -> LongTermMemorySourceScope {
+    match draft.source_scope {
+        Some(LongTermMemorySourceScope::Chat) if draft.source_chat_id.is_some() => {
+            LongTermMemorySourceScope::Chat
+        }
+        Some(LongTermMemorySourceScope::Chat) => match draft.kind {
+            LongTermMemoryKind::Fact => LongTermMemorySourceScope::World,
+            LongTermMemoryKind::Preference
+            | LongTermMemoryKind::Profile
+            | LongTermMemoryKind::Relationship
+            | LongTermMemoryKind::Constraint
+            | LongTermMemoryKind::Project
+            | LongTermMemoryKind::Task => LongTermMemorySourceScope::User,
+        },
+        Some(scope) => scope,
+        None => match draft.kind {
+            LongTermMemoryKind::Project | LongTermMemoryKind::Task
+                if draft.source_chat_id.is_some() =>
+            {
+                LongTermMemorySourceScope::Chat
+            }
+            LongTermMemoryKind::Fact => LongTermMemorySourceScope::World,
+            LongTermMemoryKind::Preference
+            | LongTermMemoryKind::Profile
+            | LongTermMemoryKind::Relationship
+            | LongTermMemoryKind::Constraint
+            | LongTermMemoryKind::Project
+            | LongTermMemoryKind::Task => LongTermMemorySourceScope::User,
+        },
+    }
+}
+
+fn memory_long_term_mutation_report_from_core(
+    core_report: bm_core::memory::MemoryLongTermMutationReport,
+    lifecycle_report: RuntimeLifecycleReport,
+) -> MemoryLongTermMutationReport {
+    MemoryLongTermMutationReport {
+        accepted: core_report.accepted,
+        dry_run: core_report.dry_run,
+        operation: core_report.operation,
+        target_report: core_report.target_report.clone(),
+        affected_records: core_report.affected_records.clone(),
+        tombstones: core_report.tombstones.clone(),
+        evidence_refs: core_report.evidence_refs.clone(),
+        transcript_refs: core_report.transcript_refs.clone(),
+        policy_decision: core_report.policy_decision.clone(),
+        projection_impact: core_report.projection_impact.clone(),
+        deferred_governance_impact: core_report.deferred_governance_impact.clone(),
+        lifecycle_report,
+        audit_event_id: core_report.audit_event_id.clone(),
+        reason: core_report.reason.clone(),
+        core_report,
+    }
+}
+
+fn memory_governance_policy_report_from_core(
+    core_report: bm_core::memory::MemoryGovernancePolicyMutationReport,
+    lifecycle_report: RuntimeLifecycleReport,
+) -> MemoryGovernancePolicyMutationReport {
+    MemoryGovernancePolicyMutationReport {
+        accepted: core_report.accepted,
+        dry_run: core_report.dry_run,
+        operation: core_report.operation,
+        policy_id: core_report.policy_id.clone(),
+        affected_future_writes: core_report.affected_future_writes.clone(),
+        policy_decision: core_report.policy_decision.clone(),
+        lifecycle_report,
+        audit_event_id: core_report.audit_event_id.clone(),
+        reason: core_report.reason.clone(),
+        core_report,
     }
 }
 

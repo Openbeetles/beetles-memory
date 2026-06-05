@@ -15,6 +15,10 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
             "export",
             "import",
             "write-procedural",
+            "long-term-list",
+            "long-term-detail",
+            "long-term-delete",
+            "long-term-policy-suppress",
             "skill-list",
             "skill-show",
             "skill-edit",
@@ -37,6 +41,30 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
     assert!(!dependencies.contains("bm-core"));
     assert!(!dependencies.contains("bm-store"));
     assert!(dependencies.contains("bm-adapter"));
+}
+
+#[test]
+fn long_term_destructive_commands_require_explicit_reason() {
+    let delete = run_cli(
+        ["memory", "long-term-delete", "--record-id", "ltm-test"]
+            .into_iter()
+            .map(str::to_string),
+    )
+    .expect_err("delete without reason should fail");
+    assert!(delete.contains("--reason is required"));
+
+    let suppress = run_cli(
+        [
+            "memory",
+            "long-term-policy-suppress",
+            "--topic",
+            "temporary-*",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect_err("policy suppress without reason should fail");
+    assert!(suppress.contains("--reason is required"));
 }
 
 #[test]
@@ -284,6 +312,34 @@ fn memory_cli_write_then_recall_uses_entry_runtime_store() {
     assert!(recall_json["procedural_hits"]
         .as_array()
         .is_some_and(|hits| !hits.is_empty()));
+
+    let long_term = run_cli(
+        [
+            "memory",
+            "long-term-list",
+            "--profile",
+            "profile-server-linux-dev-full",
+            "--store-file",
+            &store,
+            "--agent",
+            "cli-agent",
+            "--owner",
+            "owner-default",
+            "--channel",
+            "local",
+            "--chat",
+            "chat-1",
+            "--limit",
+            "4",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect("long-term list");
+    let long_term_json: serde_json::Value =
+        serde_json::from_str(&long_term).expect("long-term json");
+    assert_eq!(long_term_json["status"], "accepted");
+    assert!(long_term_json.get("total_visible").is_some());
 }
 
 fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {

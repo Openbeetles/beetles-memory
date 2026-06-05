@@ -88,6 +88,70 @@ fn desktop_profiles_allow_safe_transcript_replay_without_debug_replay() {
 }
 
 #[test]
+fn long_term_control_capabilities_follow_profile_and_policy_boundaries() {
+    let policy = MemoryCapabilityPolicy::strict_profile();
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+
+    for profile in [
+        ProfileId::DesktopMacosStandaloneMemory,
+        ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopWindowsEmbeddedSdk,
+        ProfileId::ServerLinuxMemoryGateway,
+        ProfileId::ServerLinuxDevFull,
+    ] {
+        let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+        assert!(
+            catalog.long_term_control_inspect.visible,
+            "{} should expose long-term inspect/list/detail",
+            profile.as_str()
+        );
+        assert!(
+            catalog.long_term_control_mutation.visible,
+            "{} should expose governed targeted long-term mutation",
+            profile.as_str()
+        );
+        assert!(
+            catalog.long_term_control_policy.visible,
+            "{} should expose pause/suppression policy control",
+            profile.as_str()
+        );
+        assert!(
+            catalog.long_term_control_bulk_forget.visible,
+            "{} should expose bulk forget with confirmation",
+            profile.as_str()
+        );
+    }
+
+    for profile in [
+        ProfileId::EspStandaloneMemory,
+        ProfileId::EspEmbeddedSdk,
+        ProfileId::LinuxDeviceStandaloneMemory,
+    ] {
+        let catalog =
+            resolve_memory_capabilities(profile, &policy, &privacy).expect("compact catalog");
+        assert!(catalog.long_term_control_inspect.visible);
+        assert!(catalog.long_term_control_mutation.visible);
+        assert!(catalog.long_term_control_policy.visible);
+        assert!(
+            !catalog.long_term_control_bulk_forget.visible,
+            "{} should hide destructive bulk forget",
+            profile.as_str()
+        );
+    }
+
+    let mut disabled = MemoryCapabilityPolicy::strict_profile();
+    disabled.long_term_control_mutation_enabled = false;
+    disabled.long_term_control_policy_enabled = false;
+    disabled.long_term_control_bulk_forget_enabled = false;
+    let catalog = resolve_memory_capabilities(ProfileId::ServerLinuxDevFull, &disabled, &privacy)
+        .expect("disabled catalog");
+    assert!(catalog.long_term_control_inspect.visible);
+    assert!(!catalog.long_term_control_mutation.visible);
+    assert!(!catalog.long_term_control_policy.visible);
+    assert!(!catalog.long_term_control_bulk_forget.visible);
+}
+
+#[test]
 fn server_gateway_can_surface_adapter_permission_without_creating_adapter_code() {
     let mut policy = MemoryCapabilityPolicy::strict_profile();
     policy.communication_adapter_enabled = true;

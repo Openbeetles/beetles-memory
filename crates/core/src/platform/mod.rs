@@ -3,12 +3,12 @@ use crate::error::Result;
 use crate::memory::{
     AutonomyStrategyStore, ContinuityCapsuleStore, ConversationTranscriptStore,
     CoreRevisionLedgerStore, ExecutionStateStore, FeltSignificanceStore, InnerConflictStore,
-    InnerLifeStore, LongTermMemoryExtractionStateStore, LongTermMemoryStore, MemoryStore,
-    MentalPrivacyStore, OuterVoiceStore, PrivateDocStore, PrivateGardenStore,
-    RelationshipConstitutionStore, RelationshipPortfolioStore, RelationshipTopologyStore,
-    RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore, SelfModelStore, SessionStore,
-    SessionSummaryStore, TemperamentContinuityStore, TurnContinuityEvidenceStore, TurnLedgerStore,
-    WorldSenseStore,
+    InnerLifeStore, LongTermMemoryControlStore, LongTermMemoryExtractionStateStore,
+    LongTermMemoryStore, MemoryStore, MentalPrivacyStore, OuterVoiceStore, PrivateDocStore,
+    PrivateGardenStore, RelationshipConstitutionStore, RelationshipPortfolioStore,
+    RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore,
+    SelfModelStore, SessionStore, SessionSummaryStore, TemperamentContinuityStore,
+    TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
 };
 use crate::task::TaskStore;
 use crate::task_execution::{TaskArtifactStore, TaskLearningStore, TaskRunStore};
@@ -95,6 +95,7 @@ pub trait Platform: Send + Sync {
     fn conversation_transcript_store(&self) -> Arc<dyn ConversationTranscriptStore>;
     fn session_summary_store(&self) -> Arc<dyn SessionSummaryStore>;
     fn long_term_memory_store(&self) -> Arc<dyn LongTermMemoryStore>;
+    fn long_term_memory_control_store(&self) -> Arc<dyn LongTermMemoryControlStore>;
     fn long_term_memory_extraction_state_store(
         &self,
     ) -> Arc<dyn LongTermMemoryExtractionStateStore>;

@@ -27,6 +27,9 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Inspect | `MemoryRuntime::inspect` | Return recall/operator/lifecycle inspection data. |
 | Runtime Skill List / Detail | `MemoryRuntime::list_runtime_skills` / `MemoryRuntime::get_runtime_skill` | List and inspect runtime-learned procedural memory records without executing them. |
 | Runtime Skill Mutation | `MemoryRuntime::edit_runtime_skill` / `MemoryRuntime::set_runtime_skill_enabled` / `MemoryRuntime::delete_runtime_skill` | Edit, enable, disable, or delete existing runtime skills only; it does not create, import, or manage standard Agent Skills. |
+| Long-Term Memory List / Detail | `MemoryRuntime::list_long_term_memory` / `MemoryRuntime::get_long_term_memory` | List, search, and inspect accepted long-term memory with redacted views, evidence summaries, revisions, and tombstone metadata. |
+| Long-Term Memory Mutation | `MemoryRuntime::mutate_long_term_memory` | Correct, supersede, delete, forget_by_query, mark_stale, or change_scope accepted long-term memory, and return affected records, tombstones, projection impact, and lifecycle reports. |
+| Long-Term Governance Policy | `MemoryRuntime::mutate_memory_governance_policy` | Pause, resume, or suppress future long-term memory updates. Policies affect future write governance and do not silently delete accepted memory. |
 | Agent Skill Directory | `MemoryRuntimeBuilder::agent_skill_dirs` / `add_agent_skill_dir` | Hosts can mount standard Agent Skill directories for read-only SDK scanning; the SDK recalls and projects summaries only, and never adds, edits, or executes directory resources. |
 | Agent Tool Registry | `MemoryRuntimeBuilder::agent_tool_registry` / `MemoryRuntime::upsert_agent_tool_registry` | Hosts register tool indexes and fingerprints. The SDK returns `agent_tool_hints` only from governed tool experience; no experience means empty hints, not tool routing. |
 | Replay | `MemoryRuntime::replay` | Inspect turn ledger history for a chat. |
@@ -96,15 +99,44 @@ The most common SDK request types are:
 | `RuntimeSkillEditRequest` | `name`, `title`, `topic`, `summary`, `procedure`, `edit_reason` | Edits only an existing runtime skill whose name starts with `runtime_skill__`. |
 | `RuntimeSkillSetEnabledRequest` | `name`, `enabled` | Changes only the runtime skill enabled state; it does not rewrite skill content. |
 | `RuntimeSkillDeleteRequest` | `name` | Deletes the runtime procedural memory from skill storage without adding a console tombstone. |
+| `MemoryLongTermListRequest` | `query`, `limit`, `view` | Lists accepted long-term memory through `MemoryRuntime::list_long_term_memory`; supports `cursor` paging and redacts source metadata from embedded records for `HostUi` by default. |
+| `MemoryLongTermDetailRequest` | `target`, `view` | Inspects one long-term memory record by record id, slot, or transcript derived ref, including revisions, tombstone data, and evidence refs. |
+| `MemoryLongTermMutationRequest` | `operation`, `reason`, `dry_run`, `mode_input` | Runs correct, supersede, delete, forget_by_query, mark_stale, or change_scope. Bulk forget requires a dry-run preview plus confirmation token. |
+| `MemoryLongTermPolicyRequest` | `operation`, `reason`, `dry_run`, `mode_input` | Runs pause, resume, suppress, or remove_suppression. Writes blocked by the policy appear in SDK governance reports. |
 | `MemoryReplayRequest` | `chat_id`, `limit` | Inspection-only replay surface. |
 | `MemoryExportRequest` | `chat_id` | Exports a continuity snapshot. |
 | `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode is `BootstrapImport` or `FullRestore`. |
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | Runs recoverable lifecycle recovery. |
 | `MemoryCloseRequest` | `reason` | Emits a close lifecycle report. |
 
-Generic adapter dispatch supports write, recall, project, inspect, recover, replay, export, import, capabilities, and close. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
+Generic adapter dispatch supports write, recall, project, inspect, recover, replay, export, import, long-term list/detail/mutate/policy, capabilities, and close. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
 
 Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/tool/message surface.
+
+## Accepted Long-Term Memory Control
+
+Accepted long-term memory is owned by `MemoryRuntime`. Hosts may translate user-facing natural-language commands into SDK requests, but they must not maintain a shadow memory editor in their own SQLite database, local JSON files, or UI state.
+
+The control plane is separate from the automatic write path:
+
+- `MemoryWriteRequest::Candidates` / `LongTermExtraction` submit candidate content for Memory-owned governance, merge, and storage.
+- `MemoryLongTermMutationRequest` handles user or operator correction, supersede, delete, forget, and scope-change actions for already accepted long-term memory.
+- `MemoryLongTermPolicyRequest` handles "do not remember this kind of thing again" and "pause memory updates for this scope".
+- Transcript lifecycle `DeleteRaw` / `Mask` affects conversation evidence only. It reports `DerivedMemoryRef` impact, but it does not automatically delete accepted long-term memory. Revoking derived long-term memory must go through the long-term control surface.
+- Runtime Skill management is limited to procedural runtime skill memory and is not the edit/delete surface for ordinary long-term memory.
+
+Every mutation report must be audit-ready: affected records, tombstones, transcript refs, projection impact, deferred governance impact, policy decision, and lifecycle report are returned by the SDK. If a profile denies an operation, the SDK returns a structured rejection; the host must not fall back to direct local store edits.
+
+Long-term control visibility is exposed in `MemoryCapabilityCatalog`:
+
+```rust
+let capabilities = runtime.capabilities();
+assert!(capabilities.long_term_control_inspect.visible);
+assert!(capabilities.long_term_control_mutation.visible);
+assert!(capabilities.long_term_control_policy.visible);
+```
+
+`long_term_control_bulk_forget` is a high-risk capability. Compact or embedded profiles may expose targeted inspect/mutation/policy while hiding destructive bulk forget.
 
 ## Agent Tool API
 

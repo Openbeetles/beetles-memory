@@ -1,10 +1,13 @@
 use bm_sdk::{
     AgentToolRegistryRef, AgentToolUsageFeedback, ContinuitySnapshot, ContinuitySnapshotImportMode,
-    IngressKind, MemoryCloseRequest, MemoryExportRequest, MemoryImportRequest,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryRecoverRequest, MemoryReplayRequest, MemoryWriteRequest,
-    PressureLevel, Result, RuntimeLifecycleModeInput, RuntimeLifecycleTrigger,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    IngressKind, LongTermMemoryQuery, MemoryCloseRequest, MemoryExportRequest,
+    MemoryGovernancePolicyMutation, MemoryImportRequest, MemoryInspectionRequest,
+    MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermListRequest,
+    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
+    MemoryLongTermTarget, MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRecoverRequest, MemoryReplayRequest, MemoryWriteRequest, PressureLevel, Result,
+    RuntimeLifecycleModeInput, RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome,
+    RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 use serde::Deserialize;
 
@@ -116,6 +119,46 @@ pub fn decode_json_adapter_command(
                 target_chat_id: payload.target_chat_id,
                 mode: payload.mode,
             })))
+        }
+        AdapterOperation::LongTermList => {
+            let payload: LongTermListPayload = parse_json(body)?;
+            Ok(AdapterCommand::LongTermList(MemoryLongTermListRequest {
+                query: payload.query,
+                cursor: payload.cursor,
+                limit: payload.limit.unwrap_or(20),
+                view: payload.view,
+            }))
+        }
+        AdapterOperation::LongTermDetail => {
+            let payload: LongTermDetailPayload = parse_json(body)?;
+            Ok(AdapterCommand::LongTermDetail(
+                MemoryLongTermDetailRequest {
+                    target: payload.target,
+                    view: payload.view,
+                },
+            ))
+        }
+        AdapterOperation::LongTermMutate => {
+            let payload: LongTermMutationPayload = parse_json(body)?;
+            Ok(AdapterCommand::LongTermMutate(
+                MemoryLongTermMutationRequest {
+                    operation: payload.operation,
+                    reason: payload.reason,
+                    dry_run: payload.dry_run.unwrap_or(false),
+                    mode_input: payload.mode_input,
+                },
+            ))
+        }
+        AdapterOperation::LongTermPolicy => {
+            let payload: LongTermPolicyPayload = parse_json(body)?;
+            Ok(AdapterCommand::LongTermPolicy(
+                MemoryLongTermPolicyRequest {
+                    operation: payload.operation,
+                    reason: payload.reason,
+                    dry_run: payload.dry_run.unwrap_or(false),
+                    mode_input: payload.mode_input,
+                },
+            ))
         }
         AdapterOperation::Close => {
             let payload: ClosePayload = parse_json(body)?;
@@ -289,6 +332,49 @@ struct ReplayPayload {
 #[derive(Deserialize)]
 struct ExportPayload {
     chat_id: String,
+}
+
+fn default_long_term_control_view() -> MemoryLongTermControlView {
+    MemoryLongTermControlView::HostUi
+}
+
+#[derive(Deserialize)]
+struct LongTermListPayload {
+    #[serde(default)]
+    query: LongTermMemoryQuery,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default = "default_long_term_control_view")]
+    view: MemoryLongTermControlView,
+}
+
+#[derive(Deserialize)]
+struct LongTermDetailPayload {
+    target: MemoryLongTermTarget,
+    #[serde(default = "default_long_term_control_view")]
+    view: MemoryLongTermControlView,
+}
+
+#[derive(Deserialize)]
+struct LongTermMutationPayload {
+    operation: MemoryLongTermMutation,
+    reason: String,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    mode_input: RuntimeLifecycleModeInput,
+}
+
+#[derive(Deserialize)]
+struct LongTermPolicyPayload {
+    operation: MemoryGovernancePolicyMutation,
+    reason: String,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    mode_input: RuntimeLifecycleModeInput,
 }
 
 #[derive(Deserialize)]

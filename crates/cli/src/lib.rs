@@ -14,10 +14,14 @@ use bm_entry::{
 use bm_sdk::{
     platform_capability_snapshot, platform_capability_snapshot_file_name,
     resolve_memory_capabilities, ContinuitySnapshot, ContinuitySnapshotImportMode,
-    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryExportRequest, MemoryImportRequest,
-    MemoryInspectionRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryReplayRequest, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendKind,
+    LongTermMemoryKind, LongTermMemoryQuery, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
+    MemoryExportRequest, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryImportRequest, MemoryInspectionRequest,
+    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
+    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendKind,
 };
 use serde_json::json;
 
@@ -68,6 +72,26 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         name: "write-procedural",
         usage: "bm memory write-procedural --name <name> --content <content>",
         operation: AdapterOperation::Write,
+    },
+    CommandSpec {
+        name: "long-term-list",
+        usage: "bm memory long-term-list --query <query> --limit <n>",
+        operation: AdapterOperation::LongTermList,
+    },
+    CommandSpec {
+        name: "long-term-detail",
+        usage: "bm memory long-term-detail --record-id <id>",
+        operation: AdapterOperation::LongTermDetail,
+    },
+    CommandSpec {
+        name: "long-term-delete",
+        usage: "bm memory long-term-delete --record-id <id> --reason <reason>",
+        operation: AdapterOperation::LongTermMutate,
+    },
+    CommandSpec {
+        name: "long-term-policy-suppress",
+        usage: "bm memory long-term-policy-suppress --topic <pattern> --reason <reason>",
+        operation: AdapterOperation::LongTermPolicy,
     },
     CommandSpec {
         name: "skill-list",
@@ -409,9 +433,11 @@ struct CliOptions {
     title: String,
     summary: String,
     content: String,
+    record_id: String,
     input_path: Option<PathBuf>,
     output_path: Option<PathBuf>,
     reason: String,
+    reason_provided: bool,
 }
 
 impl CliOptions {
@@ -431,9 +457,11 @@ impl CliOptions {
         let mut title = String::new();
         let mut summary = String::new();
         let mut content = String::new();
+        let mut record_id = String::new();
         let mut input_path = None;
         let mut output_path = None;
         let mut reason = "cli close".to_string();
+        let mut reason_provided = false;
         let mut index = 0;
         while index < args.len() {
             let key = args[index].as_str();
@@ -475,9 +503,13 @@ impl CliOptions {
                 "--title" => title = next_value(args, &mut index, key)?.to_string(),
                 "--summary" => summary = next_value(args, &mut index, key)?.to_string(),
                 "--content" => content = next_value(args, &mut index, key)?.to_string(),
+                "--record-id" => record_id = next_value(args, &mut index, key)?.to_string(),
                 "--input" => input_path = Some(PathBuf::from(next_value(args, &mut index, key)?)),
                 "--output" => output_path = Some(PathBuf::from(next_value(args, &mut index, key)?)),
-                "--reason" => reason = next_value(args, &mut index, key)?.to_string(),
+                "--reason" => {
+                    reason = next_value(args, &mut index, key)?.to_string();
+                    reason_provided = true;
+                }
                 other => return Err(format!("unsupported memory option: {other}")),
             }
         }
@@ -497,9 +529,11 @@ impl CliOptions {
             title,
             summary,
             content,
+            record_id,
             input_path,
             output_path,
             reason,
+            reason_provided,
         })
     }
 
@@ -559,6 +593,56 @@ impl CliOptions {
                 }],
                 source: RuntimeSkillWriteSource::Manual,
             })),
+            "long-term-list" => Ok(AdapterCommand::LongTermList(MemoryLongTermListRequest {
+                query: LongTermMemoryQuery {
+                    topic: non_empty_string(&self.query),
+                    limit: self.limit,
+                    ..LongTermMemoryQuery::default()
+                },
+                cursor: None,
+                limit: self.limit,
+                view: MemoryLongTermControlView::HostUi,
+            })),
+            "long-term-detail" => Ok(AdapterCommand::LongTermDetail(
+                bm_sdk::MemoryLongTermDetailRequest {
+                    target: MemoryLongTermTarget::RecordId(
+                        required_value(&self.record_id, "--record-id")?.to_string(),
+                    ),
+                    view: MemoryLongTermControlView::HostUi,
+                },
+            )),
+            "long-term-delete" => Ok(AdapterCommand::LongTermMutate(
+                MemoryLongTermMutationRequest {
+                    operation: MemoryLongTermMutation::Delete {
+                        target: MemoryLongTermTarget::RecordId(
+                            required_value(&self.record_id, "--record-id")?.to_string(),
+                        ),
+                    },
+                    reason: self.required_reason()?,
+                    dry_run: false,
+                    mode_input: RuntimeLifecycleModeInput::default(),
+                },
+            )),
+            "long-term-policy-suppress" => Ok(AdapterCommand::LongTermPolicy(
+                MemoryLongTermPolicyRequest {
+                    operation: MemoryGovernancePolicyMutation::Suppress {
+                        selector: MemoryGovernanceSelector {
+                            memory_space_id: None,
+                            subject_id: None,
+                            kind: Some(LongTermMemoryKind::Preference),
+                            topic_pattern: Some(
+                                required_value(&self.topic, "--topic")?.to_string(),
+                            ),
+                            source_chat_id: None,
+                            source_scope: None,
+                        },
+                        duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                    },
+                    reason: self.required_reason()?,
+                    dry_run: false,
+                    mode_input: RuntimeLifecycleModeInput::default(),
+                },
+            )),
             "recall" => Ok(AdapterCommand::Recall(MemoryRecallRequest {
                 query: self.query.clone(),
                 limit: self.limit,
@@ -615,6 +699,13 @@ impl CliOptions {
             "skill content requires --content <content> or --input <path>".to_string()
         })?;
         std::fs::read_to_string(path).map_err(|err| format!("failed to read skill content: {err}"))
+    }
+
+    fn required_reason(&self) -> Result<String, String> {
+        if !self.reason_provided {
+            return Err("--reason is required".to_string());
+        }
+        Ok(required_value(&self.reason, "--reason")?.to_string())
     }
 }
 
@@ -729,6 +820,38 @@ fn render_sdk_report(
             "status": "accepted",
             "long_term_imported": report.outcome.long_term_imported,
             "summary_restored": report.outcome.summary_restored,
+            "lifecycle": report.lifecycle_report.result_summary,
+        }),
+        AdapterSdkReport::LongTermList(report) => json!({
+            "status": "accepted",
+            "records": report.records,
+            "total_visible": report.total_visible,
+            "next_cursor": report.next_cursor,
+        }),
+        AdapterSdkReport::LongTermDetail(report) => json!({
+            "status": "accepted",
+            "record": report.record,
+            "revisions": report.revisions,
+            "tombstone": report.tombstone,
+            "transcript_refs": report.transcript_refs,
+        }),
+        AdapterSdkReport::LongTermMutate(report) => json!({
+            "status": "accepted",
+            "accepted": report.accepted,
+            "operation": report.operation,
+            "affected_records": report.affected_records,
+            "tombstones": report.tombstones,
+            "transcript_refs": report.transcript_refs,
+            "policy_decision": report.policy_decision,
+            "lifecycle": report.lifecycle_report.result_summary,
+        }),
+        AdapterSdkReport::LongTermPolicy(report) => json!({
+            "status": "accepted",
+            "accepted": report.accepted,
+            "operation": report.operation,
+            "policy_id": report.policy_id,
+            "affected_future_writes": report.affected_future_writes,
+            "policy_decision": report.policy_decision,
             "lifecycle": report.lifecycle_report.result_summary,
         }),
         AdapterSdkReport::Capabilities(catalog) => {

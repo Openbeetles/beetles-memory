@@ -32,6 +32,10 @@ Commands：
 | `replay` | 检查某个 chat 的 turn replay。 |
 | `export` | 导出 continuity snapshot。 |
 | `import` | 导入 continuity snapshot。 |
+| `long-term-list` | 列出或按 topic 查询 accepted long-term memory。 |
+| `long-term-detail` | 通过 `--record-id` 查看一条长期记忆详情。 |
+| `long-term-delete` | 通过 `--record-id` 删除一条长期记忆并产生 tombstone/audit report。 |
+| `long-term-policy-suppress` | 用 `--topic <pattern>` 添加“以后不要记这类偏好”的 suppression policy。 |
 | `skill-list` | 列出运行时 Skill 记忆。 |
 | `skill-show` | 查看单条运行时 Skill 记忆详情。 |
 | `skill-edit` | 编辑已有运行时 Skill 记忆。 |
@@ -54,6 +58,47 @@ Commands：
 | `--query <text>` | empty |
 | `--limit <n>` | `8` |
 | `--max-len <n>` | `4096` |
+| `--record-id <id>` | empty |
+| `--topic <text>` | empty |
+
+## 长期记忆控制
+
+这些命令只调用 Memory SDK 的 accepted long-term memory 控制面，不读取或修改宿主本地数据库。`long-term-delete` 会从 active recall/projection 中移除目标记忆，并写入 tombstone/audit；`long-term-policy-suppress` 影响后续长期记忆写入，不 retroactively 删除已有记忆。
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-list \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --query preferred_editor \
+  --limit 8
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-detail \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --record-id ltm-preferred-editor
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-delete \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --record-id ltm-preferred-editor \
+  --reason "user requested deletion"
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-policy-suppress \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --topic temporary-* \
+  --reason "user does not want temporary preferences remembered"
+```
 
 ## 运行时 Skill 记忆管理
 

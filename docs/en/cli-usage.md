@@ -32,6 +32,10 @@ Commands:
 | `replay` | Inspect turn replay for a chat. |
 | `export` | Export a continuity snapshot. |
 | `import` | Import a continuity snapshot. |
+| `long-term-list` | List accepted long-term memory or filter by topic. |
+| `long-term-detail` | Inspect one long-term memory record by `--record-id`. |
+| `long-term-delete` | Delete one long-term memory record by `--record-id` and emit tombstone/audit reports. |
+| `long-term-policy-suppress` | Add a suppression policy for future preference memory updates with `--topic <pattern>`. |
 | `skill-list` | List runtime Skill Memory records. |
 | `skill-show` | Inspect one runtime Skill Memory record. |
 | `skill-edit` | Edit an existing runtime Skill Memory record. |
@@ -54,6 +58,47 @@ Common options:
 | `--query <text>` | empty |
 | `--limit <n>` | `8` |
 | `--max-len <n>` | `4096` |
+| `--record-id <id>` | empty |
+| `--topic <text>` | empty |
+
+## Long-Term Memory Control
+
+These commands call the Memory SDK accepted long-term memory control surface only. They do not read or mutate a host-owned local database. `long-term-delete` removes the target from active recall/projection and writes tombstone/audit reports. `long-term-policy-suppress` affects future long-term memory writes and does not retroactively delete accepted memory.
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-list \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --query preferred_editor \
+  --limit 8
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-detail \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --record-id ltm-preferred-editor
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-delete \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --record-id ltm-preferred-editor \
+  --reason "user requested deletion"
+```
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory long-term-policy-suppress \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --topic temporary-* \
+  --reason "user does not want temporary preferences remembered"
+```
 
 ## Runtime Skill Memory Management
 

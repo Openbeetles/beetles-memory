@@ -7,7 +7,7 @@ use bm_http::{
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
     let routes = route_specs();
-    assert_eq!(routes.len(), 10);
+    assert_eq!(routes.len(), 14);
     let capabilities = routes
         .iter()
         .find(|route| route.path == "/memory/profile/capabilities")
@@ -18,6 +18,22 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
     assert!(matches!(capabilities.body, RouteBodyMode::None));
     assert!(matches!(capabilities.auth, RouteAuth::TokenOrLoopback));
     assert!(capabilities.profile_gate_required);
+    for (path, operation) in [
+        ("/memory/long-term/list", AdapterOperation::LongTermList),
+        ("/memory/long-term/detail", AdapterOperation::LongTermDetail),
+        ("/memory/long-term/mutate", AdapterOperation::LongTermMutate),
+        ("/memory/long-term/policy", AdapterOperation::LongTermPolicy),
+    ] {
+        let route = routes
+            .iter()
+            .find(|route| route.path == path)
+            .unwrap_or_else(|| panic!("missing route {path}"));
+        assert_eq!(route.method, HttpMethod::Post);
+        assert_eq!(route.operation, operation);
+        assert!(matches!(route.body, RouteBodyMode::Json));
+        assert!(matches!(route.auth, RouteAuth::TokenOrLoopback));
+        assert!(route.profile_gate_required);
+    }
 }
 
 #[test]

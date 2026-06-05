@@ -70,8 +70,12 @@ Memory routes declared by the crate:
 | `/memory/replay` | `POST` | replay contract |
 | `/memory/export` | `POST` | export contract |
 | `/memory/import` | `POST` | import contract |
+| `/memory/long-term/list` | `POST` | accepted long-term memory list/search |
+| `/memory/long-term/detail` | `POST` | accepted long-term memory detail |
+| `/memory/long-term/mutate` | `POST` | accepted long-term memory mutation |
+| `/memory/long-term/policy` | `POST` | long-term governance policy mutation |
 
-The `server-std` decoder uses the shared JSON adapter decoder for write, recall, project, maintain, inspect, recover, replay, export, import, capabilities, and close. `Subscribe` is a stream operation, not an HTTP memory command. `Maintain` needs `handle_http_request_with_services` with injected LLM/HTTP services; `handle_http_request` uses no injected services and returns a structured rejection for maintain.
+The `server-std` decoder uses the shared JSON adapter decoder for write, recall, project, maintain, inspect, recover, replay, export, import, long-term list/detail/mutate/policy, capabilities, and close. `Subscribe` is a stream operation, not an HTTP memory command. `Maintain` needs `handle_http_request_with_services` with injected LLM/HTTP services; `handle_http_request` uses no injected services and returns a structured rejection for maintain.
 
 Headers consumed by the standard-library HTTP helper:
 
@@ -175,6 +179,10 @@ Inbound command frame kinds:
 - `command.project`
 - `command.inspect`
 - `command.replay`
+- `command.long_term.list`
+- `command.long_term.detail`
+- `command.long_term.mutate`
+- `command.long_term.policy`
 - `command.capabilities`
 
 Subscription frame kinds:
@@ -207,6 +215,10 @@ Published tool specs include:
 - `memory_inspect`
 - `memory_replay`
 - `memory_write_candidate`
+- `memory_long_term_list`
+- `memory_long_term_detail`
+- `memory_long_term_mutate`
+- `memory_long_term_policy`
 - `memory_export`
 - `memory_import`
 
@@ -248,6 +260,10 @@ Bridge message names:
 - `memory_write_candidate`
 - `memory_recall_request`
 - `memory_projection_request`
+- `memory_long_term_list_request`
+- `memory_long_term_detail_request`
+- `memory_long_term_mutation_request`
+- `memory_long_term_policy_request`
 - `memory_report`
 - `memory_migration_chunk`
 - `runtime_lifecycle_event`

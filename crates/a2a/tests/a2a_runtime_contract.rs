@@ -81,6 +81,7 @@ fn a2a_bridge_decodes_declared_memory_operation_messages() {
             "memory_projection_request",
             r#"{"query":"release","max_len":1024}"#,
         ),
+        ("memory_long_term_list_request", r#"{"query":{},"limit":2}"#),
         (
             "memory_migration_chunk",
             r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,

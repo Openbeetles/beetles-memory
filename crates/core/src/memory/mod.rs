@@ -33,6 +33,7 @@ mod intelligence_replay;
 mod internal_memory_topology;
 mod llm_json;
 mod long_term;
+mod long_term_control;
 mod long_term_extraction;
 mod maintenance;
 mod memory_governance;
@@ -222,18 +223,35 @@ pub use long_term::{
     MAX_LONG_TERM_MEMORY_BLOCK_LEN, MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS,
     MAX_LONG_TERM_MEMORY_KEYWORDS, MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
 };
+pub use long_term_control::{
+    apply_long_term_memory_control_mutation, apply_long_term_memory_governance_policy_mutation,
+    get_long_term_memory_control_detail, list_long_term_memory_control_page,
+    LongTermMemoryControlAuditEvent, LongTermMemoryControlDetailRequest,
+    LongTermMemoryControlListRequest, LongTermMemoryControlMutationRequest,
+    LongTermMemoryControlRevision, LongTermMemoryControlStore, LongTermMemoryTombstone,
+    MemoryDeferredGovernanceImpactReport, MemoryGovernancePolicyMutation,
+    MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryLongTermAffectedRecord,
+    MemoryLongTermControlDecision, MemoryLongTermControlView, MemoryLongTermDetailReport,
+    MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermMutation,
+    MemoryLongTermMutationReport, MemoryLongTermRecordReport, MemoryLongTermSelector,
+    MemoryLongTermTarget, MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef,
+    MemoryProjectionImpactReport, MemorySubjectVisibilityPolicy, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+};
 pub use long_term_extraction::{
     apply_long_term_memory_extraction, apply_long_term_memory_extraction_with_report,
     build_long_term_memory_extraction_input, evaluate_long_term_memory_extraction_turn,
     mark_long_term_memory_extraction_deferred, mark_long_term_memory_extraction_processed,
     mark_long_term_memory_extraction_requested, parse_long_term_memory_extraction_response,
     persist_long_term_memory_extraction_state, run_long_term_memory_refresh,
-    LongTermMemoryExtractionApplyReport, LongTermMemoryExtractionState,
-    LongTermMemoryExtractionStateStore, LongTermMemoryExtractionTurnDecision,
-    LongTermMemoryExtractionTurnInput, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
-    ParsedLongTermMemoryExtraction, LONG_TERM_MEMORY_EXTRACTION_BATCH,
-    LONG_TERM_MEMORY_EXTRACTION_RECENT_N, LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT,
-    REL_PATH_LONG_TERM_EXTRACTION_STATES,
+    LongTermMemoryDraftAdmissionPolicy, LongTermMemoryExtractionApplyReport,
+    LongTermMemoryExtractionState, LongTermMemoryExtractionStateStore,
+    LongTermMemoryExtractionTurnDecision, LongTermMemoryExtractionTurnInput,
+    LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome, ParsedLongTermMemoryExtraction,
+    LONG_TERM_MEMORY_EXTRACTION_BATCH, LONG_TERM_MEMORY_EXTRACTION_RECENT_N,
+    LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT, REL_PATH_LONG_TERM_EXTRACTION_STATES,
 };
 pub use maintenance::{
     run_post_reply_memory_maintenance, ContinuityCapsuleMaintenanceOutcome,

@@ -84,6 +84,18 @@ pub fn dispatch_adapter_command_with_services(
         AdapterCommand::Import(request) => {
             AdapterSdkReport::Import(Box::new(runtime.import(*request)?))
         }
+        AdapterCommand::LongTermList(request) => {
+            AdapterSdkReport::LongTermList(Box::new(runtime.list_long_term_memory(request)?))
+        }
+        AdapterCommand::LongTermDetail(request) => {
+            AdapterSdkReport::LongTermDetail(Box::new(runtime.get_long_term_memory(request)?))
+        }
+        AdapterCommand::LongTermMutate(request) => {
+            AdapterSdkReport::LongTermMutate(Box::new(runtime.mutate_long_term_memory(request)?))
+        }
+        AdapterCommand::LongTermPolicy(request) => AdapterSdkReport::LongTermPolicy(Box::new(
+            runtime.mutate_memory_governance_policy(request)?,
+        )),
         AdapterCommand::Capabilities => {
             AdapterSdkReport::Capabilities(Box::new(runtime.capabilities().clone()))
         }

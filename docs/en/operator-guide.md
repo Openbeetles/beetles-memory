@@ -23,6 +23,19 @@ Use inspect after migration dry-run/apply to confirm selected ids, recall planes
 
 Projection diagnostics come from `MemoryProjectionReport.audit`, including source planes, selected ids, section chars, budget, and private gate decisions. Conservative compaction comes from `MemoryRuntime::run_retention_compaction()`, whose report explicitly forbids host-side deletion of accepted memory.
 
+## Long-Term Memory Control
+
+Operators can inspect and govern accepted long-term memory through the SDK:
+
+- `MemoryRuntime::list_long_term_memory`
+- `MemoryRuntime::get_long_term_memory`
+- `MemoryRuntime::mutate_long_term_memory`
+- `MemoryRuntime::mutate_memory_governance_policy`
+
+These entry points return affected records, tombstones, transcript refs, projection impact, deferred governance impact, policy decision, and lifecycle reports. Operator surfaces may display the report or trigger follow-up governance, but they must not read the `long_term` namespace and mutate content directly.
+
+`forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. `mutate_memory_governance_policy` handles pause/resume/suppress rules for future long-term memory writes; policies do not automatically delete already accepted memory. `DerivedMemoryRef` entries in transcript lifecycle reports are impact lists only; revoking derived long-term memory still calls `mutate_long_term_memory`.
+
 ## Runtime Skill And Standard Agent Skill
 
 Standalone consoles and CLI operators manage runtime Skill Memory only: procedural memory records learned during runtime. They are not executors, marketplaces, workflow runners, or managers for standard Agent Skill directories.

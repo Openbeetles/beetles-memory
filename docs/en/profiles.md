@@ -36,6 +36,7 @@ cargo run -p bm-cli --bin bm -- \
 - `profile-server-linux-dev-full` is a development profile, not an embedded default.
 - `llm_gateway_server` belongs only to server Linux memory gateway / dev-full profiles; ESP, device, and desktop embedded SDK profiles do not expose this entry surface.
 - The profile catalog answers whether a surface is allowed for a profile. Runtime `EntryCapabilityView.visible` is the intersection of profile allowance, enabled capability policy, and `EntryTransportConfig`.
+- Long-term memory control is split into `long_term_control_inspect`, `long_term_control_mutation`, `long_term_control_policy`, and `long_term_control_bulk_forget`. Every profile should expose targeted inspect/mutation/policy or return a structured rejection; destructive bulk forget is visible only in profiles with sufficient operator surface, and ESP compact profiles hide it by default.
 
 ## Snapshot Fixtures
 

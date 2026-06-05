@@ -206,6 +206,19 @@ impl StorePlatform {
     where
         T: Serialize,
     {
+        self.json_put_with_event_kind(namespace, key, value, MemoryStoreEventKind::MemoryWrite)
+    }
+
+    fn json_put_with_event_kind<T>(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &T,
+        event_kind: MemoryStoreEventKind,
+    ) -> Result<()>
+    where
+        T: Serialize,
+    {
         if self.engine.get_json_value(namespace, key)?.is_none() {
             let current_entries = self.engine.list_json_keys(namespace)?.len();
             if current_entries >= self.config.capacity.kv_max_entries {
@@ -222,24 +235,23 @@ impl StorePlatform {
         let value = serde_json::to_value(value)
             .map_err(|error| Error::config("store_json_encode", error.to_string()))?;
         let content_hash = stable_hash_json(&value)?;
-        let event = self.build_memory_event(
-            MemoryStoreEventKind::MemoryWrite,
-            namespace,
-            key,
-            content_hash,
-        );
+        let event = self.build_memory_event(event_kind, namespace, key, content_hash);
         self.engine
             .put_json_value_and_event(namespace, key, value, event)
     }
 
     fn json_delete(&self, namespace: &str, key: &str) -> Result<bool> {
+        self.json_delete_with_event_kind(namespace, key, MemoryStoreEventKind::MemoryDelete)
+    }
+
+    fn json_delete_with_event_kind(
+        &self,
+        namespace: &str,
+        key: &str,
+        event_kind: MemoryStoreEventKind,
+    ) -> Result<bool> {
         let content_hash = stable_hash_hex(&("delete", namespace, key));
-        let event = self.build_memory_event(
-            MemoryStoreEventKind::MemoryDelete,
-            namespace,
-            key,
-            content_hash,
-        );
+        let event = self.build_memory_event(event_kind, namespace, key, content_hash);
         self.engine
             .delete_json_value_and_event(namespace, key, event)
     }
@@ -365,6 +377,10 @@ const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
     "conversation_transcript",
     "conversation_transcript_alias",
     "conversation_transcript_derived_ref",
+    LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+    LONG_TERM_CONTROL_AUDIT_NAMESPACE,
     "session_summary",
     "session",
     "long_term",
@@ -475,6 +491,10 @@ impl Platform for StorePlatform {
     }
 
     fn long_term_memory_store(&self) -> Arc<dyn LongTermMemoryStore> {
+        Arc::new(self.clone())
+    }
+
+    fn long_term_memory_control_store(&self) -> Arc<dyn LongTermMemoryControlStore> {
         Arc::new(self.clone())
     }
 
@@ -1238,6 +1258,119 @@ impl LongTermMemoryStore for StorePlatform {
         self.engine
             .list_json_keys("long_term")
             .map(|keys| keys.len())
+    }
+}
+
+impl LongTermMemoryControlStore for StorePlatform {
+    fn put_long_term_control_revision(
+        &self,
+        revision: &LongTermMemoryControlRevision,
+    ) -> Result<()> {
+        self.json_put_with_event_kind(
+            LONG_TERM_CONTROL_REVISION_NAMESPACE,
+            &revision.revision_id,
+            revision,
+            MemoryStoreEventKind::MemoryControl,
+        )
+    }
+
+    fn list_long_term_control_revisions(
+        &self,
+        record_id: &str,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryControlRevision>> {
+        let mut revisions = self.json_list::<LongTermMemoryControlRevision>(
+            LONG_TERM_CONTROL_REVISION_NAMESPACE,
+            usize::MAX,
+        )?;
+        revisions.retain(|revision| revision.record_id == record_id);
+        revisions.sort_by(|left, right| {
+            right
+                .revision
+                .cmp(&left.revision)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+        });
+        revisions.truncate(limit);
+        Ok(revisions)
+    }
+
+    fn put_long_term_control_tombstone(&self, tombstone: &LongTermMemoryTombstone) -> Result<()> {
+        self.json_put_with_event_kind(
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+            &tombstone.record_id,
+            tombstone,
+            MemoryStoreEventKind::MemoryDelete,
+        )
+    }
+
+    fn get_long_term_control_tombstone(
+        &self,
+        record_id: &str,
+    ) -> Result<Option<LongTermMemoryTombstone>> {
+        self.json_get(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, record_id)
+    }
+
+    fn list_long_term_control_tombstones(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryTombstone>> {
+        let mut tombstones = self
+            .json_list::<LongTermMemoryTombstone>(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, limit)?;
+        tombstones.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(tombstones)
+    }
+
+    fn put_long_term_governance_policy(
+        &self,
+        policy: &MemoryLongTermGovernancePolicy,
+    ) -> Result<()> {
+        self.json_put_with_event_kind(
+            LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+            &policy.policy_id,
+            policy,
+            MemoryStoreEventKind::MemoryPolicy,
+        )
+    }
+
+    fn delete_long_term_governance_policy(&self, policy_id: &str) -> Result<bool> {
+        self.json_delete_with_event_kind(
+            LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+            policy_id,
+            MemoryStoreEventKind::MemoryPolicy,
+        )
+    }
+
+    fn list_long_term_governance_policies(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MemoryLongTermGovernancePolicy>> {
+        let mut policies = self.json_list::<MemoryLongTermGovernancePolicy>(
+            LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+            limit,
+        )?;
+        policies.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(policies)
+    }
+
+    fn put_long_term_control_audit(&self, event: &LongTermMemoryControlAuditEvent) -> Result<()> {
+        self.json_put_with_event_kind(
+            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+            &event.event_id,
+            event,
+            MemoryStoreEventKind::MemoryControl,
+        )
+    }
+
+    fn list_long_term_control_audit(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryControlAuditEvent>> {
+        let mut events = self.json_list::<LongTermMemoryControlAuditEvent>(
+            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+            limit,
+        )?;
+        events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(events)
     }
 }
 

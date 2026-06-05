@@ -67,6 +67,14 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
     .expect("recall");
     assert_eq!(recall.status_code, 200);
     assert!(recall.body.contains("\"status\""));
+
+    let long_term = handle_http_request(
+        &runtime,
+        HttpRuntimeRequest::post_json("/memory/long-term/list", r#"{"query":{},"limit":2}"#),
+    )
+    .expect("long-term list");
+    assert_eq!(long_term.status_code, 200);
+    assert!(long_term.body.contains("\"total_visible\""));
 }
 
 #[test]

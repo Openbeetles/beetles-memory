@@ -192,7 +192,46 @@ section chars、source/render budget、scope 和 private gate decision。宿主�
 hygiene / factual evidence metadata compaction / runtime skill governance，并在 report 中声明
 `host_direct_deletion_allowed=false`；宿主不能因配额压力删除已接受记忆。
 
-## 9. 宿主回合生命周期
+## 9. 管理已接受长期记忆
+
+用户后续要求查看、纠正、删除、遗忘或限制长期记忆时，宿主应调用长期记忆控制面。宿主可以负责自然语言理解和 UI 展示，但不能在自己的本地 DB 里维护一套 shadow memory。
+
+```rust
+use bm_sdk::{
+    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermTarget, LongTermMemoryQuery,
+    RuntimeLifecycleModeInput,
+};
+
+let page = runtime.list_long_term_memory(MemoryLongTermListRequest {
+    query: LongTermMemoryQuery {
+        topic: Some("preferred_editor".to_string()),
+        limit: 8,
+        ..LongTermMemoryQuery::default()
+    },
+    cursor: None,
+    limit: 8,
+    view: MemoryLongTermControlView::HostUi,
+})?;
+
+if let Some(record) = page.records.first() {
+    let report = runtime.mutate_long_term_memory(MemoryLongTermMutationRequest {
+        operation: MemoryLongTermMutation::Delete {
+            target: MemoryLongTermTarget::RecordId(record.record.id.clone()),
+        },
+        reason: "user requested deletion".to_string(),
+        dry_run: false,
+        mode_input: RuntimeLifecycleModeInput::default(),
+    })?;
+    assert!(report.accepted);
+}
+```
+
+`forget_by_query` 这类批量遗忘必须先 dry-run preview，再带 confirmation token 执行。`MemoryLongTermPolicyRequest` 用于“以后不要记这类事情”或暂停某个 scope 的未来长期记忆更新；policy 不 retroactively 删除已接受记录。
+
+Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它会报告受影响的 `DerivedMemoryRef`，但撤销对应长期记忆仍然要走 `mutate_long_term_memory`。运行时 Skill 的 edit/delete 只管理 procedural memory 中的 runtime skill，不是普通长期记忆管理面。
+
+## 10. 宿主回合生命周期
 
 完整 SDK 宿主回合只走一条 public path：
 
@@ -206,7 +245,7 @@ hygiene / factual evidence metadata compaction / runtime skill governance，并�
 
 `fixtures/sdk-host-readiness/` 里的 generic host fixture 与 Beetle-derived fixture 走同一条路径。Beetle-derived 数据只是 legacy-shaped evidence，不是 SDK 特殊分支。
 
-## 10. 迁移 dry-run、Import、Replay
+## 11. 迁移 dry-run、Import、Replay
 
 ```rust
 use bm_sdk::{
