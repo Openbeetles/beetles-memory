@@ -20,7 +20,22 @@ fn inbound_messages_map_to_adapter_commands() {
     assert!(operations.contains(&AdapterOperation::LongTermDetail));
     assert!(operations.contains(&AdapterOperation::LongTermMutate));
     assert!(operations.contains(&AdapterOperation::LongTermPolicy));
+    assert!(operations.contains(&AdapterOperation::TranscriptAttrWrite));
     assert!(operations.contains(&AdapterOperation::Capabilities));
+}
+
+#[test]
+fn transcript_attr_wss_message_is_declared_as_thin_adapter_operation() {
+    let message = message_specs()
+        .iter()
+        .find(|message| message.name == "command.transcript.attrs")
+        .expect("transcript attr WSS message");
+
+    assert_eq!(
+        message.inbound_operation,
+        Some(AdapterOperation::TranscriptAttrWrite)
+    );
+    assert!(!message.private_raw_allowed);
 }
 
 #[test]

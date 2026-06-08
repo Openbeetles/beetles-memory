@@ -101,6 +101,7 @@ bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_memory_benchmark_wall.sh
 bash scripts/check_long_term_memory_control_surface.sh
+bash scripts/check_conversation_transcript_attr_plane.sh
 
 for needle in \
   "Agent Tool Registry" \

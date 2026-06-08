@@ -7,12 +7,19 @@ use bm_adapter::{
     AdapterSdkReport, AdapterSource, TransportKind, TransportMode,
 };
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
+    CanonicalTurnDelta, ConversationKey, ConversationScope, HostRefVisibility, LlmClient,
+    LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
     MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest, MemoryPrivacyPolicy,
-    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest, Message,
-    NoopMemoryAuditSink, ProfileId, ResponseBody, StopReason, StoreBackendConfig, StorePlatform,
-    ToolChoicePolicy, ToolSpec,
+    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryTranscriptAttrWriteRequest,
+    MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
+    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, Message, NoopMemoryAuditSink,
+    ProfileId, ResponseBody, StopReason, StoreBackendConfig, StorePlatform, ToolChoicePolicy,
+    ToolSpec, TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
+    TranscriptInputMessage, TranscriptReplayView,
 };
+use serde_json::json;
 
 struct FixedClock;
 
@@ -150,6 +157,132 @@ fn long_term_list_command_dispatches_through_memory_runtime() {
     }
 }
 
+fn transcript_attr(
+    key: ConversationKey,
+    turn_id: impl Into<String>,
+    message_id: impl Into<String>,
+) -> TranscriptAttrEnvelope {
+    TranscriptAttrEnvelope {
+        attr_id: "adapter-usage-1".to_string(),
+        target: TranscriptAttrTarget {
+            key,
+            scope: TranscriptAttrScope::Message,
+            turn_id: turn_id.into(),
+            message_id: Some(message_id.into()),
+        },
+        key: "host.adapter.model_usage".to_string(),
+        value_kind: TranscriptAttrValueKind::JsonObject,
+        schema_ref: Some("adapter.model-usage.v1".to_string()),
+        value: json!({"input_tokens": 9, "output_tokens": 3, "usage_source": "provider_reported"}),
+        visibility: HostRefVisibility::HostUi,
+        source: TranscriptAttrSource {
+            writer: "adapter-test".to_string(),
+            source_kind: TranscriptAttrSourceKind::ProviderReported,
+            written_at: 1_800_000_000,
+            audit_reason: "adapter transcript attr contract".to_string(),
+        },
+        governance: TranscriptAttrGovernance {
+            max_value_bytes: 4096,
+            redaction_policy: TranscriptAttrRedactionPolicy::MetadataSurvivesMask,
+            export_allowed: false,
+        },
+        links: vec![TranscriptAttrLink {
+            relation: "model_invocation".to_string(),
+            ref_kind: "model_invocation_id".to_string(),
+            ref_id: "adapter-model-1".to_string(),
+        }],
+        created_at: 1_800_000_000,
+        updated_at: 1_800_000_000,
+    }
+}
+
+fn transcript_turn() -> CanonicalTurnDelta {
+    CanonicalTurnDelta {
+        turn_id: "turn-adapter-1".to_string(),
+        conversation: ConversationScope {
+            channel: "local".to_string(),
+            chat_id: "chat-1".to_string(),
+            conversation_id: Some("conversation-a".to_string()),
+        },
+        subject: bm_sdk::default_agent_subject_id("agent-main"),
+        delivery_status: MemoryTurnDeliveryStatus::Delivered,
+        source: MemoryTurnSource {
+            ingress: bm_sdk::IngressKind::User,
+            channel: "local".to_string(),
+            provider: Some("adapter".to_string()),
+            protocol: MemoryTurnProtocol::Native,
+            endpoint: None,
+            model_alias: None,
+            model_resolved: None,
+            request_id: Some("adapter-req-1".to_string()),
+            client_conversation_hint: Some("conversation-a".to_string()),
+        },
+        actor: None,
+        input_messages: vec![TranscriptInputMessage::user("adapter user")],
+        assistant_message: Some(TranscriptInputMessage::assistant("adapter assistant")),
+        tool_observations: Vec::new(),
+        external_content_used: false,
+        candidate_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn transcript_attr_write_command_dispatches_through_memory_runtime() {
+    let runtime = runtime();
+    let key = ConversationKey::new(runtime.memory_space_id(), "local", "conversation-a").unwrap();
+    runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: transcript_turn(),
+            host_refs: Vec::new(),
+        })
+        .expect("commit transcript");
+    let replay = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: key.memory_space_id.clone(),
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::RawOwnerOnly,
+        })
+        .expect("replay transcript");
+    let turn = &replay.slice.turns[0];
+    let message_id = turn
+        .assistant_message
+        .as_ref()
+        .expect("assistant message")
+        .message_id
+        .clone();
+
+    let attr = transcript_attr(key.clone(), turn.turn_id.clone(), message_id);
+    let response = dispatch_adapter_command(
+        &runtime,
+        envelope(
+            AdapterOperation::TranscriptAttrWrite,
+            AdapterCommand::TranscriptAttrWrite(MemoryTranscriptAttrWriteRequest {
+                memory_space_id: key.memory_space_id,
+                channel_id: key.channel_id,
+                conversation_id: key.conversation_id,
+                attrs: vec![attr],
+                idempotency_key: Some("adapter-attr-write-1".to_string()),
+                dry_run: false,
+            }),
+        ),
+    )
+    .expect("dispatch");
+
+    match response {
+        AdapterResponse::Accepted {
+            report: AdapterSdkReport::TranscriptAttrWrite(report),
+            ..
+        } => {
+            assert_eq!(report.accepted_attrs.len(), 1);
+            assert!(report.rejected_attrs.is_empty());
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
 #[test]
 fn json_decoder_covers_adapter_memory_operations() {
     let options =
@@ -189,6 +322,17 @@ fn json_decoder_covers_adapter_memory_operations() {
         (
             AdapterOperation::LongTermPolicy,
             r#"{"operation":{"suppress":{"selector":{"kind":"preference","topic_pattern":"temporary-*"},"duration":"until_manual_resume"}},"reason":"operator suppression"}"#,
+        ),
+        (
+            AdapterOperation::TranscriptAttrWrite,
+            r#"{
+                "memory_space_id":"memory-space-owner-default",
+                "channel_id":"local",
+                "conversation_id":"conversation-a",
+                "attrs":[],
+                "idempotency_key":"attr-write-1",
+                "dry_run":true
+            }"#,
         ),
         (AdapterOperation::Close, r#"{"reason":"operator close"}"#),
     ];

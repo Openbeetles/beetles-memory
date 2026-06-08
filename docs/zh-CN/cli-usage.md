@@ -36,6 +36,7 @@ Commands：
 | `long-term-detail` | 通过 `--record-id` 查看一条长期记忆详情。 |
 | `long-term-delete` | 通过 `--record-id` 删除一条长期记忆并产生 tombstone/audit report。 |
 | `long-term-policy-suppress` | 用 `--topic <pattern>` 添加“以后不要记这类偏好”的 suppression policy。 |
+| `transcript-attr-write` | 从 JSON request 文件写入受治理的 transcript turn/message attrs；必须显式传 `--reason`。 |
 | `skill-list` | 列出运行时 Skill 记忆。 |
 | `skill-show` | 查看单条运行时 Skill 记忆详情。 |
 | `skill-edit` | 编辑已有运行时 Skill 记忆。 |
@@ -99,6 +100,21 @@ cargo run -p bm-cli --bin bm -- \
   --topic temporary-* \
   --reason "user does not want temporary preferences remembered"
 ```
+
+## Transcript Attr 写入
+
+`transcript-attr-write` 是通往 `MemoryRuntime::record_transcript_attrs` 的薄 CLI 路径。它从 `--input` 读取形如 `MemoryTranscriptAttrWriteRequest` 的 JSON 文件，并要求显式 `--reason`，用于 operator audit 纪律。CLI 不构造、不解释 attr payload，也不直接写 store。响应会包含 `accepted_attrs`、`rejected_attrs`、`redactions_preview`、`profile_budget_applied` 和 `audit_event_id`。
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory transcript-attr-write \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --input /tmp/transcript-attrs.json \
+  --reason "record provider-reported per-message usage"
+```
+
+Attr JSON 必须指向已存在的 transcript turn/message。不要把 raw prompt、provider secret、本地真实文件路径、完整附件、宿主数据库 payload、task、human gate、capability call 或 artifact record 塞进 attrs；owner record 用 links 引用，value 只保留轻量 metadata。
 
 ## 运行时 Skill 记忆管理
 

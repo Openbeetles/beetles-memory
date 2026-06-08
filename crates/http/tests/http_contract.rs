@@ -7,7 +7,7 @@ use bm_http::{
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
     let routes = route_specs();
-    assert_eq!(routes.len(), 14);
+    assert_eq!(routes.len(), 15);
     let capabilities = routes
         .iter()
         .find(|route| route.path == "/memory/profile/capabilities")
@@ -23,6 +23,10 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
         ("/memory/long-term/detail", AdapterOperation::LongTermDetail),
         ("/memory/long-term/mutate", AdapterOperation::LongTermMutate),
         ("/memory/long-term/policy", AdapterOperation::LongTermPolicy),
+        (
+            "/memory/transcript/attrs",
+            AdapterOperation::TranscriptAttrWrite,
+        ),
     ] {
         let route = routes
             .iter()
@@ -69,6 +73,20 @@ fn console_route_catalog_is_separate_from_memory_operations() {
     assert!(routes
         .iter()
         .all(|route| matches!(route.auth, RouteAuth::TokenOrLoopback)));
+}
+
+#[test]
+fn transcript_attr_http_route_is_declared_as_thin_adapter_operation() {
+    let route = route_specs()
+        .iter()
+        .find(|route| route.path == "/memory/transcript/attrs")
+        .expect("transcript attr route");
+
+    assert_eq!(route.method, HttpMethod::Post);
+    assert_eq!(route.operation, AdapterOperation::TranscriptAttrWrite);
+    assert_eq!(route.body, RouteBodyMode::Json);
+    assert!(matches!(route.auth, RouteAuth::TokenOrLoopback));
+    assert!(route.profile_gate_required);
 }
 
 #[test]

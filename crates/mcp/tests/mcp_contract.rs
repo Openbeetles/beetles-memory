@@ -19,6 +19,11 @@ fn tool_schema_maps_to_adapter_commands_not_memory_planes() {
     assert!(tools.iter().any(|tool| {
         tool.name == "memory_long_term_policy" && tool.operation == AdapterOperation::LongTermPolicy
     }));
+    assert!(tools.iter().any(|tool| {
+        tool.name == "memory_transcript_attr_write"
+            && tool.operation == AdapterOperation::TranscriptAttrWrite
+            && tool.schema_fields.contains(&"attrs".to_string())
+    }));
     for tool in tools {
         assert!(!tool.schema_fields.contains(&"plane".to_string()));
         assert!(!tool.schema_fields.contains(&"store_schema".to_string()));
@@ -30,6 +35,19 @@ fn tool_results_forbid_private_raw_material() {
     for tool in tool_specs() {
         assert!(!tool.private_raw_allowed);
     }
+}
+
+#[test]
+fn transcript_attr_mcp_tool_schema_is_declared_as_thin_adapter_operation() {
+    let tool = tool_specs()
+        .into_iter()
+        .find(|tool| tool.name == "memory_transcript_attr_write")
+        .expect("transcript attr MCP tool");
+
+    assert_eq!(tool.operation, AdapterOperation::TranscriptAttrWrite);
+    assert!(tool.schema_fields.contains(&"attrs".to_string()));
+    assert!(tool.schema_fields.contains(&"memory_space_id".to_string()));
+    assert!(!tool.private_raw_allowed);
 }
 
 #[test]

@@ -20,9 +20,11 @@ use bm_sdk::{
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
     MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendKind,
+    MemoryTranscriptAttrWriteRequest, MemoryWriteRequest, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendKind,
+    TranscriptAttrEnvelope,
 };
+use serde::Deserialize;
 use serde_json::json;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +94,11 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         name: "long-term-policy-suppress",
         usage: "bm memory long-term-policy-suppress --topic <pattern> --reason <reason>",
         operation: AdapterOperation::LongTermPolicy,
+    },
+    CommandSpec {
+        name: "transcript-attr-write",
+        usage: "bm memory transcript-attr-write --input <request.json> --reason <reason>",
+        operation: AdapterOperation::TranscriptAttrWrite,
     },
     CommandSpec {
         name: "skill-list",
@@ -440,6 +447,19 @@ struct CliOptions {
     reason_provided: bool,
 }
 
+#[derive(Deserialize)]
+struct CliTranscriptAttrWritePayload {
+    memory_space_id: String,
+    channel_id: String,
+    conversation_id: String,
+    #[serde(default)]
+    attrs: Vec<TranscriptAttrEnvelope>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
 impl CliOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut profile = ProfileId::ServerLinuxDevFull;
@@ -643,6 +663,26 @@ impl CliOptions {
                     mode_input: RuntimeLifecycleModeInput::default(),
                 },
             )),
+            "transcript-attr-write" => {
+                self.required_reason()?;
+                let path = self.input_path.as_ref().ok_or_else(|| {
+                    "transcript-attr-write requires --input <request.json>".to_string()
+                })?;
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|err| format!("failed to read transcript attr request: {err}"))?;
+                let payload: CliTranscriptAttrWritePayload = serde_json::from_str(&raw)
+                    .map_err(|err| format!("failed to parse transcript attr request: {err}"))?;
+                Ok(AdapterCommand::TranscriptAttrWrite(
+                    MemoryTranscriptAttrWriteRequest {
+                        memory_space_id: payload.memory_space_id,
+                        channel_id: payload.channel_id,
+                        conversation_id: payload.conversation_id,
+                        attrs: payload.attrs,
+                        idempotency_key: payload.idempotency_key,
+                        dry_run: payload.dry_run.unwrap_or(false),
+                    },
+                ))
+            }
             "recall" => Ok(AdapterCommand::Recall(MemoryRecallRequest {
                 query: self.query.clone(),
                 limit: self.limit,
@@ -852,6 +892,19 @@ fn render_sdk_report(
             "policy_id": report.policy_id,
             "affected_future_writes": report.affected_future_writes,
             "policy_decision": report.policy_decision,
+            "lifecycle": report.lifecycle_report.result_summary,
+        }),
+        AdapterSdkReport::TranscriptAttrWrite(report) => json!({
+            "status": "accepted",
+            "memory_space_id": report.key.memory_space_id,
+            "channel_id": report.key.channel_id,
+            "conversation_id": report.key.conversation_id,
+            "accepted_attrs": report.accepted_attrs,
+            "rejected_attrs": report.rejected_attrs,
+            "redactions_preview": report.redactions_preview,
+            "profile_budget_applied": report.profile_budget_applied,
+            "audit_event_id": report.audit_event_id,
+            "dry_run": report.dry_run,
             "lifecycle": report.lifecycle_report.result_summary,
         }),
         AdapterSdkReport::Capabilities(catalog) => {

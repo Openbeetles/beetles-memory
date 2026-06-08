@@ -36,6 +36,12 @@ These entry points return affected records, tombstones, transcript refs, project
 
 `forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. `mutate_memory_governance_policy` handles pause/resume/suppress rules for future long-term memory writes; policies do not automatically delete already accepted memory. `DerivedMemoryRef` entries in transcript lifecycle reports are impact lists only; revoking derived long-term memory still calls `mutate_long_term_memory`.
 
+## Transcript Attr Inspection
+
+Transcript attrs are inspected through `MemoryRuntime::replay_transcript`, `MemoryRuntime::export_transcript`, and `MemoryRuntime::repair_transcript`. Operators can use them for per-message model usage, latency/status, attachment summary, and provenance labels, but they are transcript metadata only. They are not a task editor, artifact registry, human-gate queue, capability-call ledger, file workspace, or Memory governance command log.
+
+`MemoryRuntime::record_transcript_attrs` validates that the target turn/message exists before writing. Dry-run reports accepted and rejected attrs plus `redactions_preview` without persisting. Repair reports attr target/key/value corruption as fail-closed issues. `DeleteRaw` hides attrs by default, and `OperatorAuditOnlyAfterMask` returns only redacted audit metadata after raw deletion. Operator surfaces must not bypass the SDK to read `conversation_transcript_attr` directly or merge business SQLite records into replay results.
+
 ## Runtime Skill And Standard Agent Skill
 
 Standalone consoles and CLI operators manage runtime Skill Memory only: procedural memory records learned during runtime. They are not executors, marketplaces, workflow runners, or managers for standard Agent Skill directories.

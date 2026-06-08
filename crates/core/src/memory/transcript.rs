@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::{Error, Result};
 
@@ -297,9 +298,228 @@ pub enum TranscriptRedactionReason {
     PrivateAuthority,
     HostRefVisibility,
     HostRefLabel,
+    AttrVisibility,
+    AttrValueBudget,
+    AttrLifecyclePolicy,
     ProfileBudget,
     OperatorOnly,
     ModelContextPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptAttrScope {
+    Turn,
+    Message,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptAttrValueKind {
+    JsonObject,
+    JsonArray,
+    String,
+    Number,
+    Boolean,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptAttrSourceKind {
+    HostReported,
+    ProviderReported,
+    GatewayCounted,
+    HostEstimated,
+    MemoryComputed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptAttrRedactionPolicy {
+    FollowTranscript,
+    MetadataSurvivesMask,
+    OperatorAuditOnlyAfterMask,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAttrTarget {
+    pub key: ConversationKey,
+    pub scope: TranscriptAttrScope,
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAttrSource {
+    pub writer: String,
+    pub source_kind: TranscriptAttrSourceKind,
+    pub written_at: u64,
+    pub audit_reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAttrGovernance {
+    pub max_value_bytes: u32,
+    pub redaction_policy: TranscriptAttrRedactionPolicy,
+    pub export_allowed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAttrLink {
+    pub relation: String,
+    pub ref_kind: String,
+    pub ref_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptAttrEnvelope {
+    pub attr_id: String,
+    pub target: TranscriptAttrTarget,
+    pub key: String,
+    pub value_kind: TranscriptAttrValueKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_ref: Option<String>,
+    pub value: Value,
+    pub visibility: HostRefVisibility,
+    pub source: TranscriptAttrSource,
+    pub governance: TranscriptAttrGovernance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<TranscriptAttrLink>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl Eq for TranscriptAttrEnvelope {}
+
+impl TranscriptAttrEnvelope {
+    pub fn validate(&self) -> Result<()> {
+        if self.attr_id.trim().is_empty() {
+            return Err(Error::config(
+                "transcript_attr",
+                "attr_id must not be empty",
+            ));
+        }
+        validate_transcript_attr_key(&self.key)?;
+        if self.target.turn_id.trim().is_empty() {
+            return Err(Error::config(
+                "transcript_attr",
+                "target turn_id must not be empty",
+            ));
+        }
+        match self.target.scope {
+            TranscriptAttrScope::Turn => {
+                if self.target.message_id.is_some() {
+                    return Err(Error::config(
+                        "transcript_attr",
+                        "turn scoped attr must not include message_id",
+                    ));
+                }
+            }
+            TranscriptAttrScope::Message => {
+                if self
+                    .target
+                    .message_id
+                    .as_deref()
+                    .is_none_or(|message_id| message_id.trim().is_empty())
+                {
+                    return Err(Error::config(
+                        "transcript_attr",
+                        "message scoped attr requires message_id",
+                    ));
+                }
+            }
+        }
+        validate_transcript_attr_value_kind(self.value_kind, &self.value)?;
+        if self.source.writer.trim().is_empty() {
+            return Err(Error::config(
+                "transcript_attr",
+                "source writer must not be empty",
+            ));
+        }
+        if self.source.audit_reason.trim().is_empty() {
+            return Err(Error::config(
+                "transcript_attr",
+                "source audit_reason must not be empty",
+            ));
+        }
+        if self.governance.max_value_bytes == 0 {
+            return Err(Error::config(
+                "transcript_attr",
+                "max_value_bytes must be greater than zero",
+            ));
+        }
+        let value_bytes = serde_json::to_vec(&self.value)
+            .map_err(|err| Error::config("transcript_attr", err.to_string()))?
+            .len();
+        if value_bytes > self.governance.max_value_bytes as usize {
+            return Err(Error::config(
+                "transcript_attr",
+                "value exceeds max_value_bytes",
+            ));
+        }
+        if self.updated_at < self.created_at {
+            return Err(Error::config(
+                "transcript_attr",
+                "updated_at must be greater than or equal to created_at",
+            ));
+        }
+        for link in &self.links {
+            if link.relation.trim().is_empty()
+                || link.ref_kind.trim().is_empty()
+                || link.ref_id.trim().is_empty()
+            {
+                return Err(Error::config(
+                    "transcript_attr",
+                    "attr links must include relation, ref_kind, and ref_id",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_record(&self, record: &TranscriptTurnRecord) -> Result<()> {
+        self.validate()?;
+        if self.target.key != record.key {
+            return Err(Error::config(
+                "transcript_attr",
+                "attr target key does not match transcript turn key",
+            ));
+        }
+        if self.target.turn_id != record.turn_id {
+            return Err(Error::config(
+                "transcript_attr",
+                "attr target turn_id does not match transcript turn",
+            ));
+        }
+        if let TranscriptAttrScope::Message = self.target.scope {
+            let message_id = self.target.message_id.as_deref().unwrap_or_default();
+            if !record_has_message(record, message_id) {
+                return Err(Error::config(
+                    "transcript_attr",
+                    "attr target message_id does not exist in transcript turn",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAttrWriteRejection {
+    pub attr_id: String,
+    pub attr_key: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAttrWriteReport {
+    pub key: ConversationKey,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_attrs: Vec<TranscriptAttrEnvelope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_attrs: Vec<TranscriptAttrWriteRejection>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -743,6 +963,10 @@ pub struct TranscriptRedactionReportItem {
     pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_ref_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attr_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attr_key: Option<String>,
     pub reason: TranscriptRedactionReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_authority: Option<MemoryEvidenceAuthority>,
@@ -755,6 +979,8 @@ pub struct RedactedTranscriptMessage {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attrs: Vec<TranscriptAttrEnvelope>,
     pub authority: MemoryEvidenceAuthority,
     pub actor: ActorAttribution,
     pub observed_at: u64,
@@ -768,6 +994,8 @@ pub struct RedactedTranscriptTurn {
     pub subject: SubjectId,
     pub actor: ActorAttribution,
     pub delivery_status: MemoryTurnDeliveryStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attrs: Vec<TranscriptAttrEnvelope>,
     pub input_messages: Vec<RedactedTranscriptMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_message: Option<RedactedTranscriptMessage>,
@@ -845,8 +1073,15 @@ impl TranscriptTurnPage {
 pub enum TranscriptRepairIssueKind {
     MissingSourceTurn,
     MissingSourceMessage,
+    MissingAttrTargetTurn,
+    MissingAttrTargetMessage,
     OrphanDerivedRef,
     MismatchedSourceKey,
+    MismatchedAttrSourceKey,
+    OversizedAttrValue,
+    InvalidAttrKey,
+    InvalidAttrVisibility,
+    CorruptTranscriptAttrRecord,
     DuplicateTurnCursor,
     CorruptRecord,
 }
@@ -867,6 +1102,7 @@ pub struct TranscriptRepairReport {
     pub key: ConversationKey,
     pub checked_turns: usize,
     pub checked_derived_refs: usize,
+    pub checked_attrs: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<TranscriptRepairIssue>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -880,30 +1116,57 @@ impl RedactedTranscriptSlice {
         view: TranscriptReplayView,
         records: &[TranscriptTurnRecord],
     ) -> Self {
+        Self::from_records_with_attrs(key, view, records, &[])
+    }
+
+    pub fn from_records_with_attrs(
+        key: ConversationKey,
+        view: TranscriptReplayView,
+        records: &[TranscriptTurnRecord],
+        attrs: &[TranscriptAttrEnvelope],
+    ) -> Self {
         let mut redacted_messages = 0usize;
         let mut redacted_host_refs = 0usize;
         let mut redactions = Vec::new();
         let turns = records
             .iter()
             .map(|record| {
+                let attrs_for_turn =
+                    filter_attrs_for_target(record, None, attrs, view, &mut redactions);
                 let input_messages = record
                     .input_messages
                     .iter()
                     .map(|message| {
+                        let attrs_for_message = filter_attrs_for_target(
+                            record,
+                            Some(&message.message_id),
+                            attrs,
+                            view,
+                            &mut redactions,
+                        );
                         redact_message_for_view(
                             record,
                             message,
                             view,
+                            attrs_for_message,
                             &mut redacted_messages,
                             &mut redactions,
                         )
                     })
                     .collect();
                 let assistant_message = record.assistant_message.as_ref().map(|message| {
+                    let attrs_for_message = filter_attrs_for_target(
+                        record,
+                        Some(&message.message_id),
+                        attrs,
+                        view,
+                        &mut redactions,
+                    );
                     redact_message_for_view(
                         record,
                         message,
                         view,
+                        attrs_for_message,
                         &mut redacted_messages,
                         &mut redactions,
                     )
@@ -920,6 +1183,7 @@ impl RedactedTranscriptSlice {
                     subject: record.subject.clone(),
                     actor: record.actor.clone(),
                     delivery_status: record.delivery_status,
+                    attrs: attrs_for_turn,
                     input_messages,
                     assistant_message,
                     host_refs,
@@ -970,6 +1234,29 @@ pub trait ConversationTranscriptStore: Send + Sync {
         let records = self.list_turns(key, usize::MAX)?;
         TranscriptTurnPage::from_records(key.clone(), &records, cursor, limit)
     }
+    fn upsert_transcript_attrs(
+        &self,
+        _key: &ConversationKey,
+        _attrs: &[TranscriptAttrEnvelope],
+    ) -> Result<TranscriptAttrWriteReport> {
+        Err(Error::config(
+            "conversation_transcript_attr",
+            "transcript attr persistence is not implemented for this store",
+        ))
+    }
+    fn list_transcript_attrs(
+        &self,
+        _key: &ConversationKey,
+        _turn_id: Option<&str>,
+    ) -> Result<Vec<TranscriptAttrEnvelope>> {
+        Ok(Vec::new())
+    }
+    fn list_transcript_attr_repair_issues(
+        &self,
+        _key: &ConversationKey,
+    ) -> Result<Vec<TranscriptRepairIssue>> {
+        Ok(Vec::new())
+    }
     fn append_derived_memory_ref(
         &self,
         key: &ConversationKey,
@@ -992,10 +1279,12 @@ pub trait ConversationTranscriptStore: Send + Sync {
         view: TranscriptReplayView,
     ) -> Result<RedactedTranscriptSlice> {
         let records = self.list_turns(key, limit)?;
-        Ok(RedactedTranscriptSlice::from_records(
+        let attrs = self.list_transcript_attrs(key, None)?;
+        Ok(RedactedTranscriptSlice::from_records_with_attrs(
             key.clone(),
             view,
             &records,
+            &attrs,
         ))
     }
 
@@ -1007,8 +1296,14 @@ pub trait ConversationTranscriptStore: Send + Sync {
         view: TranscriptReplayView,
     ) -> Result<(RedactedTranscriptSlice, Option<String>, bool)> {
         let page = self.list_turns_page(key, cursor, limit)?;
+        let attrs = self.list_transcript_attrs(key, None)?;
         Ok((
-            RedactedTranscriptSlice::from_records(key.clone(), view, &page.turns),
+            RedactedTranscriptSlice::from_records_with_attrs(
+                key.clone(),
+                view,
+                &page.turns,
+                &attrs,
+            ),
             page.next_cursor,
             page.has_more,
         ))
@@ -1019,7 +1314,8 @@ pub trait ConversationTranscriptStore: Send + Sync {
         let mut turn_message_ids = HashMap::<String, HashSet<String>>::new();
         let mut turn_ids = HashSet::<String>::new();
         let mut turn_sequences = HashMap::<u64, String>::new();
-        let mut issues = Vec::new();
+        let mut issues = self.list_transcript_attr_repair_issues(key)?;
+        let corrupt_attr_count = issues.len();
         for turn in &turns {
             if turn.turn_id.trim().is_empty() {
                 issues.push(TranscriptRepairIssue {
@@ -1075,6 +1371,50 @@ pub trait ConversationTranscriptStore: Send + Sync {
             }
             turn_message_ids.insert(turn.turn_id.clone(), message_ids);
         }
+        let attrs = self.list_transcript_attrs(key, None)?;
+        for attr in &attrs {
+            if attr.target.key != *key {
+                issues.push(TranscriptRepairIssue {
+                    kind: TranscriptRepairIssueKind::MismatchedAttrSourceKey,
+                    turn_id: attr.target.turn_id.clone(),
+                    message_id: attr.target.message_id.clone(),
+                    derived_ref: None,
+                    reason: "transcript_attr_target_key_mismatch".to_string(),
+                });
+                continue;
+            }
+            if let Err(error) = attr.validate() {
+                issues.push(TranscriptRepairIssue {
+                    kind: transcript_attr_validation_issue_kind(error.to_string().as_str()),
+                    turn_id: attr.target.turn_id.clone(),
+                    message_id: attr.target.message_id.clone(),
+                    derived_ref: None,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+            let Some(message_ids) = turn_message_ids.get(&attr.target.turn_id) else {
+                issues.push(TranscriptRepairIssue {
+                    kind: TranscriptRepairIssueKind::MissingAttrTargetTurn,
+                    turn_id: attr.target.turn_id.clone(),
+                    message_id: attr.target.message_id.clone(),
+                    derived_ref: None,
+                    reason: "transcript_attr_target_turn_missing".to_string(),
+                });
+                continue;
+            };
+            if let Some(message_id) = attr.target.message_id.as_deref() {
+                if !message_ids.contains(message_id) {
+                    issues.push(TranscriptRepairIssue {
+                        kind: TranscriptRepairIssueKind::MissingAttrTargetMessage,
+                        turn_id: attr.target.turn_id.clone(),
+                        message_id: Some(message_id.to_string()),
+                        derived_ref: None,
+                        reason: "transcript_attr_target_message_missing".to_string(),
+                    });
+                }
+            }
+        }
         let derived_refs = self.list_derived_memory_refs(key, None)?;
         for derived in &derived_refs {
             if derived.store_key.trim().is_empty() {
@@ -1125,6 +1465,7 @@ pub trait ConversationTranscriptStore: Send + Sync {
             key: key.clone(),
             checked_turns: turns.len(),
             checked_derived_refs: derived_refs.len(),
+            checked_attrs: attrs.len().saturating_add(corrupt_attr_count),
             profile_budget_applied: false,
             fail_closed: !issues.is_empty(),
             issues,
@@ -1140,6 +1481,88 @@ fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
 
+fn validate_transcript_attr_key(key: &str) -> Result<()> {
+    let trimmed = key.trim();
+    if trimmed != key || trimmed.is_empty() {
+        return Err(Error::config(
+            "transcript_attr",
+            "attr key must not be empty or padded",
+        ));
+    }
+    let mut parts = trimmed.split('.');
+    let Some(owner) = parts.next() else {
+        return Err(Error::config(
+            "transcript_attr",
+            "attr key must be namespaced",
+        ));
+    };
+    if owner != "host" && owner != "memory" {
+        return Err(Error::config(
+            "transcript_attr",
+            "attr key must start with host. or memory.",
+        ));
+    }
+    let remaining = parts.collect::<Vec<_>>();
+    if remaining.len() < 2 || remaining.iter().any(|part| part.is_empty()) {
+        return Err(Error::config(
+            "transcript_attr",
+            "attr key must include namespace and name",
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err(Error::config(
+            "transcript_attr",
+            "attr key contains unsupported characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transcript_attr_value_kind(kind: TranscriptAttrValueKind, value: &Value) -> Result<()> {
+    let matches_kind = matches!(
+        (kind, value),
+        (TranscriptAttrValueKind::JsonObject, Value::Object(_))
+            | (TranscriptAttrValueKind::JsonArray, Value::Array(_))
+            | (TranscriptAttrValueKind::String, Value::String(_))
+            | (TranscriptAttrValueKind::Number, Value::Number(_))
+            | (TranscriptAttrValueKind::Boolean, Value::Bool(_))
+    );
+    if matches_kind {
+        Ok(())
+    } else {
+        Err(Error::config(
+            "transcript_attr",
+            "attr value_kind does not match value",
+        ))
+    }
+}
+
+fn record_has_message(record: &TranscriptTurnRecord, message_id: &str) -> bool {
+    record
+        .input_messages
+        .iter()
+        .any(|message| message.message_id == message_id)
+        || record
+            .assistant_message
+            .as_ref()
+            .is_some_and(|message| message.message_id == message_id)
+}
+
+fn transcript_attr_validation_issue_kind(reason: &str) -> TranscriptRepairIssueKind {
+    if reason.contains("max_value_bytes") || reason.contains("value exceeds") {
+        TranscriptRepairIssueKind::OversizedAttrValue
+    } else if reason.contains("attr key") {
+        TranscriptRepairIssueKind::InvalidAttrKey
+    } else if reason.contains("visibility") {
+        TranscriptRepairIssueKind::InvalidAttrVisibility
+    } else {
+        TranscriptRepairIssueKind::CorruptTranscriptAttrRecord
+    }
+}
+
 fn transcript_turn_cursor(record: &TranscriptTurnRecord) -> String {
     format!("{}:{}", record.sequence, record.turn_id)
 }
@@ -1148,6 +1571,7 @@ fn redact_message_for_view(
     record: &TranscriptTurnRecord,
     message: &TranscriptMessageRecord,
     view: TranscriptReplayView,
+    attrs: Vec<TranscriptAttrEnvelope>,
     redacted_messages: &mut usize,
     redactions: &mut Vec<TranscriptRedactionReportItem>,
 ) -> RedactedTranscriptMessage {
@@ -1158,6 +1582,8 @@ fn redact_message_for_view(
             turn_id: record.turn_id.clone(),
             message_id: Some(message.message_id.clone()),
             host_ref_index: None,
+            attr_id: None,
+            attr_key: None,
             reason,
             source_authority: Some(message.authority),
             view,
@@ -1171,10 +1597,167 @@ fn redact_message_for_view(
         } else {
             Some(message.content.clone())
         },
+        attrs,
         authority: message.authority,
         actor: message.actor.clone(),
         observed_at: message.observed_at,
         redacted: redaction_reason.is_some(),
+    }
+}
+
+fn filter_attrs_for_target(
+    record: &TranscriptTurnRecord,
+    message_id: Option<&str>,
+    attrs: &[TranscriptAttrEnvelope],
+    view: TranscriptReplayView,
+    redactions: &mut Vec<TranscriptRedactionReportItem>,
+) -> Vec<TranscriptAttrEnvelope> {
+    let mut visible = Vec::new();
+    for attr in attrs {
+        if attr.target.key != record.key || attr.target.turn_id != record.turn_id {
+            continue;
+        }
+        let target_matches = match (attr.target.scope, message_id) {
+            (TranscriptAttrScope::Turn, None) => attr.target.message_id.is_none(),
+            (TranscriptAttrScope::Message, Some(message_id)) => {
+                attr.target.message_id.as_deref() == Some(message_id)
+            }
+            _ => false,
+        };
+        if !target_matches {
+            continue;
+        }
+        if attr.validate_for_record(record).is_err() {
+            redactions.push(TranscriptRedactionReportItem {
+                turn_id: record.turn_id.clone(),
+                message_id: message_id.map(str::to_string),
+                host_ref_index: None,
+                attr_id: Some(attr.attr_id.clone()),
+                attr_key: Some(attr.key.clone()),
+                reason: TranscriptRedactionReason::AttrVisibility,
+                source_authority: None,
+                view,
+            });
+            continue;
+        }
+        if let Some(reason) = transcript_attr_redaction_reason(record, attr, view) {
+            redactions.push(TranscriptRedactionReportItem {
+                turn_id: record.turn_id.clone(),
+                message_id: message_id.map(str::to_string),
+                host_ref_index: None,
+                attr_id: Some(attr.attr_id.clone()),
+                attr_key: Some(attr.key.clone()),
+                reason,
+                source_authority: None,
+                view,
+            });
+            continue;
+        }
+        visible.push(transcript_attr_for_lifecycle(record, attr, view));
+    }
+    visible
+}
+
+fn transcript_attr_for_lifecycle(
+    record: &TranscriptTurnRecord,
+    attr: &TranscriptAttrEnvelope,
+    view: TranscriptReplayView,
+) -> TranscriptAttrEnvelope {
+    let lifecycle_redacted = matches!(
+        record.redaction_state,
+        TranscriptRedactionState::RawDeleted | TranscriptRedactionState::Masked
+    ) || matches!(
+        record.lifecycle_state,
+        TranscriptLifecycleState::RawDeleted | TranscriptLifecycleState::Masked
+    );
+    if !lifecycle_redacted
+        || attr.governance.redaction_policy
+            != TranscriptAttrRedactionPolicy::OperatorAuditOnlyAfterMask
+        || (view != TranscriptReplayView::OperatorAudit
+            && view != TranscriptReplayView::RawOwnerOnly)
+    {
+        return attr.clone();
+    }
+
+    let mut redacted = attr.clone();
+    redacted.value_kind = TranscriptAttrValueKind::JsonObject;
+    redacted.schema_ref = Some("memory.transcript.attr.redacted.v1".to_string());
+    redacted.value = serde_json::json!({
+        "redacted": true,
+        "reason": "transcript_lifecycle"
+    });
+    let value_bytes = serde_json::to_vec(&redacted.value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    redacted.governance.max_value_bytes = redacted
+        .governance
+        .max_value_bytes
+        .max(u32::try_from(value_bytes).unwrap_or(u32::MAX));
+    redacted
+}
+
+fn transcript_attr_redaction_reason(
+    record: &TranscriptTurnRecord,
+    attr: &TranscriptAttrEnvelope,
+    view: TranscriptReplayView,
+) -> Option<TranscriptRedactionReason> {
+    if !transcript_attr_visible_in_view(attr, view) {
+        return Some(TranscriptRedactionReason::AttrVisibility);
+    }
+    let raw_deleted = matches!(record.redaction_state, TranscriptRedactionState::RawDeleted)
+        || matches!(record.lifecycle_state, TranscriptLifecycleState::RawDeleted);
+    if raw_deleted {
+        match attr.governance.redaction_policy {
+            TranscriptAttrRedactionPolicy::FollowTranscript
+            | TranscriptAttrRedactionPolicy::MetadataSurvivesMask => {
+                return Some(TranscriptRedactionReason::AttrLifecyclePolicy);
+            }
+            TranscriptAttrRedactionPolicy::OperatorAuditOnlyAfterMask => {
+                if view != TranscriptReplayView::OperatorAudit
+                    && view != TranscriptReplayView::RawOwnerOnly
+                {
+                    return Some(TranscriptRedactionReason::AttrLifecyclePolicy);
+                }
+            }
+        }
+    }
+    if matches!(record.redaction_state, TranscriptRedactionState::Masked)
+        || matches!(record.lifecycle_state, TranscriptLifecycleState::Masked)
+    {
+        match attr.governance.redaction_policy {
+            TranscriptAttrRedactionPolicy::FollowTranscript => {
+                return Some(TranscriptRedactionReason::AttrLifecyclePolicy);
+            }
+            TranscriptAttrRedactionPolicy::MetadataSurvivesMask => {}
+            TranscriptAttrRedactionPolicy::OperatorAuditOnlyAfterMask => {
+                if view != TranscriptReplayView::OperatorAudit
+                    && view != TranscriptReplayView::RawOwnerOnly
+                {
+                    return Some(TranscriptRedactionReason::AttrLifecyclePolicy);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn transcript_attr_visible_in_view(
+    attr: &TranscriptAttrEnvelope,
+    view: TranscriptReplayView,
+) -> bool {
+    match view {
+        TranscriptReplayView::RawOwnerOnly => true,
+        TranscriptReplayView::ModelContext => attr.visibility == HostRefVisibility::ModelContext,
+        TranscriptReplayView::HostUi => attr.visibility == HostRefVisibility::HostUi,
+        TranscriptReplayView::OperatorAudit => matches!(
+            attr.visibility,
+            HostRefVisibility::HostUi
+                | HostRefVisibility::OperatorAudit
+                | HostRefVisibility::Export
+        ),
+        TranscriptReplayView::Export => {
+            attr.visibility == HostRefVisibility::Export && attr.governance.export_allowed
+        }
     }
 }
 
@@ -1223,6 +1806,8 @@ fn filter_host_refs_for_view(
                     turn_id: record.turn_id.clone(),
                     message_id: None,
                     host_ref_index: Some(index),
+                    attr_id: None,
+                    attr_key: None,
                     reason: TranscriptRedactionReason::HostRefLabel,
                     source_authority: None,
                     view,
@@ -1236,6 +1821,8 @@ fn filter_host_refs_for_view(
             turn_id: record.turn_id.clone(),
             message_id: None,
             host_ref_index: Some(index),
+            attr_id: None,
+            attr_key: None,
             reason: TranscriptRedactionReason::HostRefVisibility,
             source_authority: None,
             view,
@@ -1264,6 +1851,8 @@ pub fn filter_host_refs_for_transcript_view(
                     turn_id: turn_id.to_string(),
                     message_id: None,
                     host_ref_index: Some(index),
+                    attr_id: None,
+                    attr_key: None,
                     reason: TranscriptRedactionReason::HostRefLabel,
                     source_authority: None,
                     view,
@@ -1277,6 +1866,8 @@ pub fn filter_host_refs_for_transcript_view(
             turn_id: turn_id.to_string(),
             message_id: None,
             host_ref_index: Some(index),
+            attr_id: None,
+            attr_key: None,
             reason: TranscriptRedactionReason::HostRefVisibility,
             source_authority: None,
             view,

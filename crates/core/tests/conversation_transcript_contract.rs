@@ -2,13 +2,17 @@ use bm_core::memory::{
     ActorAttribution, CanonicalTurnDelta, ConversationKey, ConversationTranscriptStore,
     DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility,
     MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    RedactedTranscriptSlice, ToolObservationDigest, TranscriptCommitReport,
-    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
-    TranscriptLifecycleReport, TranscriptLifecycleRequest, TranscriptLifecycleState,
-    TranscriptRedactionReason, TranscriptRedactionState, TranscriptRepairIssueKind,
-    TranscriptReplayView, TranscriptTurnRecord,
+    RedactedTranscriptSlice, ToolObservationDigest, TranscriptAttrEnvelope,
+    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
+    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
+    TranscriptAttrValueKind, TranscriptCommitReport, TranscriptConversationAlias,
+    TranscriptEvidenceRef, TranscriptInputMessage, TranscriptLifecycleReport,
+    TranscriptLifecycleRequest, TranscriptLifecycleState, TranscriptRedactionReason,
+    TranscriptRedactionState, TranscriptRepairIssueKind, TranscriptReplayView,
+    TranscriptTurnRecord,
 };
 use bm_core::Result;
+use serde_json::json;
 
 fn turn_source() -> MemoryTurnSource {
     MemoryTurnSource {
@@ -63,6 +67,51 @@ fn host_ref(id: &str, visibility: HostRefVisibility) -> HostOpaqueRef {
         relation: HostRefRelation::Related,
         visibility,
         label: Some(format!("opaque {id}")),
+    }
+}
+
+fn message_usage_attr(
+    key: &ConversationKey,
+    turn_id: &str,
+    message_id: &str,
+    visibility: HostRefVisibility,
+) -> TranscriptAttrEnvelope {
+    TranscriptAttrEnvelope {
+        attr_id: format!("attr-{turn_id}-{message_id}"),
+        target: TranscriptAttrTarget {
+            key: key.clone(),
+            scope: TranscriptAttrScope::Message,
+            turn_id: turn_id.to_string(),
+            message_id: Some(message_id.to_string()),
+        },
+        key: "host.beetle_agent.model_usage".to_string(),
+        value_kind: TranscriptAttrValueKind::JsonObject,
+        schema_ref: Some("beetle-agent.model-usage.v1".to_string()),
+        value: json!({
+            "status": "measured",
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "usage_source": "provider_reported"
+        }),
+        visibility,
+        source: TranscriptAttrSource {
+            writer: "beetle-agent".to_string(),
+            source_kind: TranscriptAttrSourceKind::ProviderReported,
+            written_at: 1_800_000_010,
+            audit_reason: "model invocation completed".to_string(),
+        },
+        governance: TranscriptAttrGovernance {
+            max_value_bytes: 4096,
+            redaction_policy: TranscriptAttrRedactionPolicy::MetadataSurvivesMask,
+            export_allowed: false,
+        },
+        links: vec![TranscriptAttrLink {
+            relation: "model_invocation".to_string(),
+            ref_kind: "model_invocation_id".to_string(),
+            ref_id: "model-invocation-1".to_string(),
+        }],
+        created_at: 1_800_000_010,
+        updated_at: 1_800_000_010,
     }
 }
 
@@ -372,6 +421,194 @@ fn host_ref_label_is_redacted_for_non_owner_views() {
         RedactedTranscriptSlice::from_records(key, TranscriptReplayView::Export, &[record]);
     assert_eq!(export.turns[0].host_refs[0].business_ref_id, "export");
     assert!(export.turns[0].host_refs[0].label.is_none());
+}
+
+#[test]
+fn transcript_attrs_are_filtered_per_replay_view_and_attached_to_message() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let record = TranscriptTurnRecord::from_delta(
+        &key,
+        1,
+        &delivered_delta("turn-attr-visibility"),
+        Vec::new(),
+        10,
+    )
+    .unwrap();
+    let assistant_message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    let host_ui_attr = message_usage_attr(
+        &key,
+        "turn-attr-visibility",
+        &assistant_message_id,
+        HostRefVisibility::HostUi,
+    );
+    let model_attr = TranscriptAttrEnvelope {
+        attr_id: "attr-model-context".to_string(),
+        visibility: HostRefVisibility::ModelContext,
+        ..message_usage_attr(
+            &key,
+            "turn-attr-visibility",
+            &assistant_message_id,
+            HostRefVisibility::ModelContext,
+        )
+    };
+
+    let host_ui = RedactedTranscriptSlice::from_records_with_attrs(
+        key.clone(),
+        TranscriptReplayView::HostUi,
+        std::slice::from_ref(&record),
+        &[host_ui_attr.clone(), model_attr.clone()],
+    );
+
+    let assistant = host_ui.turns[0].assistant_message.as_ref().unwrap();
+    assert_eq!(assistant.attrs, vec![host_ui_attr]);
+    assert!(host_ui.redactions.iter().any(|item| {
+        item.reason == TranscriptRedactionReason::AttrVisibility
+            && item.attr_id.as_deref() == Some("attr-model-context")
+    }));
+
+    let model = RedactedTranscriptSlice::from_records_with_attrs(
+        key,
+        TranscriptReplayView::ModelContext,
+        &[record],
+        &[model_attr],
+    );
+    assert_eq!(
+        model.turns[0].assistant_message.as_ref().unwrap().attrs[0].visibility,
+        HostRefVisibility::ModelContext
+    );
+}
+
+#[test]
+fn transcript_attrs_obey_mask_and_delete_raw_lifecycle_policies() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let record = TranscriptTurnRecord::from_delta(
+        &key,
+        1,
+        &delivered_delta("turn-attr-lifecycle"),
+        Vec::new(),
+        10,
+    )
+    .unwrap();
+    let assistant_message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    let metadata_attr = message_usage_attr(
+        &key,
+        "turn-attr-lifecycle",
+        &assistant_message_id,
+        HostRefVisibility::HostUi,
+    );
+
+    let mut masked_record = record.clone();
+    masked_record.lifecycle_state = TranscriptLifecycleState::Masked;
+    masked_record.redaction_state = TranscriptRedactionState::Masked;
+    let masked = RedactedTranscriptSlice::from_records_with_attrs(
+        key.clone(),
+        TranscriptReplayView::HostUi,
+        std::slice::from_ref(&masked_record),
+        std::slice::from_ref(&metadata_attr),
+    );
+    assert_eq!(
+        masked.turns[0].assistant_message.as_ref().unwrap().attrs,
+        vec![metadata_attr.clone()]
+    );
+
+    let mut raw_deleted_record = record.clone();
+    raw_deleted_record.lifecycle_state = TranscriptLifecycleState::RawDeleted;
+    raw_deleted_record.redaction_state = TranscriptRedactionState::RawDeleted;
+    let raw_deleted = RedactedTranscriptSlice::from_records_with_attrs(
+        key.clone(),
+        TranscriptReplayView::HostUi,
+        std::slice::from_ref(&raw_deleted_record),
+        std::slice::from_ref(&metadata_attr),
+    );
+    assert!(raw_deleted.turns[0]
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .attrs
+        .is_empty());
+    assert!(raw_deleted.redactions.iter().any(|item| {
+        item.reason == TranscriptRedactionReason::AttrLifecyclePolicy
+            && item.attr_id.as_deref() == Some(metadata_attr.attr_id.as_str())
+    }));
+
+    let mut audit_attr = message_usage_attr(
+        &key,
+        "turn-attr-lifecycle",
+        &assistant_message_id,
+        HostRefVisibility::OperatorAudit,
+    );
+    audit_attr.attr_id = "attr-operator-audit-only".to_string();
+    audit_attr.governance.redaction_policy =
+        TranscriptAttrRedactionPolicy::OperatorAuditOnlyAfterMask;
+    audit_attr.value = json!({"secret": "provider body must not survive raw delete"});
+    let operator = RedactedTranscriptSlice::from_records_with_attrs(
+        key,
+        TranscriptReplayView::OperatorAudit,
+        std::slice::from_ref(&raw_deleted_record),
+        std::slice::from_ref(&audit_attr),
+    );
+    let visible_attr = &operator.turns[0].assistant_message.as_ref().unwrap().attrs[0];
+    assert_ne!(visible_attr.value, audit_attr.value);
+    assert_eq!(visible_attr.value["redacted"], json!(true));
+    assert_eq!(
+        visible_attr.schema_ref.as_deref(),
+        Some("memory.transcript.attr.redacted.v1")
+    );
+}
+
+#[test]
+fn transcript_attr_validation_rejects_unscoped_keys_and_bad_message_targets() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let record = TranscriptTurnRecord::from_delta(
+        &key,
+        1,
+        &delivered_delta("turn-attr-validation"),
+        Vec::new(),
+        10,
+    )
+    .unwrap();
+    let assistant_message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    let mut invalid_key = message_usage_attr(
+        &key,
+        "turn-attr-validation",
+        &assistant_message_id,
+        HostRefVisibility::HostUi,
+    );
+    invalid_key.key = "usage".to_string();
+    assert!(invalid_key.validate_for_record(&record).is_err());
+
+    let mut missing_message = message_usage_attr(
+        &key,
+        "turn-attr-validation",
+        &assistant_message_id,
+        HostRefVisibility::HostUi,
+    );
+    missing_message.target.message_id = None;
+    assert!(missing_message.validate_for_record(&record).is_err());
+
+    let mut wrong_message = message_usage_attr(
+        &key,
+        "turn-attr-validation",
+        &assistant_message_id,
+        HostRefVisibility::HostUi,
+    );
+    wrong_message.target.message_id = Some("missing-message".to_string());
+    assert!(wrong_message.validate_for_record(&record).is_err());
 }
 
 #[test]

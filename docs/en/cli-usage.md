@@ -36,6 +36,7 @@ Commands:
 | `long-term-detail` | Inspect one long-term memory record by `--record-id`. |
 | `long-term-delete` | Delete one long-term memory record by `--record-id` and emit tombstone/audit reports. |
 | `long-term-policy-suppress` | Add a suppression policy for future preference memory updates with `--topic <pattern>`. |
+| `transcript-attr-write` | Write governed transcript turn/message attrs from a JSON request file; requires `--reason`. |
 | `skill-list` | List runtime Skill Memory records. |
 | `skill-show` | Inspect one runtime Skill Memory record. |
 | `skill-edit` | Edit an existing runtime Skill Memory record. |
@@ -99,6 +100,21 @@ cargo run -p bm-cli --bin bm -- \
   --topic temporary-* \
   --reason "user does not want temporary preferences remembered"
 ```
+
+## Transcript Attr Write
+
+`transcript-attr-write` is a thin CLI path to `MemoryRuntime::record_transcript_attrs`. It reads a `MemoryTranscriptAttrWriteRequest`-shaped JSON file from `--input` and requires `--reason` for operator audit discipline. The CLI does not construct or interpret attr payloads and does not write the store directly. The response includes `accepted_attrs`, `rejected_attrs`, `redactions_preview`, `profile_budget_applied`, and `audit_event_id`.
+
+```bash
+cargo run -p bm-cli --bin bm -- \
+  memory transcript-attr-write \
+  --profile profile-server-linux-dev-full \
+  --store-file /tmp/beetle-memory-store \
+  --input /tmp/transcript-attrs.json \
+  --reason "record provider-reported per-message usage"
+```
+
+Attr JSON must target existing transcript turns/messages. Do not put raw prompts, provider secrets, local file paths, complete attachments, host database payloads, tasks, human gates, capability calls, or artifact records into attrs; use links for owner records and keep values lightweight metadata.
 
 ## Runtime Skill Memory Management
 

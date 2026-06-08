@@ -5,9 +5,9 @@ use bm_sdk::{
     MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
     MemoryLongTermTarget, MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRecoverRequest, MemoryReplayRequest, MemoryWriteRequest, PressureLevel, Result,
-    RuntimeLifecycleModeInput, RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome,
-    RuntimeSkillWrite, RuntimeSkillWriteSource,
+    MemoryRecoverRequest, MemoryReplayRequest, MemoryTranscriptAttrWriteRequest,
+    MemoryWriteRequest, PressureLevel, Result, RuntimeLifecycleModeInput, RuntimeLifecycleTrigger,
+    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
 
@@ -157,6 +157,19 @@ pub fn decode_json_adapter_command(
                     reason: payload.reason,
                     dry_run: payload.dry_run.unwrap_or(false),
                     mode_input: payload.mode_input,
+                },
+            ))
+        }
+        AdapterOperation::TranscriptAttrWrite => {
+            let payload: TranscriptAttrWritePayload = parse_json(body)?;
+            Ok(AdapterCommand::TranscriptAttrWrite(
+                MemoryTranscriptAttrWriteRequest {
+                    memory_space_id: payload.memory_space_id,
+                    channel_id: payload.channel_id,
+                    conversation_id: payload.conversation_id,
+                    attrs: payload.attrs,
+                    idempotency_key: payload.idempotency_key,
+                    dry_run: payload.dry_run.unwrap_or(false),
                 },
             ))
         }
@@ -375,6 +388,19 @@ struct LongTermPolicyPayload {
     dry_run: Option<bool>,
     #[serde(default)]
     mode_input: RuntimeLifecycleModeInput,
+}
+
+#[derive(Deserialize)]
+struct TranscriptAttrWritePayload {
+    memory_space_id: String,
+    channel_id: String,
+    conversation_id: String,
+    #[serde(default)]
+    attrs: Vec<TranscriptAttrEnvelope>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    dry_run: Option<bool>,
 }
 
 #[derive(Deserialize)]

@@ -96,6 +96,9 @@ pub fn dispatch_adapter_command_with_services(
         AdapterCommand::LongTermPolicy(request) => AdapterSdkReport::LongTermPolicy(Box::new(
             runtime.mutate_memory_governance_policy(request)?,
         )),
+        AdapterCommand::TranscriptAttrWrite(request) => AdapterSdkReport::TranscriptAttrWrite(
+            Box::new(runtime.record_transcript_attrs(request)?),
+        ),
         AdapterCommand::Capabilities => {
             AdapterSdkReport::Capabilities(Box::new(runtime.capabilities().clone()))
         }

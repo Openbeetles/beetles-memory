@@ -46,6 +46,7 @@ use bm_core::memory::{
     SharedMemoryWriteSource, SkillEvolutionReport, SubjectProjectionBoundaryProtocolReport,
     SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
     SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime, TemporalMemoryGraphGateReport,
+    TranscriptAttrEnvelope, TranscriptAttrWriteRejection, TranscriptAttrWriteReport,
     TranscriptConversationAlias, TranscriptEvidenceRef,
     TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
     TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptRedactionReason,
@@ -92,7 +93,8 @@ use crate::{
     MemoryRuntimeSystemKind, MemorySpaceExportReport, MemorySpaceExportRequest,
     MemorySpaceImportReport, MemorySpaceImportRequest, MemorySpaceMigrateApplyReport,
     MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
-    MemorySpaceMigratePreviewRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
+    MemorySpaceMigratePreviewRequest, MemoryTranscriptAttrWriteReport,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
     MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
@@ -2535,6 +2537,72 @@ impl MemoryRuntime {
                 false,
                 "transcript_replay_completed",
             )?,
+        })
+    }
+
+    pub fn record_transcript_attrs(
+        &self,
+        request: MemoryTranscriptAttrWriteRequest,
+    ) -> Result<MemoryTranscriptAttrWriteReport> {
+        self.ensure_visible("write.transcript_attrs", self.capabilities.write)?;
+        self.ensure_runtime_memory_space("write.transcript_attrs", &request.memory_space_id)?;
+        if request
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.trim().is_empty())
+        {
+            return Err(Error::config(
+                "write.transcript_attrs",
+                "idempotency_key must not be empty when provided",
+            ));
+        }
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::SdkCall,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let key = ConversationKey::new(
+            request.memory_space_id,
+            request.channel_id,
+            request.conversation_id,
+        )?;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let transcript = if request.dry_run {
+            validate_transcript_attr_write_request(transcript_store.as_ref(), &key, &request.attrs)?
+        } else {
+            transcript_store.upsert_transcript_attrs(&key, &request.attrs)?
+        };
+        let (redactions_preview, profile_budget_applied) = transcript_attr_write_redactions_preview(
+            &request.attrs,
+            &transcript.rejected_attrs,
+            self.config
+                .runtime_budget
+                .transcript_governance_budget
+                .redaction_items_per_page,
+        );
+        let changed = !request.dry_run && !transcript.accepted_attrs.is_empty();
+        let reason = if request.dry_run {
+            "transcript_attrs_dry_run_completed"
+        } else {
+            "transcript_attrs_recorded"
+        };
+        self.audit("write.transcript_attrs", true, reason);
+        let lifecycle_report = self.finish_lifecycle_success(
+            lifecycle,
+            RuntimeLifecycleEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEffect::RunMaintenance,
+            changed,
+            reason,
+        )?;
+        Ok(MemoryTranscriptAttrWriteReport {
+            key: transcript.key,
+            accepted_attrs: transcript.accepted_attrs,
+            rejected_attrs: transcript.rejected_attrs,
+            redactions_preview,
+            profile_budget_applied,
+            audit_event_id: Some(lifecycle_report.event_id.clone()),
+            dry_run: request.dry_run,
+            lifecycle_report,
         })
     }
 
@@ -5192,33 +5260,158 @@ fn transcript_replay_limit(runtime_budget: &RuntimeBudgetReport, requested_limit
     )
 }
 
+fn validate_transcript_attr_write_request(
+    transcript_store: &dyn ConversationTranscriptStore,
+    key: &ConversationKey,
+    attrs: &[TranscriptAttrEnvelope],
+) -> Result<TranscriptAttrWriteReport> {
+    let mut accepted_attrs = Vec::new();
+    let mut rejected_attrs = Vec::new();
+    for attr in attrs {
+        if attr.target.key != *key {
+            rejected_attrs.push(transcript_attr_rejection(
+                attr,
+                "transcript_attr_target_key_mismatch",
+            ));
+            continue;
+        }
+        let Some(turn) = transcript_store.get_turn(key, &attr.target.turn_id)? else {
+            rejected_attrs.push(transcript_attr_rejection(
+                attr,
+                "transcript_attr_target_turn_missing",
+            ));
+            continue;
+        };
+        match attr.validate_for_record(&turn) {
+            Ok(()) => accepted_attrs.push(attr.clone()),
+            Err(error) => rejected_attrs.push(transcript_attr_rejection(attr, error.to_string())),
+        }
+    }
+    Ok(TranscriptAttrWriteReport {
+        key: key.clone(),
+        accepted_attrs,
+        rejected_attrs,
+    })
+}
+
+fn transcript_attr_rejection(
+    attr: &TranscriptAttrEnvelope,
+    reason: impl Into<String>,
+) -> TranscriptAttrWriteRejection {
+    TranscriptAttrWriteRejection {
+        attr_id: attr.attr_id.clone(),
+        attr_key: attr.key.clone(),
+        reason: reason.into(),
+    }
+}
+
+fn transcript_attr_write_redactions_preview(
+    attrs: &[TranscriptAttrEnvelope],
+    rejections: &[TranscriptAttrWriteRejection],
+    redaction_items_limit: usize,
+) -> (Vec<TranscriptRedactionReportItem>, bool) {
+    let mut redactions = Vec::new();
+    for rejection in rejections {
+        let attr = attrs
+            .iter()
+            .find(|attr| attr.attr_id == rejection.attr_id && attr.key == rejection.attr_key);
+        let reason = transcript_attr_write_redaction_reason(&rejection.reason);
+        redactions.push(TranscriptRedactionReportItem {
+            turn_id: attr
+                .map(|attr| attr.target.turn_id.clone())
+                .unwrap_or_else(|| "*".to_string()),
+            message_id: attr.and_then(|attr| attr.target.message_id.clone()),
+            host_ref_index: None,
+            attr_id: Some(rejection.attr_id.clone()),
+            attr_key: Some(rejection.attr_key.clone()),
+            reason,
+            source_authority: None,
+            view: TranscriptReplayView::OperatorAudit,
+        });
+    }
+    let limit = redaction_items_limit.max(1);
+    let profile_budget_applied = redactions.len() > limit;
+    if profile_budget_applied {
+        redactions.truncate(limit);
+    }
+    (redactions, profile_budget_applied)
+}
+
+fn transcript_attr_write_redaction_reason(reason: &str) -> TranscriptRedactionReason {
+    if reason.contains("max_value_bytes")
+        || reason.contains("value exceeds")
+        || reason.contains("value_kind")
+    {
+        TranscriptRedactionReason::AttrValueBudget
+    } else {
+        TranscriptRedactionReason::AttrVisibility
+    }
+}
+
 fn apply_transcript_governance_budget_to_slice(
     slice: &mut RedactedTranscriptSlice,
     budget: TranscriptGovernanceBudget,
 ) {
     let host_ref_limit = budget.host_refs_per_turn.max(1);
+    let turn_attr_limit = budget.max_attrs_per_turn.max(1);
+    let message_attr_limit = budget.max_attrs_per_message.max(1);
     let mut profile_budget_limited = false;
     for turn in &mut slice.turns {
         let original_len = turn.host_refs.len();
-        if original_len <= host_ref_limit {
-            continue;
+        if original_len > host_ref_limit {
+            for index in host_ref_limit..original_len {
+                slice.redactions.push(TranscriptRedactionReportItem {
+                    turn_id: turn.turn_id.clone(),
+                    message_id: None,
+                    host_ref_index: Some(index),
+                    attr_id: None,
+                    attr_key: None,
+                    reason: TranscriptRedactionReason::ProfileBudget,
+                    source_authority: None,
+                    view: slice.view,
+                });
+            }
+            turn.host_refs.truncate(host_ref_limit);
+            slice.audit.redacted_host_refs = slice
+                .audit
+                .redacted_host_refs
+                .saturating_add(original_len.saturating_sub(host_ref_limit));
+            profile_budget_limited = true;
         }
-        for index in host_ref_limit..original_len {
-            slice.redactions.push(TranscriptRedactionReportItem {
-                turn_id: turn.turn_id.clone(),
-                message_id: None,
-                host_ref_index: Some(index),
-                reason: TranscriptRedactionReason::ProfileBudget,
-                source_authority: None,
-                view: slice.view,
-            });
+        if truncate_transcript_attrs_for_budget(
+            &turn.turn_id,
+            None,
+            &mut turn.attrs,
+            turn_attr_limit,
+            slice.view,
+            &mut slice.redactions,
+        ) {
+            profile_budget_limited = true;
         }
-        turn.host_refs.truncate(host_ref_limit);
-        slice.audit.redacted_host_refs = slice
-            .audit
-            .redacted_host_refs
-            .saturating_add(original_len.saturating_sub(host_ref_limit));
-        profile_budget_limited = true;
+        for message in &mut turn.input_messages {
+            if truncate_transcript_attrs_for_budget(
+                &turn.turn_id,
+                Some(&message.message_id),
+                &mut message.attrs,
+                message_attr_limit,
+                slice.view,
+                &mut slice.redactions,
+            ) {
+                profile_budget_limited = true;
+            }
+        }
+        if let Some(message) = turn.assistant_message.as_mut() {
+            if truncate_transcript_attrs_for_budget(
+                &turn.turn_id,
+                Some(&message.message_id),
+                &mut message.attrs,
+                message_attr_limit,
+                slice.view,
+                &mut slice.redactions,
+            ) {
+                profile_budget_limited = true;
+            }
+        }
     }
 
     let redaction_limit = budget.redaction_items_per_page.max(1);
@@ -5240,6 +5433,34 @@ fn apply_transcript_governance_budget_to_slice(
     }
 }
 
+fn truncate_transcript_attrs_for_budget(
+    turn_id: &str,
+    message_id: Option<&str>,
+    attrs: &mut Vec<TranscriptAttrEnvelope>,
+    limit: usize,
+    view: TranscriptReplayView,
+    redactions: &mut Vec<TranscriptRedactionReportItem>,
+) -> bool {
+    let original_len = attrs.len();
+    if original_len <= limit {
+        return false;
+    }
+    for attr in attrs.iter().skip(limit) {
+        redactions.push(TranscriptRedactionReportItem {
+            turn_id: turn_id.to_string(),
+            message_id: message_id.map(str::to_string),
+            host_ref_index: None,
+            attr_id: Some(attr.attr_id.clone()),
+            attr_key: Some(attr.key.clone()),
+            reason: TranscriptRedactionReason::AttrValueBudget,
+            source_authority: None,
+            view,
+        });
+    }
+    attrs.truncate(limit);
+    true
+}
+
 fn apply_transcript_lifecycle_budget(
     report: &mut CoreTranscriptLifecycleReport,
     budget: TranscriptGovernanceBudget,
@@ -5257,6 +5478,8 @@ fn apply_transcript_lifecycle_budget(
                         .unwrap_or_else(|| "*".to_string()),
                     message_id: None,
                     host_ref_index: Some(index),
+                    attr_id: None,
+                    attr_key: None,
                     reason: TranscriptRedactionReason::ProfileBudget,
                     source_authority: None,
                     view: TranscriptReplayView::OperatorAudit,

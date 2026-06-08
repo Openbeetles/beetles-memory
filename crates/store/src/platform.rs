@@ -376,6 +376,7 @@ const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
     "private_doc",
     "conversation_transcript",
     "conversation_transcript_alias",
+    "conversation_transcript_attr",
     "conversation_transcript_derived_ref",
     LONG_TERM_CONTROL_REVISION_NAMESPACE,
     LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
@@ -1014,6 +1015,114 @@ impl ConversationTranscriptStore for StorePlatform {
         Ok(records)
     }
 
+    fn upsert_transcript_attrs(
+        &self,
+        key: &ConversationKey,
+        attrs: &[TranscriptAttrEnvelope],
+    ) -> Result<TranscriptAttrWriteReport> {
+        let mut accepted_attrs = Vec::new();
+        let mut rejected_attrs = Vec::new();
+        for attr in attrs {
+            if attr.target.key != *key {
+                rejected_attrs.push(transcript_attr_rejection(
+                    attr,
+                    "attr target key does not match conversation key",
+                ));
+                continue;
+            }
+            let Some(turn) = self.get_turn(key, &attr.target.turn_id)? else {
+                rejected_attrs.push(transcript_attr_rejection(
+                    attr,
+                    "attr target turn does not exist",
+                ));
+                continue;
+            };
+            if let Err(error) = attr.validate_for_record(&turn) {
+                rejected_attrs.push(transcript_attr_rejection(attr, &error.to_string()));
+                continue;
+            }
+            self.json_put(
+                "conversation_transcript_attr",
+                &transcript_attr_storage_key(key, attr),
+                attr,
+            )?;
+            accepted_attrs.push(attr.clone());
+        }
+        Ok(TranscriptAttrWriteReport {
+            key: key.clone(),
+            accepted_attrs,
+            rejected_attrs,
+        })
+    }
+
+    fn list_transcript_attrs(
+        &self,
+        key: &ConversationKey,
+        turn_id: Option<&str>,
+    ) -> Result<Vec<TranscriptAttrEnvelope>> {
+        let prefix = transcript_attr_storage_key_prefix(key);
+        let mut attrs = Vec::new();
+        for record_key in self.engine.list_json_keys("conversation_transcript_attr")? {
+            if !record_key.starts_with(&prefix) {
+                continue;
+            }
+            let Some(value) = self
+                .engine
+                .get_json_value("conversation_transcript_attr", &record_key)?
+            else {
+                continue;
+            };
+            let Ok(attr) = serde_json::from_value::<TranscriptAttrEnvelope>(value) else {
+                continue;
+            };
+            if turn_id
+                .map(|turn_id| attr.target.turn_id == turn_id)
+                .unwrap_or(true)
+            {
+                attrs.push(attr);
+            }
+        }
+        attrs.sort_by(|left, right| {
+            left.target
+                .turn_id
+                .cmp(&right.target.turn_id)
+                .then_with(|| left.target.message_id.cmp(&right.target.message_id))
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.attr_id.cmp(&right.attr_id))
+        });
+        Ok(attrs)
+    }
+
+    fn list_transcript_attr_repair_issues(
+        &self,
+        key: &ConversationKey,
+    ) -> Result<Vec<TranscriptRepairIssue>> {
+        let prefix = transcript_attr_storage_key_prefix(key);
+        let mut issues = Vec::new();
+        for record_key in self.engine.list_json_keys("conversation_transcript_attr")? {
+            if !record_key.starts_with(&prefix) {
+                continue;
+            }
+            let Some(value) = self
+                .engine
+                .get_json_value("conversation_transcript_attr", &record_key)?
+            else {
+                continue;
+            };
+            if let Err(error) = serde_json::from_value::<TranscriptAttrEnvelope>(value.clone()) {
+                let (turn_id, message_id) = transcript_attr_repair_target_from_value(&value);
+                issues.push(TranscriptRepairIssue {
+                    kind: TranscriptRepairIssueKind::CorruptTranscriptAttrRecord,
+                    turn_id,
+                    message_id,
+                    derived_ref: None,
+                    reason: format!("transcript_attr_decode_failed:{error}"),
+                });
+            }
+        }
+        Ok(issues)
+    }
+
     fn append_derived_memory_ref(
         &self,
         key: &ConversationKey,
@@ -1156,6 +1265,47 @@ fn transcript_derived_ref_storage_key(
         transcript_derived_ref_storage_key_prefix(key),
         stable_hash_hex(&payload)
     ))
+}
+
+fn transcript_attr_rejection(
+    attr: &TranscriptAttrEnvelope,
+    reason: impl Into<String>,
+) -> TranscriptAttrWriteRejection {
+    TranscriptAttrWriteRejection {
+        attr_id: attr.attr_id.clone(),
+        attr_key: attr.key.clone(),
+        reason: reason.into(),
+    }
+}
+
+fn transcript_attr_storage_key_prefix(key: &ConversationKey) -> String {
+    format!("{}__attr__", key.storage_key())
+}
+
+fn transcript_attr_storage_key(key: &ConversationKey, attr: &TranscriptAttrEnvelope) -> String {
+    format!(
+        "{}{}",
+        transcript_attr_storage_key_prefix(key),
+        stable_hash_hex(&attr.attr_id)
+    )
+}
+
+fn transcript_attr_repair_target_from_value(value: &serde_json::Value) -> (String, Option<String>) {
+    let Some(target) = value.get("target") else {
+        return ("*".to_string(), None);
+    };
+    let turn_id = target
+        .get("turn_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("*")
+        .to_string();
+    let message_id = target
+        .get("message_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    (turn_id, message_id)
 }
 
 impl LongTermMemoryStore for StorePlatform {

@@ -30,4 +30,19 @@ fn bridge_messages_are_memory_report_or_request_only() {
     assert!(operations.contains(&AdapterOperation::LongTermDetail));
     assert!(operations.contains(&AdapterOperation::LongTermMutate));
     assert!(operations.contains(&AdapterOperation::LongTermPolicy));
+    assert!(operations.contains(&AdapterOperation::TranscriptAttrWrite));
+}
+
+#[test]
+fn transcript_attr_a2a_message_is_declared_as_thin_adapter_operation() {
+    let message = bridge_message_specs()
+        .into_iter()
+        .find(|message| message.name == "memory_transcript_attr_write_request")
+        .expect("transcript attr A2A message");
+
+    assert_eq!(
+        message.operation,
+        Some(AdapterOperation::TranscriptAttrWrite)
+    );
+    assert!(message.permissions.contains(&A2aPermission::MemoryReport));
 }

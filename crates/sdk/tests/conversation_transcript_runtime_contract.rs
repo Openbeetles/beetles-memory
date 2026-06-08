@@ -9,14 +9,18 @@ use bm_sdk::{
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
     MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryReplayRequest, MemorySemanticJudgmentSource,
-    MemorySpaceExportRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
-    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite, TranscriptEvidenceRef,
+    MemorySpaceExportRequest, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
+    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
+    ProfileId, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
     TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptRedactionReason,
     TranscriptReplayView,
 };
+use serde_json::json;
 
 use support::{
     empty_store_platform, test_runtime_with_scope_and_subject, StaticHttpClient, StaticLlmClient,
@@ -77,6 +81,51 @@ fn host_ref_with_visibility(id: &str, visibility: HostRefVisibility) -> HostOpaq
         relation: HostRefRelation::Related,
         visibility,
         label: Some(format!("opaque ticket {id}")),
+    }
+}
+
+fn model_usage_attr(
+    key: ConversationKey,
+    turn_id: &str,
+    message_id: &str,
+    visibility: HostRefVisibility,
+) -> TranscriptAttrEnvelope {
+    TranscriptAttrEnvelope {
+        attr_id: format!("usage-{turn_id}-{message_id}"),
+        target: TranscriptAttrTarget {
+            key,
+            scope: TranscriptAttrScope::Message,
+            turn_id: turn_id.to_string(),
+            message_id: Some(message_id.to_string()),
+        },
+        key: "host.beetle_agent.model_usage".to_string(),
+        value_kind: TranscriptAttrValueKind::JsonObject,
+        schema_ref: Some("beetle-agent.model-usage.v1".to_string()),
+        value: json!({
+            "status": "measured",
+            "input_tokens": 33,
+            "output_tokens": 7,
+            "usage_source": "provider_reported"
+        }),
+        visibility,
+        source: TranscriptAttrSource {
+            writer: "beetle-agent".to_string(),
+            source_kind: TranscriptAttrSourceKind::ProviderReported,
+            written_at: 1_800_000_010,
+            audit_reason: "model invocation completed".to_string(),
+        },
+        governance: TranscriptAttrGovernance {
+            max_value_bytes: 4096,
+            redaction_policy: TranscriptAttrRedactionPolicy::MetadataSurvivesMask,
+            export_allowed: false,
+        },
+        links: vec![TranscriptAttrLink {
+            relation: "model_invocation".to_string(),
+            ref_kind: "model_invocation_id".to_string(),
+            ref_id: "model-1".to_string(),
+        }],
+        created_at: 1_800_000_010,
+        updated_at: 1_800_000_010,
     }
 }
 
@@ -171,6 +220,140 @@ fn desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
             profile.as_str()
         );
     }
+}
+
+#[test]
+fn runtime_records_transcript_attrs_and_replays_host_ui_message_usage() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: finalize_request("统计这条模型回复", "已统计。").turn,
+            host_refs: Vec::new(),
+        })
+        .unwrap();
+    let replay = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::RawOwnerOnly,
+        })
+        .unwrap();
+    let turn = &replay.slice.turns[0];
+    let message_id = turn.assistant_message.as_ref().unwrap().message_id.clone();
+    let attr = model_usage_attr(
+        replay.slice.key.clone(),
+        &turn.turn_id,
+        &message_id,
+        HostRefVisibility::HostUi,
+    );
+
+    let report = runtime
+        .record_transcript_attrs(MemoryTranscriptAttrWriteRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            attrs: vec![attr.clone()],
+            idempotency_key: Some("usage-write-1".to_string()),
+            dry_run: false,
+        })
+        .unwrap();
+    assert_eq!(report.accepted_attrs, vec![attr.clone()]);
+    assert!(report.rejected_attrs.is_empty());
+    assert!(report.redactions_preview.is_empty());
+    assert!(!report.profile_budget_applied);
+    assert!(report.audit_event_id.is_some());
+
+    let host_ui = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(
+        host_ui.slice.turns[0]
+            .assistant_message
+            .as_ref()
+            .unwrap()
+            .attrs,
+        vec![attr]
+    );
+}
+
+#[test]
+fn runtime_transcript_attr_dry_run_reports_without_persisting() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: finalize_request("dry run attr", "not persisted.").turn,
+            host_refs: Vec::new(),
+        })
+        .unwrap();
+    let key = ConversationKey::new(
+        runtime.memory_space_id().to_string(),
+        "llm.gateway",
+        "conversation-a",
+    )
+    .unwrap();
+    let attr = model_usage_attr(key, "turn-12", "missing-message", HostRefVisibility::HostUi);
+
+    let report = runtime
+        .record_transcript_attrs(MemoryTranscriptAttrWriteRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            attrs: vec![attr],
+            idempotency_key: Some("usage-write-dry-run".to_string()),
+            dry_run: true,
+        })
+        .unwrap();
+
+    assert!(report.accepted_attrs.is_empty());
+    assert_eq!(report.rejected_attrs.len(), 1);
+    assert_eq!(report.redactions_preview.len(), 1);
+    assert_eq!(
+        report.redactions_preview[0].reason,
+        TranscriptRedactionReason::AttrVisibility
+    );
+    assert!(report.audit_event_id.is_some());
+    let host_ui = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert!(host_ui.slice.turns[0]
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .attrs
+        .is_empty());
 }
 
 #[test]
@@ -1229,7 +1412,7 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
                     memory_space_id: runtime.memory_space_id().to_string(),
                     channel_id: "llm.gateway".to_string(),
                     conversation_id: "conversation-a".to_string(),
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     message_id: None,
                     subject_id: Some("subject-default".to_string()),
                     authority: Some(MemoryEvidenceAuthority::PrivateGardenInternal),
@@ -1237,6 +1420,37 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
                 created_at: 1_800_000_000,
             },
         )
+        .unwrap();
+    let replay = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::RawOwnerOnly,
+        })
+        .unwrap();
+    let assistant_message_id = replay.slice.turns[0]
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    runtime
+        .record_transcript_attrs(MemoryTranscriptAttrWriteRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            attrs: vec![model_usage_attr(
+                key.clone(),
+                &turn_id,
+                &assistant_message_id,
+                HostRefVisibility::HostUi,
+            )],
+            idempotency_key: Some("export-privacy-attr-write".to_string()),
+            dry_run: false,
+        })
         .unwrap();
 
     let redacted = runtime
@@ -1261,6 +1475,11 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
         .json_docs
         .iter()
         .any(|doc| doc.namespace == "conversation_transcript_derived_ref"));
+    assert!(!redacted
+        .snapshot
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == "conversation_transcript_attr"));
 
     let raw = runtime
         .export_memory_space(MemorySpaceExportRequest {
@@ -1283,6 +1502,11 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
         .json_docs
         .iter()
         .any(|doc| doc.namespace == "conversation_transcript_derived_ref"));
+    assert!(raw
+        .snapshot
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == "conversation_transcript_attr"));
 }
 
 #[test]

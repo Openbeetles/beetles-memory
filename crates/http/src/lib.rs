@@ -112,6 +112,10 @@ const ROUTES: &[RouteSpec] = &[
     memory_post("/memory/long-term/detail", AdapterOperation::LongTermDetail),
     memory_post("/memory/long-term/mutate", AdapterOperation::LongTermMutate),
     memory_post("/memory/long-term/policy", AdapterOperation::LongTermPolicy),
+    memory_post(
+        "/memory/transcript/attrs",
+        AdapterOperation::TranscriptAttrWrite,
+    ),
 ];
 
 const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
@@ -1396,6 +1400,20 @@ fn render_report(report: AdapterSdkReport) -> String {
             "policy_id": report.policy_id,
             "affected_future_writes": report.affected_future_writes,
             "policy_decision": report.policy_decision,
+            "lifecycle": report.lifecycle_report.result_summary,
+        })
+        .to_string(),
+        AdapterSdkReport::TranscriptAttrWrite(report) => json!({
+            "status": "accepted",
+            "memory_space_id": report.key.memory_space_id,
+            "channel_id": report.key.channel_id,
+            "conversation_id": report.key.conversation_id,
+            "accepted_attrs": report.accepted_attrs,
+            "rejected_attrs": report.rejected_attrs,
+            "redactions_preview": report.redactions_preview,
+            "profile_budget_applied": report.profile_budget_applied,
+            "audit_event_id": report.audit_event_id,
+            "dry_run": report.dry_run,
             "lifecycle": report.lifecycle_report.result_summary,
         })
         .to_string(),

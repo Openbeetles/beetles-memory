@@ -58,7 +58,7 @@ for file in crates/core/src/budget.rs crates/sdk/src/runtime.rs; do
   fi
 done
 
-if rg -n 'profile.*transcript_page|transcript_page_size|host_refs_per_turn|derived_refs_per_report|repair_issues_per_report' crates/store/src; then
+if rg -n 'profile.*transcript_page|transcript_page_size|host_refs_per_turn|max_attrs_per_turn|max_attrs_per_message|derived_refs_per_report|repair_issues_per_report' crates/store/src; then
   fail "StorePlatform must not own transcript governance profile budgets"
 fi
 

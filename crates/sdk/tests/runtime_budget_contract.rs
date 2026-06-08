@@ -4,12 +4,16 @@ use bm_core::platform::Platform as _;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
     HostOpaqueRef, HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority,
-    MemoryProjectionRequest, MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest,
-    MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    TranscriptEvidenceRef, TranscriptInputMessage, TranscriptLifecycleTransition,
-    TranscriptRedactionReason, TranscriptReplayView,
+    MemoryProjectionRequest, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, TranscriptAttrEnvelope, TranscriptAttrGovernance,
+    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptRedactionReason,
+    TranscriptReplayView,
 };
+use serde_json::json;
 
 use support::{
     empty_store_platform, seeded_store_platform, test_runtime, test_runtime_with_scope_and_subject,
@@ -47,6 +51,50 @@ fn transcript_budget_turn(turn_id: &str) -> CanonicalTurnDelta {
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),
+    }
+}
+
+fn transcript_budget_attr(
+    key: ConversationKey,
+    turn_id: &str,
+    message_id: &str,
+    index: usize,
+) -> TranscriptAttrEnvelope {
+    TranscriptAttrEnvelope {
+        attr_id: format!("budget-attr-{index}"),
+        target: TranscriptAttrTarget {
+            key,
+            scope: TranscriptAttrScope::Message,
+            turn_id: turn_id.to_string(),
+            message_id: Some(message_id.to_string()),
+        },
+        key: format!("host.budget.model_usage_{index}"),
+        value_kind: TranscriptAttrValueKind::JsonObject,
+        schema_ref: Some("budget.model-usage.v1".to_string()),
+        value: json!({
+            "input_tokens": 10 + index,
+            "output_tokens": 2,
+            "usage_source": "provider_reported"
+        }),
+        visibility: HostRefVisibility::HostUi,
+        source: TranscriptAttrSource {
+            writer: "budget-test".to_string(),
+            source_kind: TranscriptAttrSourceKind::ProviderReported,
+            written_at: 1_800_000_000 + index as u64,
+            audit_reason: "budget attr test".to_string(),
+        },
+        governance: TranscriptAttrGovernance {
+            max_value_bytes: 4096,
+            redaction_policy: TranscriptAttrRedactionPolicy::MetadataSurvivesMask,
+            export_allowed: false,
+        },
+        links: vec![TranscriptAttrLink {
+            relation: "model_invocation".to_string(),
+            ref_kind: "model_invocation_id".to_string(),
+            ref_id: format!("budget-model-{index}"),
+        }],
+        created_at: 1_800_000_000 + index as u64,
+        updated_at: 1_800_000_000 + index as u64,
     }
 }
 
@@ -100,10 +148,14 @@ fn transcript_governance_budget_is_profile_owned_and_runtime_enforced() {
 
     assert!(compact_budget.transcript_page_size > 0);
     assert!(compact_budget.host_refs_per_turn > 0);
+    assert!(compact_budget.max_attrs_per_turn > 0);
+    assert!(compact_budget.max_attrs_per_message > 0);
     assert!(compact_budget.redaction_items_per_page > 0);
     assert!(compact_budget.derived_refs_per_report > 0);
     assert!(compact_budget.repair_issues_per_report > 0);
     assert!(compact_budget.transcript_page_size < server_budget.transcript_page_size);
+    assert!(compact_budget.max_attrs_per_turn < server_budget.max_attrs_per_turn);
+    assert!(compact_budget.max_attrs_per_message < server_budget.max_attrs_per_message);
     assert!(compact_budget.derived_refs_per_report < server_budget.derived_refs_per_report);
 
     let profile = ProfileId::ServerLinuxDevFull;
@@ -298,6 +350,97 @@ fn transcript_replay_budget_limits_visible_host_refs_and_redaction_items() {
     assert_eq!(replay.slice.turns[0].host_refs.len(), 1);
     assert_eq!(replay.slice.redactions.len(), 1);
     assert_eq!(replay.slice.audit.redacted_host_refs, 2);
+    assert!(replay
+        .slice
+        .audit
+        .redaction_reasons
+        .contains(&TranscriptRedactionReason::ProfileBudget));
+}
+
+#[test]
+fn transcript_attr_budget_limits_visible_message_attrs_and_reports_redaction() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let mut runtime_budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    runtime_budget
+        .transcript_governance_budget
+        .max_attrs_per_message = 1;
+    runtime_budget
+        .transcript_governance_budget
+        .redaction_items_per_page = 10;
+    let runtime = test_runtime_with_scope_subject_and_budget(
+        platform,
+        profile,
+        "llm.gateway",
+        "budget-chat",
+        "subject-budget",
+        runtime_budget,
+    );
+    runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: transcript_budget_turn("turn-attr-budget"),
+            host_refs: Vec::new(),
+        })
+        .expect("commit transcript");
+    let raw = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "budget-conversation".to_string(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::RawOwnerOnly,
+        })
+        .expect("raw replay");
+    let turn = &raw.slice.turns[0];
+    let message_id = turn
+        .assistant_message
+        .as_ref()
+        .expect("assistant message")
+        .message_id
+        .clone();
+    let attrs = (0..3)
+        .map(|index| {
+            transcript_budget_attr(raw.slice.key.clone(), &turn.turn_id, &message_id, index)
+        })
+        .collect::<Vec<_>>();
+    runtime
+        .record_transcript_attrs(MemoryTranscriptAttrWriteRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "budget-conversation".to_string(),
+            attrs,
+            idempotency_key: Some("budget-attr-write".to_string()),
+            dry_run: false,
+        })
+        .expect("record attrs");
+
+    let replay = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "budget-conversation".to_string(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .expect("budgeted replay");
+
+    let assistant = replay.slice.turns[0]
+        .assistant_message
+        .as_ref()
+        .expect("assistant message");
+    assert_eq!(assistant.attrs.len(), 1);
+    assert!(replay.slice.redactions.iter().any(|redaction| {
+        redaction.attr_id.as_deref() == Some("budget-attr-1")
+            && redaction.attr_key.as_deref() == Some("host.budget.model_usage_1")
+            && redaction.reason == TranscriptRedactionReason::AttrValueBudget
+    }));
+    assert!(replay
+        .slice
+        .audit
+        .redaction_reasons
+        .contains(&TranscriptRedactionReason::AttrValueBudget));
     assert!(replay
         .slice
         .audit

@@ -36,6 +36,12 @@ Operator 可以通过 SDK 查看和治理已接受长期记忆：
 
 `forget_by_query` 必须先 dry-run preview，再用 confirmation token 执行。`mutate_memory_governance_policy` 用于 pause/resume/suppress 未来长期记忆写入；policy 不会自动删除已有 accepted memory。Transcript lifecycle report 中的 `DerivedMemoryRef` 只是影响清单，撤销派生长期记忆仍需调用 `mutate_long_term_memory`。
 
+## Transcript Attr 检查
+
+Transcript attrs 通过 `MemoryRuntime::replay_transcript`、`MemoryRuntime::export_transcript` 和 `MemoryRuntime::repair_transcript` 检查。Operator 可以用它们展示每条消息的模型用量、latency/status、附件摘要和 provenance 标签，但它们只是 transcript metadata。它们不是任务编辑器、artifact registry、human-gate queue、capability-call ledger、file workspace，也不是 Memory governance command log。
+
+`MemoryRuntime::record_transcript_attrs` 写入前会校验 target turn/message 存在。Dry-run 返回 accepted/rejected attrs 和 `redactions_preview`，不落库。Repair report 会把 attr target/key/value 损坏作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs，`OperatorAuditOnlyAfterMask` 在 raw deletion 后只返回脱敏审计 metadata。Operator surface 不能绕过 SDK 直接读 `conversation_transcript_attr`，也不能把业务 SQLite record 拼进 replay 结果冒充 Memory 返回。
+
 ## 运行时 Skill 与标准 Agent Skill
 
 独立部署配置台和 CLI 只管理运行时 Skill 记忆，也就是系统运行中沉淀出来的 procedural memory record。它们不是执行器、插件市场或 workflow runner，也不管理标准 Agent Skill 目录。

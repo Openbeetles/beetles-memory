@@ -19,6 +19,7 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
             "long-term-detail",
             "long-term-delete",
             "long-term-policy-suppress",
+            "transcript-attr-write",
             "skill-list",
             "skill-show",
             "skill-edit",
@@ -65,6 +66,44 @@ fn long_term_destructive_commands_require_explicit_reason() {
     )
     .expect_err("policy suppress without reason should fail");
     assert!(suppress.contains("--reason is required"));
+
+    let attr_write = run_cli(
+        [
+            "memory",
+            "transcript-attr-write",
+            "--input",
+            "/tmp/missing-transcript-attrs.json",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect_err("transcript attr write without reason should fail");
+    assert!(attr_write.contains("--reason is required"));
+}
+
+#[test]
+fn transcript_attr_write_command_is_public_and_requires_explicit_reason() {
+    let spec = command_specs()
+        .iter()
+        .find(|spec| spec.name == "transcript-attr-write")
+        .expect("transcript attr write command");
+    assert_eq!(
+        spec.operation,
+        bm_adapter::AdapterOperation::TranscriptAttrWrite
+    );
+
+    let attr_write = run_cli(
+        [
+            "memory",
+            "transcript-attr-write",
+            "--input",
+            "/tmp/missing-transcript-attrs.json",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect_err("transcript attr write without reason should fail");
+    assert!(attr_write.contains("--reason is required"));
 }
 
 #[test]

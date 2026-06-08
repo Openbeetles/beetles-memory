@@ -173,6 +173,8 @@ pub struct LlmGatewayBudget {
 pub struct TranscriptGovernanceBudget {
     pub transcript_page_size: usize,
     pub host_refs_per_turn: usize,
+    pub max_attrs_per_turn: usize,
+    pub max_attrs_per_message: usize,
     pub redaction_items_per_page: usize,
     pub derived_refs_per_report: usize,
     pub repair_issues_per_report: usize,
@@ -467,6 +469,16 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         .max(1),
         host_refs_per_turn: scale_usize(
             ceiling.transcript_governance_budget.host_refs_per_turn,
+            source_scale,
+        )
+        .max(1),
+        max_attrs_per_turn: scale_usize(
+            ceiling.transcript_governance_budget.max_attrs_per_turn,
+            source_scale,
+        )
+        .max(1),
+        max_attrs_per_message: scale_usize(
+            ceiling.transcript_governance_budget.max_attrs_per_message,
             source_scale,
         )
         .max(1),
@@ -780,6 +792,8 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
         transcript_governance_budget: TranscriptGovernanceBudget {
             transcript_page_size: max_usize(spec.source_chars / 256, 4),
             host_refs_per_turn: max_usize(spec.http_body_max_bytes / (8 * 1024), 1),
+            max_attrs_per_turn: max_usize(spec.source_chars / 512, 2),
+            max_attrs_per_message: max_usize(spec.source_chars / 512, 2),
             redaction_items_per_page: max_usize(spec.source_chars / 128, 8),
             derived_refs_per_report: max_usize(spec.records / 512, 4),
             repair_issues_per_report: max_usize(spec.events / 512, 4),
@@ -861,10 +875,14 @@ mod tests {
 
         assert!(compact.transcript_page_size > 0);
         assert!(compact.host_refs_per_turn > 0);
+        assert!(compact.max_attrs_per_turn > 0);
+        assert!(compact.max_attrs_per_message > 0);
         assert!(compact.redaction_items_per_page > 0);
         assert!(compact.derived_refs_per_report > 0);
         assert!(compact.repair_issues_per_report > 0);
         assert!(compact.transcript_page_size < server.transcript_page_size);
+        assert!(compact.max_attrs_per_turn < server.max_attrs_per_turn);
+        assert!(compact.max_attrs_per_message < server.max_attrs_per_message);
         assert!(compact.derived_refs_per_report < server.derived_refs_per_report);
         assert!(compact.repair_issues_per_report < server.repair_issues_per_report);
     }

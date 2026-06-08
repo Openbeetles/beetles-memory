@@ -58,11 +58,15 @@ pub use bm_core::memory::{
     SubjectDescriptor, SubjectKind, SubjectLifecycleState, SubjectRegistry,
     SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
     SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulSurface, SubjectVisibility,
-    TranscriptCommitReport, TranscriptConversationAlias, TranscriptEvidenceRef,
-    TranscriptInputMessage, TranscriptLifecycleState, TranscriptLifecycleTransition,
-    TranscriptRedactionReason, TranscriptRedactionReportItem, TranscriptRedactionState,
-    TranscriptRepairIssue, TranscriptRepairIssueKind, TranscriptRepairReport,
-    TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage, TranscriptTurnRecord,
+    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
+    TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptCommitReport,
+    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
+    TranscriptLifecycleState, TranscriptLifecycleTransition, TranscriptRedactionReason,
+    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairIssue,
+    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
+    TranscriptTurnPage, TranscriptTurnRecord,
 };
 pub use bm_core::memory::{
     build_core_revision_diff_from_record,
@@ -157,7 +161,8 @@ pub use ops::{
     MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
     MemorySpaceMigratePreviewRequest, MemorySpaceMigrationManifest,
     MemorySpaceMigrationPlaneReport, MemorySpaceMigrationPrivacyReport,
-    MemorySpaceSubjectRemapReport, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
+    MemorySpaceSubjectRemapReport, MemoryTranscriptAttrWriteReport,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
     MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
@@ -507,6 +512,7 @@ fn is_private_snapshot_namespace(namespace: &str) -> bool {
             | "private_doc"
             | "conversation_transcript"
             | "conversation_transcript_alias"
+            | "conversation_transcript_attr"
             | "conversation_transcript_derived_ref"
             | "private_garden"
     )

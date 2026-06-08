@@ -1043,6 +1043,7 @@ const fn is_mutation(operation: bm_adapter::AdapterOperation) -> bool {
             | bm_adapter::AdapterOperation::Maintain
             | bm_adapter::AdapterOperation::Recover
             | bm_adapter::AdapterOperation::Import
+            | bm_adapter::AdapterOperation::TranscriptAttrWrite
             | bm_adapter::AdapterOperation::Close
     )
 }

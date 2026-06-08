@@ -12,9 +12,10 @@ use bm_core::memory::{
     PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateMaterialRedactionReport,
     ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck,
     RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
-    SubjectProjectionReport, SubjectScopedRuntime, TranscriptCommitReport, TranscriptEvidenceRef,
-    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRepairReport,
-    TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
+    SubjectProjectionReport, SubjectScopedRuntime, TranscriptAttrEnvelope,
+    TranscriptAttrWriteRejection, TranscriptCommitReport, TranscriptEvidenceRef,
+    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRedactionReportItem,
+    TranscriptRepairReport, TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
 };
 use bm_core::memory::{CompactMemoryGraph, GraphRecallRerankReport, TemporalMemoryGraphGateReport};
 use bm_core::skills::{
@@ -522,6 +523,28 @@ pub struct MemoryTranscriptReplayReport {
     pub slice: RedactedTranscriptSlice,
     pub next_cursor: Option<String>,
     pub has_more: bool,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptAttrWriteRequest {
+    pub memory_space_id: String,
+    pub channel_id: String,
+    pub conversation_id: String,
+    pub attrs: Vec<TranscriptAttrEnvelope>,
+    pub idempotency_key: Option<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptAttrWriteReport {
+    pub key: ConversationKey,
+    pub accepted_attrs: Vec<TranscriptAttrEnvelope>,
+    pub rejected_attrs: Vec<TranscriptAttrWriteRejection>,
+    pub redactions_preview: Vec<TranscriptRedactionReportItem>,
+    pub profile_budget_applied: bool,
+    pub audit_event_id: Option<String>,
+    pub dry_run: bool,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 

@@ -42,6 +42,10 @@ const MESSAGE_SPECS: &[WssMessageSpec] = &[
     inbound("command.long_term.detail", AdapterOperation::LongTermDetail),
     inbound("command.long_term.mutate", AdapterOperation::LongTermMutate),
     inbound("command.long_term.policy", AdapterOperation::LongTermPolicy),
+    inbound(
+        "command.transcript.attrs",
+        AdapterOperation::TranscriptAttrWrite,
+    ),
     inbound("command.capabilities", AdapterOperation::Capabilities),
     stream("subscribe.projection"),
     stream("subscribe.inspection"),
@@ -480,6 +484,20 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
             AdapterSdkReport::Capabilities(catalog) => json!({
                 "status": "accepted",
                 "profile": catalog.profile.as_str(),
+            })
+            .to_string(),
+            AdapterSdkReport::TranscriptAttrWrite(report) => json!({
+                "status": "accepted",
+                "memory_space_id": report.key.memory_space_id,
+                "channel_id": report.key.channel_id,
+                "conversation_id": report.key.conversation_id,
+                "accepted_attrs": report.accepted_attrs,
+                "rejected_attrs": report.rejected_attrs,
+                "redactions_preview": report.redactions_preview,
+                "profile_budget_applied": report.profile_budget_applied,
+                "audit_event_id": report.audit_event_id,
+                "dry_run": report.dry_run,
+                "lifecycle": report.lifecycle_report.result_summary,
             })
             .to_string(),
             other => json!({"status":"accepted","report":format!("{other:?}")}).to_string(),

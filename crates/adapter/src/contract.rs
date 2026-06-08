@@ -7,7 +7,8 @@ use bm_sdk::{
     MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
     MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
     MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
-    MemoryWriteReport, MemoryWriteRequest,
+    MemoryTranscriptAttrWriteReport, MemoryTranscriptAttrWriteRequest, MemoryWriteReport,
+    MemoryWriteRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +50,7 @@ pub enum AdapterOperation {
     LongTermDetail,
     LongTermMutate,
     LongTermPolicy,
+    TranscriptAttrWrite,
     Capabilities,
     Subscribe,
     Close,
@@ -134,6 +136,7 @@ pub enum AdapterCommand {
     LongTermDetail(MemoryLongTermDetailRequest),
     LongTermMutate(MemoryLongTermMutationRequest),
     LongTermPolicy(MemoryLongTermPolicyRequest),
+    TranscriptAttrWrite(MemoryTranscriptAttrWriteRequest),
     Capabilities,
     Close(MemoryCloseRequest),
 }
@@ -162,6 +165,7 @@ impl AdapterCommand {
             Self::LongTermDetail(_) => AdapterOperation::LongTermDetail,
             Self::LongTermMutate(_) => AdapterOperation::LongTermMutate,
             Self::LongTermPolicy(_) => AdapterOperation::LongTermPolicy,
+            Self::TranscriptAttrWrite(_) => AdapterOperation::TranscriptAttrWrite,
             Self::Capabilities => AdapterOperation::Capabilities,
             Self::Close(_) => AdapterOperation::Close,
         }
@@ -182,6 +186,7 @@ pub enum AdapterSdkReport {
     LongTermDetail(Box<MemoryLongTermDetailReport>),
     LongTermMutate(Box<MemoryLongTermMutationReport>),
     LongTermPolicy(Box<MemoryGovernancePolicyMutationReport>),
+    TranscriptAttrWrite(Box<MemoryTranscriptAttrWriteReport>),
     Capabilities(Box<MemoryCapabilityCatalog>),
     Close(Box<MemoryCloseReport>),
 }
@@ -202,6 +207,7 @@ impl std::fmt::Debug for AdapterSdkReport {
             Self::LongTermDetail(_) => "LongTermDetail",
             Self::LongTermMutate(_) => "LongTermMutate",
             Self::LongTermPolicy(_) => "LongTermPolicy",
+            Self::TranscriptAttrWrite(_) => "TranscriptAttrWrite",
             Self::Capabilities(_) => "Capabilities",
             Self::Close(_) => "Close",
         };

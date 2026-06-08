@@ -2,13 +2,16 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
     CanonicalTurnDelta, ConversationKey, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
     HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, TranscriptConversationAlias, TranscriptEvidenceRef,
-    TranscriptInputMessage, TranscriptLifecycleRequest, TranscriptLifecycleState,
-    TranscriptLifecycleTransition, TranscriptRepairIssueKind, TranscriptReplayView,
-    TranscriptTurnRecord,
+    MemoryTurnProtocol, MemoryTurnSource, TranscriptAttrEnvelope, TranscriptAttrGovernance,
+    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
+    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
+    TranscriptLifecycleRequest, TranscriptLifecycleState, TranscriptLifecycleTransition,
+    TranscriptRepairIssueKind, TranscriptReplayView, TranscriptTurnRecord,
 };
 use bm_core::platform::Platform;
-use bm_store::{StoreBackendConfig, StoreEventScope, StorePlatform};
+use bm_store::{StoreBackendConfig, StoreEventScope, StorePlatform, StoreSnapshotJsonDoc};
+use serde_json::json;
 
 fn temp_root(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -35,6 +38,50 @@ fn turn_source() -> MemoryTurnSource {
 
 fn transcript_record(key: &ConversationKey, turn_id: &str, user: &str) -> TranscriptTurnRecord {
     TranscriptTurnRecord::from_delta(key, 1, &delta(turn_id, user), Vec::new(), 10).unwrap()
+}
+
+fn model_usage_attr(
+    key: &ConversationKey,
+    turn_id: &str,
+    message_id: &str,
+) -> TranscriptAttrEnvelope {
+    TranscriptAttrEnvelope {
+        attr_id: format!("usage-{turn_id}-{message_id}"),
+        target: TranscriptAttrTarget {
+            key: key.clone(),
+            scope: TranscriptAttrScope::Message,
+            turn_id: turn_id.to_string(),
+            message_id: Some(message_id.to_string()),
+        },
+        key: "host.beetle_agent.model_usage".to_string(),
+        value_kind: TranscriptAttrValueKind::JsonObject,
+        schema_ref: Some("beetle-agent.model-usage.v1".to_string()),
+        value: json!({
+            "status": "measured",
+            "input_tokens": 42,
+            "output_tokens": 9,
+            "usage_source": "provider_reported"
+        }),
+        visibility: HostRefVisibility::HostUi,
+        source: TranscriptAttrSource {
+            writer: "beetle-agent".to_string(),
+            source_kind: TranscriptAttrSourceKind::ProviderReported,
+            written_at: 1_800_000_010,
+            audit_reason: "model invocation completed".to_string(),
+        },
+        governance: TranscriptAttrGovernance {
+            max_value_bytes: 4096,
+            redaction_policy: TranscriptAttrRedactionPolicy::MetadataSurvivesMask,
+            export_allowed: false,
+        },
+        links: vec![TranscriptAttrLink {
+            relation: "model_invocation".to_string(),
+            ref_kind: "model_invocation_id".to_string(),
+            ref_id: "model-1".to_string(),
+        }],
+        created_at: 1_800_000_010,
+        updated_at: 1_800_000_010,
+    }
 }
 
 fn delta(turn_id: &str, user: &str) -> CanonicalTurnDelta {
@@ -98,6 +145,145 @@ fn store_persists_transcript_by_memory_space_channel_and_conversation() {
         replay.turns[0].input_messages[0].content.as_deref(),
         Some("hello")
     );
+}
+
+#[test]
+fn store_persists_transcript_attrs_and_replays_visible_message_attrs() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let record = transcript_record(&key, "turn-attr", "count this model reply");
+    let message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    store.append_turn(&record).unwrap();
+
+    let attr = model_usage_attr(&key, "turn-attr", &message_id);
+    let report = store
+        .upsert_transcript_attrs(&key, std::slice::from_ref(&attr))
+        .unwrap();
+
+    assert_eq!(report.accepted_attrs, vec![attr.clone()]);
+    assert!(report.rejected_attrs.is_empty());
+    let replay = store
+        .redacted_replay(&key, 10, TranscriptReplayView::HostUi)
+        .unwrap();
+    assert_eq!(
+        replay.turns[0].assistant_message.as_ref().unwrap().attrs,
+        vec![attr]
+    );
+}
+
+#[test]
+fn store_rejects_transcript_attrs_when_target_turn_or_message_is_missing() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let record = transcript_record(&key, "turn-attr-target", "target exists");
+    let message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    store.append_turn(&record).unwrap();
+
+    let missing_turn = model_usage_attr(&key, "missing-turn", &message_id);
+    let mut missing_message = model_usage_attr(&key, "turn-attr-target", &message_id);
+    missing_message.attr_id = "usage-missing-message".to_string();
+    missing_message.target.message_id = Some("missing-message".to_string());
+    let report = store
+        .upsert_transcript_attrs(&key, &[missing_turn, missing_message])
+        .unwrap();
+
+    assert!(report.accepted_attrs.is_empty());
+    assert_eq!(report.rejected_attrs.len(), 2);
+    assert!(store.list_transcript_attrs(&key, None).unwrap().is_empty());
+    let repair = store.repair_report(&key).unwrap();
+    assert_eq!(repair.checked_attrs, 0);
+    assert!(!repair.fail_closed);
+}
+
+#[test]
+fn store_repair_reports_corrupt_transcript_attr_records_without_failing_replay() {
+    let platform = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let record = transcript_record(&key, "turn-corrupt-attr", "target exists");
+    let message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    store.append_turn(&record).unwrap();
+
+    let mut snapshot = platform.export_store_snapshot().unwrap();
+    snapshot.json_docs.push(StoreSnapshotJsonDoc {
+        namespace: "conversation_transcript_attr".to_string(),
+        key: format!("{}__attr__corrupt", key.storage_key()),
+        value: json!({
+            "attr_id": "corrupt-attr",
+            "target": {
+                "key": key.clone(),
+                "scope": "message",
+                "turn_id": "turn-corrupt-attr",
+                "message_id": message_id
+            },
+            "key": "host.beetle_agent.model_usage",
+            "value_kind": "json_object",
+            "value": {"status": "measured"},
+            "visibility": "not_a_visibility",
+            "source": {
+                "writer": "beetle-agent",
+                "source_kind": "provider_reported",
+                "written_at": 1,
+                "audit_reason": "corrupt fixture"
+            },
+            "governance": {
+                "max_value_bytes": 4096,
+                "redaction_policy": "metadata_survives_mask",
+                "export_allowed": false
+            },
+            "created_at": 1,
+            "updated_at": 1
+        }),
+    });
+    let target = StorePlatform::open_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    )
+    .unwrap();
+    target.import_store_snapshot(&snapshot).unwrap();
+    let target_store = target.conversation_transcript_store();
+
+    let replay = target_store
+        .redacted_replay(&key, 10, TranscriptReplayView::HostUi)
+        .unwrap();
+    assert!(replay.turns[0]
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .attrs
+        .is_empty());
+    let repair = target_store.repair_report(&key).unwrap();
+    assert!(repair.fail_closed);
+    assert_eq!(repair.checked_attrs, 1);
+    assert!(repair.issues.iter().any(|issue| {
+        issue.kind == TranscriptRepairIssueKind::CorruptTranscriptAttrRecord
+            && issue.turn_id == "turn-corrupt-attr"
+    }));
 }
 
 #[test]
@@ -402,6 +588,10 @@ fn snapshot_export_import_carries_conversation_transcript_namespace() {
     let record = transcript_record(&key, "turn-snapshot", "snapshot me");
     let message = record.input_messages[0].clone();
     store.append_turn(&record).unwrap();
+    let attr = model_usage_attr(&key, "turn-snapshot", &message.message_id);
+    store
+        .upsert_transcript_attrs(&key, std::slice::from_ref(&attr))
+        .unwrap();
     let derived = DerivedMemoryRef {
         plane: DerivedMemoryPlane::ArchiveEvidence,
         store_key: "archive:conversation-store:turn-snapshot".to_string(),
@@ -427,6 +617,10 @@ fn snapshot_export_import_carries_conversation_transcript_namespace() {
     assert!(snapshot
         .json_docs
         .iter()
+        .any(|doc| doc.namespace == "conversation_transcript_attr"));
+    assert!(snapshot
+        .json_docs
+        .iter()
         .any(|doc| doc.namespace == "conversation_transcript_derived_ref"));
 
     let target = StorePlatform::open_in_memory(
@@ -443,6 +637,7 @@ fn snapshot_export_import_carries_conversation_transcript_namespace() {
         replay.turns[0].input_messages[0].content.as_deref(),
         Some("snapshot me")
     );
+    assert_eq!(replay.turns[0].input_messages[0].attrs, vec![attr]);
     let derived_refs = target
         .conversation_transcript_store()
         .list_derived_memory_refs(&key, Some("turn-snapshot"))
