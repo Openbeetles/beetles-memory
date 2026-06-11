@@ -79,6 +79,61 @@ impl StoreCapacityBudget {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorePathBudget {
+    pub max_file_name_bytes: usize,
+    pub max_directory_name_bytes: usize,
+    pub max_relative_path_bytes: usize,
+    pub physical_key_digest_hex_chars: usize,
+}
+
+impl StorePathBudget {
+    pub const fn esp_compact() -> Self {
+        Self {
+            max_file_name_bytes: 32,
+            max_directory_name_bytes: 48,
+            max_relative_path_bytes: 160,
+            physical_key_digest_hex_chars: 24,
+        }
+    }
+
+    pub const fn linux_device() -> Self {
+        Self {
+            max_file_name_bytes: 64,
+            max_directory_name_bytes: 64,
+            max_relative_path_bytes: 384,
+            physical_key_digest_hex_chars: 24,
+        }
+    }
+
+    pub const fn desktop_macos() -> Self {
+        Self {
+            max_file_name_bytes: 96,
+            max_directory_name_bytes: 96,
+            max_relative_path_bytes: 512,
+            physical_key_digest_hex_chars: 24,
+        }
+    }
+
+    pub const fn desktop_windows() -> Self {
+        Self {
+            max_file_name_bytes: 64,
+            max_directory_name_bytes: 64,
+            max_relative_path_bytes: 240,
+            physical_key_digest_hex_chars: 24,
+        }
+    }
+
+    pub const fn server_linux() -> Self {
+        Self {
+            max_file_name_bytes: 128,
+            max_directory_name_bytes: 128,
+            max_relative_path_bytes: 1024,
+            physical_key_digest_hex_chars: 24,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreBackendConfig {
     pub backend: StoreBackendKind,
@@ -87,6 +142,7 @@ pub struct StoreBackendConfig {
     pub event_scope: StoreEventScope,
     pub data_path: Option<PathBuf>,
     pub capacity: StoreCapacityBudget,
+    pub path_budget: StorePathBudget,
     pub repair_policy: StoreRepairPolicy,
     pub fsync: bool,
     pub schema_id: &'static str,
@@ -137,6 +193,7 @@ impl StoreBackendConfig {
         validate_backend_profile(backend, profile)?;
         let memory_system_kind = profile_memory_system_kind(profile);
         let capacity = default_capacity(backend, profile);
+        let path_budget = default_path_budget(profile);
         Ok(Self {
             backend,
             profile,
@@ -144,6 +201,7 @@ impl StoreBackendConfig {
             event_scope: StoreEventScope::system(memory_system_kind.as_str()),
             data_path,
             capacity,
+            path_budget,
             repair_policy: StoreRepairPolicy::ReportOnly,
             fsync: true,
             schema_id: STORE_SCHEMA_ID,
@@ -196,4 +254,20 @@ fn default_capacity(_backend: StoreBackendKind, profile: ProfileId) -> StoreCapa
     StoreCapacityBudget::from_runtime_budget(
         RuntimeBudgetReport::static_for_profile(profile).store_budget,
     )
+}
+
+pub const fn default_path_budget(profile: ProfileId) -> StorePathBudget {
+    match profile {
+        ProfileId::EspStandaloneMemory | ProfileId::EspEmbeddedSdk => {
+            StorePathBudget::esp_compact()
+        }
+        ProfileId::LinuxDeviceStandaloneMemory => StorePathBudget::linux_device(),
+        ProfileId::DesktopMacosStandaloneMemory | ProfileId::DesktopMacosEmbeddedSdk => {
+            StorePathBudget::desktop_macos()
+        }
+        ProfileId::DesktopWindowsEmbeddedSdk => StorePathBudget::desktop_windows(),
+        ProfileId::ServerLinuxMemoryGateway | ProfileId::ServerLinuxDevFull => {
+            StorePathBudget::server_linux()
+        }
+    }
 }

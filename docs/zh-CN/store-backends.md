@@ -35,6 +35,12 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
+## File Path Budget
+
+logical store key 不是 filesystem path。file backend 会按 profile 的 `StorePathBudget` 把 logical key 映射到受限 physical address：短 digest 文件名加 sidecar key index。`list_*_keys`、snapshot export/import、replay 和 delete 仍然只暴露 logical key。
+
+不要把 transcript ID、conversation ID、attr ID 或 host ref 直接编码进文件名。平台差异化的 filename / relative-path budget 属于 `bm-store`，不属于 adapter crate。
+
 ## Ownership Rules
 
 允许：

@@ -20,7 +20,7 @@ mod sqlite;
 
 pub use config::{
     profile_is_esp, profile_memory_system_kind, StoreBackendConfig, StoreBackendKind,
-    StoreCapacityBudget, StoreRepairPolicy,
+    StoreCapacityBudget, StorePathBudget, StoreRepairPolicy,
 };
 pub use engine::{StoreEngine, StoreSnapshotReplaceReport};
 pub use error::{StoreError, StoreOpenReport, StoreRepairReport};

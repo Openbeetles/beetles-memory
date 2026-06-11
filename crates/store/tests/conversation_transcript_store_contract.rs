@@ -578,6 +578,54 @@ fn file_store_persists_transcript_across_reopen() {
 }
 
 #[test]
+fn file_store_persists_long_transcript_keys_and_attrs_across_reopen() {
+    let root = temp_root("file-long-transcript-key");
+    let config = StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap();
+    let key = ConversationKey::new(
+        "space:local-user-with-default-desktop-memory",
+        "llm.gateway",
+        format!("work-room:{}", "long-input-segment-".repeat(16)),
+    )
+    .unwrap();
+    let mut turn_delta = delta("turn-long-file-key", "persist long key");
+    turn_delta.conversation.channel = key.channel_id.clone();
+    turn_delta.conversation.conversation_id = Some(key.conversation_id.clone());
+    let record = TranscriptTurnRecord::from_delta(&key, 1, &turn_delta, Vec::new(), 10).unwrap();
+    let message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    let attr = model_usage_attr(&key, "turn-long-file-key", &message_id);
+
+    {
+        let platform = StorePlatform::open(config.clone()).unwrap();
+        let store = platform.conversation_transcript_store();
+        store.append_turn(&record).unwrap();
+        store
+            .upsert_transcript_attrs(&key, std::slice::from_ref(&attr))
+            .unwrap();
+    }
+
+    let reopened = StorePlatform::open(config).unwrap();
+    let replay = reopened
+        .conversation_transcript_store()
+        .redacted_replay(&key, 10, TranscriptReplayView::HostUi)
+        .unwrap();
+
+    assert_eq!(replay.turns.len(), 1);
+    assert_eq!(
+        replay.turns[0].input_messages[0].content.as_deref(),
+        Some("persist long key")
+    );
+    assert_eq!(
+        replay.turns[0].assistant_message.as_ref().unwrap().attrs,
+        vec![attr]
+    );
+}
+
+#[test]
 fn snapshot_export_import_carries_conversation_transcript_namespace() {
     let source = StorePlatform::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
@@ -643,4 +691,67 @@ fn snapshot_export_import_carries_conversation_transcript_namespace() {
         .list_derived_memory_refs(&key, Some("turn-snapshot"))
         .unwrap();
     assert_eq!(derived_refs, vec![derived]);
+}
+
+#[test]
+fn file_snapshot_export_import_preserves_long_transcript_keys_and_attrs() {
+    let source_root = temp_root("file-snapshot-source-long-key");
+    let target_root = temp_root("file-snapshot-target-long-key");
+    let source = StorePlatform::open(
+        StoreBackendConfig::file(&source_root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    )
+    .unwrap();
+    let key = ConversationKey::new(
+        "space:local-user-with-default-desktop-memory",
+        "llm.gateway",
+        format!("work-room:{}", "long-input-segment-".repeat(16)),
+    )
+    .unwrap();
+    let mut turn_delta = delta("turn-long-file-snapshot", "snapshot long key");
+    turn_delta.conversation.channel = key.channel_id.clone();
+    turn_delta.conversation.conversation_id = Some(key.conversation_id.clone());
+    let record = TranscriptTurnRecord::from_delta(&key, 1, &turn_delta, Vec::new(), 10).unwrap();
+    let message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    let attr = model_usage_attr(&key, "turn-long-file-snapshot", &message_id);
+    let source_store = source.conversation_transcript_store();
+    source_store.append_turn(&record).unwrap();
+    source_store
+        .upsert_transcript_attrs(&key, std::slice::from_ref(&attr))
+        .unwrap();
+
+    let snapshot = source.export_store_snapshot().unwrap();
+    assert!(snapshot.json_docs.iter().any(|doc| {
+        doc.namespace == "conversation_transcript"
+            && doc.key.contains("long-input-segment")
+            && doc.key.contains("turn-long-file-snapshot")
+    }));
+    assert!(snapshot.json_docs.iter().any(|doc| {
+        doc.namespace == "conversation_transcript_attr" && doc.key.contains("long-input-segment")
+    }));
+
+    let target = StorePlatform::open(
+        StoreBackendConfig::file(&target_root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    )
+    .unwrap();
+    target.import_store_snapshot(&snapshot).unwrap();
+    let target_store = target.conversation_transcript_store();
+    let turns = target_store.list_turns(&key, 10).unwrap();
+    assert_eq!(turns.len(), 1);
+
+    let replay = target_store
+        .redacted_replay(&key, 10, TranscriptReplayView::HostUi)
+        .unwrap();
+    assert_eq!(
+        replay.turns[0].input_messages[0].content.as_deref(),
+        Some("snapshot long key")
+    );
+    assert_eq!(
+        replay.turns[0].assistant_message.as_ref().unwrap().attrs,
+        vec![attr]
+    );
 }

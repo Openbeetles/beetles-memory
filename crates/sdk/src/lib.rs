@@ -128,8 +128,8 @@ pub use bm_core::{Error, Result};
 pub use bm_store::{
     profile_memory_system_kind, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
     StoreBackendKind, StoreCapacityBudget, StoreEventLog, StoreEventScope, StoreOpenReport,
-    StorePlatform, StoreRepairPolicy, StoreRepairReport, StoreSnapshot, StoreSnapshotExportReport,
-    StoreSnapshotImportReport,
+    StorePathBudget, StorePlatform, StoreRepairPolicy, StoreRepairReport, StoreSnapshot,
+    StoreSnapshotExportReport, StoreSnapshotImportReport,
 };
 pub use capability::{
     resolve_memory_capabilities, AdapterTransportVisibility, MemoryAdapterCapabilityCatalog,

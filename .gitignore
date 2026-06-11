@@ -5,6 +5,7 @@
 /examples/*/Cargo.lock
 /examples/*/target/
 /memory/
+/crates/*/memory/
 /target/
 /apps/console/node_modules/
 /apps/console/dist/

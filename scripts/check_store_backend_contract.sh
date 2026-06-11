@@ -27,6 +27,8 @@ assert_store_tree_includes() {
 
 cargo fmt --all -- --check
 cargo check --workspace
+cargo test -p bm-store --test file_store_contract file_store_maps_long_logical_keys_to_profile_bounded_physical_paths
+cargo test -p bm-store --test conversation_transcript_store_contract file_snapshot_export_import_preserves_long_transcript_keys_and_attrs
 cargo test -p bm-store
 cargo test -p bm-store --all-features
 cargo test -p bm-store --features sqlite-store

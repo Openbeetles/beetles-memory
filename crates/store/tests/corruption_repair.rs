@@ -1,9 +1,26 @@
+use std::path::{Path, PathBuf};
+
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::Platform;
 use bm_store::{
     MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig, StoreEventLog, StoreEventScope,
     StorePlatform, StoreRepairPolicy,
 };
+
+fn first_file_with_extension(root: &Path, extension: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).expect("read directory") {
+        let entry = entry.expect("read directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = first_file_with_extension(&path, extension) {
+                return Some(found);
+            }
+        } else if path.extension().and_then(|value| value.to_str()) == Some(extension) {
+            return Some(path);
+        }
+    }
+    None
+}
 
 #[test]
 fn file_store_returns_structured_error_for_corrupt_json() {
@@ -19,13 +36,9 @@ fn file_store_returns_structured_error_for_corrupt_json() {
         .append("chat-a", "user", "hello")
         .unwrap();
 
-    let session_dir = root.join("kv").join("session");
-    let corrupt_file = std::fs::read_dir(&session_dir)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let corrupt_file =
+        first_file_with_extension(&root.join("kv").join("session").join("_v2"), "json")
+            .expect("session data json exists");
     std::fs::write(&corrupt_file, b"{not-json").unwrap();
 
     let err = platform

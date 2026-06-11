@@ -5,17 +5,31 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::{Error, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
-    MemoryStoreEvent, StoreBackendConfig, StoreEngine, StoreEventLog, StoreRepairPolicy,
-    StoreRepairReport, StoreSchemaManifest, StoreSnapshotBlob, StoreSnapshotJsonDoc,
-    StoreSnapshotReplaceReport,
+    MemoryStoreEvent, StoreBackendConfig, StoreEngine, StoreEventLog, StorePathBudget,
+    StoreRepairPolicy, StoreRepairReport, StoreSchemaManifest, StoreSnapshotBlob,
+    StoreSnapshotJsonDoc, StoreSnapshotReplaceReport,
 };
+
+const FILE_ADDRESSING_VERSION: u64 = 2;
+const FILE_ADDRESSING_DATA_DIR: &str = "_v2";
+const FILE_ADDRESSING_INDEX_DIR: &str = "_keys";
+const MIN_PHYSICAL_DIGEST_HEX_CHARS: usize = 16;
+const MAX_PHYSICAL_DIGEST_HEX_CHARS: usize = 32;
 
 pub struct FileStoreEngine {
     root: PathBuf,
     fsync: bool,
+    path_budget: StorePathBudget,
+}
+
+#[derive(Clone, Debug)]
+struct PhysicalKeyPaths {
+    data_path: PathBuf,
+    index_path: PathBuf,
+    legacy_path: PathBuf,
 }
 
 impl FileStoreEngine {
@@ -36,6 +50,7 @@ impl FileStoreEngine {
         let engine = Self {
             root,
             fsync: config.fsync,
+            path_budget: config.path_budget,
         };
         let repair = engine.repair_orphan_tmp_files(config.repair_policy)?;
         let manifest = engine.open_or_create_manifest(config)?;
@@ -98,18 +113,86 @@ impl FileStoreEngine {
         }
     }
 
-    fn json_path(&self, namespace: &str, key: &str) -> PathBuf {
-        self.root
-            .join("kv")
-            .join(namespace)
-            .join(format!("{}.json", hex_encode(key.as_bytes())))
+    fn json_paths(&self, namespace: &str, key: &str) -> Result<PhysicalKeyPaths> {
+        self.json_paths_at_root(&self.root, namespace, key)
     }
 
-    fn blob_path(&self, namespace: &str, key: &str) -> PathBuf {
-        self.root
-            .join("blob")
-            .join(namespace)
-            .join(format!("{}.bin", hex_encode(key.as_bytes())))
+    fn json_paths_at_root(
+        &self,
+        root: &Path,
+        namespace: &str,
+        key: &str,
+    ) -> Result<PhysicalKeyPaths> {
+        self.physical_key_paths_at_root(root, "kv", namespace, key, "json")
+    }
+
+    fn blob_paths(&self, namespace: &str, key: &str) -> Result<PhysicalKeyPaths> {
+        self.blob_paths_at_root(&self.root, namespace, key)
+    }
+
+    fn blob_paths_at_root(
+        &self,
+        root: &Path,
+        namespace: &str,
+        key: &str,
+    ) -> Result<PhysicalKeyPaths> {
+        self.physical_key_paths_at_root(root, "blob", namespace, key, "bin")
+    }
+
+    fn physical_key_paths_at_root(
+        &self,
+        root: &Path,
+        lane: &str,
+        namespace: &str,
+        key: &str,
+        extension: &str,
+    ) -> Result<PhysicalKeyPaths> {
+        self.validate_addressing_budget(extension, "file_store_addressing")?;
+        let digest = physical_key_digest(
+            lane,
+            namespace,
+            key,
+            self.path_budget.physical_key_digest_hex_chars,
+        );
+        let shard = &digest[..2];
+        let data_file_name = format!("{digest}.{extension}");
+        let index_file_name = format!("{digest}.json");
+
+        self.validate_directory_component(lane, "file_store_addressing")?;
+        self.validate_directory_component(namespace, "file_store_addressing")?;
+        self.validate_directory_component(FILE_ADDRESSING_DATA_DIR, "file_store_addressing")?;
+        self.validate_directory_component(FILE_ADDRESSING_INDEX_DIR, "file_store_addressing")?;
+        self.validate_directory_component(shard, "file_store_addressing")?;
+        self.validate_file_name(&data_file_name, "file_store_addressing")?;
+        self.validate_file_name(&index_file_name, "file_store_addressing")?;
+        self.validate_relative_path(
+            &format!("{lane}/{namespace}/{FILE_ADDRESSING_DATA_DIR}/{shard}/{data_file_name}"),
+            "file_store_addressing",
+        )?;
+        self.validate_relative_path(
+            &format!("{lane}/{namespace}/{FILE_ADDRESSING_INDEX_DIR}/{shard}/{index_file_name}"),
+            "file_store_addressing",
+        )?;
+
+        Ok(PhysicalKeyPaths {
+            data_path: root
+                .join(lane)
+                .join(namespace)
+                .join(FILE_ADDRESSING_DATA_DIR)
+                .join(shard)
+                .join(data_file_name),
+            index_path: root
+                .join(lane)
+                .join(namespace)
+                .join(FILE_ADDRESSING_INDEX_DIR)
+                .join(shard)
+                .join(index_file_name),
+            legacy_path: root.join(lane).join(namespace).join(format!(
+                "{}.{}",
+                hex_encode(key.as_bytes()),
+                extension
+            )),
+        })
     }
 
     fn events_path(&self) -> PathBuf {
@@ -128,7 +211,244 @@ impl FileStoreEngine {
         atomic_write(path, bytes, self.fsync, "file_store_write")
     }
 
-    fn list_encoded_keys(&self, base: PathBuf, extension: &str) -> Result<Vec<String>> {
+    fn validate_addressing_budget(&self, extension: &str, stage: &'static str) -> Result<()> {
+        let digest_chars = self.path_budget.physical_key_digest_hex_chars;
+        if !(MIN_PHYSICAL_DIGEST_HEX_CHARS..=MAX_PHYSICAL_DIGEST_HEX_CHARS).contains(&digest_chars)
+        {
+            return Err(Error::config(
+                stage,
+                format!(
+                    "physical key digest hex chars {digest_chars} outside {MIN_PHYSICAL_DIGEST_HEX_CHARS}..={MAX_PHYSICAL_DIGEST_HEX_CHARS}"
+                ),
+            ));
+        }
+        let max_data_file_len = digest_chars + 1 + extension.len();
+        let max_index_file_len = digest_chars + 1 + "json".len();
+        if max_data_file_len > self.path_budget.max_file_name_bytes
+            || max_index_file_len > self.path_budget.max_file_name_bytes
+        {
+            return Err(Error::config(
+                stage,
+                format!(
+                    "physical key digest length exceeds file name budget {}",
+                    self.path_budget.max_file_name_bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_directory_component(&self, value: &str, stage: &'static str) -> Result<()> {
+        if value.is_empty() || value.contains('/') || value.contains('\\') {
+            return Err(Error::config(
+                stage,
+                format!("invalid file store directory component {value:?}"),
+            ));
+        }
+        if value.len() > self.path_budget.max_directory_name_bytes {
+            return Err(Error::config(
+                stage,
+                format!(
+                    "directory component {value:?} exceeds {} bytes",
+                    self.path_budget.max_directory_name_bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_file_name(&self, value: &str, stage: &'static str) -> Result<()> {
+        if value.is_empty() || value.contains('/') || value.contains('\\') {
+            return Err(Error::config(
+                stage,
+                format!("invalid file store file name {value:?}"),
+            ));
+        }
+        if value.len() > self.path_budget.max_file_name_bytes {
+            return Err(Error::config(
+                stage,
+                format!(
+                    "file name {value:?} exceeds {} bytes",
+                    self.path_budget.max_file_name_bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_relative_path(&self, value: &str, stage: &'static str) -> Result<()> {
+        if value.len() > self.path_budget.max_relative_path_bytes {
+            return Err(Error::config(
+                stage,
+                format!(
+                    "relative file store path exceeds {} bytes",
+                    self.path_budget.max_relative_path_bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_key_index(&self, path: &Path, key: &str, stage: &'static str) -> Result<()> {
+        let value = json!({
+            "addressing_version": FILE_ADDRESSING_VERSION,
+            "key": key,
+        });
+        let bytes = serde_json::to_vec_pretty(&value)
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        atomic_write(path, &bytes, self.fsync, stage)
+    }
+
+    fn read_key_index(&self, path: &Path, stage: &'static str) -> Result<Option<String>> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if is_not_found_or_invalid_filename(&error) => return Ok(None),
+            Err(error) => return Err(Error::io(stage, error)),
+        };
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        let version = value
+            .get("addressing_version")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| Error::config(stage, "file store key index missing version"))?;
+        if version != FILE_ADDRESSING_VERSION {
+            return Err(Error::config(
+                stage,
+                format!("unsupported file store key index version {version}"),
+            ));
+        }
+        value
+            .get("key")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| Error::config(stage, "file store key index missing key"))
+            .map(Some)
+    }
+
+    fn require_key_index_matches(&self, path: &Path, key: &str, stage: &'static str) -> Result<()> {
+        let Some(existing) = self.read_key_index(path, stage)? else {
+            return Err(Error::config(
+                stage,
+                "file store physical data is missing key index",
+            ));
+        };
+        if existing != key {
+            return Err(Error::config(
+                stage,
+                "file store physical key collision detected",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_key_index_available(
+        &self,
+        paths: &PhysicalKeyPaths,
+        key: &str,
+        stage: &'static str,
+    ) -> Result<()> {
+        if let Some(existing) = self.read_key_index(&paths.index_path, stage)? {
+            if existing != key {
+                return Err(Error::config(
+                    stage,
+                    "file store physical key collision detected",
+                ));
+            }
+            return Ok(());
+        }
+        if paths.data_path.exists() {
+            return Err(Error::config(
+                stage,
+                "file store physical data is missing key index",
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_json_value_at_root(
+        &self,
+        root: &Path,
+        namespace: &str,
+        key: &str,
+        value: &Value,
+        stage: &'static str,
+    ) -> Result<()> {
+        let paths = self.json_paths_at_root(root, namespace, key)?;
+        self.ensure_key_index_available(&paths, key, stage)?;
+        self.write_key_index(&paths.index_path, key, stage)?;
+        let bytes = serde_json::to_vec_pretty(value)
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        atomic_write(&paths.data_path, &bytes, self.fsync, stage)
+    }
+
+    fn write_blob_at_root(
+        &self,
+        root: &Path,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        stage: &'static str,
+    ) -> Result<()> {
+        let paths = self.blob_paths_at_root(root, namespace, key)?;
+        self.ensure_key_index_available(&paths, key, stage)?;
+        self.write_key_index(&paths.index_path, key, stage)?;
+        atomic_write(&paths.data_path, value, self.fsync, stage)
+    }
+
+    fn list_keys(&self, base: PathBuf, extension: &str) -> Result<Vec<String>> {
+        let mut out = BTreeSet::new();
+        for key in self.list_indexed_keys(&base, extension)? {
+            out.insert(key);
+        }
+        for key in self.list_legacy_encoded_keys(base, extension)? {
+            out.insert(key);
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    fn list_indexed_keys(&self, base: &Path, extension: &str) -> Result<Vec<String>> {
+        let index_base = base.join(FILE_ADDRESSING_INDEX_DIR);
+        let data_base = base.join(FILE_ADDRESSING_DATA_DIR);
+        let Ok(shards) = fs::read_dir(&index_base) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for shard in shards {
+            let shard = shard.map_err(|error| Error::io("file_store_list", error))?;
+            let shard_path = shard.path();
+            if !shard_path.is_dir() {
+                continue;
+            }
+            let Some(shard_name) = shard_path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let entries =
+                fs::read_dir(&shard_path).map_err(|error| Error::io("file_store_list", error))?;
+            for entry in entries {
+                let entry = entry.map_err(|error| Error::io("file_store_list", error))?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                let data_path = data_base
+                    .join(shard_name)
+                    .join(format!("{stem}.{extension}"));
+                if !data_path.is_file() {
+                    continue;
+                }
+                if let Some(key) = self.read_key_index(&path, "file_store_list")? {
+                    out.push(key);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    fn list_legacy_encoded_keys(&self, base: PathBuf, extension: &str) -> Result<Vec<String>> {
         let Ok(entries) = fs::read_dir(&base) else {
             return Ok(Vec::new());
         };
@@ -213,64 +533,92 @@ fn read_events_jsonl(path: &Path) -> Result<Vec<MemoryStoreEvent>> {
 
 impl StoreEngine for FileStoreEngine {
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
-        let path = self.json_path(namespace, key);
-        match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|error| Error::config("file_store_json_read", error.to_string())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        let paths = self.json_paths(namespace, key)?;
+        match fs::read(&paths.data_path) {
+            Ok(bytes) => {
+                self.require_key_index_matches(&paths.index_path, key, "file_store_json_read")?;
+                serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|error| Error::config("file_store_json_read", error.to_string()))
+            }
+            Err(error) if is_not_found_or_invalid_filename(&error) => {
+                match fs::read(&paths.legacy_path) {
+                    Ok(bytes) => serde_json::from_slice(&bytes)
+                        .map(Some)
+                        .map_err(|error| Error::config("file_store_json_read", error.to_string())),
+                    Err(error) if is_not_found_or_invalid_filename(&error) => Ok(None),
+                    Err(error) => Err(Error::io("file_store_json_read", error)),
+                }
+            }
             Err(error) => Err(Error::io("file_store_json_read", error)),
         }
     }
 
     fn put_json_value(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
+        let paths = self.json_paths(namespace, key)?;
+        self.ensure_key_index_available(&paths, key, "file_store_json_write")?;
+        self.write_key_index(&paths.index_path, key, "file_store_json_write")?;
         let bytes = serde_json::to_vec_pretty(&value)
             .map_err(|error| Error::config("file_store_json_write", error.to_string()))?;
-        self.write_json_file(&self.json_path(namespace, key), &bytes)
+        atomic_write(
+            &paths.data_path,
+            &bytes,
+            self.fsync,
+            "file_store_json_write",
+        )
     }
 
     fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
-        let path = self.json_path(namespace, key);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(Error::io("file_store_json_delete", error)),
-        }
+        let paths = self.json_paths(namespace, key)?;
+        let mut deleted = false;
+        deleted |= remove_file_if_exists(&paths.data_path, "file_store_json_delete")?;
+        deleted |= remove_file_if_exists(&paths.index_path, "file_store_json_delete")?;
+        deleted |= remove_file_if_exists(&paths.legacy_path, "file_store_json_delete")?;
+        Ok(deleted)
     }
 
     fn list_json_keys(&self, namespace: &str) -> Result<Vec<String>> {
-        self.list_encoded_keys(self.root.join("kv").join(namespace), "json")
+        self.validate_directory_component(namespace, "file_store_list")?;
+        self.list_keys(self.root.join("kv").join(namespace), "json")
     }
 
     fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
-        let path = self.blob_path(namespace, key);
-        match fs::read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        let paths = self.blob_paths(namespace, key)?;
+        match fs::read(&paths.data_path) {
+            Ok(bytes) => {
+                self.require_key_index_matches(&paths.index_path, key, "file_store_blob_read")?;
+                Ok(Some(bytes))
+            }
+            Err(error) if is_not_found_or_invalid_filename(&error) => {
+                match fs::read(&paths.legacy_path) {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(error) if is_not_found_or_invalid_filename(&error) => Ok(None),
+                    Err(error) => Err(Error::io("file_store_blob_read", error)),
+                }
+            }
             Err(error) => Err(Error::io("file_store_blob_read", error)),
         }
     }
 
     fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
-        atomic_write(
-            &self.blob_path(namespace, key),
-            value,
-            self.fsync,
-            "file_store_blob_write",
-        )
+        let paths = self.blob_paths(namespace, key)?;
+        self.ensure_key_index_available(&paths, key, "file_store_blob_write")?;
+        self.write_key_index(&paths.index_path, key, "file_store_blob_write")?;
+        atomic_write(&paths.data_path, value, self.fsync, "file_store_blob_write")
     }
 
     fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
-        let path = self.blob_path(namespace, key);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(Error::io("file_store_blob_delete", error)),
-        }
+        let paths = self.blob_paths(namespace, key)?;
+        let mut deleted = false;
+        deleted |= remove_file_if_exists(&paths.data_path, "file_store_blob_delete")?;
+        deleted |= remove_file_if_exists(&paths.index_path, "file_store_blob_delete")?;
+        deleted |= remove_file_if_exists(&paths.legacy_path, "file_store_blob_delete")?;
+        Ok(deleted)
     }
 
     fn list_blob_keys(&self, namespace: &str) -> Result<Vec<String>> {
-        self.list_encoded_keys(self.root.join("blob").join(namespace), "bin")
+        self.validate_directory_component(namespace, "file_store_list")?;
+        self.list_keys(self.root.join("blob").join(namespace), "bin")
     }
 
     fn replace_events(&self, events: &[MemoryStoreEvent]) -> Result<()> {
@@ -362,20 +710,22 @@ impl FileStoreEngine {
             "file_store_snapshot_import",
         )?;
         for doc in json_docs {
-            let path = stage_root
-                .join("kv")
-                .join(&doc.namespace)
-                .join(format!("{}.json", hex_encode(doc.key.as_bytes())));
-            let bytes = serde_json::to_vec_pretty(&doc.value)
-                .map_err(|error| Error::config("file_store_snapshot_import", error.to_string()))?;
-            atomic_write(&path, &bytes, self.fsync, "file_store_snapshot_import")?;
+            self.write_json_value_at_root(
+                stage_root,
+                &doc.namespace,
+                &doc.key,
+                &doc.value,
+                "file_store_snapshot_import",
+            )?;
         }
         for blob in blobs {
-            let path = stage_root
-                .join("blob")
-                .join(&blob.namespace)
-                .join(format!("{}.bin", hex_encode(blob.key.as_bytes())));
-            atomic_write(&path, &blob.value, self.fsync, "file_store_snapshot_import")?;
+            self.write_blob_at_root(
+                stage_root,
+                &blob.namespace,
+                &blob.key,
+                &blob.value,
+                "file_store_snapshot_import",
+            )?;
         }
         Ok(())
     }
@@ -544,6 +894,21 @@ fn remove_path_if_exists(path: &Path, stage: &'static str) -> Result<()> {
     }
 }
 
+fn remove_file_if_exists(path: &Path, stage: &'static str) -> Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if is_not_found_or_invalid_filename(&error) => Ok(false),
+        Err(error) => Err(Error::io(stage, error)),
+    }
+}
+
+fn is_not_found_or_invalid_filename(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+    )
+}
+
 fn atomic_write(path: &Path, bytes: &[u8], fsync: bool, stage: &'static str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| Error::io(stage, error))?;
@@ -587,4 +952,40 @@ fn hex_decode_to_string(value: &str) -> Option<String> {
         bytes.push(u8::from_str_radix(hex, 16).ok()?);
     }
     String::from_utf8(bytes).ok()
+}
+
+fn physical_key_digest(lane: &str, namespace: &str, key: &str, hex_chars: usize) -> String {
+    let first = digest_parts(
+        0xcbf2_9ce4_8422_2325,
+        &[
+            b"bm-store-file-v2".as_slice(),
+            lane.as_bytes(),
+            namespace.as_bytes(),
+            key.as_bytes(),
+        ],
+    );
+    let second = digest_parts(
+        0x8422_2325_cbf2_9ce4,
+        &[
+            b"bm-store-file-v2-key".as_slice(),
+            key.as_bytes(),
+            namespace.as_bytes(),
+            lane.as_bytes(),
+        ],
+    );
+    let full = format!("{first:016x}{second:016x}");
+    full[..hex_chars].to_string()
+}
+
+fn digest_parts(seed: u64, parts: &[&[u8]]) -> u64 {
+    let mut hash = seed;
+    for part in parts {
+        for byte in *part {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
