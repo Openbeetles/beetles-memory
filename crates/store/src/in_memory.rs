@@ -5,12 +5,13 @@ use bm_core::{Error, Result};
 use serde_json::Value;
 
 use crate::{
-    MemoryStoreEvent, StoreEngine, StoreEventLog, StoreSnapshotBlob, StoreSnapshotJsonDoc,
+    enforce_event_key_budget, enforce_logical_key_budget, store_budget_error, MemoryStoreEvent,
+    StoreCapacityBudget, StoreEngine, StoreEventLog, StoreSnapshotBlob, StoreSnapshotJsonDoc,
     StoreSnapshotReplaceReport,
 };
 
-#[derive(Default)]
 pub struct InMemoryStoreEngine {
+    capacity: StoreCapacityBudget,
     state: Mutex<InMemoryStoreEngineState>,
 }
 
@@ -23,19 +24,37 @@ struct InMemoryStoreEngineState {
 }
 
 impl InMemoryStoreEngine {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(capacity: StoreCapacityBudget) -> Self {
+        Self {
+            capacity,
+            state: Mutex::new(InMemoryStoreEngineState::default()),
+        }
+    }
+}
+
+impl Default for InMemoryStoreEngine {
+    fn default() -> Self {
+        Self::new(StoreCapacityBudget::full())
     }
 }
 
 impl StoreEventLog for InMemoryStoreEngine {
     fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
+        enforce_event_key_budget(self.capacity, &event, "in_memory_store_event")?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if !state.event_ids.insert(event.event_id.clone()) {
             return Err(Error::config(
                 "store_event_log",
                 format!("duplicate event id {}", event.event_id),
             ));
+        }
+        if state.events.len() >= self.capacity.event_log_max_items {
+            state.event_ids.remove(&event.event_id);
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                state.events.len().saturating_add(1),
+                self.capacity.event_log_max_items
+            )));
         }
         state.events.push(event);
         Ok(())
@@ -53,6 +72,7 @@ impl StoreEventLog for InMemoryStoreEngine {
 
 impl StoreEngine for InMemoryStoreEngine {
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_json_read")?;
         Ok(self
             .state
             .lock()
@@ -63,15 +83,63 @@ impl StoreEngine for InMemoryStoreEngine {
     }
 
     fn put_json_value(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .json
-            .insert((namespace.to_string(), key.to_string()), value);
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_json_write")?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let storage_key = (namespace.to_string(), key.to_string());
+        if !state.json.contains_key(&storage_key)
+            && state.json.len() >= self.capacity.kv_max_entries
+        {
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                state.json.len().saturating_add(1),
+                self.capacity.kv_max_entries
+            )));
+        }
+        state.json.insert(storage_key, value);
+        Ok(())
+    }
+
+    fn put_json_value_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: Value,
+        event: MemoryStoreEvent,
+    ) -> Result<()> {
+        enforce_event_key_budget(self.capacity, &event, "in_memory_json_write")?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.event_ids.contains(&event.event_id) {
+            return Err(Error::config(
+                "store_event_log",
+                format!("duplicate event id {}", event.event_id),
+            ));
+        }
+        if state.events.len() >= self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                state.events.len().saturating_add(1),
+                self.capacity.event_log_max_items
+            )));
+        }
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_json_write")?;
+        let storage_key = (namespace.to_string(), key.to_string());
+        if !state.json.contains_key(&storage_key)
+            && state.json.len() >= self.capacity.kv_max_entries
+        {
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                state.json.len().saturating_add(1),
+                self.capacity.kv_max_entries
+            )));
+        }
+        state.json.insert(storage_key, value);
+        state.event_ids.insert(event.event_id.clone());
+        state.events.push(event);
         Ok(())
     }
 
     fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_json_delete")?;
         Ok(self
             .state
             .lock()
@@ -81,7 +149,42 @@ impl StoreEngine for InMemoryStoreEngine {
             .is_some())
     }
 
+    fn delete_json_value_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        event: MemoryStoreEvent,
+    ) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_json_delete")?;
+        enforce_event_key_budget(self.capacity, &event, "in_memory_json_delete")?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state
+            .json
+            .contains_key(&(namespace.to_string(), key.to_string()))
+        {
+            return Ok(false);
+        }
+        if state.event_ids.contains(&event.event_id) {
+            return Err(Error::config(
+                "store_event_log",
+                format!("duplicate event id {}", event.event_id),
+            ));
+        }
+        if state.events.len() >= self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                state.events.len().saturating_add(1),
+                self.capacity.event_log_max_items
+            )));
+        }
+        state.json.remove(&(namespace.to_string(), key.to_string()));
+        state.event_ids.insert(event.event_id.clone());
+        state.events.push(event);
+        Ok(true)
+    }
+
     fn list_json_keys(&self, namespace: &str) -> Result<Vec<String>> {
+        enforce_logical_key_budget(self.capacity, namespace, "", "in_memory_json_list")?;
         let mut keys = self
             .state
             .lock()
@@ -96,6 +199,7 @@ impl StoreEngine for InMemoryStoreEngine {
     }
 
     fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_blob_read")?;
         Ok(self
             .state
             .lock()
@@ -106,15 +210,67 @@ impl StoreEngine for InMemoryStoreEngine {
     }
 
     fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .blobs
-            .insert((namespace.to_string(), key.to_string()), value.to_vec());
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_blob_write")?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let storage_key = (namespace.to_string(), key.to_string());
+        let current_bytes = state.blobs.values().map(Vec::len).sum::<usize>();
+        let previous = state.blobs.get(&storage_key).map(Vec::len).unwrap_or(0);
+        let next_bytes = current_bytes
+            .saturating_sub(previous)
+            .saturating_add(value.len());
+        if next_bytes > self.capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                next_bytes, self.capacity.blob_max_bytes
+            )));
+        }
+        state.blobs.insert(storage_key, value.to_vec());
+        Ok(())
+    }
+
+    fn put_blob_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        event: MemoryStoreEvent,
+    ) -> Result<()> {
+        enforce_event_key_budget(self.capacity, &event, "in_memory_blob_write")?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.event_ids.contains(&event.event_id) {
+            return Err(Error::config(
+                "store_event_log",
+                format!("duplicate event id {}", event.event_id),
+            ));
+        }
+        if state.events.len() >= self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                state.events.len().saturating_add(1),
+                self.capacity.event_log_max_items
+            )));
+        }
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_blob_write")?;
+        let storage_key = (namespace.to_string(), key.to_string());
+        let current_bytes = state.blobs.values().map(Vec::len).sum::<usize>();
+        let previous = state.blobs.get(&storage_key).map(Vec::len).unwrap_or(0);
+        let next_bytes = current_bytes
+            .saturating_sub(previous)
+            .saturating_add(value.len());
+        if next_bytes > self.capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                next_bytes, self.capacity.blob_max_bytes
+            )));
+        }
+        state.blobs.insert(storage_key, value.to_vec());
+        state.event_ids.insert(event.event_id.clone());
+        state.events.push(event);
         Ok(())
     }
 
     fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_blob_delete")?;
         Ok(self
             .state
             .lock()
@@ -124,7 +280,44 @@ impl StoreEngine for InMemoryStoreEngine {
             .is_some())
     }
 
+    fn delete_blob_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        event: MemoryStoreEvent,
+    ) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "in_memory_blob_delete")?;
+        enforce_event_key_budget(self.capacity, &event, "in_memory_blob_delete")?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state
+            .blobs
+            .contains_key(&(namespace.to_string(), key.to_string()))
+        {
+            return Ok(false);
+        }
+        if state.event_ids.contains(&event.event_id) {
+            return Err(Error::config(
+                "store_event_log",
+                format!("duplicate event id {}", event.event_id),
+            ));
+        }
+        if state.events.len() >= self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                state.events.len().saturating_add(1),
+                self.capacity.event_log_max_items
+            )));
+        }
+        state
+            .blobs
+            .remove(&(namespace.to_string(), key.to_string()));
+        state.event_ids.insert(event.event_id.clone());
+        state.events.push(event);
+        Ok(true)
+    }
+
     fn list_blob_keys(&self, namespace: &str) -> Result<Vec<String>> {
+        enforce_logical_key_budget(self.capacity, namespace, "", "in_memory_blob_list")?;
         let mut keys = self
             .state
             .lock()
@@ -139,8 +332,16 @@ impl StoreEngine for InMemoryStoreEngine {
     }
 
     fn replace_events(&self, events: &[MemoryStoreEvent]) -> Result<()> {
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
         let mut event_ids = BTreeSet::new();
         for event in events {
+            enforce_event_key_budget(self.capacity, event, "in_memory_event_replace")?;
             if !event_ids.insert(event.event_id.clone()) {
                 return Err(Error::config(
                     "store_event_log",
@@ -162,8 +363,16 @@ impl StoreEngine for InMemoryStoreEngine {
         blobs: &[StoreSnapshotBlob],
         events: &[MemoryStoreEvent],
     ) -> Result<StoreSnapshotReplaceReport> {
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
         let mut event_ids = BTreeSet::new();
         for event in events {
+            enforce_event_key_budget(self.capacity, event, "in_memory_snapshot_import")?;
             if !event_ids.insert(event.event_id.clone()) {
                 return Err(Error::config(
                     "store_event_log",
@@ -176,14 +385,56 @@ impl StoreEngine for InMemoryStoreEngine {
         let blob_namespace_set = namespace_set(blob_namespaces);
         let json_snapshot_keys = json_docs
             .iter()
-            .map(|doc| (doc.namespace.clone(), doc.key.clone()))
-            .collect::<BTreeSet<_>>();
+            .map(|doc| {
+                enforce_logical_key_budget(
+                    self.capacity,
+                    &doc.namespace,
+                    &doc.key,
+                    "in_memory_snapshot_import",
+                )?;
+                Ok((doc.namespace.clone(), doc.key.clone()))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
         let blob_snapshot_keys = blobs
             .iter()
-            .map(|blob| (blob.namespace.clone(), blob.key.clone()))
-            .collect::<BTreeSet<_>>();
+            .map(|blob| {
+                enforce_logical_key_budget(
+                    self.capacity,
+                    &blob.namespace,
+                    &blob.key,
+                    "in_memory_snapshot_import",
+                )?;
+                Ok((blob.namespace.clone(), blob.key.clone()))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
 
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let retained_json_entries = state
+            .json
+            .keys()
+            .filter(|(namespace, _key)| !json_namespace_set.contains(namespace.as_str()))
+            .count();
+        let final_json_entries = retained_json_entries.saturating_add(json_docs.len());
+        if final_json_entries > self.capacity.kv_max_entries {
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                final_json_entries, self.capacity.kv_max_entries
+            )));
+        }
+        let retained_blob_bytes = state
+            .blobs
+            .iter()
+            .filter(|((namespace, _key), _value)| !blob_namespace_set.contains(namespace.as_str()))
+            .map(|(_key, value)| value.len())
+            .sum::<usize>();
+        let snapshot_blob_bytes = blobs.iter().map(|blob| blob.value.len()).sum::<usize>();
+        let final_blob_bytes = retained_blob_bytes.saturating_add(snapshot_blob_bytes);
+        if final_blob_bytes > self.capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                final_blob_bytes, self.capacity.blob_max_bytes
+            )));
+        }
         let json_deleted = state
             .json
             .keys()

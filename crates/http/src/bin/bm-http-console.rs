@@ -43,7 +43,8 @@ struct ConsoleServerOptions {
 impl ConsoleServerOptions {
     fn from_args(mut args: impl Iterator<Item = String>) -> bm_sdk::Result<Self> {
         let mut addr = "127.0.0.1:8718".to_string();
-        let mut store = ConsoleStore::File(PathBuf::from("target/bm-http-console-store"));
+        let mut store = None;
+        let mut file_store_requested = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -57,8 +58,14 @@ impl ConsoleServerOptions {
                         bm_sdk::Error::config("http_console_args", "--store requires a value")
                     })?;
                     store = match value.as_str() {
-                        "file" => ConsoleStore::File(PathBuf::from("target/bm-http-console-store")),
-                        "memory" | "in-memory" => ConsoleStore::InMemory,
+                        "file" => {
+                            file_store_requested = true;
+                            None
+                        }
+                        "memory" | "in-memory" => {
+                            file_store_requested = false;
+                            Some(ConsoleStore::InMemory)
+                        }
                         other => {
                             return Err(bm_sdk::Error::config(
                                 "http_console_args",
@@ -71,7 +78,8 @@ impl ConsoleServerOptions {
                     let path = args.next().ok_or_else(|| {
                         bm_sdk::Error::config("http_console_args", "--store-path requires a value")
                     })?;
-                    store = ConsoleStore::File(PathBuf::from(path));
+                    file_store_requested = false;
+                    store = Some(ConsoleStore::File(memory_store_path_from_arg(path)?));
                 }
                 "--help" | "-h" => {
                     print_usage();
@@ -86,6 +94,21 @@ impl ConsoleServerOptions {
             }
         }
 
+        let store = match store {
+            Some(store) => store,
+            None if file_store_requested => {
+                return Err(bm_sdk::Error::config(
+                    "http_console_args",
+                    "--store file requires --store-path with an absolute path",
+                ))
+            }
+            None => {
+                return Err(bm_sdk::Error::config(
+                    "http_console_args",
+                    "memory store backend must be explicit: use --store memory or --store-path with an absolute path",
+                ))
+            }
+        };
         Ok(Self { addr, store })
     }
 
@@ -161,4 +184,56 @@ fn print_usage() {
     println!(
         "Usage: bm-http-console [--addr 127.0.0.1:8718] [--store file|memory] [--store-path PATH]"
     );
+}
+
+fn memory_store_path_from_arg(raw: String) -> bm_sdk::Result<PathBuf> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(bm_sdk::Error::config(
+            "http_console_args",
+            "--store-path must be an absolute path",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_console_requires_explicit_store_backend() {
+        let error = ConsoleServerOptions::from_args(std::iter::empty())
+            .expect_err("store backend must be explicit");
+        assert!(error.to_string().contains("explicit"), "{error}");
+    }
+
+    #[test]
+    fn http_console_rejects_file_store_without_absolute_path() {
+        let error = ConsoleServerOptions::from_args(
+            vec!["--store".to_string(), "file".to_string()].into_iter(),
+        )
+        .expect_err("file store without path must fail");
+        assert!(error.to_string().contains("--store-path"), "{error}");
+
+        let error = ConsoleServerOptions::from_args(
+            vec![
+                "--store-path".to_string(),
+                "target/http-console-store".to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect_err("relative file store path must fail");
+        assert!(error.to_string().contains("absolute"), "{error}");
+    }
+
+    #[test]
+    fn http_console_accepts_explicit_volatile_memory_store() {
+        let options = ConsoleServerOptions::from_args(
+            vec!["--store".to_string(), "memory".to_string()].into_iter(),
+        )
+        .expect("explicit memory store");
+        assert!(matches!(options.store, ConsoleStore::InMemory));
+    }
 }

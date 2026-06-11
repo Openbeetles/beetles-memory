@@ -1137,7 +1137,12 @@ fn runtime_skill_index_hints_sqlite(
     preferred_chat_id: Option<&str>,
 ) -> crate::error::Result<std::collections::HashMap<String, RuntimeSkillIndexHint>> {
     let signature = build_runtime_skill_index_signature(records);
-    let path = runtime_skill_index_path(&signature);
+    let Some(path) = runtime_skill_index_path(&signature)? else {
+        return Err(crate::error::Error::config(
+            "runtime_skill_index",
+            "sqlite index state dir is not configured",
+        ));
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| crate::error::Error::io("runtime_skill_index", e))?;
@@ -1184,8 +1189,11 @@ fn build_runtime_skill_index_signature(
 }
 
 #[cfg(feature = "sqlite-index")]
-fn runtime_skill_index_path(_signature: &RuntimeSkillIndexSignature) -> PathBuf {
-    crate::platform::state_mount_path().join(REL_PATH_RUNTIME_SKILL_INDEX)
+fn runtime_skill_index_path(
+    _signature: &RuntimeSkillIndexSignature,
+) -> crate::error::Result<Option<PathBuf>> {
+    Ok(crate::platform::sqlite_index_state_dir()?
+        .map(|root| root.join(REL_PATH_RUNTIME_SKILL_INDEX)))
 }
 
 #[cfg(feature = "sqlite-index")]

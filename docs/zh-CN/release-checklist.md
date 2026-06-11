@@ -37,6 +37,7 @@ cargo doc --no-deps --no-default-features \
 bash scripts/check_platform_compile_gates.sh
 bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh
+bash scripts/check_production_hardening_contract.sh
 bash scripts/check_release_surface.sh
 ```
 
@@ -57,7 +58,7 @@ bm-entry
 bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
-通过 `scripts/check_release_surface.sh` 运行 staged `cargo publish --dry-run --allow-dirty -p <crate>`。正式发布使用干净工作区。
+通过 `scripts/check_release_surface.sh` 运行 staged `cargo publish --dry-run -p <crate>`。release gate 会运行 production hardening 检查、使用临时 Cargo target，并在 ignored artifact baseline 发生变化时失败。
 
 ## 范围检查
 

@@ -2,13 +2,15 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::{Error, Result};
 use serde_json::{json, Value};
 
 use crate::{
-    MemoryStoreEvent, StoreBackendConfig, StoreEngine, StoreEventLog, StorePathBudget,
+    enforce_event_key_budget, enforce_logical_key_budget, store_budget_error, MemoryStoreEvent,
+    StoreBackendConfig, StoreCapacityBudget, StoreEngine, StoreEventLog, StorePathBudget,
     StoreRepairPolicy, StoreRepairReport, StoreSchemaManifest, StoreSnapshotBlob,
     StoreSnapshotJsonDoc, StoreSnapshotReplaceReport,
 };
@@ -18,10 +20,12 @@ const FILE_ADDRESSING_DATA_DIR: &str = "_v2";
 const FILE_ADDRESSING_INDEX_DIR: &str = "_keys";
 const MIN_PHYSICAL_DIGEST_HEX_CHARS: usize = 16;
 const MAX_PHYSICAL_DIGEST_HEX_CHARS: usize = 32;
+static SNAPSHOT_IMPORT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct FileStoreEngine {
     root: PathBuf,
     fsync: bool,
+    capacity: StoreCapacityBudget,
     path_budget: StorePathBudget,
 }
 
@@ -50,6 +54,7 @@ impl FileStoreEngine {
         let engine = Self {
             root,
             fsync: config.fsync,
+            capacity: config.capacity,
             path_budget: config.path_budget,
         };
         let repair = engine.repair_orphan_tmp_files(config.repair_policy)?;
@@ -147,6 +152,7 @@ impl FileStoreEngine {
         key: &str,
         extension: &str,
     ) -> Result<PhysicalKeyPaths> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "file_store_addressing")?;
         self.validate_addressing_budget(extension, "file_store_addressing")?;
         let digest = physical_key_digest(
             lane,
@@ -365,6 +371,32 @@ impl FileStoreEngine {
         Ok(())
     }
 
+    fn validate_v2_pair_for_delete(
+        &self,
+        paths: &PhysicalKeyPaths,
+        key: &str,
+        stage: &'static str,
+    ) -> Result<()> {
+        let data_exists = paths.data_path.exists();
+        let index = self.read_key_index(&paths.index_path, stage)?;
+        match (data_exists, index) {
+            (true, Some(existing)) if existing == key => Ok(()),
+            (true, Some(_)) => Err(Error::config(
+                stage,
+                "file store physical key collision detected",
+            )),
+            (true, None) => Err(Error::config(
+                stage,
+                "file store physical data is missing key index",
+            )),
+            (false, Some(_)) => Err(Error::config(
+                stage,
+                "file store key index has missing physical data",
+            )),
+            (false, None) => Ok(()),
+        }
+    }
+
     fn write_json_value_at_root(
         &self,
         root: &Path,
@@ -395,9 +427,10 @@ impl FileStoreEngine {
         atomic_write(&paths.data_path, value, self.fsync, stage)
     }
 
-    fn list_keys(&self, base: PathBuf, extension: &str) -> Result<Vec<String>> {
+    fn list_keys(&self, lane: &str, namespace: &str, extension: &str) -> Result<Vec<String>> {
+        let base = self.root.join(lane).join(namespace);
         let mut out = BTreeSet::new();
-        for key in self.list_indexed_keys(&base, extension)? {
+        for key in self.list_indexed_keys(lane, namespace, &base, extension)? {
             out.insert(key);
         }
         for key in self.list_legacy_encoded_keys(base, extension)? {
@@ -406,11 +439,19 @@ impl FileStoreEngine {
         Ok(out.into_iter().collect())
     }
 
-    fn list_indexed_keys(&self, base: &Path, extension: &str) -> Result<Vec<String>> {
+    fn list_indexed_keys(
+        &self,
+        lane: &str,
+        namespace: &str,
+        base: &Path,
+        extension: &str,
+    ) -> Result<Vec<String>> {
         let index_base = base.join(FILE_ADDRESSING_INDEX_DIR);
         let data_base = base.join(FILE_ADDRESSING_DATA_DIR);
-        let Ok(shards) = fs::read_dir(&index_base) else {
-            return Ok(Vec::new());
+        let shards = match fs::read_dir(&index_base) {
+            Ok(shards) => shards,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::io("file_store_list", error)),
         };
         let mut out = Vec::new();
         for shard in shards {
@@ -437,9 +478,20 @@ impl FileStoreEngine {
                     .join(shard_name)
                     .join(format!("{stem}.{extension}"));
                 if !data_path.is_file() {
-                    continue;
+                    return Err(Error::config(
+                        "file_store_list",
+                        "file store key index has missing physical data",
+                    ));
                 }
                 if let Some(key) = self.read_key_index(&path, "file_store_list")? {
+                    let expected = self
+                        .physical_key_paths_at_root(&self.root, lane, namespace, &key, extension)?;
+                    if expected.index_path != path || expected.data_path != data_path {
+                        return Err(Error::config(
+                            "file_store_list",
+                            "file store physical key index does not match logical key",
+                        ));
+                    }
                     out.push(key);
                 }
             }
@@ -449,8 +501,10 @@ impl FileStoreEngine {
     }
 
     fn list_legacy_encoded_keys(&self, base: PathBuf, extension: &str) -> Result<Vec<String>> {
-        let Ok(entries) = fs::read_dir(&base) else {
-            return Ok(Vec::new());
+        let entries = match fs::read_dir(&base) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::io("file_store_list", error)),
         };
         let mut out = Vec::new();
         for entry in entries {
@@ -469,12 +523,11 @@ impl FileStoreEngine {
         out.sort();
         Ok(out)
     }
-}
 
-impl StoreEventLog for FileStoreEngine {
-    fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
-        if self
-            .read_events()?
+    fn ensure_can_append_event(&self, event: &MemoryStoreEvent) -> Result<()> {
+        enforce_event_key_budget(self.capacity, event, "store_event_log")?;
+        let events = self.read_events()?;
+        if events
             .iter()
             .any(|existing| existing.event_id == event.event_id)
         {
@@ -483,6 +536,148 @@ impl StoreEventLog for FileStoreEngine {
                 format!("duplicate event id {}", event.event_id),
             ));
         }
+        if events.len() >= self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len().saturating_add(1),
+                self.capacity.event_log_max_items
+            )));
+        }
+        Ok(())
+    }
+
+    fn json_entry_count(&self) -> Result<usize> {
+        let mut count = 0usize;
+        for namespace in list_child_directory_names(&self.root.join("kv"), "file_store_json_quota")?
+        {
+            count = count.saturating_add(self.list_json_keys(&namespace)?.len());
+        }
+        Ok(count)
+    }
+
+    fn blob_total_bytes(&self) -> Result<usize> {
+        let mut total = 0usize;
+        for namespace in
+            list_child_directory_names(&self.root.join("blob"), "file_store_blob_quota")?
+        {
+            for key in self.list_blob_keys(&namespace)? {
+                if let Some(value) = self.get_blob(&namespace, &key)? {
+                    total = total.saturating_add(value.len());
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    fn ensure_json_entry_budget(&self, namespace: &str, key: &str) -> Result<()> {
+        if self.get_json_value(namespace, key)?.is_some() {
+            return Ok(());
+        }
+        let count = self.json_entry_count()?;
+        if count >= self.capacity.kv_max_entries {
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                count.saturating_add(1),
+                self.capacity.kv_max_entries
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_blob_total_budget(&self, namespace: &str, key: &str, value_len: usize) -> Result<()> {
+        let previous = self
+            .get_blob(namespace, key)?
+            .map(|value| value.len())
+            .unwrap_or(0);
+        let next = self
+            .blob_total_bytes()?
+            .saturating_sub(previous)
+            .saturating_add(value_len);
+        if next > self.capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                next, self.capacity.blob_max_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_snapshot_capacity(
+        &self,
+        json_namespaces: &[&str],
+        blob_namespaces: &[&str],
+        json_docs: &[StoreSnapshotJsonDoc],
+        blobs: &[StoreSnapshotBlob],
+        events: &[MemoryStoreEvent],
+    ) -> Result<()> {
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
+        for event in events {
+            enforce_event_key_budget(self.capacity, event, "file_store_snapshot_import")?;
+        }
+        for doc in json_docs {
+            enforce_logical_key_budget(
+                self.capacity,
+                &doc.namespace,
+                &doc.key,
+                "file_store_snapshot_import",
+            )?;
+        }
+        for blob in blobs {
+            enforce_logical_key_budget(
+                self.capacity,
+                &blob.namespace,
+                &blob.key,
+                "file_store_snapshot_import",
+            )?;
+        }
+        let json_namespace_set = namespace_set(json_namespaces);
+        let retained_json_entries =
+            list_child_directory_names(&self.root.join("kv"), "file_store_json_quota")?
+                .into_iter()
+                .filter(|namespace| !json_namespace_set.contains(namespace.as_str()))
+                .try_fold(0usize, |count, namespace| {
+                    self.list_json_keys(&namespace)
+                        .map(|keys| count.saturating_add(keys.len()))
+                })?;
+        let final_json_entries = retained_json_entries.saturating_add(json_docs.len());
+        if final_json_entries > self.capacity.kv_max_entries {
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                final_json_entries, self.capacity.kv_max_entries
+            )));
+        }
+        let blob_namespace_set = namespace_set(blob_namespaces);
+        let retained_blob_bytes =
+            list_child_directory_names(&self.root.join("blob"), "file_store_blob_quota")?
+                .into_iter()
+                .filter(|namespace| !blob_namespace_set.contains(namespace.as_str()))
+                .try_fold(0usize, |count, namespace| {
+                    let mut namespace_bytes = 0usize;
+                    for key in self.list_blob_keys(&namespace)? {
+                        if let Some(value) = self.get_blob(&namespace, &key)? {
+                            namespace_bytes = namespace_bytes.saturating_add(value.len());
+                        }
+                    }
+                    Ok::<usize, Error>(count.saturating_add(namespace_bytes))
+                })?;
+        let snapshot_blob_bytes = blobs.iter().map(|blob| blob.value.len()).sum::<usize>();
+        let final_blob_bytes = retained_blob_bytes.saturating_add(snapshot_blob_bytes);
+        if final_blob_bytes > self.capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                final_blob_bytes, self.capacity.blob_max_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn append_event_unchecked(&self, event: &MemoryStoreEvent) -> Result<()> {
         let path = self.events_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| Error::io("store_event_log", error))?;
@@ -492,7 +687,7 @@ impl StoreEventLog for FileStoreEngine {
             .append(true)
             .open(&path)
             .map_err(|error| Error::io("store_event_log", error))?;
-        serde_json::to_writer(&mut file, &event)
+        serde_json::to_writer(&mut file, event)
             .map_err(|error| Error::config("store_event_log", error.to_string()))?;
         file.write_all(b"\n")
             .map_err(|error| Error::io("store_event_log", error))?;
@@ -502,9 +697,24 @@ impl StoreEventLog for FileStoreEngine {
         }
         Ok(())
     }
+}
+
+impl StoreEventLog for FileStoreEngine {
+    fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
+        self.ensure_can_append_event(&event)?;
+        self.append_event_unchecked(&event)
+    }
 
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
-        read_events_jsonl(&self.events_path())
+        let events = read_events_jsonl(&self.events_path())?;
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
+        Ok(events)
     }
 }
 
@@ -542,6 +752,15 @@ impl StoreEngine for FileStoreEngine {
                     .map_err(|error| Error::config("file_store_json_read", error.to_string()))
             }
             Err(error) if is_not_found_or_invalid_filename(&error) => {
+                if self
+                    .read_key_index(&paths.index_path, "file_store_json_read")?
+                    .is_some()
+                {
+                    return Err(Error::config(
+                        "file_store_json_read",
+                        "file store key index has missing physical data",
+                    ));
+                }
                 match fs::read(&paths.legacy_path) {
                     Ok(bytes) => serde_json::from_slice(&bytes)
                         .map(Some)
@@ -556,6 +775,7 @@ impl StoreEngine for FileStoreEngine {
 
     fn put_json_value(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
         let paths = self.json_paths(namespace, key)?;
+        self.ensure_json_entry_budget(namespace, key)?;
         self.ensure_key_index_available(&paths, key, "file_store_json_write")?;
         self.write_key_index(&paths.index_path, key, "file_store_json_write")?;
         let bytes = serde_json::to_vec_pretty(&value)
@@ -568,8 +788,21 @@ impl StoreEngine for FileStoreEngine {
         )
     }
 
+    fn put_json_value_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: Value,
+        event: MemoryStoreEvent,
+    ) -> Result<()> {
+        self.ensure_can_append_event(&event)?;
+        self.put_json_value(namespace, key, value)?;
+        self.append_event_unchecked(&event)
+    }
+
     fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
         let paths = self.json_paths(namespace, key)?;
+        self.validate_v2_pair_for_delete(&paths, key, "file_store_json_delete")?;
         let mut deleted = false;
         deleted |= remove_file_if_exists(&paths.data_path, "file_store_json_delete")?;
         deleted |= remove_file_if_exists(&paths.index_path, "file_store_json_delete")?;
@@ -577,9 +810,23 @@ impl StoreEngine for FileStoreEngine {
         Ok(deleted)
     }
 
+    fn delete_json_value_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        event: MemoryStoreEvent,
+    ) -> Result<bool> {
+        self.ensure_can_append_event(&event)?;
+        let deleted = self.delete_json_value(namespace, key)?;
+        if deleted {
+            self.append_event_unchecked(&event)?;
+        }
+        Ok(deleted)
+    }
+
     fn list_json_keys(&self, namespace: &str) -> Result<Vec<String>> {
         self.validate_directory_component(namespace, "file_store_list")?;
-        self.list_keys(self.root.join("kv").join(namespace), "json")
+        self.list_keys("kv", namespace, "json")
     }
 
     fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
@@ -590,6 +837,15 @@ impl StoreEngine for FileStoreEngine {
                 Ok(Some(bytes))
             }
             Err(error) if is_not_found_or_invalid_filename(&error) => {
+                if self
+                    .read_key_index(&paths.index_path, "file_store_blob_read")?
+                    .is_some()
+                {
+                    return Err(Error::config(
+                        "file_store_blob_read",
+                        "file store key index has missing physical data",
+                    ));
+                }
                 match fs::read(&paths.legacy_path) {
                     Ok(bytes) => Ok(Some(bytes)),
                     Err(error) if is_not_found_or_invalid_filename(&error) => Ok(None),
@@ -602,13 +858,27 @@ impl StoreEngine for FileStoreEngine {
 
     fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
         let paths = self.blob_paths(namespace, key)?;
+        self.ensure_blob_total_budget(namespace, key, value.len())?;
         self.ensure_key_index_available(&paths, key, "file_store_blob_write")?;
         self.write_key_index(&paths.index_path, key, "file_store_blob_write")?;
         atomic_write(&paths.data_path, value, self.fsync, "file_store_blob_write")
     }
 
+    fn put_blob_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        event: MemoryStoreEvent,
+    ) -> Result<()> {
+        self.ensure_can_append_event(&event)?;
+        self.put_blob(namespace, key, value)?;
+        self.append_event_unchecked(&event)
+    }
+
     fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
         let paths = self.blob_paths(namespace, key)?;
+        self.validate_v2_pair_for_delete(&paths, key, "file_store_blob_delete")?;
         let mut deleted = false;
         deleted |= remove_file_if_exists(&paths.data_path, "file_store_blob_delete")?;
         deleted |= remove_file_if_exists(&paths.index_path, "file_store_blob_delete")?;
@@ -616,15 +886,37 @@ impl StoreEngine for FileStoreEngine {
         Ok(deleted)
     }
 
+    fn delete_blob_and_event(
+        &self,
+        namespace: &str,
+        key: &str,
+        event: MemoryStoreEvent,
+    ) -> Result<bool> {
+        self.ensure_can_append_event(&event)?;
+        let deleted = self.delete_blob(namespace, key)?;
+        if deleted {
+            self.append_event_unchecked(&event)?;
+        }
+        Ok(deleted)
+    }
+
     fn list_blob_keys(&self, namespace: &str) -> Result<Vec<String>> {
         self.validate_directory_component(namespace, "file_store_list")?;
-        self.list_keys(self.root.join("blob").join(namespace), "bin")
+        self.list_keys("blob", namespace, "bin")
     }
 
     fn replace_events(&self, events: &[MemoryStoreEvent]) -> Result<()> {
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
         let mut event_ids = BTreeSet::new();
         let mut bytes = Vec::new();
         for event in events {
+            enforce_event_key_budget(self.capacity, event, "store_event_log")?;
             if !event_ids.insert(event.event_id.clone()) {
                 return Err(Error::config(
                     "store_event_log",
@@ -646,11 +938,22 @@ impl StoreEngine for FileStoreEngine {
         blobs: &[StoreSnapshotBlob],
         events: &[MemoryStoreEvent],
     ) -> Result<StoreSnapshotReplaceReport> {
-        let import_id = format!("{}-{}", current_unix_secs(), std::process::id());
+        self.validate_snapshot_capacity(
+            json_namespaces,
+            blob_namespaces,
+            json_docs,
+            blobs,
+            events,
+        )?;
+        let import_id = snapshot_import_id();
         let stage_root = self.root.join(format!(".snapshot-import-{import_id}"));
         let backup_root = self.root.join(format!(".snapshot-backup-{import_id}"));
-        let _ = fs::remove_dir_all(&stage_root);
-        let _ = fs::remove_dir_all(&backup_root);
+        if stage_root.exists() || backup_root.exists() {
+            return Err(Error::config(
+                "file_store_snapshot_import",
+                "snapshot staging directory already exists",
+            ));
+        }
 
         let prepare_result = self.prepare_snapshot_stage(&stage_root, json_docs, blobs, events);
         if let Err(error) = prepare_result {
@@ -832,6 +1135,37 @@ fn collect_tmp_files(root: &Path, findings: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn list_child_directory_names(root: &Path, stage: &'static str) -> Result<Vec<String>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(Error::io(stage, error)),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| Error::io(stage, error))?;
+        if !entry
+            .file_type()
+            .map_err(|error| Error::io(stage, error))?
+            .is_dir()
+        {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn namespace_set(namespaces: &[&str]) -> BTreeSet<String> {
+    namespaces
+        .iter()
+        .map(|namespace| (*namespace).to_string())
+        .collect()
+}
+
 fn count_deleted_json_keys(
     engine: &FileStoreEngine,
     namespaces: &[&str],
@@ -931,6 +1265,25 @@ fn current_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn snapshot_import_id() -> String {
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let sequence = SNAPSHOT_IMPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let thread_id = format!("{:?}", std::thread::current().id())
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    format!(
+        "{}-{}-{}-{}",
+        now_nanos,
+        std::process::id(),
+        thread_id,
+        sequence
+    )
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

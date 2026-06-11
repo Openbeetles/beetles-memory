@@ -21,7 +21,10 @@ let store = StorePlatform::open(StoreBackendConfig::sqlite(
     "/var/lib/beetle-memory/memory.sqlite3",
     profile,
 )?)?;
+let open_report = store.open_report();
 ```
+
+Keep the `StoreOpenReport` in startup diagnostics. It carries schema and repair findings that operators need before the runtime starts accepting writes.
 
 ## Repair Policy
 
@@ -40,6 +43,12 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
 Logical store keys are not filesystem paths. The file backend maps each logical key to a bounded physical address using the profile's `StorePathBudget`, with short digest file names plus a sidecar key index. `list_*_keys`, snapshot export/import, replay, and delete still operate on logical keys.
 
 Do not encode transcript IDs, conversation IDs, attr IDs, or host refs directly into file names. Platform-specific filename and relative-path budgets belong to `bm-store`, not adapter crates.
+
+## Capacity And Key Budget
+
+`StoreRuntimeBudget` is compiled by Beetle Memory and converted into `StoreCapacityBudget` before the backend opens. The budget covers KV, blob, snapshot, event count, logical namespace/key bytes, event record key bytes, and dedicated export/import byte limits.
+
+Every backend enforces the same budget contract. Oversized logical keys, event record keys, snapshot imports, exports, or cumulative blobs fail with structured `store_budget_exceeded` errors; backends must not truncate keys or silently drop memory.
 
 ## Ownership Rules
 

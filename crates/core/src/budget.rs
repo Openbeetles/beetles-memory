@@ -113,6 +113,9 @@ pub struct StoreRuntimeBudget {
     pub kv_max_entries: usize,
     pub blob_max_bytes: usize,
     pub snapshot_max_bytes: usize,
+    pub logical_namespace_max_bytes: usize,
+    pub logical_key_max_bytes: usize,
+    pub event_record_key_max_bytes: usize,
     pub export_max_bytes: usize,
     pub import_max_bytes: usize,
 }
@@ -368,6 +371,14 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
             .max(ceiling.p0_min_blob_bytes),
         snapshot_max_bytes: scale_usize(ceiling.store_budget.snapshot_max_bytes, store_scale)
             .max(ceiling.p0_min_snapshot_bytes),
+        logical_namespace_max_bytes: ceiling.store_budget.logical_namespace_max_bytes,
+        logical_key_max_bytes: scale_usize(ceiling.store_budget.logical_key_max_bytes, store_scale)
+            .max(128),
+        event_record_key_max_bytes: scale_usize(
+            ceiling.store_budget.event_record_key_max_bytes,
+            store_scale,
+        )
+        .max(128),
         export_max_bytes: scale_usize(ceiling.store_budget.export_max_bytes, store_scale)
             .max(ceiling.p0_min_snapshot_bytes),
         import_max_bytes: scale_usize(ceiling.store_budget.import_max_bytes, store_scale)
@@ -753,6 +764,9 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             kv_max_entries: spec.records,
             blob_max_bytes: spec.blob_max_bytes,
             snapshot_max_bytes: spec.snapshot_max_bytes,
+            logical_namespace_max_bytes: 96,
+            logical_key_max_bytes: max_usize(spec.snapshot_max_bytes / 1024, 512),
+            event_record_key_max_bytes: max_usize(spec.snapshot_max_bytes / 1024, 512),
             export_max_bytes: spec.snapshot_max_bytes,
             import_max_bytes: spec.snapshot_max_bytes,
         },

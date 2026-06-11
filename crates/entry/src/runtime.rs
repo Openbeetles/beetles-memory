@@ -16,8 +16,8 @@ use bm_sdk::{
     NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeBudgetInput, RuntimeBudgetReport,
     RuntimeLifecycleModeInput, RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest,
     RuntimeSkillEditRequest, RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest,
-    StaticPlatformManifest, StoreBackendConfig, StoreBackendKind, StorePlatform, WorkbenchApiMap,
-    WorkbenchSurface,
+    StaticPlatformManifest, StoreBackendConfig, StoreBackendKind, StoreOpenReport, StorePlatform,
+    WorkbenchApiMap, WorkbenchSurface,
 };
 
 use crate::config::{enabled_capability_policy, privacy_policy};
@@ -286,6 +286,10 @@ impl EntryRuntime {
 
     pub fn capability(&self) -> &EntryCapabilityView {
         &self.capability
+    }
+
+    pub fn store_open_report(&self) -> &StoreOpenReport {
+        self.store.open_report()
     }
 
     pub fn console_overview(&self) -> EntryConsoleOverview {
@@ -995,18 +999,30 @@ fn open_store(
             let path = config.data_path.clone().ok_or_else(|| {
                 Error::config("entry_store_config", "file store requires data_path")
             })?;
+            validate_absolute_store_path(&path, "file")?;
             StoreBackendConfig::file(path, profile)?
         }
         StoreBackendKind::Sqlite => {
             let path = config.data_path.clone().ok_or_else(|| {
                 Error::config("entry_store_config", "sqlite store requires data_path")
             })?;
+            validate_absolute_store_path(&path, "sqlite")?;
             StoreBackendConfig::sqlite(path, profile)?
         }
     }
     .with_fsync(config.fsync)
     .with_runtime_store_budget(runtime_budget.store_budget);
     StorePlatform::open(store_config)
+}
+
+fn validate_absolute_store_path(path: &std::path::Path, backend: &str) -> Result<()> {
+    if path.is_absolute() {
+        return Ok(());
+    }
+    Err(Error::config(
+        "entry_store_config",
+        format!("{backend} store path must be absolute"),
+    ))
 }
 
 fn auth_rejection_reason(

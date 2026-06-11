@@ -149,6 +149,21 @@ pub fn state_mount_path() -> PathBuf {
     }
 }
 
+#[cfg(feature = "sqlite-index")]
+pub fn sqlite_index_state_dir() -> crate::error::Result<Option<PathBuf>> {
+    let Some(path) = std::env::var_os("BEETLE_MEMORY_STATE_DIR") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(crate::error::Error::config(
+            "sqlite_index_state_dir",
+            "BEETLE_MEMORY_STATE_DIR must be an absolute path when sqlite-index is enabled",
+        ));
+    }
+    Ok(Some(path))
+}
+
 pub mod task_wdt {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum TaskWdtThreadPolicy {

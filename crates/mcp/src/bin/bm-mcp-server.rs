@@ -75,6 +75,7 @@ struct McpServerOptions {
     profile: bm_sdk::ProfileId,
     store_backend: bm_sdk::StoreBackendKind,
     store_path: Option<PathBuf>,
+    store_explicit: bool,
     fsync: bool,
     agent_id: String,
     owner_id: String,
@@ -101,23 +102,28 @@ impl McpServerOptions {
                 }
                 "--store-file" => {
                     options.store_backend = bm_sdk::StoreBackendKind::File;
-                    options.store_path =
-                        Some(PathBuf::from(args.next().ok_or_else(|| {
-                            "--store-file requires a value".to_string()
-                        })?));
+                    options.store_path = Some(memory_store_path_from_arg(
+                        "--store-file",
+                        args.next()
+                            .ok_or_else(|| "--store-file requires a value".to_string())?,
+                    )?);
+                    options.store_explicit = true;
                     options.fsync = true;
                 }
                 "--store-sqlite" => {
                     options.store_backend = bm_sdk::StoreBackendKind::Sqlite;
-                    options.store_path =
-                        Some(PathBuf::from(args.next().ok_or_else(|| {
-                            "--store-sqlite requires a value".to_string()
-                        })?));
+                    options.store_path = Some(memory_store_path_from_arg(
+                        "--store-sqlite",
+                        args.next()
+                            .ok_or_else(|| "--store-sqlite requires a value".to_string())?,
+                    )?);
+                    options.store_explicit = true;
                     options.fsync = true;
                 }
                 "--store-memory" => {
                     options.store_backend = bm_sdk::StoreBackendKind::InMemory;
                     options.store_path = None;
+                    options.store_explicit = true;
                     options.fsync = false;
                 }
                 "--no-fsync" => {
@@ -151,19 +157,23 @@ impl McpServerOptions {
     }
 
     fn from_env() -> Result<Self, String> {
-        let mut store_backend = bm_sdk::StoreBackendKind::File;
-        let mut store_path = Some(PathBuf::from("target/bm-memory-gateway-store"));
+        let mut store_backend = bm_sdk::StoreBackendKind::InMemory;
+        let mut store_path = None;
+        let mut store_explicit = false;
         let mut fsync = true;
         if env_truthy("BM_MEMORY_STORE_MEMORY") {
             store_backend = bm_sdk::StoreBackendKind::InMemory;
             store_path = None;
+            store_explicit = true;
             fsync = false;
         } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_SQLITE") {
             store_backend = bm_sdk::StoreBackendKind::Sqlite;
-            store_path = Some(PathBuf::from(path));
+            store_path = Some(memory_store_path_from_arg("BM_MEMORY_STORE_SQLITE", path)?);
+            store_explicit = true;
         } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_FILE") {
             store_backend = bm_sdk::StoreBackendKind::File;
-            store_path = Some(PathBuf::from(path));
+            store_path = Some(memory_store_path_from_arg("BM_MEMORY_STORE_FILE", path)?);
+            store_explicit = true;
         }
         let profile = match std::env::var("BM_MEMORY_PROFILE") {
             Ok(raw) => parse_profile(&raw)?,
@@ -175,6 +185,7 @@ impl McpServerOptions {
             profile,
             store_backend,
             store_path,
+            store_explicit,
             fsync,
             agent_id: std::env::var("BM_MEMORY_AGENT_ID")
                 .unwrap_or_else(|_| "agent-main".to_string()),
@@ -187,6 +198,9 @@ impl McpServerOptions {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if !self.store_explicit {
+            return Err("memory store backend must be explicit: use --store-memory or an absolute --store-file/--store-sqlite path".to_string());
+        }
         if !matches!(self.store_backend, bm_sdk::StoreBackendKind::InMemory)
             && self.store_path.is_none()
         {
@@ -213,6 +227,15 @@ fn env_truthy(name: &str) -> bool {
     )
 }
 
+fn memory_store_path_from_arg(label: &str, raw: String) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!("{label} must be an absolute path"))
+    }
+}
+
 fn parse_profile(raw: &str) -> Result<bm_sdk::ProfileId, String> {
     platform_profiles()
         .iter()
@@ -232,6 +255,96 @@ fn platform_profiles() -> &'static [bm_sdk::ProfileId] {
         bm_sdk::ProfileId::ServerLinuxMemoryGateway,
         bm_sdk::ProfileId::ServerLinuxDevFull,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                old: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = self.old.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn clear_store_env() -> Vec<EnvRestore> {
+        let guards = vec![
+            EnvRestore::new("BM_MEMORY_STORE_FILE"),
+            EnvRestore::new("BM_MEMORY_STORE_SQLITE"),
+            EnvRestore::new("BM_MEMORY_STORE_MEMORY"),
+        ];
+        std::env::remove_var("BM_MEMORY_STORE_FILE");
+        std::env::remove_var("BM_MEMORY_STORE_SQLITE");
+        std::env::remove_var("BM_MEMORY_STORE_MEMORY");
+        guards
+    }
+
+    fn store_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn mcp_server_requires_explicit_store_backend() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let error = McpServerOptions::parse(std::iter::empty(), false)
+            .expect_err("store backend must be explicit");
+        assert!(error.contains("explicit"), "{error}");
+    }
+
+    #[test]
+    fn mcp_server_rejects_relative_persistent_store_path() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let error = McpServerOptions::parse(
+            vec!["--store-file".to_string(), "target/mcp-store".to_string()].into_iter(),
+            false,
+        )
+        .expect_err("relative file store path must fail");
+        assert!(error.contains("absolute"), "{error}");
+
+        let error = McpServerOptions::parse(
+            vec![
+                "--store-sqlite".to_string(),
+                "target/mcp.sqlite3".to_string(),
+            ]
+            .into_iter(),
+            false,
+        )
+        .expect_err("relative sqlite store path must fail");
+        assert!(error.contains("absolute"), "{error}");
+    }
+
+    #[test]
+    fn mcp_server_accepts_explicit_volatile_memory_store() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let options =
+            McpServerOptions::parse(vec!["--store-memory".to_string()].into_iter(), false)
+                .expect("explicit memory store should be accepted");
+        assert_eq!(options.store_backend, bm_sdk::StoreBackendKind::InMemory);
+        assert_eq!(options.store_path, None);
+    }
 }
 
 #[cfg(feature = "server-stdio")]

@@ -38,6 +38,7 @@ cargo doc --no-deps --no-default-features \
 bash scripts/check_platform_compile_gates.sh
 bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh
+bash scripts/check_production_hardening_contract.sh
 bash scripts/check_release_surface.sh
 ```
 
@@ -58,7 +59,7 @@ bm-entry
 bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
-Run staged `cargo publish --dry-run --allow-dirty -p <crate>` through `scripts/check_release_surface.sh`. Use a clean workspace for the final publish.
+Run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_surface.sh`. The release gate runs production hardening checks, uses temporary Cargo target directories, and fails if repository ignored artifacts change.
 
 ## Scope Checks
 

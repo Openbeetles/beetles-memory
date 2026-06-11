@@ -73,6 +73,56 @@ fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
 }
 
 #[test]
+fn entry_runtime_rejects_relative_persistent_store_path() {
+    let mut file_config = config();
+    file_config.store.backend = StoreBackendKind::File;
+    file_config.store.data_path = Some(std::path::PathBuf::from("target/bm-memory-store"));
+    let error = match EntryRuntime::open(file_config) {
+        Ok(_) => panic!("relative file store path must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("absolute"), "{error}");
+
+    let mut sqlite_config = config();
+    sqlite_config.store.backend = StoreBackendKind::Sqlite;
+    sqlite_config.store.data_path = Some(std::path::PathBuf::from("target/bm-memory.sqlite3"));
+    let error = match EntryRuntime::open(sqlite_config) {
+        Ok(_) => panic!("relative sqlite store path must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("absolute"), "{error}");
+}
+
+#[test]
+fn entry_runtime_exposes_store_open_repair_report() {
+    let root = std::env::temp_dir().join(format!(
+        "beetle-memory-entry-open-report-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let tmp = root.join("kv").join("session").join("orphan.tmp");
+    std::fs::create_dir_all(tmp.parent().unwrap()).unwrap();
+    std::fs::write(&tmp, b"partial").unwrap();
+
+    let mut config = config();
+    config.store.backend = StoreBackendKind::File;
+    config.store.data_path = Some(root);
+    config.store.fsync = false;
+    let runtime = EntryRuntime::open(config).expect("entry runtime");
+    let report = runtime.store_open_report();
+    assert_eq!(report.backend, "file");
+    assert!(report.repair.checked);
+    assert!(
+        report
+            .repair
+            .findings
+            .iter()
+            .any(|finding| finding.contains("orphan.tmp")),
+        "{report:?}"
+    );
+}
+
+#[test]
 fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
     let runtime = EntryRuntime::open(config()).expect("entry runtime");
     let response = runtime

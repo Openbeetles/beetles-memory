@@ -829,7 +829,12 @@ fn continuity_capsule_index_hints_sqlite(
     preferred_chat_id: Option<&str>,
 ) -> Result<HashMap<String, ContinuityCapsuleIndexHint>> {
     let signature = build_continuity_capsule_index_signature(capsules);
-    let path = continuity_capsule_index_path(&signature);
+    let Some(path) = continuity_capsule_index_path(&signature)? else {
+        return Err(crate::error::Error::config(
+            "continuity_capsule_index",
+            "sqlite index state dir is not configured",
+        ));
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| crate::error::Error::io("continuity_capsule_index", e))?;
@@ -887,8 +892,11 @@ fn build_continuity_capsule_index_signature(
 }
 
 #[cfg(feature = "sqlite-index")]
-fn continuity_capsule_index_path(_signature: &ContinuityCapsuleIndexSignature) -> PathBuf {
-    crate::platform::state_mount_path().join(REL_PATH_CONTINUITY_CAPSULE_INDEX)
+fn continuity_capsule_index_path(
+    _signature: &ContinuityCapsuleIndexSignature,
+) -> Result<Option<PathBuf>> {
+    Ok(crate::platform::sqlite_index_state_dir()?
+        .map(|root| root.join(REL_PATH_CONTINUITY_CAPSULE_INDEX)))
 }
 
 #[cfg(feature = "sqlite-index")]

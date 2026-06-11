@@ -1,4 +1,5 @@
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bm_llm_gateway::{
@@ -12,7 +13,7 @@ use bm_sdk::StoreBackendKind;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = GatewayConfig::default_for_local_dev();
-    apply_shared_memory_runtime_env(&mut config);
+    apply_shared_memory_runtime_env(&mut config)?;
     if let Ok(bind_addr) = std::env::var("BM_LLM_GATEWAY_BIND") {
         config.server.bind_addr = bind_addr;
     }
@@ -108,23 +109,25 @@ impl GatewayHttpConnectionHandler for ReqwestGatewayConnectionHandler {
     }
 }
 
-fn apply_shared_memory_runtime_env(config: &mut GatewayConfig) {
-    config.entry.store.backend = StoreBackendKind::File;
-    config.entry.store.data_path = Some("target/bm-memory-gateway-store".into());
-    config.entry.store.fsync = true;
-
+fn apply_shared_memory_runtime_env(config: &mut GatewayConfig) -> bm_llm_gateway::Result<()> {
     if env_truthy("BM_MEMORY_STORE_MEMORY") {
         config.entry.store.backend = StoreBackendKind::InMemory;
         config.entry.store.data_path = None;
         config.entry.store.fsync = false;
     } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_SQLITE") {
         config.entry.store.backend = StoreBackendKind::Sqlite;
-        config.entry.store.data_path = Some(path.into());
+        config.entry.store.data_path =
+            Some(memory_store_path_from_env("BM_MEMORY_STORE_SQLITE", path)?);
         config.entry.store.fsync = true;
     } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_FILE") {
         config.entry.store.backend = StoreBackendKind::File;
-        config.entry.store.data_path = Some(path.into());
+        config.entry.store.data_path =
+            Some(memory_store_path_from_env("BM_MEMORY_STORE_FILE", path)?);
         config.entry.store.fsync = true;
+    } else {
+        return Err(GatewayError::invalid_config(
+            "memory store backend must be explicit: set BM_MEMORY_STORE_MEMORY=1 or an absolute BM_MEMORY_STORE_FILE/BM_MEMORY_STORE_SQLITE",
+        ));
     }
     if let Ok(owner) = std::env::var("BM_MEMORY_OWNER_ID") {
         config.scope.local_owner_id = Some(owner);
@@ -149,6 +152,18 @@ fn apply_shared_memory_runtime_env(config: &mut GatewayConfig) {
             config.scope.ollama_app.local_app_identity = "ollama-app".to_string();
         }
     }
+    Ok(())
+}
+
+fn memory_store_path_from_env(name: &str, raw: String) -> bm_llm_gateway::Result<PathBuf> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(GatewayError::invalid_config(format!(
+            "{name} must be an absolute path"
+        )))
+    }
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -156,4 +171,90 @@ fn env_truthy(name: &str) -> bool {
         std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                old: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = self.old.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn clear_store_env() -> Vec<EnvRestore> {
+        let guards = vec![
+            EnvRestore::new("BM_MEMORY_STORE_FILE"),
+            EnvRestore::new("BM_MEMORY_STORE_SQLITE"),
+            EnvRestore::new("BM_MEMORY_STORE_MEMORY"),
+        ];
+        std::env::remove_var("BM_MEMORY_STORE_FILE");
+        std::env::remove_var("BM_MEMORY_STORE_SQLITE");
+        std::env::remove_var("BM_MEMORY_STORE_MEMORY");
+        guards
+    }
+
+    fn store_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn llm_gateway_requires_explicit_memory_store() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let mut config = GatewayConfig::default_for_local_dev();
+        let error = apply_shared_memory_runtime_env(&mut config)
+            .expect_err("store backend must be explicit");
+        assert!(error.to_string().contains("explicit"), "{error}");
+    }
+
+    #[test]
+    fn llm_gateway_rejects_relative_persistent_store_path() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        std::env::set_var("BM_MEMORY_STORE_FILE", "target/gateway-store");
+        let mut config = GatewayConfig::default_for_local_dev();
+        let error = apply_shared_memory_runtime_env(&mut config)
+            .expect_err("relative file store path must fail");
+        assert!(error.to_string().contains("absolute"), "{error}");
+
+        std::env::remove_var("BM_MEMORY_STORE_FILE");
+        std::env::set_var("BM_MEMORY_STORE_SQLITE", "target/gateway.sqlite3");
+        let mut config = GatewayConfig::default_for_local_dev();
+        let error = apply_shared_memory_runtime_env(&mut config)
+            .expect_err("relative sqlite store path must fail");
+        assert!(error.to_string().contains("absolute"), "{error}");
+    }
+
+    #[test]
+    fn llm_gateway_accepts_explicit_volatile_memory_store() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        std::env::set_var("BM_MEMORY_STORE_MEMORY", "1");
+        let mut config = GatewayConfig::default_for_local_dev();
+        apply_shared_memory_runtime_env(&mut config).expect("explicit memory store");
+        assert_eq!(config.entry.store.backend, StoreBackendKind::InMemory);
+        assert_eq!(config.entry.store.data_path, None);
+    }
 }

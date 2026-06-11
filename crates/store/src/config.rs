@@ -5,7 +5,7 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::platform::MemorySystemKind;
 use bm_core::{Error, Result};
 
-use crate::event::StoreEventScope;
+use crate::event::{MemoryStoreEvent, StoreEventScope};
 use crate::schema::STORE_SCHEMA_ID;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +39,11 @@ pub struct StoreCapacityBudget {
     pub kv_max_entries: usize,
     pub blob_max_bytes: usize,
     pub snapshot_max_bytes: usize,
+    pub logical_namespace_max_bytes: usize,
+    pub logical_key_max_bytes: usize,
+    pub event_record_key_max_bytes: usize,
+    pub export_max_bytes: usize,
+    pub import_max_bytes: usize,
 }
 
 impl StoreCapacityBudget {
@@ -48,6 +53,11 @@ impl StoreCapacityBudget {
             kv_max_entries: budget.kv_max_entries,
             blob_max_bytes: budget.blob_max_bytes,
             snapshot_max_bytes: budget.snapshot_max_bytes,
+            logical_namespace_max_bytes: budget.logical_namespace_max_bytes,
+            logical_key_max_bytes: budget.logical_key_max_bytes,
+            event_record_key_max_bytes: budget.event_record_key_max_bytes,
+            export_max_bytes: budget.export_max_bytes,
+            import_max_bytes: budget.import_max_bytes,
         }
     }
 
@@ -57,6 +67,11 @@ impl StoreCapacityBudget {
             kv_max_entries: 20_000,
             blob_max_bytes: 64 * 1024 * 1024,
             snapshot_max_bytes: 16 * 1024 * 1024,
+            logical_namespace_max_bytes: 128,
+            logical_key_max_bytes: 8192,
+            event_record_key_max_bytes: 8192,
+            export_max_bytes: 16 * 1024 * 1024,
+            import_max_bytes: 16 * 1024 * 1024,
         }
     }
 
@@ -66,6 +81,11 @@ impl StoreCapacityBudget {
             kv_max_entries: 4_096,
             blob_max_bytes: 4 * 1024 * 1024,
             snapshot_max_bytes: 1024 * 1024,
+            logical_namespace_max_bytes: 96,
+            logical_key_max_bytes: 1024,
+            event_record_key_max_bytes: 1024,
+            export_max_bytes: 1024 * 1024,
+            import_max_bytes: 1024 * 1024,
         }
     }
 
@@ -75,8 +95,55 @@ impl StoreCapacityBudget {
             kv_max_entries: 512,
             blob_max_bytes: 1024 * 1024,
             snapshot_max_bytes: 256 * 1024,
+            logical_namespace_max_bytes: 96,
+            logical_key_max_bytes: 512,
+            event_record_key_max_bytes: 512,
+            export_max_bytes: 256 * 1024,
+            import_max_bytes: 256 * 1024,
         }
     }
+}
+
+pub(crate) fn store_budget_error(message: impl Into<String>) -> Error {
+    Error::config("store_budget_exceeded", message.into())
+}
+
+pub(crate) fn enforce_logical_key_budget(
+    capacity: StoreCapacityBudget,
+    namespace: &str,
+    key: &str,
+    label: &'static str,
+) -> Result<()> {
+    if namespace.len() > capacity.logical_namespace_max_bytes {
+        return Err(store_budget_error(format!(
+            "{label} namespace bytes {} exceed {}",
+            namespace.len(),
+            capacity.logical_namespace_max_bytes
+        )));
+    }
+    if key.len() > capacity.logical_key_max_bytes {
+        return Err(store_budget_error(format!(
+            "{label} logical key bytes {} exceed {}",
+            key.len(),
+            capacity.logical_key_max_bytes
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn enforce_event_key_budget(
+    capacity: StoreCapacityBudget,
+    event: &MemoryStoreEvent,
+    label: &'static str,
+) -> Result<()> {
+    if event.record_key.len() > capacity.event_record_key_max_bytes {
+        return Err(store_budget_error(format!(
+            "{label} event record key bytes {} exceed {}",
+            event.record_key.len(),
+            capacity.event_record_key_max_bytes
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

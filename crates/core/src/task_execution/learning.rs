@@ -858,7 +858,12 @@ fn task_learning_index_hints_sqlite(
     active_run_id: Option<&str>,
 ) -> Result<HashMap<String, TaskLearningIndexHint>> {
     let signature = build_task_learning_index_signature(records);
-    let path = task_learning_index_path(&signature);
+    let Some(path) = task_learning_index_path(&signature)? else {
+        return Err(Error::config(
+            "task_learning_index",
+            "sqlite index state dir is not configured",
+        ));
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io("task_learning_index", e))?;
     }
@@ -909,8 +914,9 @@ fn build_task_learning_index_signature(
 }
 
 #[cfg(feature = "sqlite-index")]
-fn task_learning_index_path(_signature: &TaskLearningIndexSignature) -> PathBuf {
-    crate::platform::state_mount_path().join(REL_PATH_TASK_LEARNING_INDEX)
+fn task_learning_index_path(_signature: &TaskLearningIndexSignature) -> Result<Option<PathBuf>> {
+    Ok(crate::platform::sqlite_index_state_dir()?
+        .map(|root| root.join(REL_PATH_TASK_LEARNING_INDEX)))
 }
 
 #[cfg(feature = "sqlite-index")]
@@ -2522,7 +2528,9 @@ mod tests {
             "Need the release fix path",
         );
 
-        let expected_backend = if cfg!(feature = "sqlite-index") {
+        let expected_backend = if cfg!(feature = "sqlite-index")
+            && std::env::var_os("BEETLE_MEMORY_STATE_DIR").is_some()
+        {
             "task_learning_sqlite_fts_hybrid"
         } else {
             "task_learning_heuristic"

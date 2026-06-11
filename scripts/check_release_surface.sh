@@ -2,6 +2,19 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
+
+gate_tmp="$(mktemp -d "${TMPDIR:-/tmp}/bm-release-surface.XXXXXX")"
+cleanup() {
+  rm -rf "$gate_tmp"
+}
+trap cleanup EXIT
+
+export CARGO_TARGET_DIR="$gate_tmp/cargo-target"
+
+ignored_before="$gate_tmp/ignored-before.txt"
+ignored_after="$gate_tmp/ignored-after.txt"
+git ls-files --others --ignored --exclude-standard | sort > "$ignored_before"
 
 required_docs=(
   "docs/README.md"
@@ -25,6 +38,7 @@ required_docs=(
   "docs/zh-CN/release-checklist.md"
   "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
+  "dev-docs/production-hardening-audit-plan.md"
   "dev-docs/release-surface-plan.md"
   "dev-docs/agent-tool-experience-registry-plan.md"
 )
@@ -58,8 +72,30 @@ examples=(
   "examples/esp-embedded-sdk/Cargo.toml"
 )
 
+example_tmp_root="$gate_tmp/example-repo"
+mkdir -p "$example_tmp_root/examples"
+ln -s "$ROOT/crates" "$example_tmp_root/crates"
+
+run_example_manifest() {
+  local manifest="$1"
+  local example_dir
+  local example_name
+  local tmp_example
+
+  example_dir="$(dirname "$manifest")"
+  example_name="$(basename "$example_dir")"
+  tmp_example="$example_tmp_root/examples/$example_name"
+  mkdir -p "$tmp_example"
+  cp "$ROOT/$manifest" "$tmp_example/Cargo.toml"
+  if [[ -d "$ROOT/$example_dir/src" ]]; then
+    cp -R "$ROOT/$example_dir/src" "$tmp_example/src"
+  fi
+  CARGO_TARGET_DIR="$gate_tmp/example-target-$example_name" \
+    cargo run -q --manifest-path "$tmp_example/Cargo.toml"
+}
+
 for manifest in "${examples[@]}"; do
-  cargo run -q --manifest-path "$manifest"
+  run_example_manifest "$manifest"
 done
 
 publishable=(
@@ -102,6 +138,7 @@ bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_memory_benchmark_wall.sh
 bash scripts/check_long_term_memory_control_surface.sh
 bash scripts/check_conversation_transcript_attr_plane.sh
+bash scripts/check_production_hardening_contract.sh
 
 for needle in \
   "Agent Tool Registry" \
@@ -167,9 +204,9 @@ publish_dry_run() {
   esac
 
   if ((${#extra[@]} == 0)); then
-    cargo publish --dry-run --allow-dirty -p "$crate"
+    cargo publish --dry-run -p "$crate"
   else
-    cargo publish --dry-run --allow-dirty -p "$crate" "${extra[@]}"
+    cargo publish --dry-run -p "$crate" "${extra[@]}"
   fi
 }
 
@@ -186,6 +223,12 @@ fi
 if rg -n "workflow runner|skill marketplace|管理控制台|TLS certificate|TLS 证书|TLS termination|TLS 终止" \
   docs examples crates README.md | rg -v "不|不能|不启动|not|Red Lines|Drift"; then
   echo "release surface appears to include out-of-scope runtime surface" >&2
+  exit 1
+fi
+
+git ls-files --others --ignored --exclude-standard | sort > "$ignored_after"
+if ! diff -u "$ignored_before" "$ignored_after"; then
+  echo "release surface gate changed ignored repository artifacts" >&2
   exit 1
 fi
 

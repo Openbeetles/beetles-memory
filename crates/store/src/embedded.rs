@@ -5,8 +5,9 @@ use bm_core::{Error, Result};
 use serde_json::Value;
 
 use crate::{
-    MemoryStoreEvent, StoreCapacityBudget, StoreEngine, StoreEventLog, StoreSnapshotBlob,
-    StoreSnapshotJsonDoc, StoreSnapshotReplaceReport,
+    enforce_event_key_budget, enforce_logical_key_budget, store_budget_error, MemoryStoreEvent,
+    StoreCapacityBudget, StoreEngine, StoreEventLog, StoreSnapshotBlob, StoreSnapshotJsonDoc,
+    StoreSnapshotReplaceReport,
 };
 
 pub struct EmbeddedStoreEngine {
@@ -33,6 +34,7 @@ impl EmbeddedStoreEngine {
 
 impl StoreEventLog for EmbeddedStoreEngine {
     fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
+        enforce_event_key_budget(self.capacity, &event, "embedded_store_event")?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if !state.event_ids.insert(event.event_id.clone()) {
             return Err(Error::config(
@@ -62,6 +64,7 @@ impl StoreEventLog for EmbeddedStoreEngine {
 
 impl StoreEngine for EmbeddedStoreEngine {
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_json_read")?;
         Ok(self
             .state
             .lock()
@@ -72,21 +75,24 @@ impl StoreEngine for EmbeddedStoreEngine {
     }
 
     fn put_json_value(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_json_write")?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let storage_key = (namespace.to_string(), key.to_string());
         if !state.json.contains_key(&storage_key)
             && state.json.len() >= self.capacity.kv_max_entries
         {
-            return Err(Error::config(
-                "embedded_store_quota",
-                format!("kv entries exceed {}", self.capacity.kv_max_entries),
-            ));
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                state.json.len().saturating_add(1),
+                self.capacity.kv_max_entries
+            )));
         }
         state.json.insert(storage_key, value);
         Ok(())
     }
 
     fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_json_delete")?;
         Ok(self
             .state
             .lock()
@@ -97,6 +103,7 @@ impl StoreEngine for EmbeddedStoreEngine {
     }
 
     fn list_json_keys(&self, namespace: &str) -> Result<Vec<String>> {
+        enforce_logical_key_budget(self.capacity, namespace, "", "embedded_store_json_list")?;
         let mut keys = self
             .state
             .lock()
@@ -111,6 +118,7 @@ impl StoreEngine for EmbeddedStoreEngine {
     }
 
     fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_blob_read")?;
         Ok(self
             .state
             .lock()
@@ -121,6 +129,7 @@ impl StoreEngine for EmbeddedStoreEngine {
     }
 
     fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_blob_write")?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let current_bytes = state.blobs.values().map(Vec::len).sum::<usize>();
         let previous = state
@@ -132,10 +141,10 @@ impl StoreEngine for EmbeddedStoreEngine {
             .saturating_sub(previous)
             .saturating_add(value.len());
         if next_bytes > self.capacity.blob_max_bytes {
-            return Err(Error::config(
-                "embedded_store_quota",
-                format!("blob bytes exceed {}", self.capacity.blob_max_bytes),
-            ));
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                next_bytes, self.capacity.blob_max_bytes
+            )));
         }
         state
             .blobs
@@ -144,6 +153,7 @@ impl StoreEngine for EmbeddedStoreEngine {
     }
 
     fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_blob_delete")?;
         Ok(self
             .state
             .lock()
@@ -154,6 +164,7 @@ impl StoreEngine for EmbeddedStoreEngine {
     }
 
     fn list_blob_keys(&self, namespace: &str) -> Result<Vec<String>> {
+        enforce_logical_key_budget(self.capacity, namespace, "", "embedded_store_blob_list")?;
         let mut keys = self
             .state
             .lock()
@@ -169,17 +180,15 @@ impl StoreEngine for EmbeddedStoreEngine {
 
     fn replace_events(&self, events: &[MemoryStoreEvent]) -> Result<()> {
         if events.len() > self.capacity.event_log_max_items {
-            return Err(Error::config(
-                "embedded_store_quota",
-                format!(
-                    "event lineage items {} exceed {}",
-                    events.len(),
-                    self.capacity.event_log_max_items
-                ),
-            ));
+            return Err(store_budget_error(format!(
+                "event lineage items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
         }
         let mut event_ids = BTreeSet::new();
         for event in events {
+            enforce_event_key_budget(self.capacity, event, "embedded_store_event_replace")?;
             if !event_ids.insert(event.event_id.clone()) {
                 return Err(Error::config(
                     "store_event_log",
@@ -202,17 +211,15 @@ impl StoreEngine for EmbeddedStoreEngine {
         events: &[MemoryStoreEvent],
     ) -> Result<StoreSnapshotReplaceReport> {
         if events.len() > self.capacity.event_log_max_items {
-            return Err(Error::config(
-                "embedded_store_quota",
-                format!(
-                    "event lineage items {} exceed {}",
-                    events.len(),
-                    self.capacity.event_log_max_items
-                ),
-            ));
+            return Err(store_budget_error(format!(
+                "event lineage items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
         }
         let mut event_ids = BTreeSet::new();
         for event in events {
+            enforce_event_key_budget(self.capacity, event, "embedded_store_snapshot_import")?;
             if !event_ids.insert(event.event_id.clone()) {
                 return Err(Error::config(
                     "store_event_log",
@@ -225,12 +232,28 @@ impl StoreEngine for EmbeddedStoreEngine {
         let blob_namespace_set = namespace_set(blob_namespaces);
         let json_snapshot_keys = json_docs
             .iter()
-            .map(|doc| (doc.namespace.clone(), doc.key.clone()))
-            .collect::<BTreeSet<_>>();
+            .map(|doc| {
+                enforce_logical_key_budget(
+                    self.capacity,
+                    &doc.namespace,
+                    &doc.key,
+                    "embedded_store_snapshot_import",
+                )?;
+                Ok((doc.namespace.clone(), doc.key.clone()))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
         let blob_snapshot_keys = blobs
             .iter()
-            .map(|blob| (blob.namespace.clone(), blob.key.clone()))
-            .collect::<BTreeSet<_>>();
+            .map(|blob| {
+                enforce_logical_key_budget(
+                    self.capacity,
+                    &blob.namespace,
+                    &blob.key,
+                    "embedded_store_snapshot_import",
+                )?;
+                Ok((blob.namespace.clone(), blob.key.clone()))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
 
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let retained_json_entries = state
@@ -240,10 +263,10 @@ impl StoreEngine for EmbeddedStoreEngine {
             .count();
         let final_json_entries = retained_json_entries.saturating_add(json_docs.len());
         if final_json_entries > self.capacity.kv_max_entries {
-            return Err(Error::config(
-                "embedded_store_quota",
-                format!("kv entries exceed {}", self.capacity.kv_max_entries),
-            ));
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                final_json_entries, self.capacity.kv_max_entries
+            )));
         }
         let retained_blob_bytes = state
             .blobs
@@ -253,10 +276,11 @@ impl StoreEngine for EmbeddedStoreEngine {
             .sum::<usize>();
         let snapshot_blob_bytes = blobs.iter().map(|blob| blob.value.len()).sum::<usize>();
         if retained_blob_bytes.saturating_add(snapshot_blob_bytes) > self.capacity.blob_max_bytes {
-            return Err(Error::config(
-                "embedded_store_quota",
-                format!("blob bytes exceed {}", self.capacity.blob_max_bytes),
-            ));
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                retained_blob_bytes.saturating_add(snapshot_blob_bytes),
+                self.capacity.blob_max_bytes
+            )));
         }
 
         let json_deleted = state

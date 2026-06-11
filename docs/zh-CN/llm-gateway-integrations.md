@@ -41,7 +41,7 @@ Chat、generate 和无状态 responses 请求会在上游模型请求前注入�
 用同一组 `BM_MEMORY_*` 环境变量让 `bm-llm-gateway` 和 `bm-mcp-server` 命中同一套 Beetle Memory runtime：
 
 ```bash
-export BM_MEMORY_STORE_FILE=target/bm-memory-gateway-store
+export BM_MEMORY_STORE_FILE=/var/lib/beetle-memory/gateway-store
 export BM_MEMORY_OWNER_ID=owner-default
 export BM_MEMORY_AGENT_ID=agent-main
 export BM_MEMORY_CHANNEL=llm.gateway
@@ -51,11 +51,11 @@ export BM_MEMORY_CHAT_ID=chat-1
 `bm-mcp-server` 也支持显式本地覆盖：
 
 ```bash
-bm-mcp-server stdio --store-file target/bm-memory-gateway-store --chat-id chat-1
-bm-mcp-server http --addr 127.0.0.1:8788 --store-file target/bm-memory-gateway-store --chat-id chat-1
+bm-mcp-server stdio --store-file /var/lib/beetle-memory/gateway-store --chat-id chat-1
+bm-mcp-server http --addr 127.0.0.1:8788 --store-file /var/lib/beetle-memory/gateway-store --chat-id chat-1
 ```
 
-sqlite 部署用 `BM_MEMORY_STORE_SQLITE=/path/to/memory.sqlite3`；`BM_MEMORY_STORE_MEMORY=1` 只用于一次性本地测试。binary 默认是 `target/bm-memory-gateway-store` 本地 file store，不是临时 in-memory store。
+sqlite 部署用 `BM_MEMORY_STORE_SQLITE=/path/to/memory.sqlite3`；`BM_MEMORY_STORE_MEMORY=1` 只用于一次性本地测试。持久化 file/sqlite 路径必须显式传入绝对路径；binary 不再默认写入源码树下的 `target/` store。
 
 ## MCP Server
 

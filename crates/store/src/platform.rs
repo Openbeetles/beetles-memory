@@ -24,11 +24,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "sqlite-store")]
 use crate::sqlite::SqliteStoreEngine;
 use crate::{
-    embedded::EmbeddedStoreEngine, file::FileStoreEngine, InMemoryStoreEngine, MemoryStoreEvent,
-    MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind, StoreEngine, StoreEventLog,
-    StoreEventScope, StoreOpenReport, StoreRepairReport, StoreSchemaManifest, StoreSnapshot,
-    StoreSnapshotBlob, StoreSnapshotExportReport, StoreSnapshotImportReport, StoreSnapshotJsonDoc,
-    STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
+    embedded::EmbeddedStoreEngine, enforce_event_key_budget, enforce_logical_key_budget,
+    file::FileStoreEngine, store_budget_error, InMemoryStoreEngine, MemoryStoreEvent,
+    MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget, StoreEngine,
+    StoreEventLog, StoreEventScope, StoreOpenReport, StoreRepairReport, StoreSchemaManifest,
+    StoreSnapshot, StoreSnapshotBlob, StoreSnapshotExportReport, StoreSnapshotImportReport,
+    StoreSnapshotJsonDoc, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
 };
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -38,6 +39,7 @@ pub struct StorePlatform {
     config: StoreBackendConfig,
     engine: Arc<dyn StoreEngine>,
     schema_manifest: StoreSchemaManifest,
+    open_report: StoreOpenReport,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,7 +61,7 @@ impl StorePlatform {
             StoreSchemaManifest,
         ) = match config.backend {
             StoreBackendKind::InMemory => (
-                Arc::new(InMemoryStoreEngine::default()),
+                Arc::new(InMemoryStoreEngine::new(config.capacity)),
                 StoreRepairReport::clean(),
                 StoreSchemaManifest::new(config.backend, config.profile, now_secs),
             ),
@@ -86,6 +88,7 @@ impl StorePlatform {
             config,
             engine,
             schema_manifest,
+            open_report: report.clone(),
         };
         platform.emit_runtime_event("open")?;
         Ok((platform, report))
@@ -111,6 +114,10 @@ impl StorePlatform {
 
     pub fn config(&self) -> &StoreBackendConfig {
         &self.config
+    }
+
+    pub fn open_report(&self) -> &StoreOpenReport {
+        &self.open_report
     }
 
     pub fn into_arc(self) -> Arc<dyn Platform> {
@@ -155,7 +162,7 @@ impl StorePlatform {
             blobs,
             self.read_events()?,
         );
-        self.enforce_snapshot_budget(&snapshot)?;
+        self.enforce_snapshot_budget(&snapshot, self.config.capacity.export_max_bytes, "export")?;
         let report = snapshot.export_report();
         Ok((snapshot, report))
     }
@@ -170,7 +177,8 @@ impl StorePlatform {
         snapshot: &StoreSnapshot,
     ) -> Result<StoreSnapshotImportReport> {
         validate_snapshot_import_contract(snapshot)?;
-        self.enforce_snapshot_budget(snapshot)?;
+        enforce_snapshot_logical_budget(self.config.capacity, snapshot)?;
+        self.enforce_snapshot_budget(snapshot, self.config.capacity.import_max_bytes, "import")?;
         let replace_report = self.engine.replace_snapshot(
             JSON_SNAPSHOT_NAMESPACES,
             BLOB_SNAPSHOT_NAMESPACES,
@@ -219,6 +227,7 @@ impl StorePlatform {
     where
         T: Serialize,
     {
+        enforce_logical_key_budget(self.config.capacity, namespace, key, "store_json_write")?;
         if self.engine.get_json_value(namespace, key)?.is_none() {
             let current_entries = self.engine.list_json_keys(namespace)?.len();
             if current_entries >= self.config.capacity.kv_max_entries {
@@ -250,6 +259,7 @@ impl StorePlatform {
         key: &str,
         event_kind: MemoryStoreEventKind,
     ) -> Result<bool> {
+        enforce_logical_key_budget(self.config.capacity, namespace, key, "store_json_delete")?;
         let content_hash = stable_hash_hex(&("delete", namespace, key));
         let event = self.build_memory_event(event_kind, namespace, key, content_hash);
         self.engine
@@ -273,6 +283,7 @@ impl StorePlatform {
     }
 
     fn blob_put(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
+        enforce_logical_key_budget(self.config.capacity, namespace, key, "store_blob_write")?;
         if value.len() > self.config.capacity.blob_max_bytes {
             return Err(Error::config(
                 "store_budget_exceeded",
@@ -294,6 +305,7 @@ impl StorePlatform {
     }
 
     fn blob_delete(&self, namespace: &str, key: &str) -> Result<bool> {
+        enforce_logical_key_budget(self.config.capacity, namespace, key, "store_blob_delete")?;
         let content_hash = stable_hash_hex(&("delete", namespace, key));
         let event = self.build_memory_event(
             MemoryStoreEventKind::MemoryDelete,
@@ -332,21 +344,28 @@ impl StorePlatform {
         .with_payload("backend", self.config.backend.as_str())
         .with_payload("profile", self.config.profile.as_str())
         .with_payload("result", "ok");
+        self.append_validated_event(event)
+    }
+
+    fn append_validated_event(&self, event: MemoryStoreEvent) -> Result<()> {
+        enforce_event_key_budget(self.config.capacity, &event, "store_event_log")?;
         self.engine.append_event(event)
     }
 
-    fn enforce_snapshot_budget(&self, snapshot: &StoreSnapshot) -> Result<()> {
+    fn enforce_snapshot_budget(
+        &self,
+        snapshot: &StoreSnapshot,
+        max_bytes: usize,
+        operation: &'static str,
+    ) -> Result<()> {
         let bytes = serde_json::to_vec(snapshot)
             .map_err(|error| Error::config("store_snapshot_budget", error.to_string()))?;
-        if bytes.len() > self.config.capacity.snapshot_max_bytes {
-            return Err(Error::config(
-                "store_budget_exceeded",
-                format!(
-                    "snapshot bytes {} exceed {}",
-                    bytes.len(),
-                    self.config.capacity.snapshot_max_bytes
-                ),
-            ));
+        if bytes.len() > max_bytes {
+            return Err(store_budget_error(format!(
+                "{operation} snapshot bytes {} exceed {}",
+                bytes.len(),
+                max_bytes
+            )));
         }
         Ok(())
     }
@@ -399,7 +418,7 @@ const BLOB_SNAPSHOT_NAMESPACES: &[&str] = &["state_fs", "skills", "memory", "dai
 
 impl StoreEventLog for StorePlatform {
     fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
-        self.engine.append_event(event)
+        self.append_validated_event(event)
     }
 
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
@@ -442,7 +461,7 @@ impl RuntimeLifecycleEventSink for StorePlatform {
         for (key, value) in event.payload {
             store_event = store_event.with_payload(key, value);
         }
-        self.engine.append_event(store_event)
+        self.append_validated_event(store_event)
     }
 }
 
@@ -2077,6 +2096,27 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
                 format!("duplicate event id {}", event.event_id),
             ));
         }
+    }
+    Ok(())
+}
+
+fn enforce_snapshot_logical_budget(
+    capacity: StoreCapacityBudget,
+    snapshot: &StoreSnapshot,
+) -> Result<()> {
+    for doc in &snapshot.json_docs {
+        enforce_logical_key_budget(capacity, &doc.namespace, &doc.key, "store_snapshot_import")?;
+    }
+    for blob in &snapshot.blobs {
+        enforce_logical_key_budget(
+            capacity,
+            &blob.namespace,
+            &blob.key,
+            "store_snapshot_import",
+        )?;
+    }
+    for event in &snapshot.events {
+        enforce_event_key_budget(capacity, event, "store_snapshot_import")?;
     }
     Ok(())
 }

@@ -21,7 +21,10 @@ let store = StorePlatform::open(StoreBackendConfig::sqlite(
     "/var/lib/beetle-memory/memory.sqlite3",
     profile,
 )?)?;
+let open_report = store.open_report();
 ```
+
+启动诊断里要保留 `StoreOpenReport`。它包含 schema 与 repair finding，operator 需要在 runtime 接受写入前看到这些信息。
 
 ## Repair Policy
 
@@ -40,6 +43,12 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
 logical store key 不是 filesystem path。file backend 会按 profile 的 `StorePathBudget` 把 logical key 映射到受限 physical address：短 digest 文件名加 sidecar key index。`list_*_keys`、snapshot export/import、replay 和 delete 仍然只暴露 logical key。
 
 不要把 transcript ID、conversation ID、attr ID 或 host ref 直接编码进文件名。平台差异化的 filename / relative-path budget 属于 `bm-store`，不属于 adapter crate。
+
+## Capacity And Key Budget
+
+`StoreRuntimeBudget` 由 Beetle Memory 编译，并在打开 backend 前转换成 `StoreCapacityBudget`。预算覆盖 KV、blob、snapshot、event count、logical namespace/key bytes、event record key bytes，以及独立的 export/import byte limit。
+
+所有 backend 执行同一套预算合同。超长 logical key、event record key、snapshot import、export 或累计 blob 超限时，必须返回结构化 `store_budget_exceeded`；backend 不能截断 key，也不能静默丢记忆。
 
 ## Ownership Rules
 

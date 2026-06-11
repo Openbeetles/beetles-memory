@@ -41,7 +41,7 @@ The shared console includes a dedicated LLM Gateway page backed by `GET /console
 Run `bm-llm-gateway` and `bm-mcp-server` against the same Beetle Memory runtime by using the shared `BM_MEMORY_*` environment variables:
 
 ```bash
-export BM_MEMORY_STORE_FILE=target/bm-memory-gateway-store
+export BM_MEMORY_STORE_FILE=/var/lib/beetle-memory/gateway-store
 export BM_MEMORY_OWNER_ID=owner-default
 export BM_MEMORY_AGENT_ID=agent-main
 export BM_MEMORY_CHANNEL=llm.gateway
@@ -51,11 +51,11 @@ export BM_MEMORY_CHAT_ID=chat-1
 Both binaries also accept explicit local overrides where applicable:
 
 ```bash
-bm-mcp-server stdio --store-file target/bm-memory-gateway-store --chat-id chat-1
-bm-mcp-server http --addr 127.0.0.1:8788 --store-file target/bm-memory-gateway-store --chat-id chat-1
+bm-mcp-server stdio --store-file /var/lib/beetle-memory/gateway-store --chat-id chat-1
+bm-mcp-server http --addr 127.0.0.1:8788 --store-file /var/lib/beetle-memory/gateway-store --chat-id chat-1
 ```
 
-Use `BM_MEMORY_STORE_SQLITE=/path/to/memory.sqlite3` for sqlite deployments, or `BM_MEMORY_STORE_MEMORY=1` only for disposable local tests. The binary default is a local file store under `target/bm-memory-gateway-store`, not a temporary in-memory store.
+Use `BM_MEMORY_STORE_SQLITE=/path/to/memory.sqlite3` for sqlite deployments, or `BM_MEMORY_STORE_MEMORY=1` only for disposable local tests. Persistent file/sqlite paths must be explicit absolute paths; the binaries do not default to a repository-local `target/` store.
 
 ## MCP Server
 

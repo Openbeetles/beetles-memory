@@ -546,8 +546,11 @@ pub(crate) fn maintain_archive_search_backend(
 ) -> Result<bool> {
     #[cfg(feature = "sqlite-index")]
     {
-        let signature = build_archive_source_signature()?;
-        let path = archive_index_path();
+        let Some(root) = crate::platform::sqlite_index_state_dir()? else {
+            return Ok(false);
+        };
+        let signature = build_archive_source_signature(&root)?;
+        let path = archive_index_path(&root);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -751,14 +754,19 @@ fn search_archive_records_from_sqlite_detailed(
     query: PreparedArchiveSearchQuery<'_>,
     terms: &[String],
 ) -> Result<Option<ArchiveSearchResult>> {
-    let signature = match build_archive_source_signature() {
+    let root = match crate::platform::sqlite_index_state_dir() {
+        Ok(Some(root)) => root,
+        Ok(None) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let signature = match build_archive_source_signature(&root) {
         Ok(signature) => signature,
         Err(error) => {
             log::warn!("[archive_search] sqlite signature failed: {}", error);
             return Ok(None);
         }
     };
-    let path = archive_index_path();
+    let path = archive_index_path(&root);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -830,8 +838,8 @@ fn search_archive_records_from_sqlite_detailed(
 }
 
 #[cfg(feature = "sqlite-index")]
-fn archive_index_path() -> PathBuf {
-    crate::platform::state_mount_path().join(REL_PATH_ARCHIVE_INDEX)
+fn archive_index_path(root: &Path) -> PathBuf {
+    root.join(REL_PATH_ARCHIVE_INDEX)
 }
 
 #[cfg(feature = "sqlite-index")]
@@ -1143,8 +1151,7 @@ fn archive_sqlite_match_expression(terms: &[String]) -> Option<String> {
 }
 
 #[cfg(feature = "sqlite-index")]
-fn build_archive_source_signature() -> Result<ArchiveSourceSignature> {
-    let root = crate::platform::state_mount_path();
+fn build_archive_source_signature(root: &Path) -> Result<ArchiveSourceSignature> {
     let sessions = scan_path_signature(&root.join(super::REL_PATH_SESSIONS_DIR))?;
     let daily = scan_path_signature(&root.join(super::REL_PATH_DAILY_DIR))?;
     let turn_logs = scan_path_signature(&root.join(super::REL_PATH_TURN_LEDGERS))?;

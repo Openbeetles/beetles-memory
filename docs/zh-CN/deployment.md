@@ -135,7 +135,7 @@ Tauri 开发态会自动启动共享 `apps/console` 前端；生产打包会先�
 ```bash
 cargo run -p bm-http --features server-std --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
-  --store-path target/bm-http-console-store
+  --store-path /var/lib/beetle-memory/http-console-store
 ```
 
 独立部署需要挂载宿主自管的标准 Agent Skill 目录时，在启动进程前设置 `BM_AGENT_SKILL_DIRS`。多个目录使用当前平台的 path separator 分隔。运行时只读扫描这些目录用于召回和投影，不管理、不执行其中的文件。
@@ -144,7 +144,7 @@ cargo run -p bm-http --features server-std --bin bm-http-console -- \
 BM_AGENT_SKILL_DIRS=/path/to/project/.agents/skills:/path/to/user/skills \
   cargo run -p bm-http --features server-std --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
-  --store-path target/bm-http-console-store
+  --store-path /var/lib/beetle-memory/http-console-store
 ```
 
 HTTP shell 的前端开发态固定使用 `5176`，并把 `/console/*`、`/memory/*` 代理到 `127.0.0.1:8718`。这只验证 HTTP shell；macOS 桌面生产形态应使用上面的 Tauri 启动方式：

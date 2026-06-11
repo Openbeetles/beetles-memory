@@ -7,12 +7,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::{
-    MemoryStoreEvent, StoreBackendConfig, StoreEngine, StoreEventLog, StoreSchemaManifest,
+    enforce_event_key_budget, enforce_logical_key_budget, store_budget_error, MemoryStoreEvent,
+    StoreBackendConfig, StoreCapacityBudget, StoreEngine, StoreEventLog, StoreSchemaManifest,
     StoreSnapshotBlob, StoreSnapshotJsonDoc, StoreSnapshotReplaceReport, STORE_SCHEMA_ID,
     STORE_SCHEMA_VERSION,
 };
 
 pub struct SqliteStoreEngine {
+    capacity: StoreCapacityBudget,
     connection: Mutex<Connection>,
 }
 
@@ -29,6 +31,7 @@ impl SqliteStoreEngine {
         let connection =
             Connection::open(&path).map_err(|error| Error::storage("sqlite_store_open", error))?;
         let engine = Self {
+            capacity: config.capacity,
             connection: Mutex::new(connection),
         };
         let manifest = engine.init_schema(config, path)?;
@@ -134,6 +137,102 @@ impl SqliteStoreEngine {
             .map_err(|error| Error::storage("sqlite_store_schema", error))?;
         Ok(manifest)
     }
+
+    fn ensure_can_insert_event(
+        capacity: StoreCapacityBudget,
+        connection: &Connection,
+        event: &MemoryStoreEvent,
+    ) -> Result<()> {
+        enforce_event_key_budget(capacity, event, "store_event_log")?;
+        let duplicate: Option<String> = connection
+            .query_row(
+                "SELECT event_id FROM bm_event_log WHERE event_id = ?1",
+                params![&event.event_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| Error::storage("store_event_log", error))?;
+        if duplicate.is_some() {
+            return Err(Error::config("store_event_log", "duplicate event id"));
+        }
+        let count: usize = connection
+            .query_row("SELECT COUNT(*) FROM bm_event_log", [], |row| row.get(0))
+            .map_err(|error| Error::storage("store_event_log", error))?;
+        if count >= capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                count.saturating_add(1),
+                capacity.event_log_max_items
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_json_entry_budget(
+        capacity: StoreCapacityBudget,
+        connection: &Connection,
+        namespace: &str,
+        key: &str,
+    ) -> Result<()> {
+        enforce_logical_key_budget(capacity, namespace, key, "sqlite_store_json_write")?;
+        let exists: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| Error::storage("sqlite_store_json_write", error))?;
+        if exists.is_some() {
+            return Ok(());
+        }
+        let count: usize = connection
+            .query_row("SELECT COUNT(*) FROM bm_kv", [], |row| row.get(0))
+            .map_err(|error| Error::storage("sqlite_store_json_write", error))?;
+        if count >= capacity.kv_max_entries {
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                count.saturating_add(1),
+                capacity.kv_max_entries
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_blob_budget(
+        capacity: StoreCapacityBudget,
+        connection: &Connection,
+        namespace: &str,
+        key: &str,
+        value_len: usize,
+    ) -> Result<()> {
+        enforce_logical_key_budget(capacity, namespace, key, "sqlite_store_blob_write")?;
+        let previous: Option<usize> = connection
+            .query_row(
+                "SELECT length(value_blob) FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| Error::storage("sqlite_store_blob_write", error))?;
+        let current: usize = connection
+            .query_row(
+                "SELECT COALESCE(SUM(length(value_blob)), 0) FROM bm_blob",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| Error::storage("sqlite_store_blob_write", error))?;
+        let next = current
+            .saturating_sub(previous.unwrap_or(0))
+            .saturating_add(value_len);
+        if next > capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                next, capacity.blob_max_bytes
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl StoreEventLog for SqliteStoreEngine {
@@ -144,6 +243,7 @@ impl StoreEventLog for SqliteStoreEngine {
             .connection
             .lock()
             .map_err(|error| Error::config("store_event_log", error.to_string()))?;
+        Self::ensure_can_insert_event(self.capacity, &connection, &event)?;
         connection
             .execute(
                 "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
@@ -164,6 +264,15 @@ impl StoreEventLog for SqliteStoreEngine {
             .connection
             .lock()
             .map_err(|error| Error::config("store_event_log", error.to_string()))?;
+        let count: usize = connection
+            .query_row("SELECT COUNT(*) FROM bm_event_log", [], |row| row.get(0))
+            .map_err(|error| Error::storage("store_event_log", error))?;
+        if count > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                count, self.capacity.event_log_max_items
+            )));
+        }
         let mut statement = connection
             .prepare("SELECT event_json FROM bm_event_log ORDER BY sequence ASC")
             .map_err(|error| Error::storage("store_event_log", error))?;
@@ -184,6 +293,7 @@ impl StoreEventLog for SqliteStoreEngine {
 
 impl StoreEngine for SqliteStoreEngine {
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_json_read")?;
         let connection = self
             .connection
             .lock()
@@ -210,6 +320,7 @@ impl StoreEngine for SqliteStoreEngine {
             .connection
             .lock()
             .map_err(|error| Error::config("sqlite_store_json_write", error.to_string()))?;
+        Self::ensure_json_entry_budget(self.capacity, &connection, namespace, key)?;
         connection
             .execute(
                 "INSERT OR REPLACE INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
@@ -236,6 +347,8 @@ impl StoreEngine for SqliteStoreEngine {
         let tx = connection
             .transaction()
             .map_err(|error| Error::storage("sqlite_store_json_write", error))?;
+        Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
+        Self::ensure_json_entry_budget(self.capacity, &tx, namespace, key)?;
         tx.execute(
             "INSERT OR REPLACE INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
             params![namespace, key, raw],
@@ -252,6 +365,7 @@ impl StoreEngine for SqliteStoreEngine {
     }
 
     fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_json_delete")?;
         let connection = self
             .connection
             .lock()
@@ -279,6 +393,7 @@ impl StoreEngine for SqliteStoreEngine {
         let tx = connection
             .transaction()
             .map_err(|error| Error::storage("sqlite_store_json_delete", error))?;
+        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_json_delete")?;
         let rows = tx
             .execute(
                 "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
@@ -286,6 +401,7 @@ impl StoreEngine for SqliteStoreEngine {
             )
             .map_err(|error| Error::storage("sqlite_store_json_delete", error))?;
         if rows > 0 {
+            Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
             tx.execute(
                 "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
                 params![event.event_id, event_raw],
@@ -298,6 +414,7 @@ impl StoreEngine for SqliteStoreEngine {
     }
 
     fn list_json_keys(&self, namespace: &str) -> Result<Vec<String>> {
+        enforce_logical_key_budget(self.capacity, namespace, "", "sqlite_store_json_list")?;
         let connection = self
             .connection
             .lock()
@@ -316,6 +433,7 @@ impl StoreEngine for SqliteStoreEngine {
     }
 
     fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_blob_read")?;
         let connection = self
             .connection
             .lock()
@@ -335,6 +453,7 @@ impl StoreEngine for SqliteStoreEngine {
             .connection
             .lock()
             .map_err(|error| Error::config("sqlite_store_blob_write", error.to_string()))?;
+        Self::ensure_blob_budget(self.capacity, &connection, namespace, key, value.len())?;
         connection
             .execute(
                 "INSERT OR REPLACE INTO bm_blob(namespace, key, value_blob) VALUES (?1, ?2, ?3)",
@@ -359,6 +478,8 @@ impl StoreEngine for SqliteStoreEngine {
         let tx = connection
             .transaction()
             .map_err(|error| Error::storage("sqlite_store_blob_write", error))?;
+        Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
+        Self::ensure_blob_budget(self.capacity, &tx, namespace, key, value.len())?;
         tx.execute(
             "INSERT OR REPLACE INTO bm_blob(namespace, key, value_blob) VALUES (?1, ?2, ?3)",
             params![namespace, key, value],
@@ -375,6 +496,7 @@ impl StoreEngine for SqliteStoreEngine {
     }
 
     fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
+        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_blob_delete")?;
         let connection = self
             .connection
             .lock()
@@ -402,6 +524,7 @@ impl StoreEngine for SqliteStoreEngine {
         let tx = connection
             .transaction()
             .map_err(|error| Error::storage("sqlite_store_blob_delete", error))?;
+        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_blob_delete")?;
         let rows = tx
             .execute(
                 "DELETE FROM bm_blob WHERE namespace = ?1 AND key = ?2",
@@ -409,6 +532,7 @@ impl StoreEngine for SqliteStoreEngine {
             )
             .map_err(|error| Error::storage("sqlite_store_blob_delete", error))?;
         if rows > 0 {
+            Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
             tx.execute(
                 "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
                 params![event.event_id, event_raw],
@@ -421,6 +545,7 @@ impl StoreEngine for SqliteStoreEngine {
     }
 
     fn list_blob_keys(&self, namespace: &str) -> Result<Vec<String>> {
+        enforce_logical_key_budget(self.capacity, namespace, "", "sqlite_store_blob_list")?;
         let connection = self
             .connection
             .lock()
@@ -439,9 +564,17 @@ impl StoreEngine for SqliteStoreEngine {
     }
 
     fn replace_events(&self, events: &[MemoryStoreEvent]) -> Result<()> {
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
         let mut event_ids = std::collections::BTreeSet::new();
         let mut encoded = Vec::with_capacity(events.len());
         for event in events {
+            enforce_event_key_budget(self.capacity, event, "store_event_log")?;
             if !event_ids.insert(event.event_id.clone()) {
                 return Err(Error::config(
                     "store_event_log",
@@ -479,9 +612,17 @@ impl StoreEngine for SqliteStoreEngine {
         blobs: &[StoreSnapshotBlob],
         events: &[MemoryStoreEvent],
     ) -> Result<StoreSnapshotReplaceReport> {
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "event log items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
         let mut event_ids = std::collections::BTreeSet::new();
         let mut encoded_events = Vec::with_capacity(events.len());
         for event in events {
+            enforce_event_key_budget(self.capacity, event, "sqlite_store_snapshot_import")?;
             if !event_ids.insert(event.event_id.clone()) {
                 return Err(Error::config(
                     "store_event_log",
@@ -493,6 +634,12 @@ impl StoreEngine for SqliteStoreEngine {
         let encoded_docs = json_docs
             .iter()
             .map(|doc| {
+                enforce_logical_key_budget(
+                    self.capacity,
+                    &doc.namespace,
+                    &doc.key,
+                    "sqlite_store_snapshot_import",
+                )?;
                 serde_json::to_string(&doc.value)
                     .map(|raw| (doc.namespace.clone(), doc.key.clone(), raw))
                     .map_err(|error| {
@@ -507,8 +654,16 @@ impl StoreEngine for SqliteStoreEngine {
             .collect::<std::collections::BTreeSet<_>>();
         let blob_snapshot_keys = blobs
             .iter()
-            .map(|blob| (blob.namespace.clone(), blob.key.clone()))
-            .collect::<std::collections::BTreeSet<_>>();
+            .map(|blob| {
+                enforce_logical_key_budget(
+                    self.capacity,
+                    &blob.namespace,
+                    &blob.key,
+                    "sqlite_store_snapshot_import",
+                )?;
+                Ok((blob.namespace.clone(), blob.key.clone()))
+            })
+            .collect::<Result<std::collections::BTreeSet<_>>>()?;
 
         let mut connection = self
             .connection
@@ -517,6 +672,29 @@ impl StoreEngine for SqliteStoreEngine {
         let tx = connection
             .transaction()
             .map_err(|error| Error::storage("sqlite_store_snapshot_import", error))?;
+        let retained_json_entries = count_retained_rows(
+            &tx,
+            "bm_kv",
+            "sqlite_store_snapshot_import",
+            json_namespaces,
+        )?;
+        let final_json_entries = retained_json_entries.saturating_add(json_docs.len());
+        if final_json_entries > self.capacity.kv_max_entries {
+            return Err(store_budget_error(format!(
+                "kv entries {} exceed {}",
+                final_json_entries, self.capacity.kv_max_entries
+            )));
+        }
+        let retained_blob_bytes =
+            count_retained_blob_bytes(&tx, "sqlite_store_snapshot_import", blob_namespaces)?;
+        let snapshot_blob_bytes = blobs.iter().map(|blob| blob.value.len()).sum::<usize>();
+        let final_blob_bytes = retained_blob_bytes.saturating_add(snapshot_blob_bytes);
+        if final_blob_bytes > self.capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "blob bytes {} exceed {}",
+                final_blob_bytes, self.capacity.blob_max_bytes
+            )));
+        }
 
         let mut json_deleted = 0usize;
         for namespace in json_namespaces {
@@ -604,6 +782,59 @@ fn current_unix_secs() -> u64 {
 fn serialize_event(event: &MemoryStoreEvent) -> Result<String> {
     serde_json::to_string(event)
         .map_err(|error| Error::config("store_event_log", error.to_string()))
+}
+
+fn count_retained_rows(
+    connection: &Connection,
+    table: &'static str,
+    stage: &'static str,
+    replaced_namespaces: &[&str],
+) -> Result<usize> {
+    let replaced = replaced_namespaces
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut statement = connection
+        .prepare(&format!("SELECT namespace FROM {table}"))
+        .map_err(|error| Error::storage(stage, error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| Error::storage(stage, error))?;
+    let mut count = 0usize;
+    for row in rows {
+        let namespace = row.map_err(|error| Error::storage(stage, error))?;
+        if !replaced.contains(namespace.as_str()) {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
+}
+
+fn count_retained_blob_bytes(
+    connection: &Connection,
+    stage: &'static str,
+    replaced_namespaces: &[&str],
+) -> Result<usize> {
+    let replaced = replaced_namespaces
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut statement = connection
+        .prepare("SELECT namespace, length(value_blob) FROM bm_blob")
+        .map_err(|error| Error::storage(stage, error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+        })
+        .map_err(|error| Error::storage(stage, error))?;
+    let mut bytes = 0usize;
+    for row in rows {
+        let (namespace, len) = row.map_err(|error| Error::storage(stage, error))?;
+        if !replaced.contains(namespace.as_str()) {
+            bytes = bytes.saturating_add(len);
+        }
+    }
+    Ok(bytes)
 }
 
 fn map_event_insert_error(error: rusqlite::Error) -> Error {

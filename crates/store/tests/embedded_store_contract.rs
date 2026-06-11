@@ -42,7 +42,7 @@ fn embedded_sdk_store_keeps_lightweight_runtime_paths_available() {
 #[test]
 fn embedded_store_enforces_snapshot_runtime_budget() {
     let mut config = StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory).unwrap();
-    config.capacity.snapshot_max_bytes = 64;
+    config.capacity.export_max_bytes = 64;
 
     let platform = StorePlatform::open(config).unwrap();
     platform
@@ -84,7 +84,7 @@ fn embedded_snapshot_import_rejects_event_lineage_that_exceeds_ring() {
         .import_store_snapshot(&snapshot)
         .expect_err("embedded import must not truncate snapshot event lineage");
 
-    assert_eq!(err.stage(), "embedded_store_quota");
+    assert_eq!(err.stage(), "store_budget_exceeded");
     assert!(err.to_string().contains("event lineage"));
     let after = target.export_store_snapshot().unwrap();
     assert_eq!(after.state_fingerprint(), before.state_fingerprint());

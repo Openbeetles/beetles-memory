@@ -18,6 +18,7 @@ mod snapshot;
 #[cfg(feature = "sqlite-store")]
 mod sqlite;
 
+pub(crate) use config::{enforce_event_key_budget, enforce_logical_key_budget, store_budget_error};
 pub use config::{
     profile_is_esp, profile_memory_system_kind, StoreBackendConfig, StoreBackendKind,
     StoreCapacityBudget, StorePathBudget, StoreRepairPolicy,
