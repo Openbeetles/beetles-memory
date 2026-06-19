@@ -58,6 +58,12 @@ rg -Fq "W4 graph expansion budget" dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "W4 production recall index" dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "W4 external noisy wall summary/operator contract" dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "W4 external noisy stage/index diagnostics" dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "召回质量优化" dev-docs/next-gen-soul-memory-roadmap.md dev-docs/README.md
+rg -Fq "W4.1 Recall Quality Optimization" dev-docs/temporal-memory-graph-plan.md
+rg -Fq "candidate pool split" dev-docs/temporal-memory-graph-plan.md
+rg -Fq "memory-owned hybrid source retrieval" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "query-aware graph expansion" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "graph_anchor_candidates" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "external runner temporal graph anchor binding" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "memory_graph_index_source_anchor_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "write_chunks_creates_indexed_eval_recall_path" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md
