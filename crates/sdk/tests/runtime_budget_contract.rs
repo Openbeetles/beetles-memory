@@ -2,11 +2,12 @@ mod support;
 
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
-    HostOpaqueRef, HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority,
-    MemoryProjectionRequest, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
-    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId,
+    compile_runtime_budget, CanonicalTurnDelta, ConversationKey, ConversationScope,
+    DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    MemoryEvidenceAuthority, MemoryProjectionRequest, MemoryTranscriptAttrWriteRequest,
+    MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest,
+    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    PressureLevel, ProfileId, ProviderModelContextLimit, RuntimeBudgetInput,
     RuntimeLifecycleModeInput, TranscriptAttrEnvelope, TranscriptAttrGovernance,
     TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
@@ -136,6 +137,55 @@ fn runtime_exposes_compiled_budget_report() {
     assert!(budget.projection_source_budget.context_assembly_max_chars > 0);
     assert!(budget.projection_render_budget.system_block_max_chars > 0);
     assert!(budget.adapter_budget.http_body_max_bytes > 0);
+}
+
+#[test]
+fn graph_expansion_budget_is_profile_owned_and_not_provider_render_owned() {
+    let esp_embedded = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
+        .graph_expansion_budget;
+    let esp_standalone =
+        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspStandaloneMemory)
+            .graph_expansion_budget;
+    let linux_device =
+        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::LinuxDeviceStandaloneMemory)
+            .graph_expansion_budget;
+    let server_gateway =
+        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxMemoryGateway)
+            .graph_expansion_budget;
+    let dev_full = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
+        .graph_expansion_budget;
+
+    assert_eq!(esp_embedded.max_hops, 1);
+    assert_eq!(esp_standalone.max_hops, 1);
+    assert_eq!(linux_device.max_hops, 1);
+    assert!(!esp_embedded.default_recall_multi_hop_allowed);
+    assert!(!esp_standalone.default_recall_multi_hop_allowed);
+    assert!(!linux_device.default_recall_multi_hop_allowed);
+
+    assert_eq!(server_gateway.max_hops, 2);
+    assert_eq!(dev_full.max_hops, 2);
+    assert!(server_gateway.eval_recall_multi_hop_allowed);
+    assert!(dev_full.eval_recall_multi_hop_allowed);
+    assert!(esp_embedded.max_expanded_candidates < server_gateway.max_expanded_candidates);
+    assert!(linux_device.max_graph_nodes_loaded < dev_full.max_graph_nodes_loaded);
+
+    let mut provider_limited_input =
+        RuntimeBudgetInput::static_for_profile(ProfileId::ServerLinuxDevFull);
+    provider_limited_input.provider_model_context_limit = Some(ProviderModelContextLimit {
+        provider: Some("local".to_string()),
+        model: Some("tiny-render".to_string()),
+        max_context_tokens: None,
+        max_prompt_chars: Some(512),
+    });
+    let provider_limited = compile_runtime_budget(provider_limited_input);
+
+    assert_eq!(provider_limited.graph_expansion_budget, dev_full);
+    assert_eq!(
+        provider_limited
+            .projection_render_budget
+            .system_block_max_chars,
+        512
+    );
 }
 
 #[test]

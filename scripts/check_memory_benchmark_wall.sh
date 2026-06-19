@@ -16,6 +16,7 @@ test -f fixtures/memory-benchmark-wall/recall-multisession/compact-baseline.json
 test -f fixtures/memory-benchmark-wall/recall-multisession/full-baseline.json
 test -f fixtures/memory-benchmark-wall/temporal-update/compact-baseline.json
 test -f fixtures/memory-benchmark-wall/temporal-update/full-baseline.json
+test -f fixtures/memory-benchmark-wall/temporal-update/w4-eval-recall-persistent-graph-full.json
 test -f fixtures/memory-benchmark-wall/subject-projection/compact-baseline.json
 test -f fixtures/memory-benchmark-wall/subject-projection/full-baseline.json
 test -f fixtures/memory-benchmark-wall/subject-projection/inhabited-subject-mount-compact.json
@@ -40,12 +41,17 @@ test -f fixtures/memory-benchmark-wall/agent-tool-experience/governed-experience
 test -f fixtures/memory-benchmark-wall/agent-tool-experience/schema-drift-stales-experience-full.json
 test -f fixtures/memory-benchmark-wall/agent-tool-experience/private-observation-not-public-full.json
 test -f fixtures/memory-benchmark-wall/agent-tool-experience/gateway-host-tools-no-cold-route-full.json
+test -f scripts/check_w4_external_noisy_wall_operator.sh
 
 needles=(
   "MemoryBenchmarkReport"
   "SoulKernelBenchmarkJudgeReport"
   "SubjectProjectionBenchmarkJudgeReport"
   "AgentToolExperienceBenchmarkJudgeReport"
+  "W4EvalRecallBenchmarkJudgeReport"
+  "W4ExternalNoisyWallReport"
+  "W4ExternalNoisyStageHitCounts"
+  "W4ExternalNoisyIndexDiagnostics"
   "MemoryBenchmarkSemanticFailure"
   "check_memory_benchmark_wall"
   "recall_multisession"
@@ -72,8 +78,42 @@ needles=(
   "no_governed_tool_experience"
   "host_execution_required"
   "agent_tool_registry_forbidden_by_profile"
+  "w4_eval_recall"
+  "W4EvalRecallSemantics"
+  "source_expanded_selected_split_covered"
+  "evaluate_w4_external_noisy_wall"
+  "w4_external_noisy_summary_with_provenance"
+  "w4_external_noisy_wall_improvement_not_proven"
+  "w4_external_noisy_wall_stage_diagnostics_missing"
+  "w4_external_noisy_wall_index_diagnostics_missing"
+  "w4_external_noisy_wall_stage_attribution_not_proven"
+  "w4_external_noisy_wall_index_effect_not_proven"
+  "stage_diagnostics_attached"
+  "index_diagnostics_attached"
+  "stage_attributed_improvement_proven"
+  "index_effect_proven"
+  "stage_hit_counts"
+  "index_diagnostics"
 )
 
 for needle in "${needles[@]}"; do
   rg -q "$needle" dev-docs/next-gen-soul-memory-roadmap.md crates/replay scripts fixtures/memory-benchmark-wall
 done
+
+operator_needles=(
+  "BM_W4_EXTERNAL_BENCH_ROOT"
+  "BM_W4_EXTERNAL_EXPECT_BLOCKED"
+  "bm-w4-external-noisy-wall"
+  "runner/src/main.rs"
+  "locomo.merged.summary.json"
+  "longmemeval_oracle.merged.summary.json"
+  "longmemeval_s_cleaned.merged.summary.json"
+  "longmemeval_m_cleaned.merged.summary.json"
+  "shasum -a 256"
+)
+
+for needle in "${operator_needles[@]}"; do
+  rg -q "$needle" scripts/check_w4_external_noisy_wall_operator.sh
+done
+
+! rg -q "jsonl|data/|invalid-pre-runner-fix|runner/target" scripts/check_w4_external_noisy_wall_operator.sh

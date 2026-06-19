@@ -8,10 +8,11 @@ use bm_core::memory::{
     build_soul_regression_suite_report, build_temporal_memory_graph_gate_report,
     build_vault_migration_preflight, build_workbench_gate_report,
     compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
-    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, CompactGraphIndex,
-    CompactSoulProfile, CoreRevisionActionKind, CoreRevisionConflictClass, CoreRevisionLedger,
-    CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange, DroppedProjectionCandidate,
-    EdgeRecoveryFixture, EncryptedSnapshotEnvelope, EvidenceBacklink, MemoryAutopilotInput,
+    plan_temporal_memory_graph_write, promote_task_experience_to_procedure,
+    rerank_recall_with_temporal_graph, CompactGraphIndex, CompactSoulProfile,
+    CoreRevisionActionKind, CoreRevisionConflictClass, CoreRevisionLedger, CoreRevisionOutcome,
+    CoreRevisionRecord, CoreRevisionRecordChange, DroppedProjectionCandidate, EdgeRecoveryFixture,
+    EncryptedSnapshotEnvelope, EvidenceBacklink, GraphRecallExpansionBudget, MemoryAutopilotInput,
     MemoryAutopilotPlan, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence,
     MemoryGraphNode, MemoryGraphNodeKind, MemoryHygieneDiff, NextGenPhase,
     PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
@@ -383,6 +384,45 @@ fn temporal_memory_graph_gate_requires_evidence_backlinks_for_projection() {
 }
 
 #[test]
+fn temporal_memory_graph_write_plan_rejects_dangling_edges_and_missing_backlinks() {
+    let node = MemoryGraphNode {
+        node_id: "node:release".to_string(),
+        kind: MemoryGraphNodeKind::Task,
+        label: "Release verification".to_string(),
+        evidence_refs: vec!["turn:release".to_string()],
+    };
+    let edge = MemoryGraphEdge {
+        edge_id: "edge:release:missing".to_string(),
+        kind: MemoryGraphEdgeKind::Supports,
+        from_node_id: "node:release".to_string(),
+        to_node_id: "node:missing".to_string(),
+        validity: TemporalValidity {
+            valid_from: 1_800_000_000,
+            valid_until: None,
+            observed_at: 1_800_000_000,
+            superseded_by: None,
+        },
+        evidence_refs: vec!["turn:release".to_string()],
+    };
+
+    let plan =
+        plan_temporal_memory_graph_write("memory_graph.write", vec![node], vec![edge], Vec::new());
+
+    assert!(!plan.accepted);
+    assert_eq!(plan.node_count, 1);
+    assert_eq!(plan.edge_count, 1);
+    assert_eq!(plan.backlink_count, 0);
+    assert!(plan
+        .gate_failures
+        .iter()
+        .any(|failure| failure == "missing_evidence_backlink:turn:release"));
+    assert!(plan
+        .gate_failures
+        .iter()
+        .any(|failure| failure == "edge:edge:release:missing:memory_graph_edge_to_missing"));
+}
+
+#[test]
 fn temporal_memory_graph_rejects_raw_soul_private_material() {
     let graph =
         bm_core::memory::build_temporal_memory_graph_from_evidence(vec![MemoryGraphEvidence {
@@ -452,6 +492,7 @@ fn temporal_memory_graph_builder_creates_nodes_edges_and_graph_rerank_report() {
             "fact:device-target:new".to_string(),
         ],
         &graph,
+        GraphRecallExpansionBudget::runtime_default(),
     );
 
     assert_eq!(
@@ -459,6 +500,207 @@ fn temporal_memory_graph_builder_creates_nodes_edges_and_graph_rerank_report() {
         Some("fact:device-target:new")
     );
     assert_eq!(rerank.stale_false_positive_count, 1);
+    assert!(rerank
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:device-target:old"));
+    let new_score = rerank
+        .score_breakdown
+        .iter()
+        .find(|score| score.candidate_id == "fact:device-target:new")
+        .expect("new fact score breakdown");
+    let old_score = rerank
+        .score_breakdown
+        .iter()
+        .find(|score| score.candidate_id == "fact:device-target:old")
+        .expect("old fact score breakdown");
+    assert!(new_score.graph_neighborhood_score > 0);
+    assert!(new_score.temporal_validity_score > 0);
+    assert!(new_score.evidence_quality_score > 0);
+    assert!(new_score.source_authority_score > 0);
+    assert!(new_score.privacy_profile_eligibility_score > 0);
+    assert_eq!(new_score.stale_superseded_penalty, 0);
+    assert!(old_score.stale_superseded_penalty > 0);
+    assert!(new_score.total_score > old_score.total_score);
+}
+
+#[test]
+fn temporal_memory_graph_expansion_budget_blocks_second_hop_until_profile_allows_it() {
+    let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
+        vec![
+            graph_node("fact:seed", MemoryGraphNodeKind::MemoryRecord, "Seed fact"),
+            graph_node(
+                "fact:first-hop",
+                MemoryGraphNodeKind::Task,
+                "First hop evidence",
+            ),
+            graph_node(
+                "fact:second-hop",
+                MemoryGraphNodeKind::Project,
+                "Second hop evidence",
+            ),
+        ],
+        vec![
+            graph_edge(
+                "edge:seed:first",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:first-hop",
+            ),
+            graph_edge(
+                "edge:first:second",
+                MemoryGraphEdgeKind::DerivedFrom,
+                "fact:first-hop",
+                "fact:second-hop",
+            ),
+        ],
+        vec![
+            graph_backlink("turn:seed"),
+            graph_backlink("turn:first-hop"),
+            graph_backlink("turn:second-hop"),
+        ],
+    );
+
+    let one_hop = rerank_recall_with_temporal_graph(
+        "second hop evidence",
+        vec!["fact:seed".to_string()],
+        &graph,
+        GraphRecallExpansionBudget::runtime_default(),
+    );
+
+    assert!(one_hop
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:first-hop"));
+    assert!(!one_hop
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:second-hop"));
+    assert_eq!(one_hop.expansion_budget.max_hops, 1);
+    assert_eq!(one_hop.expansion_budget.hop1_candidate_count, 1);
+    assert_eq!(one_hop.expansion_budget.hop2_candidate_count, 0);
+    assert!(one_hop.expansion_budget.profile_budget_applied);
+    assert!(one_hop
+        .expansion_budget
+        .blocked_reasons
+        .contains(&"graph_expansion_second_hop_requires_budget".to_string()));
+
+    let two_hop = rerank_recall_with_temporal_graph(
+        "second hop evidence",
+        vec!["fact:seed".to_string()],
+        &graph,
+        GraphRecallExpansionBudget {
+            max_hops: 2,
+            max_neighbors_per_candidate: 4,
+            max_expanded_candidates: 4,
+        },
+    );
+
+    assert!(two_hop
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:second-hop"));
+    assert_eq!(two_hop.expansion_budget.max_hops, 2);
+    assert_eq!(two_hop.expansion_budget.hop2_candidate_count, 1);
+    assert!(!two_hop.expansion_budget.profile_budget_applied);
+    assert!(two_hop.expansion_budget.blocked_reasons.is_empty());
+}
+
+#[test]
+fn temporal_memory_graph_expansion_budget_truncates_neighbors_before_render() {
+    let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
+        vec![
+            graph_node("fact:seed", MemoryGraphNodeKind::MemoryRecord, "Seed fact"),
+            graph_node("fact:a", MemoryGraphNodeKind::Task, "A"),
+            graph_node("fact:b", MemoryGraphNodeKind::Task, "B"),
+        ],
+        vec![
+            graph_edge(
+                "edge:seed:a",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:a",
+            ),
+            graph_edge(
+                "edge:seed:b",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:b",
+            ),
+        ],
+        vec![
+            graph_backlink("turn:seed"),
+            graph_backlink("turn:a"),
+            graph_backlink("turn:b"),
+        ],
+    );
+
+    let report = rerank_recall_with_temporal_graph(
+        "seed",
+        vec!["fact:seed".to_string()],
+        &graph,
+        GraphRecallExpansionBudget {
+            max_hops: 1,
+            max_neighbors_per_candidate: 1,
+            max_expanded_candidates: 2,
+        },
+    );
+
+    assert_eq!(report.expanded_candidate_ids.len(), 2);
+    assert_eq!(report.expansion_budget.truncated_candidate_count, 1);
+    assert!(report.expansion_budget.profile_budget_applied);
+    assert!(report
+        .expansion_budget
+        .blocked_reasons
+        .contains(&"graph_expansion_neighbor_budget_exhausted".to_string()));
+}
+
+fn graph_node(node_id: &str, kind: MemoryGraphNodeKind, label: &str) -> MemoryGraphNode {
+    MemoryGraphNode {
+        node_id: node_id.to_string(),
+        kind,
+        label: label.to_string(),
+        evidence_refs: vec![graph_evidence_ref(node_id)],
+    }
+}
+
+fn graph_edge(
+    edge_id: &str,
+    kind: MemoryGraphEdgeKind,
+    from_node_id: &str,
+    to_node_id: &str,
+) -> MemoryGraphEdge {
+    MemoryGraphEdge {
+        edge_id: edge_id.to_string(),
+        kind,
+        from_node_id: from_node_id.to_string(),
+        to_node_id: to_node_id.to_string(),
+        validity: TemporalValidity {
+            valid_from: 1_800_000_000,
+            valid_until: None,
+            observed_at: 1_800_000_001,
+            superseded_by: None,
+        },
+        evidence_refs: vec![graph_evidence_ref(from_node_id)],
+    }
+}
+
+fn graph_backlink(source_id: &str) -> EvidenceBacklink {
+    EvidenceBacklink {
+        source_kind: "turn_ledger".to_string(),
+        source_id: source_id.to_string(),
+        fingerprint: format!("fp-{source_id}"),
+    }
+}
+
+fn graph_evidence_ref(node_id: &str) -> String {
+    format!(
+        "turn:{}",
+        node_id
+            .strip_prefix("fact:")
+            .or_else(|| node_id.strip_prefix("graph:"))
+            .unwrap_or(node_id)
+    )
 }
 
 #[test]

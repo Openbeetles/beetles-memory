@@ -114,6 +114,8 @@ pub struct MemoryBenchmarkFixture {
     pub semantic_contract: MemoryBenchmarkSemanticContract,
     pub metrics: MemoryBenchmarkMetrics,
     pub thresholds: MemoryBenchmarkThresholds,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_recall: Option<MemoryBenchmarkEvalRecall>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -133,6 +135,49 @@ pub struct MemoryBenchmarkScenario {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub expected_surfaces: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecall {
+    #[serde(default)]
+    pub suite: String,
+    #[serde(default)]
+    pub split: String,
+    #[serde(default)]
+    pub question_id: String,
+    #[serde(default)]
+    pub question_type: String,
+    #[serde(default)]
+    pub expected_evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub source_candidates: Vec<String>,
+    #[serde(default)]
+    pub expanded_candidates: Vec<String>,
+    #[serde(default)]
+    pub selected_candidates: Vec<String>,
+    #[serde(default)]
+    pub rendered_block_preview: String,
+    #[serde(default)]
+    pub missing_evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub metrics: MemoryBenchmarkEvalRecallMetrics,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecallMetrics {
+    #[serde(default)]
+    pub recall_at_k: Vec<MemoryBenchmarkEvalRecallAtK>,
+    #[serde(default)]
+    pub mrr_bps: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecallAtK {
+    pub k: usize,
+    pub any_evidence_hit: bool,
+    pub all_evidence_hit: bool,
+    #[serde(default)]
+    pub matched_evidence_refs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,15 +226,17 @@ pub enum MemoryBenchmarkSemanticDimension {
     SoulLifeSemantics,
     WorkIntegritySemantics,
     AgentToolExperienceSemantics,
+    W4EvalRecallSemantics,
 }
 
 impl MemoryBenchmarkSemanticDimension {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ProjectionShape,
         Self::PrivacyRuntimeSemantics,
         Self::SoulLifeSemantics,
         Self::WorkIntegritySemantics,
         Self::AgentToolExperienceSemantics,
+        Self::W4EvalRecallSemantics,
     ];
 }
 
@@ -286,6 +333,7 @@ pub struct MemoryBenchmarkReport {
     pub soul_kernel_judge: SoulKernelBenchmarkJudgeReport,
     pub subject_projection_judge: SubjectProjectionBenchmarkJudgeReport,
     pub agent_tool_experience_judge: AgentToolExperienceBenchmarkJudgeReport,
+    pub w4_eval_recall_judge: W4EvalRecallBenchmarkJudgeReport,
     pub failures: Vec<MemoryBenchmarkFailure>,
     pub semantic_failures: Vec<MemoryBenchmarkSemanticFailure>,
     pub passed: bool,
@@ -333,6 +381,523 @@ pub struct AgentToolExperienceBenchmarkJudgeReport {
     pub compact_registry_forbidden_covered: bool,
     pub host_execution_boundary_covered: bool,
     pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4EvalRecallBenchmarkJudgeReport {
+    pub release_gate_passed: bool,
+    pub fixture_ids: Vec<String>,
+    pub fixture_count: usize,
+    pub required_k_covered: bool,
+    pub missing_evidence_reported: bool,
+    pub source_expanded_selected_split_covered: bool,
+    pub mrr_covered: bool,
+    pub noisy_external_wall_required: bool,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4ExternalNoisyBenchmarkSummary {
+    #[serde(default)]
+    pub suite: String,
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(default)]
+    pub shards: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_source_sha256: Option<String>,
+    #[serde(default)]
+    pub samples: usize,
+    #[serde(default)]
+    pub questions: usize,
+    #[serde(default)]
+    pub evidence_questions: usize,
+    #[serde(default)]
+    pub any_evidence_hit: usize,
+    #[serde(default)]
+    pub all_evidence_hit: usize,
+    #[serde(default)]
+    pub write_errors: usize,
+    #[serde(default)]
+    pub recall_errors: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_hit_counts: Option<W4ExternalNoisyStageHitCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_diagnostics: Option<W4ExternalNoisyIndexDiagnostics>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4ExternalNoisyStageHitCounts {
+    #[serde(default)]
+    pub source_any_evidence_hit: usize,
+    #[serde(default)]
+    pub source_all_evidence_hit: usize,
+    #[serde(default)]
+    pub expanded_any_evidence_hit: usize,
+    #[serde(default)]
+    pub expanded_all_evidence_hit: usize,
+    #[serde(default)]
+    pub reranked_any_evidence_hit: usize,
+    #[serde(default)]
+    pub reranked_all_evidence_hit: usize,
+    #[serde(default)]
+    pub selected_any_evidence_hit: usize,
+    #[serde(default)]
+    pub selected_all_evidence_hit: usize,
+    #[serde(default)]
+    pub rendered_any_evidence_hit: usize,
+    #[serde(default)]
+    pub rendered_all_evidence_hit: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4ExternalNoisyIndexDiagnostics {
+    #[serde(default)]
+    pub questions_with_index_report: usize,
+    #[serde(default)]
+    pub index_used_questions: usize,
+    #[serde(default)]
+    pub fallback_full_scan_questions: usize,
+    #[serde(default)]
+    pub source_candidate_count: usize,
+    #[serde(default)]
+    pub matched_source_anchor_count: usize,
+    #[serde(default)]
+    pub unmatched_source_anchor_count: usize,
+    #[serde(default)]
+    pub indexed_neighbor_count: usize,
+    #[serde(default)]
+    pub filtered_node_count: usize,
+    #[serde(default)]
+    pub filtered_edge_count: usize,
+    #[serde(default)]
+    pub filtered_backlink_count: usize,
+    #[serde(default)]
+    pub failure_count: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4ExternalNoisySuiteReport {
+    pub suite: String,
+    pub completed: bool,
+    pub samples: usize,
+    pub questions: usize,
+    pub evidence_questions: usize,
+    pub any_evidence_hit: usize,
+    pub all_evidence_hit: usize,
+    pub write_errors: usize,
+    pub recall_errors: usize,
+    pub shard_count: usize,
+    pub expected_shard_count: Option<usize>,
+    pub shards_valid: bool,
+    pub expected_samples: Option<usize>,
+    pub expected_questions: Option<usize>,
+    pub expected_evidence_questions: Option<usize>,
+    pub row_counts_valid: bool,
+    pub summary_sha256: Option<String>,
+    pub runner_source_sha256: Option<String>,
+    pub any_evidence_hit_bps: u32,
+    pub all_evidence_hit_bps: u32,
+    pub noisy_split: bool,
+    pub oracle_sanity_only: bool,
+    pub baseline_any_evidence_hit: Option<usize>,
+    pub baseline_all_evidence_hit: Option<usize>,
+    pub regressed_against_baseline: bool,
+    pub improved_against_baseline: bool,
+    pub stage_hit_counts: Option<W4ExternalNoisyStageHitCounts>,
+    pub index_diagnostics: Option<W4ExternalNoisyIndexDiagnostics>,
+    pub stage_attributed_improvement: bool,
+    pub index_effect_proven: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4ExternalNoisyWallReport {
+    pub release_gate_passed: bool,
+    pub summary_attached: bool,
+    pub required_suites_covered: bool,
+    pub noisy_splits_covered: bool,
+    pub completed: bool,
+    pub no_runner_errors: bool,
+    pub row_counts_covered: bool,
+    pub provenance_attached: bool,
+    pub stage_diagnostics_attached: bool,
+    pub index_diagnostics_attached: bool,
+    pub oracle_sanity_only: bool,
+    pub noisy_improvement_proven: bool,
+    pub stage_attributed_improvement_proven: bool,
+    pub index_effect_proven: bool,
+    pub suite_reports: Vec<W4ExternalNoisySuiteReport>,
+    pub blocked_reasons: Vec<String>,
+}
+
+pub fn evaluate_w4_external_noisy_wall(
+    summaries: &[W4ExternalNoisyBenchmarkSummary],
+) -> W4ExternalNoisyWallReport {
+    let suite_reports = summaries
+        .iter()
+        .map(w4_external_noisy_suite_report)
+        .collect::<Vec<_>>();
+    let summary_attached = !summaries.is_empty();
+    let required_suites = [
+        "locomo",
+        "longmemeval_oracle",
+        "longmemeval_s_cleaned",
+        "longmemeval_m_cleaned",
+    ];
+    let noisy_suites = ["locomo", "longmemeval_s_cleaned", "longmemeval_m_cleaned"];
+    let required_suites_covered = required_suites
+        .iter()
+        .all(|suite| summaries.iter().any(|summary| summary.suite == *suite));
+    let noisy_splits_covered = noisy_suites
+        .iter()
+        .all(|suite| summaries.iter().any(|summary| summary.suite == *suite));
+    let completed = summary_attached
+        && required_suites_covered
+        && required_suites.iter().all(|suite| {
+            summaries
+                .iter()
+                .find(|summary| summary.suite == *suite)
+                .is_some_and(|summary| summary.completed)
+        });
+    let no_runner_errors = summaries
+        .iter()
+        .all(|summary| summary.write_errors == 0 && summary.recall_errors == 0);
+    let row_counts_covered = required_suites_covered
+        && suite_reports
+            .iter()
+            .filter(|report| required_suites.iter().any(|suite| report.suite == *suite))
+            .all(|report| report.row_counts_valid);
+    let provenance_attached = required_suites_covered
+        && summaries
+            .iter()
+            .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
+            .all(|summary| {
+                summary
+                    .summary_sha256
+                    .as_deref()
+                    .is_some_and(|hash| !hash.trim().is_empty())
+                    && summary
+                        .runner_source_sha256
+                        .as_deref()
+                        .is_some_and(|hash| !hash.trim().is_empty())
+            });
+    let stage_diagnostics_attached = required_suites_covered
+        && summaries
+            .iter()
+            .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
+            .all(|summary| summary.stage_hit_counts.is_some());
+    let index_diagnostics_attached = required_suites_covered
+        && summaries
+            .iter()
+            .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
+            .all(|summary| summary.index_diagnostics.is_some());
+    let oracle_sanity_only = true;
+    let noisy_reports = suite_reports
+        .iter()
+        .filter(|report| report.noisy_split)
+        .collect::<Vec<_>>();
+    let noisy_not_regressed = noisy_splits_covered
+        && noisy_reports
+            .iter()
+            .all(|report| !report.regressed_against_baseline);
+    let m_cleaned_improved = suite_reports
+        .iter()
+        .find(|report| report.suite == "longmemeval_m_cleaned")
+        .is_some_and(|report| report.improved_against_baseline);
+    let noisy_improvement_proven = noisy_not_regressed && m_cleaned_improved;
+    let stage_attributed_improvement_proven = suite_reports
+        .iter()
+        .find(|report| report.suite == "longmemeval_m_cleaned")
+        .is_some_and(|report| report.stage_attributed_improvement);
+    let index_effect_proven = suite_reports
+        .iter()
+        .find(|report| report.suite == "longmemeval_m_cleaned")
+        .is_some_and(|report| report.index_effect_proven);
+
+    let mut blocked_reasons = Vec::new();
+    push_missing(
+        &mut blocked_reasons,
+        summary_attached,
+        "w4_external_noisy_wall_summary_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        required_suites_covered,
+        "w4_external_noisy_wall_required_suites_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        noisy_splits_covered,
+        "w4_external_noisy_wall_noisy_splits_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        completed,
+        "w4_external_noisy_wall_incomplete",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        no_runner_errors,
+        "w4_external_noisy_wall_runner_errors",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        row_counts_covered,
+        "w4_external_noisy_wall_row_counts_invalid",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        provenance_attached,
+        "w4_external_noisy_wall_provenance_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        !required_suites_covered || stage_diagnostics_attached,
+        "w4_external_noisy_wall_stage_diagnostics_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        !required_suites_covered || index_diagnostics_attached,
+        "w4_external_noisy_wall_index_diagnostics_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        noisy_improvement_proven,
+        "w4_external_noisy_wall_improvement_not_proven",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        stage_attributed_improvement_proven,
+        "w4_external_noisy_wall_stage_attribution_not_proven",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        index_effect_proven,
+        "w4_external_noisy_wall_index_effect_not_proven",
+    );
+    blocked_reasons.sort();
+    blocked_reasons.dedup();
+
+    W4ExternalNoisyWallReport {
+        release_gate_passed: blocked_reasons.is_empty(),
+        summary_attached,
+        required_suites_covered,
+        noisy_splits_covered,
+        completed,
+        no_runner_errors,
+        row_counts_covered,
+        provenance_attached,
+        stage_diagnostics_attached,
+        index_diagnostics_attached,
+        oracle_sanity_only,
+        noisy_improvement_proven,
+        stage_attributed_improvement_proven,
+        index_effect_proven,
+        suite_reports,
+        blocked_reasons,
+    }
+}
+
+pub fn w4_external_noisy_summary_with_provenance(
+    summary_json: &str,
+    summary_sha256: impl Into<String>,
+    runner_source_sha256: impl Into<String>,
+) -> Result<W4ExternalNoisyBenchmarkSummary> {
+    let summary_sha256 = normalize_sha256(summary_sha256.into(), "summary_sha256")?;
+    let runner_source_sha256 =
+        normalize_sha256(runner_source_sha256.into(), "runner_source_sha256")?;
+    let mut summary = serde_json::from_str::<W4ExternalNoisyBenchmarkSummary>(summary_json)
+        .map_err(|source| Error::Other {
+            source: Box::new(source),
+            stage: "w4_external_noisy_summary_json",
+        })?;
+    summary.summary_sha256 = Some(summary_sha256);
+    summary.runner_source_sha256 = Some(runner_source_sha256);
+    Ok(summary)
+}
+
+fn normalize_sha256(value: String, field: &'static str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::config(
+            "w4_external_noisy_provenance",
+            format!("{field} must be a 64-character hex sha256"),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn w4_external_noisy_suite_report(
+    summary: &W4ExternalNoisyBenchmarkSummary,
+) -> W4ExternalNoisySuiteReport {
+    let expected = w4_external_suite_expectation(&summary.suite);
+    let shard_count = summary.shards.len();
+    let shards_valid = expected.is_some_and(|expected| {
+        shard_count == expected.shard_count
+            && summary
+                .shards
+                .iter()
+                .all(|shard| !shard.trim().is_empty() && shard.ends_with(".summary.json"))
+    });
+    let row_counts_valid = expected.is_some_and(|expected| {
+        summary.samples == expected.samples
+            && summary.questions == expected.questions
+            && summary.evidence_questions == expected.evidence_questions
+    });
+    let baseline = w4_external_suite_baseline(&summary.suite);
+    let regressed_against_baseline = baseline.is_some_and(|baseline| {
+        summary.any_evidence_hit < baseline.any_evidence_hit
+            || summary.all_evidence_hit < baseline.all_evidence_hit
+    });
+    let improved_against_baseline = baseline.is_some_and(|baseline| {
+        summary.any_evidence_hit > baseline.any_evidence_hit
+            && summary.all_evidence_hit > baseline.all_evidence_hit
+    });
+    let stage_attributed_improvement =
+        improved_against_baseline && stage_counts_show_graph_attributed_gain(summary, baseline);
+    let index_effect_proven = stage_attributed_improvement
+        && summary
+            .index_diagnostics
+            .as_ref()
+            .is_some_and(index_diagnostics_show_index_effect);
+    W4ExternalNoisySuiteReport {
+        suite: summary.suite.clone(),
+        completed: summary.completed,
+        samples: summary.samples,
+        questions: summary.questions,
+        evidence_questions: summary.evidence_questions,
+        any_evidence_hit: summary.any_evidence_hit,
+        all_evidence_hit: summary.all_evidence_hit,
+        write_errors: summary.write_errors,
+        recall_errors: summary.recall_errors,
+        shard_count,
+        expected_shard_count: expected.map(|expected| expected.shard_count),
+        shards_valid,
+        expected_samples: expected.map(|expected| expected.samples),
+        expected_questions: expected.map(|expected| expected.questions),
+        expected_evidence_questions: expected.map(|expected| expected.evidence_questions),
+        row_counts_valid,
+        summary_sha256: summary.summary_sha256.clone(),
+        runner_source_sha256: summary.runner_source_sha256.clone(),
+        any_evidence_hit_bps: evidence_hit_bps(
+            summary.any_evidence_hit,
+            summary.evidence_questions,
+        ),
+        all_evidence_hit_bps: evidence_hit_bps(
+            summary.all_evidence_hit,
+            summary.evidence_questions,
+        ),
+        noisy_split: matches!(
+            summary.suite.as_str(),
+            "locomo" | "longmemeval_s_cleaned" | "longmemeval_m_cleaned"
+        ),
+        oracle_sanity_only: summary.suite == "longmemeval_oracle",
+        baseline_any_evidence_hit: baseline.map(|baseline| baseline.any_evidence_hit),
+        baseline_all_evidence_hit: baseline.map(|baseline| baseline.all_evidence_hit),
+        regressed_against_baseline,
+        improved_against_baseline,
+        stage_hit_counts: summary.stage_hit_counts.clone(),
+        index_diagnostics: summary.index_diagnostics.clone(),
+        stage_attributed_improvement,
+        index_effect_proven,
+    }
+}
+
+fn stage_counts_show_graph_attributed_gain(
+    summary: &W4ExternalNoisyBenchmarkSummary,
+    baseline: Option<W4ExternalSuiteBaseline>,
+) -> bool {
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    let Some(stage) = summary.stage_hit_counts.as_ref() else {
+        return false;
+    };
+    let any_gain_after_source = stage.expanded_any_evidence_hit > stage.source_any_evidence_hit
+        || stage.reranked_any_evidence_hit > stage.source_any_evidence_hit
+        || stage.selected_any_evidence_hit > stage.source_any_evidence_hit;
+    let all_gain_after_source = stage.expanded_all_evidence_hit > stage.source_all_evidence_hit
+        || stage.reranked_all_evidence_hit > stage.source_all_evidence_hit
+        || stage.selected_all_evidence_hit > stage.source_all_evidence_hit;
+    stage.selected_any_evidence_hit > baseline.any_evidence_hit
+        && stage.selected_all_evidence_hit > baseline.all_evidence_hit
+        && any_gain_after_source
+        && all_gain_after_source
+}
+
+fn index_diagnostics_show_index_effect(diagnostics: &W4ExternalNoisyIndexDiagnostics) -> bool {
+    diagnostics.questions_with_index_report > 0
+        && diagnostics.index_used_questions > 0
+        && diagnostics.index_used_questions <= diagnostics.questions_with_index_report
+        && diagnostics.fallback_full_scan_questions < diagnostics.questions_with_index_report
+        && diagnostics.matched_source_anchor_count > 0
+        && diagnostics.indexed_neighbor_count > 0
+        && diagnostics.failure_count < diagnostics.questions_with_index_report
+}
+
+#[derive(Clone, Copy)]
+struct W4ExternalSuiteExpectation {
+    shard_count: usize,
+    samples: usize,
+    questions: usize,
+    evidence_questions: usize,
+}
+
+#[derive(Clone, Copy)]
+struct W4ExternalSuiteBaseline {
+    any_evidence_hit: usize,
+    all_evidence_hit: usize,
+}
+
+fn w4_external_suite_expectation(suite: &str) -> Option<W4ExternalSuiteExpectation> {
+    match suite {
+        "locomo" => Some(W4ExternalSuiteExpectation {
+            shard_count: 1,
+            samples: 10,
+            questions: 1986,
+            evidence_questions: 1982,
+        }),
+        "longmemeval_oracle" | "longmemeval_s_cleaned" | "longmemeval_m_cleaned" => {
+            Some(W4ExternalSuiteExpectation {
+                shard_count: if suite == "longmemeval_m_cleaned" {
+                    8
+                } else {
+                    1
+                },
+                samples: 500,
+                questions: 500,
+                evidence_questions: 500,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn evidence_hit_bps(hits: usize, evidence_questions: usize) -> u32 {
+    if evidence_questions == 0 {
+        return 0;
+    }
+    ((hits.saturating_mul(10_000)) / evidence_questions).min(u32::MAX as usize) as u32
+}
+
+fn w4_external_suite_baseline(suite: &str) -> Option<W4ExternalSuiteBaseline> {
+    match suite {
+        "locomo" => Some(W4ExternalSuiteBaseline {
+            any_evidence_hit: 21,
+            all_evidence_hit: 13,
+        }),
+        "longmemeval_s_cleaned" => Some(W4ExternalSuiteBaseline {
+            any_evidence_hit: 111,
+            all_evidence_hit: 26,
+        }),
+        "longmemeval_m_cleaned" => Some(W4ExternalSuiteBaseline {
+            any_evidence_hit: 10,
+            all_evidence_hit: 3,
+        }),
+        _ => None,
+    }
 }
 
 pub fn load_memory_benchmark_fixture_dir(
@@ -438,11 +1003,13 @@ pub fn run_memory_benchmark_wall(fixtures: &[MemoryBenchmarkFixture]) -> MemoryB
     let soul_kernel_judge = build_soul_kernel_benchmark_judge(fixtures);
     let subject_projection_judge = build_subject_projection_benchmark_judge(fixtures);
     let agent_tool_experience_judge = build_agent_tool_experience_benchmark_judge(fixtures);
+    let w4_eval_recall_judge = build_w4_eval_recall_benchmark_judge(fixtures);
     let passed = failures.is_empty()
         && semantic_failures.is_empty()
         && soul_kernel_judge.release_gate_passed
         && subject_projection_judge.release_gate_passed
-        && agent_tool_experience_judge.release_gate_passed;
+        && agent_tool_experience_judge.release_gate_passed
+        && w4_eval_recall_judge.release_gate_passed;
 
     MemoryBenchmarkReport {
         suite: "memory_benchmark_wall".to_string(),
@@ -455,6 +1022,7 @@ pub fn run_memory_benchmark_wall(fixtures: &[MemoryBenchmarkFixture]) -> MemoryB
         soul_kernel_judge,
         subject_projection_judge,
         agent_tool_experience_judge,
+        w4_eval_recall_judge,
         failures,
         semantic_failures,
         passed,
@@ -642,6 +1210,134 @@ fn build_agent_tool_experience_benchmark_judge(
         host_execution_boundary_covered,
         blocked_reasons,
     }
+}
+
+fn build_w4_eval_recall_benchmark_judge(
+    fixtures: &[MemoryBenchmarkFixture],
+) -> W4EvalRecallBenchmarkJudgeReport {
+    let w4_fixtures = fixtures
+        .iter()
+        .filter(|fixture| fixture_declares_w4_eval_recall(fixture))
+        .collect::<Vec<_>>();
+    let fixture_ids = w4_fixtures
+        .iter()
+        .map(|fixture| fixture.fixture_id.clone())
+        .collect::<Vec<_>>();
+    let fixture_count = w4_fixtures.len();
+    let required_k = [5_usize, 10, 20, 50];
+    let required_k_covered = !w4_fixtures.is_empty()
+        && w4_fixtures.iter().all(|fixture| {
+            fixture.eval_recall.as_ref().is_some_and(|eval| {
+                required_k
+                    .iter()
+                    .all(|k| eval.metrics.recall_at_k.iter().any(|entry| entry.k == *k))
+            })
+        });
+    let missing_evidence_reported = !w4_fixtures.is_empty()
+        && w4_fixtures
+            .iter()
+            .all(|fixture| w4_missing_evidence_contract_holds(fixture));
+    let source_expanded_selected_split_covered = w4_fixtures.iter().any(|fixture| {
+        fixture
+            .eval_recall
+            .as_ref()
+            .is_some_and(w4_eval_has_report_split)
+    });
+    let mrr_covered = !w4_fixtures.is_empty()
+        && w4_fixtures.iter().all(|fixture| {
+            fixture.eval_recall.as_ref().is_some_and(|eval| {
+                eval.metrics.mrr_bps > 0
+                    || eval.metrics.recall_at_k.iter().all(|entry| {
+                        !entry.any_evidence_hit && entry.matched_evidence_refs.is_empty()
+                    })
+            })
+        });
+    let noisy_external_wall_required = true;
+
+    let mut blocked_reasons = Vec::new();
+    push_missing(
+        &mut blocked_reasons,
+        fixture_count > 0,
+        "w4_eval_recall_fixture_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        required_k_covered,
+        "w4_eval_recall_required_k_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        missing_evidence_reported,
+        "w4_eval_recall_missing_evidence_report_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        source_expanded_selected_split_covered,
+        "w4_eval_recall_report_split_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        mrr_covered,
+        "w4_eval_recall_mrr_missing",
+    );
+    blocked_reasons.sort();
+    blocked_reasons.dedup();
+
+    W4EvalRecallBenchmarkJudgeReport {
+        release_gate_passed: blocked_reasons.is_empty(),
+        fixture_ids,
+        fixture_count,
+        required_k_covered,
+        missing_evidence_reported,
+        source_expanded_selected_split_covered,
+        mrr_covered,
+        noisy_external_wall_required,
+        blocked_reasons,
+    }
+}
+
+fn fixture_declares_w4_eval_recall(fixture: &MemoryBenchmarkFixture) -> bool {
+    fixture
+        .semantic_contract
+        .provided_keys
+        .iter()
+        .chain(fixture.semantic_contract.required_keys.iter())
+        .any(|key| key == "w4_eval_recall")
+        || fixture.eval_recall.is_some()
+}
+
+fn w4_eval_has_report_split(eval: &MemoryBenchmarkEvalRecall) -> bool {
+    !eval.source_candidates.is_empty()
+        && !eval.expanded_candidates.is_empty()
+        && !eval.selected_candidates.is_empty()
+        && eval.expanded_candidates.iter().any(|candidate| {
+            !eval
+                .source_candidates
+                .iter()
+                .any(|source| source == candidate)
+        })
+}
+
+fn w4_missing_evidence_contract_holds(fixture: &MemoryBenchmarkFixture) -> bool {
+    let Some(eval) = fixture.eval_recall.as_ref() else {
+        return false;
+    };
+    let matched = eval
+        .metrics
+        .recall_at_k
+        .iter()
+        .flat_map(|entry| entry.matched_evidence_refs.iter())
+        .collect::<BTreeSet<_>>();
+    let unmatched_expected = eval
+        .expected_evidence_refs
+        .iter()
+        .filter(|expected| {
+            !matched
+                .iter()
+                .any(|actual| actual.as_str() == expected.as_str())
+        })
+        .collect::<Vec<_>>();
+    unmatched_expected.is_empty() || !eval.missing_evidence_refs.is_empty()
 }
 
 fn build_subject_projection_benchmark_judge(
@@ -855,7 +1551,102 @@ fn validate_memory_benchmark_fixture(
             ));
         }
     }
+    failures.extend(validate_w4_eval_recall_fixture(fixture));
     failures
+}
+
+fn validate_w4_eval_recall_fixture(
+    fixture: &MemoryBenchmarkFixture,
+) -> Vec<MemoryBenchmarkFailure> {
+    if !fixture_declares_w4_eval_recall(fixture) {
+        return Vec::new();
+    }
+
+    let Some(eval) = fixture.eval_recall.as_ref() else {
+        return vec![memory_benchmark_failure(
+            fixture,
+            "w4_eval_recall_contract",
+            "w4_eval_recall fixture is declared but eval_recall payload is missing",
+        )];
+    };
+
+    let mut missing = Vec::new();
+    push_w4_missing(&mut missing, !eval.suite.trim().is_empty(), "suite");
+    push_w4_missing(&mut missing, !eval.split.trim().is_empty(), "split");
+    push_w4_missing(
+        &mut missing,
+        !eval.question_id.trim().is_empty(),
+        "question_id",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.question_type.trim().is_empty(),
+        "question_type",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.expected_evidence_refs.is_empty(),
+        "expected_evidence_refs",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.source_candidates.is_empty(),
+        "source_candidates",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.expanded_candidates.is_empty(),
+        "expanded_candidates",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.selected_candidates.is_empty(),
+        "selected_candidates",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.rendered_block_preview.trim().is_empty(),
+        "rendered_block_preview",
+    );
+    let required_k = [5_usize, 10, 20, 50];
+    for k in required_k {
+        push_w4_missing(
+            &mut missing,
+            eval.metrics.recall_at_k.iter().any(|entry| entry.k == k),
+            format!("recall_at_k:{k}"),
+        );
+    }
+    push_w4_missing(
+        &mut missing,
+        w4_missing_evidence_contract_holds(fixture),
+        "missing_evidence_refs",
+    );
+    push_w4_missing(
+        &mut missing,
+        eval.metrics.mrr_bps > 0
+            || eval
+                .metrics
+                .recall_at_k
+                .iter()
+                .all(|entry| !entry.any_evidence_hit && entry.matched_evidence_refs.is_empty()),
+        "mrr_bps",
+    );
+
+    if missing.is_empty() {
+        Vec::new()
+    } else {
+        vec![memory_benchmark_failure(
+            fixture,
+            "w4_eval_recall_contract",
+            format!("missing or invalid {}", missing.join(", ")),
+        )]
+    }
+}
+
+fn push_w4_missing(missing: &mut Vec<String>, condition: bool, field: impl Into<String>) {
+    if !condition {
+        missing.push(field.into());
+    }
 }
 
 fn validate_memory_benchmark_semantics(

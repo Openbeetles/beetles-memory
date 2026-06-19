@@ -93,12 +93,12 @@ require_regex "affected_turns=0.*changed=false|changed=false.*affected_turns=0" 
 require_fixed "long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_impact" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "candidate_write_records_only_second_stage_accepted_derived_refs" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
-require_fixed "record_long_term_extraction_derived_memory_refs" crates/sdk/src/runtime.rs
+require_fixed "plan_long_term_extraction_derived_memory_ref_mutations" crates/sdk/src/runtime.rs
 require_fixed "SessionMessageRecord" dev-docs/conversation-transcript-governance-hardening-plan.md crates/core/src/memory/mod.rs crates/core/src/memory/archive_search.rs
 require_fixed "transcript_ref" dev-docs/conversation-transcript-governance-hardening-plan.md crates/core/src/memory/mod.rs crates/sdk/src/runtime.rs
 require_fixed "live_archive_transcript_hit_preserves_structured_transcript_evidence_ref" dev-docs/conversation-transcript-governance-hardening-plan.md crates/core/src/memory/archive_search.rs
 require_fixed "private_garden_self_work_records_private_garden_derived_refs_without_raw_content" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
-require_fixed "record_private_garden_derived_memory_refs" crates/sdk/src/runtime.rs
+require_fixed "plan_private_garden_derived_memory_ref_mutations" crates/sdk/src/runtime.rs
 require_fixed "lifecycle_report_sanitizes_host_refs_for_operator_view" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "host_ref_redactions" docs/en/api.md docs/zh-CN/api.md crates/core/src/memory/transcript.rs crates/sdk/src/runtime.rs
 require_fixed "filter_host_refs_for_transcript_view" crates/core/src/memory/transcript.rs crates/sdk/src/runtime.rs

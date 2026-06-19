@@ -11,6 +11,7 @@ use crate::util::{
 use rusqlite::{params, Connection, OptionalExtension};
 #[cfg(feature = "sqlite-index")]
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "sqlite-index")]
 use std::hash::{Hash, Hasher};
 #[cfg(feature = "sqlite-index")]
@@ -297,6 +298,18 @@ pub struct RuntimeSkillWriteOutcome {
     pub changed: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reports: Vec<RuntimeSkillWriteItemReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeSkillStorageMutation {
+    Upsert { name: String, content: Vec<u8> },
+    Delete { name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeSkillWritePlan {
+    pub outcome: RuntimeSkillWriteOutcome,
+    pub mutations: Vec<RuntimeSkillStorageMutation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -836,6 +849,92 @@ pub fn write_governed_runtime_skills(
         )?;
     }
     Ok(outcome)
+}
+
+pub fn plan_governed_runtime_skills(
+    storage: &dyn SkillStorage,
+    writes: &[RuntimeSkillWrite],
+    source: RuntimeSkillWriteSource,
+) -> crate::error::Result<RuntimeSkillWritePlan> {
+    let planning_storage = PlanningSkillStorage::new(storage);
+    let outcome = write_governed_runtime_skills(&planning_storage, writes, source)?;
+    Ok(RuntimeSkillWritePlan {
+        outcome,
+        mutations: planning_storage.into_mutations(),
+    })
+}
+
+struct PlanningSkillStorage<'a> {
+    base: &'a dyn SkillStorage,
+    changes: std::sync::Mutex<BTreeMap<String, Option<Vec<u8>>>>,
+}
+
+impl<'a> PlanningSkillStorage<'a> {
+    fn new(base: &'a dyn SkillStorage) -> Self {
+        Self {
+            base,
+            changes: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn into_mutations(self) -> Vec<RuntimeSkillStorageMutation> {
+        self.changes
+            .into_inner()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, value)| match value {
+                Some(content) => RuntimeSkillStorageMutation::Upsert { name, content },
+                None => RuntimeSkillStorageMutation::Delete { name },
+            })
+            .collect()
+    }
+}
+
+impl SkillStorage for PlanningSkillStorage<'_> {
+    fn list_names(&self) -> crate::error::Result<Vec<String>> {
+        let mut names = self.base.list_names()?.into_iter().collect::<BTreeSet<_>>();
+        for (name, value) in self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+        {
+            if value.is_some() {
+                names.insert(name.clone());
+            } else {
+                names.remove(name);
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    fn read(&self, name: &str) -> crate::error::Result<Vec<u8>> {
+        if let Some(value) = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(name)
+        {
+            return Ok(value.clone().unwrap_or_default());
+        }
+        self.base.read(name)
+    }
+
+    fn write(&self, name: &str, content: &[u8]) -> crate::error::Result<()> {
+        self.changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(name.to_string(), Some(content.to_vec()));
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> crate::error::Result<()> {
+        self.changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(name.to_string(), None);
+        Ok(())
+    }
 }
 
 pub fn govern_runtime_skills(

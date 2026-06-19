@@ -108,6 +108,22 @@ pub struct MemoryCoreBudget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GraphExpansionRuntimeBudget {
+    pub max_hops: u8,
+    pub max_seed_candidates: usize,
+    pub max_expanded_candidates: usize,
+    pub max_neighbors_per_candidate: usize,
+    pub max_graph_nodes_loaded: usize,
+    pub max_graph_edges_loaded: usize,
+    pub max_backlinks_loaded: usize,
+    pub compact_graph_node_limit: usize,
+    pub compact_graph_edge_limit: usize,
+    pub default_recall_multi_hop_allowed: bool,
+    pub eval_recall_multi_hop_allowed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoreRuntimeBudget {
     pub event_log_max_items: usize,
     pub kv_max_entries: usize,
@@ -193,6 +209,7 @@ pub struct RuntimeBudgetReport {
     pub static_platform_manifest: StaticPlatformManifest,
     pub provider_model_context_limit: Option<ProviderModelContextLimit>,
     pub memory_core_budget: MemoryCoreBudget,
+    pub graph_expansion_budget: GraphExpansionRuntimeBudget,
     pub store_budget: StoreRuntimeBudget,
     pub adapter_budget: AdapterRuntimeBudget,
     pub projection_source_budget: ProjectionSourceBudget,
@@ -362,6 +379,53 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         )
         .max(ceiling.p0_min_recall_items),
     };
+    let graph_expansion_budget = GraphExpansionRuntimeBudget {
+        max_hops: ceiling.graph_expansion_budget.max_hops.clamp(1, 2),
+        max_seed_candidates: scale_usize(
+            ceiling.graph_expansion_budget.max_seed_candidates,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        max_expanded_candidates: scale_usize(
+            ceiling.graph_expansion_budget.max_expanded_candidates,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        max_neighbors_per_candidate: scale_usize(
+            ceiling.graph_expansion_budget.max_neighbors_per_candidate,
+            source_scale,
+        )
+        .max(1),
+        max_graph_nodes_loaded: scale_usize(
+            ceiling.graph_expansion_budget.max_graph_nodes_loaded,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        max_graph_edges_loaded: scale_usize(
+            ceiling.graph_expansion_budget.max_graph_edges_loaded,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        max_backlinks_loaded: scale_usize(
+            ceiling.graph_expansion_budget.max_backlinks_loaded,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        compact_graph_node_limit: scale_usize(
+            ceiling.graph_expansion_budget.compact_graph_node_limit,
+            source_scale,
+        )
+        .max(1),
+        compact_graph_edge_limit: scale_usize(
+            ceiling.graph_expansion_budget.compact_graph_edge_limit,
+            source_scale,
+        )
+        .max(1),
+        default_recall_multi_hop_allowed: ceiling
+            .graph_expansion_budget
+            .default_recall_multi_hop_allowed,
+        eval_recall_multi_hop_allowed: ceiling.graph_expansion_budget.eval_recall_multi_hop_allowed,
+    };
     let store_budget = StoreRuntimeBudget {
         event_log_max_items: scale_usize(ceiling.store_budget.event_log_max_items, store_scale)
             .max(ceiling.p0_min_events),
@@ -529,6 +593,7 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         static_platform_manifest: input.static_platform_manifest,
         provider_model_context_limit: input.provider_model_context_limit,
         memory_core_budget,
+        graph_expansion_budget,
         store_budget,
         adapter_budget,
         projection_source_budget,
@@ -607,6 +672,7 @@ struct ProfileBudgetCeiling {
     memory_floor_bytes: u64,
     storage_floor_bytes: u64,
     memory_core_budget: MemoryCoreBudget,
+    graph_expansion_budget: GraphExpansionRuntimeBudget,
     store_budget: StoreRuntimeBudget,
     adapter_budget: AdapterRuntimeBudget,
     projection_source_budget: ProjectionSourceBudget,
@@ -643,6 +709,9 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             maintenance_chars: 1024,
             runtime_cache_max_runtimes: 8,
             wss_subscriptions: 4,
+            graph_max_hops: 1,
+            graph_default_recall_multi_hop_allowed: false,
+            graph_eval_recall_multi_hop_allowed: false,
         }),
         ProfileId::EspStandaloneMemory => profile_budget(ProfileBudgetSpec {
             memory_floor_bytes: 256 * MB,
@@ -657,6 +726,9 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             maintenance_chars: 2048,
             runtime_cache_max_runtimes: 16,
             wss_subscriptions: 8,
+            graph_max_hops: 1,
+            graph_default_recall_multi_hop_allowed: false,
+            graph_eval_recall_multi_hop_allowed: false,
         }),
         ProfileId::LinuxDeviceStandaloneMemory => profile_budget(ProfileBudgetSpec {
             memory_floor_bytes: 512 * MB,
@@ -671,6 +743,9 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             maintenance_chars: 4096,
             runtime_cache_max_runtimes: 32,
             wss_subscriptions: 16,
+            graph_max_hops: 1,
+            graph_default_recall_multi_hop_allowed: false,
+            graph_eval_recall_multi_hop_allowed: false,
         }),
         ProfileId::DesktopMacosEmbeddedSdk | ProfileId::DesktopWindowsEmbeddedSdk => {
             profile_budget(ProfileBudgetSpec {
@@ -686,6 +761,9 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
                 maintenance_chars: 2048,
                 runtime_cache_max_runtimes: 16,
                 wss_subscriptions: 8,
+                graph_max_hops: 1,
+                graph_default_recall_multi_hop_allowed: false,
+                graph_eval_recall_multi_hop_allowed: false,
             })
         }
         ProfileId::DesktopMacosStandaloneMemory => profile_budget(ProfileBudgetSpec {
@@ -701,6 +779,9 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             maintenance_chars: 8192,
             runtime_cache_max_runtimes: 64,
             wss_subscriptions: 32,
+            graph_max_hops: 1,
+            graph_default_recall_multi_hop_allowed: false,
+            graph_eval_recall_multi_hop_allowed: false,
         }),
         ProfileId::ServerLinuxMemoryGateway => profile_budget(ProfileBudgetSpec {
             memory_floor_bytes: 1024 * MB,
@@ -715,6 +796,9 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             maintenance_chars: 8192,
             runtime_cache_max_runtimes: 128,
             wss_subscriptions: 64,
+            graph_max_hops: 2,
+            graph_default_recall_multi_hop_allowed: true,
+            graph_eval_recall_multi_hop_allowed: true,
         }),
         ProfileId::ServerLinuxDevFull => profile_budget(ProfileBudgetSpec {
             memory_floor_bytes: 2048 * MB,
@@ -729,6 +813,9 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             maintenance_chars: 16_384,
             runtime_cache_max_runtimes: 256,
             wss_subscriptions: 128,
+            graph_max_hops: 2,
+            graph_default_recall_multi_hop_allowed: true,
+            graph_eval_recall_multi_hop_allowed: true,
         }),
     }
 }
@@ -748,6 +835,9 @@ struct ProfileBudgetSpec {
     maintenance_chars: usize,
     runtime_cache_max_runtimes: usize,
     wss_subscriptions: usize,
+    graph_max_hops: u8,
+    graph_default_recall_multi_hop_allowed: bool,
+    graph_eval_recall_multi_hop_allowed: bool,
 }
 
 const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
@@ -758,6 +848,19 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             profile_max_records: spec.records,
             recall_working_set_max_items: max_usize(spec.records / 16, 16),
             long_term_scan_max_items: max_usize(spec.records / 8, 32),
+        },
+        graph_expansion_budget: GraphExpansionRuntimeBudget {
+            max_hops: spec.graph_max_hops,
+            max_seed_candidates: max_usize(spec.records / 64, 4),
+            max_expanded_candidates: max_usize(spec.records / 128, 8),
+            max_neighbors_per_candidate: max_usize(spec.records / 512, 2),
+            max_graph_nodes_loaded: max_usize(spec.records / 16, 16),
+            max_graph_edges_loaded: max_usize(spec.records / 8, 32),
+            max_backlinks_loaded: max_usize(spec.records / 8, 32),
+            compact_graph_node_limit: if spec.records >= 4096 { 32 } else { 16 },
+            compact_graph_edge_limit: if spec.records >= 4096 { 32 } else { 16 },
+            default_recall_multi_hop_allowed: spec.graph_default_recall_multi_hop_allowed,
+            eval_recall_multi_hop_allowed: spec.graph_eval_recall_multi_hop_allowed,
         },
         store_budget: StoreRuntimeBudget {
             event_log_max_items: spec.events,

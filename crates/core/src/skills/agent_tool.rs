@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use crate::feature_gate::ProfileId;
 use crate::platform::SkillStorage;
+use crate::skills::runtime::RuntimeSkillStorageMutation;
 use std::collections::{BTreeSet, HashSet};
 
 pub const AGENT_TOOL_NO_EXPERIENCE_REASON: &str = "no_governed_tool_experience";
@@ -444,6 +445,26 @@ pub fn write_agent_tool_experience_record(
         super::write_skill(storage, &name, &rendered)?;
     }
     Ok(changed)
+}
+
+pub fn plan_agent_tool_experience_record(
+    storage: &dyn SkillStorage,
+    record: &AgentToolExperienceRecord,
+) -> Result<Option<RuntimeSkillStorageMutation>> {
+    let name = agent_tool_experience_storage_name(record);
+    let rendered = serde_json::to_string_pretty(record)
+        .map_err(|error| Error::config("agent_tool_experience", error.to_string()))?;
+    let changed = super::get_skill_content(storage, &name)
+        .map(|existing| existing.trim() != rendered.trim())
+        .unwrap_or(true);
+    if changed {
+        Ok(Some(RuntimeSkillStorageMutation::Upsert {
+            name,
+            content: rendered.into_bytes(),
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn build_agent_tool_registry_report(

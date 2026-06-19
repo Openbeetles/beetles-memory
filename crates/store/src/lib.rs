@@ -12,6 +12,7 @@ mod error;
 mod event;
 mod file;
 mod in_memory;
+mod mutation;
 mod platform;
 mod schema;
 mod snapshot;
@@ -27,6 +28,9 @@ pub use engine::{StoreEngine, StoreSnapshotReplaceReport};
 pub use error::{StoreError, StoreOpenReport, StoreRepairReport};
 pub use event::{MemoryStoreEvent, MemoryStoreEventKind, StoreEventLog, StoreEventScope};
 pub use in_memory::InMemoryStoreEngine;
+pub use mutation::{
+    StoreMutation, StoreMutationBatch, StoreMutationBatchReport, StoreMutationBudgetReport,
+};
 pub use platform::StorePlatform;
 pub use schema::{StoreSchemaManifest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION};
 pub use snapshot::{

@@ -6,7 +6,8 @@ use std::collections::HashMap;
 
 use super::{
     inspect_long_term_memory_merge_guard, route_long_term_draft, LongTermMemoryDraft,
-    LongTermMemoryKind, LongTermMemoryStore, MemoryPlane, MAX_LONG_TERM_MEMORY_ITEMS,
+    LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryStore, MemoryPlane,
+    MAX_LONG_TERM_MEMORY_ITEMS,
 };
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +112,13 @@ pub struct SharedMemoryWriteOutcome {
     pub reports: Vec<SharedMemoryWriteItemReport>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SharedMemoryWritePlan {
+    pub outcome: SharedMemoryWriteOutcome,
+    pub accepted_drafts: Vec<LongTermMemoryDraft>,
+    pub accepted_entries: Vec<LongTermMemoryEntry>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SharedFactWriteGovernanceContext {
     pub memory_space_id: String,
@@ -149,7 +157,21 @@ pub fn write_governed_shared_memory_in_space(
     now_secs: u64,
     context: SharedFactWriteGovernanceContext,
 ) -> Result<SharedMemoryWriteOutcome> {
-    let mut outcome = write_governed_shared_memory(store, drafts, now_secs, context.source)?;
+    let mut plan = plan_governed_shared_memory_in_space(store, drafts, now_secs, context)?;
+    if !plan.accepted_drafts.is_empty() {
+        plan.outcome.changed = store.upsert_many(&plan.accepted_drafts, now_secs)?;
+    }
+    Ok(plan.outcome)
+}
+
+pub fn plan_governed_shared_memory_in_space(
+    store: &dyn LongTermMemoryStore,
+    drafts: &[LongTermMemoryDraft],
+    now_secs: u64,
+    context: SharedFactWriteGovernanceContext,
+) -> Result<SharedMemoryWritePlan> {
+    let mut plan = plan_governed_shared_memory(store, drafts, now_secs, context.source)?;
+    let outcome = &mut plan.outcome;
     outcome.memory_space_id = context.memory_space_id.clone();
     outcome.owner_layer = "memory_space".to_string();
     outcome.origin_subject_id = Some(context.origin_subject_id.clone());
@@ -162,7 +184,7 @@ pub fn write_governed_shared_memory_in_space(
         report.origin_subject_id = Some(context.origin_subject_id.clone());
         report.actor_subject_id = Some(context.actor_subject_id.clone());
     }
-    Ok(outcome)
+    Ok(plan)
 }
 
 pub fn write_governed_shared_memory(
@@ -171,12 +193,26 @@ pub fn write_governed_shared_memory(
     now_secs: u64,
     source: SharedMemoryWriteSource,
 ) -> Result<SharedMemoryWriteOutcome> {
+    let mut plan = plan_governed_shared_memory(store, drafts, now_secs, source)?;
+    if !plan.accepted_drafts.is_empty() {
+        plan.outcome.changed = store.upsert_many(&plan.accepted_drafts, now_secs)?;
+    }
+    Ok(plan.outcome)
+}
+
+pub fn plan_governed_shared_memory(
+    store: &dyn LongTermMemoryStore,
+    drafts: &[LongTermMemoryDraft],
+    now_secs: u64,
+    source: SharedMemoryWriteSource,
+) -> Result<SharedMemoryWritePlan> {
     let existing_entries = store.list(MAX_LONG_TERM_MEMORY_ITEMS)?;
     let existing_by_id = existing_entries
         .into_iter()
         .map(|entry| (entry.id.clone(), entry))
         .collect::<HashMap<_, _>>();
-    let mut accepted = Vec::with_capacity(drafts.len());
+    let mut accepted_drafts = Vec::with_capacity(drafts.len());
+    let mut accepted_entries = Vec::with_capacity(drafts.len());
     let mut reports = Vec::with_capacity(drafts.len());
     for draft in drafts {
         let report_topic = draft.topic.trim().to_string();
@@ -276,6 +312,11 @@ pub fn write_governed_shared_memory(
                 }
             }
         }
+        if let Some(entry) =
+            planned_long_term_entry_from_draft(&factual_draft, &existing_by_id, now_secs)
+        {
+            accepted_entries.push(entry);
+        }
         reports.push(SharedMemoryWriteItemReport {
             memory_space_id: String::new(),
             origin_subject_id: None,
@@ -287,32 +328,67 @@ pub fn write_governed_shared_memory(
             kind: factual_draft.kind.clone(),
             detail: format!("accepted as canonical shared fact via {}", source.label()),
         });
-        accepted.push(factual_draft);
+        accepted_drafts.push(factual_draft);
     }
-    let changed = if accepted.is_empty() {
-        0
-    } else {
-        store.upsert_many(&accepted, now_secs)?
-    };
-    let accepted_count = accepted.len();
+    let accepted_count = accepted_drafts.len();
     let rejected_count = reports
         .iter()
         .filter(|report| matches!(report.action, SharedMemoryWriteAction::Rejected))
         .count();
-    Ok(SharedMemoryWriteOutcome {
-        memory_space_id: String::new(),
-        owner_layer: "shared_memory_governance".to_string(),
-        origin_subject_id: None,
-        actor_subject_id: None,
-        target_subject_id: None,
-        relationship_id: None,
-        requested_visibility: String::new(),
-        source,
-        submitted: drafts.len(),
-        accepted: accepted_count,
-        rejected: rejected_count,
-        changed,
-        reports,
+    Ok(SharedMemoryWritePlan {
+        outcome: SharedMemoryWriteOutcome {
+            memory_space_id: String::new(),
+            owner_layer: "shared_memory_governance".to_string(),
+            origin_subject_id: None,
+            actor_subject_id: None,
+            target_subject_id: None,
+            relationship_id: None,
+            requested_visibility: String::new(),
+            source,
+            submitted: drafts.len(),
+            accepted: accepted_count,
+            rejected: rejected_count,
+            changed: accepted_entries.len(),
+            reports,
+        },
+        accepted_drafts,
+        accepted_entries,
+    })
+}
+
+fn planned_long_term_entry_from_draft(
+    draft: &LongTermMemoryDraft,
+    existing_by_id: &HashMap<String, LongTermMemoryEntry>,
+    now_secs: u64,
+) -> Option<LongTermMemoryEntry> {
+    let normalized = draft.normalized()?;
+    let id = normalized.stable_id()?;
+    let prior = existing_by_id.get(&id);
+    let observed_at = normalized.observed_at.unwrap_or(now_secs);
+    let last_confirmed_at = normalized
+        .last_confirmed_at
+        .unwrap_or(observed_at)
+        .max(observed_at);
+    Some(LongTermMemoryEntry {
+        id,
+        kind: normalized.kind,
+        topic: normalized.topic,
+        content: normalized.content,
+        keywords: normalized.keywords,
+        source_chat_id: normalized.source_chat_id,
+        source_type: normalized.source_type.unwrap_or_default(),
+        source_scope: normalized.source_scope.unwrap_or_default(),
+        confidence: normalized.confidence.unwrap_or_default(),
+        freshness: normalized.freshness.unwrap_or_default(),
+        stale_hint: normalized.stale_hint.unwrap_or_default(),
+        supporting_citations: normalized.supporting_citations,
+        evidence_count: normalized.evidence_count.unwrap_or(0),
+        created_at: prior.map(|entry| entry.created_at).unwrap_or(now_secs),
+        updated_at: now_secs,
+        observed_at,
+        last_confirmed_at,
+        source_revision: normalized.source_revision.unwrap_or(0),
+        last_used_at: prior.map(|entry| entry.last_used_at).unwrap_or(0),
     })
 }
 

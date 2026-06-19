@@ -6,15 +6,19 @@ mod harness;
 mod runner;
 
 pub use bench::{
-    load_memory_benchmark_fixture_dir, run_memory_benchmark_wall,
-    run_persona_governance_benchmark_gate, run_recall_benchmark_gate, BenchmarkGateReport,
-    MemoryBenchmarkBaseline, MemoryBenchmarkClass, MemoryBenchmarkClassCoverage,
+    evaluate_w4_external_noisy_wall, load_memory_benchmark_fixture_dir, run_memory_benchmark_wall,
+    run_persona_governance_benchmark_gate, run_recall_benchmark_gate,
+    w4_external_noisy_summary_with_provenance, BenchmarkGateReport, MemoryBenchmarkBaseline,
+    MemoryBenchmarkClass, MemoryBenchmarkClassCoverage, MemoryBenchmarkEvalRecall,
+    MemoryBenchmarkEvalRecallAtK, MemoryBenchmarkEvalRecallMetrics,
     MemoryBenchmarkEvaluationSource, MemoryBenchmarkFailure, MemoryBenchmarkFixture,
     MemoryBenchmarkMetrics, MemoryBenchmarkMissingClass, MemoryBenchmarkMode,
     MemoryBenchmarkReport, MemoryBenchmarkScenario, MemoryBenchmarkSemanticContract,
     MemoryBenchmarkSemanticCoverage, MemoryBenchmarkSemanticDimension,
     MemoryBenchmarkSemanticFailure, MemoryBenchmarkThresholds, SoulKernelBenchmarkJudgeReport,
-    SubjectProjectionBenchmarkJudgeReport,
+    SubjectProjectionBenchmarkJudgeReport, W4EvalRecallBenchmarkJudgeReport,
+    W4ExternalNoisyBenchmarkSummary, W4ExternalNoisyIndexDiagnostics,
+    W4ExternalNoisyStageHitCounts, W4ExternalNoisySuiteReport, W4ExternalNoisyWallReport,
 };
 pub use bm_core::memory::{
     inspect_intelligence_replay, ArchiveBenchmarkCase, ArchiveBenchmarkResult,

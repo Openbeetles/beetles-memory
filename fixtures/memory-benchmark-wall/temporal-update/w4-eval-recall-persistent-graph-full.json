@@ -1,0 +1,135 @@
+{
+  "schema": "beetle-memory.memory-benchmark-wall.v1",
+  "fixture_id": "temporal-update-w4-eval-recall-persistent-graph-full",
+  "class": "temporal_update",
+  "profile": "server_linux_dev_full",
+  "mode": "full",
+  "evaluation_source": "runtime_replay",
+  "description": "W4 eval recall reports source, expanded, selected, rendered, and evidence metrics after persistent graph expansion.",
+  "scenario": {
+    "user_goal": "Recall the release manifest evidence through a persistent temporal memory graph neighbor without growing default render.",
+    "evidence_refs": [
+      "crates/sdk/tests/eval_recall_contract.rs",
+      "crates/sdk/src/runtime.rs",
+      "crates/store/src/platform.rs"
+    ],
+    "expected_surfaces": [
+      "MemoryEvalRecallReport",
+      "GraphRecallRerankReport",
+      "TemporalMemoryGraphGateReport",
+      "CompactMemoryGraph"
+    ]
+  },
+  "semantic_contract": {
+    "dimensions": ["w4_eval_recall_semantics"],
+    "provided_keys": [
+      "w4_eval_recall",
+      "source_candidates",
+      "expanded_candidates",
+      "selected_candidates",
+      "missing_evidence_refs",
+      "recall_at_k",
+      "mrr",
+      "graph_expansion",
+      "evidence_backlink_gate",
+      "render_report_split"
+    ],
+    "required_keys": [
+      "w4_eval_recall",
+      "graph_expansion",
+      "evidence_backlink_gate",
+      "render_report_split"
+    ],
+    "forbidden_keys": [
+      "external_eval_gold_in_search_body",
+      "adapter_owned_graph_scoring",
+      "prompt_length_as_recall_success"
+    ],
+    "required_markers": [
+      "persistent graph docs read by SDK recall",
+      "source expanded selected rendered split",
+      "missing evidence refs reported"
+    ],
+    "observed_markers": [
+      "persistent graph docs read by SDK recall",
+      "source expanded selected rendered split",
+      "missing evidence refs reported"
+    ],
+    "forbidden_markers": [
+      "LoCoMo raw data committed",
+      "LongMemEval raw data committed",
+      "oracle split treated as noisy success"
+    ]
+  },
+  "metrics": {
+    "accuracy_bps": 9400,
+    "evidence_precision_bps": 9300,
+    "projection_faithfulness_bps": 9000,
+    "privacy_violation_count": 0,
+    "stale_memory_false_positive_count": 0,
+    "procedural_reuse_success_bps": 9000,
+    "soul_regression_count": 0,
+    "latency_ms": 95,
+    "token_budget": 2048,
+    "memory_bytes": 131072
+  },
+  "thresholds": {
+    "min_accuracy_bps": 9000,
+    "min_evidence_precision_bps": 8500,
+    "min_projection_faithfulness_bps": 8500,
+    "max_privacy_violation_count": 0,
+    "max_stale_memory_false_positive_count": 0,
+    "min_procedural_reuse_success_bps": 8500,
+    "max_soul_regression_count": 0,
+    "max_latency_ms": 500,
+    "max_token_budget": 4096,
+    "max_memory_bytes": 262144
+  },
+  "eval_recall": {
+    "suite": "internal_w4_contract",
+    "split": "persistent_graph_recall",
+    "question_id": "release-q2",
+    "question_type": "temporal_update",
+    "expected_evidence_refs": ["turn:release-manifest"],
+    "source_candidates": ["runtime_skill__release_guard"],
+    "expanded_candidates": [
+      "runtime_skill__release_guard",
+      "graph:release_manifest_check"
+    ],
+    "selected_candidates": [
+      "graph:release_manifest_check",
+      "runtime_skill__release_guard"
+    ],
+    "rendered_block_preview": "graph:release_manifest_check [turn:release-manifest]",
+    "missing_evidence_refs": [],
+    "metrics": {
+      "recall_at_k": [
+        {
+          "k": 5,
+          "any_evidence_hit": true,
+          "all_evidence_hit": true,
+          "matched_evidence_refs": ["turn:release-manifest"]
+        },
+        {
+          "k": 10,
+          "any_evidence_hit": true,
+          "all_evidence_hit": true,
+          "matched_evidence_refs": ["turn:release-manifest"]
+        },
+        {
+          "k": 20,
+          "any_evidence_hit": true,
+          "all_evidence_hit": true,
+          "matched_evidence_refs": ["turn:release-manifest"]
+        },
+        {
+          "k": 50,
+          "any_evidence_hit": true,
+          "all_evidence_hit": true,
+          "matched_evidence_refs": ["turn:release-manifest"]
+        }
+      ],
+      "mrr_bps": 10000
+    }
+  }
+}

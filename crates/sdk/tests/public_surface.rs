@@ -9,18 +9,19 @@ use bm_sdk::{
     AgentToolExperienceGovernanceReport, AgentToolHint, AgentToolObservationDigest,
     AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
     AgentToolRegistrySnapshot, AgentToolUsageFeedback, ConversationKey, DerivedMemoryPlane,
-    DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility,
-    LLMRuntimeProjectionEnvelope, MemoryAutopilotInput, MemoryCapabilityCatalog,
-    MemoryCapabilityPolicy, MemoryGovernancePolicyMutation, MemoryGovernancePolicyMutationReport,
-    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryGraphEvidence,
-    MemoryGraphNodeKind, MemoryIdentity, MemoryLongTermControlView, MemoryLongTermDetailReport,
-    MemoryLongTermDetailRequest, MemoryLongTermGovernancePolicy, MemoryLongTermListReport,
-    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationReport,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermSelector,
-    MemoryLongTermTarget, MemoryProfile, MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
-    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
-    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
+    DerivedMemoryRef, GraphRecallExpansionBudget, GraphRecallExpansionBudgetReport, HostOpaqueRef,
+    HostRefRelation, HostRefVisibility, LLMRuntimeProjectionEnvelope, MemoryAutopilotInput,
+    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGovernancePolicyMutation,
+    MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
+    MemoryLongTermControlView, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
+    MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermListRequest,
+    MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryProfile,
+    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
+    MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest, MemoryWriteRequest,
+    PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
     PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
     ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
     PromptParticipationPlan, RedactedTranscriptSlice, SoulLifeProjectionReport, StoreBackendConfig,
@@ -290,9 +291,14 @@ fn next_gen_builders_are_sdk_public_without_adapter_ownership() {
         supports: Vec::new(),
         supersedes: None,
     }]);
-    let rerank =
-        rerank_recall_with_temporal_graph("current", vec!["fact:current".to_string()], &graph);
+    let rerank = rerank_recall_with_temporal_graph(
+        "current",
+        vec!["fact:current".to_string()],
+        &graph,
+        GraphRecallExpansionBudget::runtime_default(),
+    );
     assert_eq!(rerank.selected_ids, vec!["fact:current"]);
+    let _budget_report: GraphRecallExpansionBudgetReport = rerank.expansion_budget.clone();
     assert!(graph.gate.high_confidence_projection_allowed);
     assert_eq!(graph.compact_graph.nodes.len(), 1);
 

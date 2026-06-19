@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,51 +11,60 @@ use bm_core::budget::{
 use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
-    apply_long_term_memory_control_mutation, apply_long_term_memory_extraction_with_report,
-    apply_long_term_memory_governance_policy_mutation, build_deferred_governance_queue_report,
-    build_temporal_memory_graph_from_evidence, commit_canonical_turn_delta_with_transcript,
-    compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
-    export_continuity_snapshot, filter_host_refs_for_transcript_view, govern_write_candidates,
-    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
-    inspect_working_recall, load_prompt_memory_context, promote_task_experience_to_procedure,
-    relationship_scope, rerank_recall_with_temporal_graph, run_long_term_memory_refresh,
-    run_memory_retention_compaction, run_post_reply_memory_maintenance,
-    run_private_garden_governance, write_governed_shared_memory_in_space, CanonicalTurnDelta,
+    apply_long_term_memory_control_mutation, apply_long_term_memory_governance_policy_mutation,
+    build_deferred_governance_queue_report, build_memory_graph_recall_index_docs,
+    build_temporal_memory_graph_from_evidence, build_temporal_memory_graph_from_parts,
+    commit_canonical_turn_delta_with_transcript, compile_inhabited_subject_projection,
+    default_agent_subject_id, default_memory_space_id, export_continuity_snapshot,
+    filter_host_refs_for_transcript_view, govern_write_candidates, import_continuity_snapshot,
+    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
+    load_prompt_memory_context, memory_graph_backlink_key, normalize_private_garden_doc_path,
+    plan_governed_shared_memory_in_space, plan_temporal_memory_graph_write,
+    promote_task_experience_to_procedure, relationship_scope, rerank_recall_with_temporal_graph,
+    run_long_term_memory_refresh, run_memory_retention_compaction,
+    run_post_reply_memory_maintenance, run_private_garden_governance, CanonicalTurnDelta,
     CompactMemoryGraph, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
     ContinuitySnapshotMode, ConversationKey, ConversationTranscriptStore, DeferredGovernanceJob,
     DeferredGovernanceJobStatus, DeferredGovernanceQueueReport, DerivedMemoryPlane,
-    DerivedMemoryRef, DroppedProjectionCandidate, GovernedWriteDecision, GraphRecallRerankReport,
-    IngressKind, InhabitedSubjectProjection, InhabitedSubjectProjectionInput,
+    DerivedMemoryRef, DroppedProjectionCandidate, EvidenceBacklink, GovernedWriteDecision,
+    GraphRecallCandidateScore, GraphRecallExpansionBudget, GraphRecallRerankReport, IngressKind,
+    InhabitedSubjectProjection, InhabitedSubjectProjectionInput, LongTermMemoryControlAuditEvent,
     LongTermMemoryControlDetailRequest as CoreLongTermMemoryControlDetailRequest,
     LongTermMemoryControlListRequest as CoreLongTermMemoryControlListRequest,
     LongTermMemoryControlMutationRequest as CoreLongTermMemoryControlMutationRequest,
-    LongTermMemoryDraft, LongTermMemoryDraftAdmissionPolicy, LongTermMemoryKind,
-    LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
-    LongTermMemoryRefreshRequestOutcome, LongTermMemorySourceScope, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryHygieneContext,
-    MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryPlaneGovernanceReport,
-    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain, ParsedLongTermMemoryExtraction,
+    LongTermMemoryControlRevision, LongTermMemoryControlStore, LongTermMemoryDraft,
+    LongTermMemoryDraftAdmissionPolicy, LongTermMemoryEntry, LongTermMemoryExtractionState,
+    LongTermMemoryKind, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    LongTermMemoryRefreshRequestOutcome, LongTermMemorySourceScope, LongTermMemoryStore,
+    LongTermMemoryTombstone, MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryGraphEdge,
+    MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphRecallIndexDoc,
+    MemoryGraphWritePlan, MemoryHygieneContext, MemoryLongTermGovernancePolicy,
+    MemoryLongTermMutation, MemoryPlaneGovernanceReport, MemoryWriteAuthority,
+    MemoryWriteCandidate, MemoryWriteDomain, ParsedLongTermMemoryExtraction,
     PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateGardenGovernanceContext,
-    PrivateGardenGovernanceInput, PrivateGardenGovernanceManifestEntry,
-    PrivateGardenGovernanceOutcome, ProceduralMemoryPromotionPolicy,
-    ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
-    ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
-    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate,
-    RecallSelectionReport, RedactedTranscriptSlice, SessionMessage, SessionMessageRecord,
-    SessionStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
-    SharedMemoryWriteSource, SkillEvolutionReport, SubjectProjectionBoundaryProtocolReport,
-    SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
-    SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime, TemporalMemoryGraphGateReport,
-    TranscriptAttrEnvelope, TranscriptAttrWriteRejection, TranscriptAttrWriteReport,
-    TranscriptConversationAlias, TranscriptEvidenceRef,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateGardenDoc,
+    PrivateGardenDocRecord, PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
+    PrivateGardenGovernanceManifestEntry, PrivateGardenGovernanceOutcome, PrivateGardenStore,
+    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProjectionBudgetDecision,
+    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, PromptMemoryContextParams,
+    PromptParticipationPlan, PromptProjectionSource, PromptProjectionSurfaceRole,
+    PromptRecallIntent, RecallCandidate, RecallSelectionReport, RedactedTranscriptSlice,
+    SessionMessage, SessionMessageRecord, SessionStore, SharedFactWriteGovernanceContext,
+    SharedMemoryWriteAction, SharedMemoryWriteOutcome, SharedMemoryWriteSource,
+    SkillEvolutionReport, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
+    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, SubjectRegistry,
+    SubjectRelationshipGraph, SubjectScopedRuntime, TemporalMemoryGraphBuildReport,
+    TemporalMemoryGraphGateReport, TranscriptAttrEnvelope, TranscriptAttrWriteRejection,
+    TranscriptAttrWriteReport, TranscriptConversationAlias, TranscriptEvidenceRef,
     TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
     TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptRedactionReason,
     TranscriptRedactionReportItem, TranscriptRepairReport as CoreTranscriptRepairReport,
-    TranscriptReplayView, WorkingRecallInspectionInput,
+    TranscriptReplayView, WorkingRecallInspectionInput, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, PRIVATE_GARDEN_MAX_DOC_BYTES,
 };
 use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
-use bm_core::platform::Platform;
+use bm_core::platform::{Platform, SkillStorage};
 use bm_core::resource::RuntimeResourceSnapshot;
 use bm_core::runtime::{
     build_runtime_lifecycle_diagnosis, ensure_platform_soul_kernel_recovery,
@@ -64,23 +74,27 @@ use bm_core::runtime::{
 };
 use bm_core::skills::{
     build_agent_skill_registry_snapshot, build_agent_tool_registry_report,
-    build_projected_agent_skill_hints, delete_skill as delete_skill_record, get_disabled_skills,
-    get_skills_order, govern_agent_tool_usage_feedback, is_runtime_skill_name,
-    list_agent_tool_experience_records, list_runtime_skill_records, retrieve_agent_skill_hits,
-    retrieve_runtime_skill_hits, select_agent_tool_hints,
-    set_skill_enabled as set_skill_enabled_record, set_skills_order,
-    validate_agent_tool_registry_snapshot, write_agent_tool_experience_record,
-    write_governed_runtime_skills, AgentSkillDirConfig, AgentSkillProjectionAudit,
-    AgentSkillRegistrySnapshot, AgentToolProjectionAudit, AgentToolRegistryReport,
-    AgentToolRegistrySnapshot, RuntimeSkillRecord, RuntimeSkillStatus, RuntimeSkillWriteAction,
+    build_projected_agent_skill_hints, get_disabled_skills, govern_agent_tool_usage_feedback,
+    is_runtime_skill_name, list_agent_tool_experience_records, list_runtime_skill_records,
+    plan_agent_tool_experience_record, plan_governed_runtime_skills, retrieve_agent_skill_hits,
+    retrieve_runtime_skill_hits, select_agent_tool_hints, validate_agent_tool_registry_snapshot,
+    AgentSkillDirConfig, AgentSkillProjectionAudit, AgentSkillRegistrySnapshot,
+    AgentToolProjectionAudit, AgentToolRegistryReport, AgentToolRegistrySnapshot,
+    RuntimeSkillRecord, RuntimeSkillStatus, RuntimeSkillStorageMutation, RuntimeSkillWriteAction,
 };
-use bm_store::{MemoryStoreEvent, StorePlatform};
+use bm_store::{
+    MemoryStoreEvent, MemoryStoreEventKind, StoreEventScope, StoreMutation, StoreMutationBatch,
+    StoreMutationBatchReport, StorePlatform,
+};
+use serde::de::DeserializeOwned;
 
 use crate::{
     resolve_memory_capabilities, Error, LLMRuntimeProjectionEnvelope, LlmClient,
     MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
-    MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest, MemoryExportReport,
-    MemoryExportRequest, MemoryGovernancePolicyMutationReport, MemoryImportReport,
+    MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest, MemoryEvalRecallAtK,
+    MemoryEvalRecallCandidate, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
+    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryExportReport, MemoryExportRequest,
+    MemoryGovernancePolicyMutationReport, MemoryGraphRecallIndexReport, MemoryImportReport,
     MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
     MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
     MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
@@ -98,14 +112,14 @@ use crate::{
     MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
-    MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, PressureLevel,
-    PrivateDisclosureIntegrityReport, Result, RuntimeDisclosureProtocolReport,
+    MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport,
+    PressureLevel, PrivateDisclosureIntegrityReport, Result, RuntimeDisclosureProtocolReport,
     RuntimeOperatorAction, RuntimeOperatorActionReport, RuntimeProjectionSourceBlock,
     RuntimeSkillDeleteRequest, RuntimeSkillDetailReport, RuntimeSkillDetailRequest,
     RuntimeSkillEditRequest, RuntimeSkillListReport, RuntimeSkillListRequest,
     RuntimeSkillMutationReport, RuntimeSkillReuseOutcome, RuntimeSkillSetEnabledRequest,
     RuntimeSkillSummary, RuntimeSkillWrite, RuntimeSkillWriteSource, SoulLifeProjectionReport,
-    WorkIntegrityReport,
+    TemporalMemoryGraphMutationReport, TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -397,46 +411,59 @@ impl MemoryRuntime {
             RuntimeLifecycleTrigger::OperatorRequested,
             request.mode_input,
         );
-        let store = self.config.platform.long_term_memory_store();
-        let control_store = self.config.platform.long_term_memory_control_store();
-        let core_report = apply_long_term_memory_control_mutation(
-            store.as_ref(),
-            control_store.as_ref(),
-            CoreLongTermMemoryControlMutationRequest {
-                operation: request.operation,
-                reason: request.reason,
-                dry_run: request.dry_run,
-                actor_subject_id: Some(self.config.scoped_runtime.actor_subject_id.clone()),
-                memory_space_id: Some(self.config.memory_space_id.clone()),
-                now_secs: self.config.clock.now_secs(),
-            },
-        )?;
-        let lifecycle_report = self.finish_lifecycle_success_with_payload(
-            lifecycle,
-            RuntimeLifecycleEventKind::OperatorAction,
-            RuntimeLifecycleEffect::RecordOperatorAction,
-            !core_report.dry_run && !core_report.affected_records.is_empty(),
-            format!(
-                "{} accepted={} affected={}",
-                core_report.operation,
-                core_report.accepted,
-                core_report.affected_records.len()
+        let core_request = CoreLongTermMemoryControlMutationRequest {
+            operation: request.operation,
+            reason: request.reason,
+            dry_run: request.dry_run,
+            actor_subject_id: Some(self.config.scoped_runtime.actor_subject_id.clone()),
+            memory_space_id: Some(self.config.memory_space_id.clone()),
+            now_secs: self.config.clock.now_secs(),
+        };
+        let (core_report, mutations) = self.plan_long_term_control_mutation(core_request)?;
+        let changed = !core_report.dry_run && !core_report.affected_records.is_empty();
+        let lifecycle_summary = format!(
+            "{} accepted={} affected={}",
+            core_report.operation,
+            core_report.accepted,
+            core_report.affected_records.len()
+        );
+        let lifecycle_payload = [
+            (
+                "action",
+                RuntimeOperatorAction::LongTermMemoryControl
+                    .as_str()
+                    .to_string(),
             ),
-            &[
-                (
-                    "action",
-                    RuntimeOperatorAction::LongTermMemoryControl
-                        .as_str()
-                        .to_string(),
-                ),
-                ("operation", core_report.operation.to_string()),
-                ("accepted", core_report.accepted.to_string()),
-                (
-                    "affected_records",
-                    core_report.affected_records.len().to_string(),
-                ),
-            ],
-        )?;
+            ("operation", core_report.operation.to_string()),
+            ("accepted", core_report.accepted.to_string()),
+            (
+                "affected_records",
+                core_report.affected_records.len().to_string(),
+            ),
+        ];
+        let lifecycle_report = if mutations.is_empty() {
+            self.finish_lifecycle_success_with_payload(
+                lifecycle,
+                RuntimeLifecycleEventKind::OperatorAction,
+                RuntimeLifecycleEffect::RecordOperatorAction,
+                changed,
+                lifecycle_summary,
+                &lifecycle_payload,
+            )?
+        } else {
+            self.commit_memory_write_transaction(
+                lifecycle,
+                "long_term_control.mutation",
+                RuntimeLifecycleEventKind::OperatorAction,
+                RuntimeLifecycleEffect::RecordOperatorAction,
+                changed,
+                lifecycle_summary,
+                &lifecycle_payload,
+                mutations,
+                core_report.affected_records.len(),
+            )?
+            .0
+        };
         Ok(memory_long_term_mutation_report_from_core(
             core_report,
             lifecycle_report,
@@ -456,40 +483,56 @@ impl MemoryRuntime {
             RuntimeLifecycleTrigger::OperatorRequested,
             request.mode_input,
         );
-        let control_store = self.config.platform.long_term_memory_control_store();
-        let core_report = apply_long_term_memory_governance_policy_mutation(
-            control_store.as_ref(),
+        let (core_report, mutations) = self.plan_memory_governance_policy_mutation(
             request.operation,
             request.reason,
             request.dry_run,
             self.config.clock.now_secs(),
         )?;
-        let lifecycle_report = self.finish_lifecycle_success_with_payload(
-            lifecycle,
-            RuntimeLifecycleEventKind::OperatorAction,
-            RuntimeLifecycleEffect::RecordOperatorAction,
-            !core_report.dry_run && core_report.accepted,
-            format!(
-                "{} accepted={} policy={}",
-                core_report.operation,
-                core_report.accepted,
-                core_report.policy_id.as_deref().unwrap_or("")
+        let changed = !core_report.dry_run && core_report.accepted;
+        let lifecycle_summary = format!(
+            "{} accepted={} policy={}",
+            core_report.operation,
+            core_report.accepted,
+            core_report.policy_id.as_deref().unwrap_or("")
+        );
+        let lifecycle_payload = [
+            (
+                "action",
+                RuntimeOperatorAction::LongTermMemoryPolicyControl
+                    .as_str()
+                    .to_string(),
             ),
-            &[
-                (
-                    "action",
-                    RuntimeOperatorAction::LongTermMemoryPolicyControl
-                        .as_str()
-                        .to_string(),
-                ),
-                ("operation", core_report.operation.to_string()),
-                ("accepted", core_report.accepted.to_string()),
-                (
-                    "policy_id",
-                    core_report.policy_id.clone().unwrap_or_default(),
-                ),
-            ],
-        )?;
+            ("operation", core_report.operation.to_string()),
+            ("accepted", core_report.accepted.to_string()),
+            (
+                "policy_id",
+                core_report.policy_id.clone().unwrap_or_default(),
+            ),
+        ];
+        let lifecycle_report = if mutations.is_empty() {
+            self.finish_lifecycle_success_with_payload(
+                lifecycle,
+                RuntimeLifecycleEventKind::OperatorAction,
+                RuntimeLifecycleEffect::RecordOperatorAction,
+                changed,
+                lifecycle_summary,
+                &lifecycle_payload,
+            )?
+        } else {
+            self.commit_memory_write_transaction(
+                lifecycle,
+                "long_term_control.policy",
+                RuntimeLifecycleEventKind::OperatorAction,
+                RuntimeLifecycleEffect::RecordOperatorAction,
+                changed,
+                lifecycle_summary,
+                &lifecycle_payload,
+                mutations,
+                usize::from(changed),
+            )?
+            .0
+        };
         Ok(memory_governance_policy_report_from_core(
             core_report,
             lifecycle_report,
@@ -677,6 +720,7 @@ impl MemoryRuntime {
                         operation: "write.procedural",
                         reason: "runtime_learned_procedural_write_requires_promotion".to_string(),
                         lifecycle_report,
+                        transaction: None,
                         semantic_governance: None,
                         shared_fact_governance: None,
                         procedural_evolution,
@@ -686,26 +730,35 @@ impl MemoryRuntime {
                 } else {
                     let storage = self.config.platform.skill_storage();
                     let writes = normalize_runtime_skill_write_names(writes);
-                    let outcome = write_governed_runtime_skills(storage.as_ref(), &writes, source)?;
+                    let plan = plan_governed_runtime_skills(storage.as_ref(), &writes, source)?;
+                    let outcome = plan.outcome;
                     let procedural_evolution = Some(
                         build_skill_evolution_report_from_write_outcome(&writes, &outcome),
                     );
+                    let changed = outcome.changed;
+                    let mutations =
+                        runtime_skill_storage_mutations_to_store_mutations(&plan.mutations);
+                    let (lifecycle_report, transaction) = self.commit_memory_write_transaction(
+                        lifecycle,
+                        "write.procedural",
+                        RuntimeLifecycleEventKind::RuntimeLifecycle,
+                        RuntimeLifecycleEffect::RunMaintenance,
+                        changed > 0,
+                        "write.procedural",
+                        &[("changed_count", changed.to_string())],
+                        mutations,
+                        changed,
+                    )?;
                     MemoryWriteReport {
                         accepted: outcome.accepted > 0 || outcome.rejected == 0,
-                        changed: outcome.changed,
+                        changed,
                         operation: "write.procedural",
                         reason: format!(
                             "submitted={}, accepted={}, rejected={}",
                             outcome.submitted, outcome.accepted, outcome.rejected
                         ),
-                        lifecycle_report: self.finish_lifecycle_success_with_payload(
-                            lifecycle,
-                            RuntimeLifecycleEventKind::RuntimeLifecycle,
-                            RuntimeLifecycleEffect::RunMaintenance,
-                            outcome.changed > 0,
-                            "write.procedural",
-                            &[("changed_count", outcome.changed.to_string())],
-                        )?,
+                        lifecycle_report,
+                        transaction: Some(transaction),
                         semantic_governance: None,
                         shared_fact_governance: None,
                         procedural_evolution,
@@ -737,8 +790,19 @@ impl MemoryRuntime {
                         .collect::<Vec<_>>(),
                 );
                 let storage = self.config.platform.skill_storage();
-                let outcome = if writes.is_empty() {
-                    crate::RuntimeSkillWriteOutcome {
+                let transaction_plan = if writes.is_empty() {
+                    None
+                } else {
+                    Some(plan_governed_runtime_skills(
+                        storage.as_ref(),
+                        &writes,
+                        source,
+                    )?)
+                };
+                let outcome = transaction_plan
+                    .as_ref()
+                    .map(|plan| plan.outcome.clone())
+                    .unwrap_or_else(|| crate::RuntimeSkillWriteOutcome {
                         source,
                         submitted: promotion_reports.len(),
                         rejected: promotion_reports
@@ -746,10 +810,7 @@ impl MemoryRuntime {
                             .filter(|report| !report.promoted)
                             .count(),
                         ..crate::RuntimeSkillWriteOutcome::default()
-                    }
-                } else {
-                    write_governed_runtime_skills(storage.as_ref(), &writes, source)?
-                };
+                    });
                 let procedural_evolution = Some(merge_promotion_and_write_evolution(
                     &promotion_reports,
                     &writes,
@@ -759,11 +820,40 @@ impl MemoryRuntime {
                     .iter()
                     .flat_map(|report| report.blocked_reasons.iter().cloned())
                     .collect::<Vec<_>>();
+                let changed = outcome.changed;
+                let (lifecycle_report, transaction) = if let Some(plan) = transaction_plan {
+                    let mutations =
+                        runtime_skill_storage_mutations_to_store_mutations(&plan.mutations);
+                    let (lifecycle_report, transaction) = self.commit_memory_write_transaction(
+                        lifecycle,
+                        "write.procedural_promotions",
+                        RuntimeLifecycleEventKind::RuntimeLifecycle,
+                        RuntimeLifecycleEffect::RunMaintenance,
+                        changed > 0,
+                        "write.procedural_promotions",
+                        &[("changed_count", changed.to_string())],
+                        mutations,
+                        changed,
+                    )?;
+                    (lifecycle_report, Some(transaction))
+                } else {
+                    (
+                        self.finish_lifecycle_success_with_payload(
+                            lifecycle,
+                            RuntimeLifecycleEventKind::RuntimeLifecycle,
+                            RuntimeLifecycleEffect::RunMaintenance,
+                            changed > 0,
+                            "write.procedural_promotions",
+                            &[("changed_count", changed.to_string())],
+                        )?,
+                        None,
+                    )
+                };
                 MemoryWriteReport {
                     accepted: !writes.is_empty()
                         && blocked_reasons.is_empty()
                         && outcome.accepted == writes.len(),
-                    changed: outcome.changed,
+                    changed,
                     operation: "write.procedural_promotions",
                     reason: format!(
                         "submitted={}, promoted={}, accepted={}, rejected={}, blocked={}",
@@ -776,14 +866,8 @@ impl MemoryRuntime {
                         outcome.rejected,
                         blocked_reasons.join("|")
                     ),
-                    lifecycle_report: self.finish_lifecycle_success_with_payload(
-                        lifecycle,
-                        RuntimeLifecycleEventKind::RuntimeLifecycle,
-                        RuntimeLifecycleEffect::RunMaintenance,
-                        outcome.changed > 0,
-                        "write.procedural_promotions",
-                        &[("changed_count", outcome.changed.to_string())],
-                    )?,
+                    lifecycle_report,
+                    transaction,
                     semantic_governance: None,
                     shared_fact_governance: None,
                     procedural_evolution,
@@ -792,8 +876,6 @@ impl MemoryRuntime {
                 }
             }
             MemoryWriteRequest::LongTermExtraction { extraction } => {
-                let store = self.config.platform.long_term_memory_store();
-                let skill_storage = self.config.platform.skill_storage();
                 let (upserts, suppressed_long_term_policy_ids, suppressed_draft_count) =
                     self.filter_long_term_drafts_by_policy(extraction.upserts.clone(), now_secs)?;
                 let extraction = ParsedLongTermMemoryExtraction {
@@ -801,20 +883,22 @@ impl MemoryRuntime {
                     deletes: extraction.deletes,
                     skill_writes: extraction.skill_writes,
                 };
-                let extraction_report = apply_long_term_memory_extraction_with_report(
-                    store.as_ref(),
-                    skill_storage.as_ref(),
-                    &extraction,
-                    now_secs,
+                let extraction_plan =
+                    self.plan_long_term_extraction_transaction(&extraction, now_secs)?;
+                let changed = extraction_plan.changed;
+                let shared_fact_governance = extraction_plan.shared_fact_governance.clone();
+                let procedural_evolution = extraction_plan.procedural_evolution.clone();
+                let (lifecycle_report, transaction) = self.commit_memory_write_transaction(
+                    lifecycle,
+                    "write.long_term_extraction",
+                    RuntimeLifecycleEventKind::RuntimeLifecycle,
+                    RuntimeLifecycleEffect::RequestLongTermRefresh,
+                    changed > 0,
+                    "write.long_term_extraction",
+                    &[("changed_count", changed.to_string())],
+                    extraction_plan.mutations,
+                    changed,
                 )?;
-                record_long_term_extraction_derived_memory_refs(
-                    self.config.platform.as_ref(),
-                    &self.config.subject_id,
-                    &extraction_report.accepted_upserts,
-                    &extraction_report.accepted_skill_writes,
-                    now_secs,
-                )?;
-                let changed = extraction_report.changed;
                 let policy_reason = if suppressed_draft_count > 0 {
                     format!(
                         "; suppressed_by_long_term_policy={}, policy_ids={}",
@@ -829,219 +913,64 @@ impl MemoryRuntime {
                     changed,
                     operation: "write.long_term_extraction",
                     reason: format!("long_term_extraction_applied{policy_reason}"),
-                    lifecycle_report: self.finish_lifecycle_success_with_payload(
-                        lifecycle,
-                        RuntimeLifecycleEventKind::RuntimeLifecycle,
-                        RuntimeLifecycleEffect::RequestLongTermRefresh,
-                        changed > 0,
-                        "write.long_term_extraction",
-                        &[("changed_count", changed.to_string())],
-                    )?,
+                    lifecycle_report,
+                    transaction: Some(transaction),
                     semantic_governance: None,
-                    shared_fact_governance: None,
-                    procedural_evolution: None,
-                    procedural_promotions: Vec::new(),
-                    agent_tool_experience: None,
-                }
-            }
-            MemoryWriteRequest::Candidates { candidates } => {
-                let semantic_governance = govern_write_candidates(&candidates);
-                let accepted_candidates = candidates
-                    .iter()
-                    .filter(|candidate| {
-                        candidate_semantically_accepted(
-                            candidate,
-                            &semantic_governance.plane_reports,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let accepted_draft_pairs = accepted_candidates
-                    .iter()
-                    .filter_map(|candidate| {
-                        let target = candidate.governed_target().unwrap_or(&candidate.target);
-                        candidate
-                            .to_long_term_draft_for_target(
-                                target,
-                                &self.config.scope.chat_id,
-                                now_secs,
-                            )
-                            .map(|draft| (*candidate, draft))
-                    })
-                    .collect::<Vec<_>>();
-                let (accepted_draft_pairs, suppressed_long_term_policy_ids, suppressed_draft_count) =
-                    self.filter_long_term_draft_pairs_by_policy(accepted_draft_pairs, now_secs)?;
-                let accepted_drafts = accepted_draft_pairs
-                    .iter()
-                    .map(|(_, draft)| draft.clone())
-                    .collect::<Vec<_>>();
-                let accepted_skill_pairs = accepted_candidates
-                    .iter()
-                    .filter_map(|candidate| {
-                        let target = candidate.governed_target().unwrap_or(&candidate.target);
-                        candidate
-                            .to_runtime_skill_write_for_target(
-                                target,
-                                &self.config.scope.chat_id,
-                                now_secs,
-                            )
-                            .map(|write| (*candidate, write))
-                    })
-                    .collect::<Vec<_>>();
-                let accepted_skill_writes = accepted_skill_pairs
-                    .iter()
-                    .map(|(_, write)| write.clone())
-                    .collect::<Vec<_>>();
-                let accepted_skill_writes =
-                    normalize_runtime_skill_write_names(accepted_skill_writes);
-                let accepted_normalized_skill_pairs = accepted_skill_pairs
-                    .iter()
-                    .zip(accepted_skill_writes.iter())
-                    .map(|((candidate, _), write)| (*candidate, write.clone()))
-                    .collect::<Vec<_>>();
-                let shared_fact_governance = if accepted_drafts.is_empty() {
-                    None
-                } else {
-                    let store = self.config.platform.long_term_memory_store();
-                    let mut context = SharedFactWriteGovernanceContext::new(
-                        self.config.memory_space_id.clone(),
-                        self.config.scoped_runtime.mounted_subject_id.clone(),
-                        self.config.scoped_runtime.actor_subject_id.clone(),
-                        SharedMemoryWriteSource::ManualTool,
-                    );
-                    context.relationship_id = self
-                        .config
-                        .scoped_runtime
-                        .relationship_scope
-                        .as_ref()
-                        .map(|scope| scope.relationship_id.clone());
-                    Some(write_governed_shared_memory_in_space(
-                        store.as_ref(),
-                        &accepted_drafts,
-                        now_secs,
-                        context,
-                    )?)
-                };
-                let long_term_changed = shared_fact_governance
-                    .as_ref()
-                    .map(|outcome| outcome.changed)
-                    .unwrap_or(0);
-                let governed_draft_pairs = shared_fact_governance
-                    .as_ref()
-                    .map(|outcome| {
-                        accepted_draft_pairs
-                            .iter()
-                            .zip(outcome.reports.iter())
-                            .filter(|&((_candidate, _draft), report)| {
-                                matches!(report.action, SharedMemoryWriteAction::Accepted)
-                            })
-                            .map(|((candidate, draft), _report)| (*candidate, draft.clone()))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let (skill_changed, procedural_evolution, governed_skill_pairs) =
-                    if accepted_skill_writes.is_empty() {
-                        (0, None, Vec::new())
-                    } else {
-                        let storage = self.config.platform.skill_storage();
-                        let outcome = write_governed_runtime_skills(
-                            storage.as_ref(),
-                            &accepted_skill_writes,
-                            RuntimeSkillWriteSource::Manual,
-                        )?;
-                        let governed_skill_pairs = accepted_normalized_skill_pairs
-                            .iter()
-                            .zip(outcome.reports.iter())
-                            .filter(|&((_candidate, _write), report)| {
-                                matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                            })
-                            .map(|((candidate, write), _report)| (*candidate, write.clone()))
-                            .collect::<Vec<_>>();
-                        let procedural_evolution = build_skill_evolution_report_from_write_outcome(
-                            &accepted_skill_writes,
-                            &outcome,
-                        );
-                        (
-                            outcome.changed,
-                            Some(procedural_evolution),
-                            governed_skill_pairs,
-                        )
-                    };
-                record_candidate_derived_memory_refs(
-                    self.config.platform.as_ref(),
-                    &self.config.subject_id,
-                    &governed_draft_pairs,
-                    &governed_skill_pairs,
-                    now_secs,
-                )?;
-                record_soul_handoff_derived_memory_refs(
-                    self.config.platform.as_ref(),
-                    &self.config.subject_id,
-                    &candidates,
-                    now_secs,
-                )?;
-                let changed = long_term_changed + skill_changed;
-                let policy_reason = if suppressed_draft_count > 0 {
-                    format!(
-                        ", suppressed_by_long_term_policy={}, policy_ids={}",
-                        suppressed_draft_count,
-                        suppressed_long_term_policy_ids.join("|")
-                    )
-                } else {
-                    String::new()
-                };
-                MemoryWriteReport {
-                    accepted: semantic_governance.rejected_count == 0,
-                    changed,
-                    operation: "write.candidates",
-                    reason: format!(
-                        "submitted={}, accepted={}, rejected={}, deferred={}{}",
-                        semantic_governance.proposal_count,
-                        semantic_governance.accepted_count,
-                        semantic_governance.rejected_count,
-                        semantic_governance.deferred_count,
-                        policy_reason
-                    ),
-                    lifecycle_report: self.finish_lifecycle_success_with_payload(
-                        lifecycle,
-                        RuntimeLifecycleEventKind::RuntimeLifecycle,
-                        RuntimeLifecycleEffect::RunMaintenance,
-                        changed > 0,
-                        "write.candidates",
-                        &[("changed_count", changed.to_string())],
-                    )?,
-                    semantic_governance: Some(semantic_governance),
                     shared_fact_governance,
                     procedural_evolution,
                     procedural_promotions: Vec::new(),
                     agent_tool_experience: None,
                 }
             }
+            MemoryWriteRequest::Candidates { candidates } => {
+                self.write_candidates_transactional(candidates, lifecycle, now_secs)?
+            }
             MemoryWriteRequest::AgentToolUsageFeedback { feedback } => {
                 let storage = self.config.platform.skill_storage();
                 let agent_tool_registries = self.agent_tool_registries();
                 let governance =
                     govern_agent_tool_usage_feedback(&agent_tool_registries, &feedback, now_secs);
-                let changed = if let Some(experience) = governance.experience.as_ref() {
-                    usize::from(write_agent_tool_experience_record(
-                        storage.as_ref(),
-                        experience,
-                    )?)
+                let (changed, lifecycle_report, transaction) = if let Some(experience) =
+                    governance.experience.as_ref()
+                {
+                    let mutations = if let Some(mutation) =
+                        plan_agent_tool_experience_record(storage.as_ref(), experience)?
+                    {
+                        runtime_skill_storage_mutations_to_store_mutations(&[mutation])
+                    } else {
+                        Vec::new()
+                    };
+                    let changed = usize::from(!mutations.is_empty());
+                    let (lifecycle_report, transaction) = self.commit_memory_write_transaction(
+                        lifecycle,
+                        "write.agent_tool_usage_feedback",
+                        RuntimeLifecycleEventKind::RuntimeLifecycle,
+                        RuntimeLifecycleEffect::RunMaintenance,
+                        changed > 0,
+                        "write.agent_tool_usage_feedback",
+                        &[("changed_count", changed.to_string())],
+                        mutations,
+                        changed,
+                    )?;
+                    (changed, lifecycle_report, Some(transaction))
                 } else {
-                    0
+                    let lifecycle_report = self.finish_lifecycle_success_with_payload(
+                        lifecycle,
+                        RuntimeLifecycleEventKind::RuntimeLifecycle,
+                        RuntimeLifecycleEffect::RunMaintenance,
+                        false,
+                        "write.agent_tool_usage_feedback",
+                        &[("changed_count", "0".to_string())],
+                    )?;
+                    (0, lifecycle_report, None)
                 };
                 MemoryWriteReport {
                     accepted: governance.accepted,
                     changed,
                     operation: "write.agent_tool_usage_feedback",
                     reason: governance.reason.clone(),
-                    lifecycle_report: self.finish_lifecycle_success_with_payload(
-                        lifecycle,
-                        RuntimeLifecycleEventKind::RuntimeLifecycle,
-                        RuntimeLifecycleEffect::RunMaintenance,
-                        changed > 0,
-                        "write.agent_tool_usage_feedback",
-                        &[("changed_count", changed.to_string())],
-                    )?,
+                    lifecycle_report,
+                    transaction,
                     semantic_governance: None,
                     shared_fact_governance: None,
                     procedural_evolution: None,
@@ -1052,6 +981,568 @@ impl MemoryRuntime {
         };
         self.audit("write", true, &report.reason);
         Ok(report)
+    }
+
+    fn write_candidates_transactional(
+        &self,
+        candidates: Vec<MemoryWriteCandidate>,
+        lifecycle: RuntimeLifecycleReport,
+        now_secs: u64,
+    ) -> Result<MemoryWriteReport> {
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_write_transaction_unavailable",
+                "transactional memory writes require StorePlatform-backed runtime",
+            )
+        })?;
+        let transaction_id = format!("memory_write_txn_{}", lifecycle.event_id);
+        let operation = "write.candidates";
+        let semantic_governance = govern_write_candidates(&candidates);
+        let accepted_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate_semantically_accepted(candidate, &semantic_governance.plane_reports)
+            })
+            .collect::<Vec<_>>();
+        let accepted_draft_pairs = accepted_candidates
+            .iter()
+            .filter_map(|candidate| {
+                let target = candidate.governed_target().unwrap_or(&candidate.target);
+                candidate
+                    .to_long_term_draft_for_target(target, &self.config.scope.chat_id, now_secs)
+                    .map(|draft| (*candidate, draft))
+            })
+            .collect::<Vec<_>>();
+        let (accepted_draft_pairs, suppressed_long_term_policy_ids, suppressed_draft_count) =
+            self.filter_long_term_draft_pairs_by_policy(accepted_draft_pairs, now_secs)?;
+        let accepted_drafts = accepted_draft_pairs
+            .iter()
+            .map(|(_, draft)| draft.clone())
+            .collect::<Vec<_>>();
+        let accepted_skill_pairs = accepted_candidates
+            .iter()
+            .filter_map(|candidate| {
+                let target = candidate.governed_target().unwrap_or(&candidate.target);
+                candidate
+                    .to_runtime_skill_write_for_target(target, &self.config.scope.chat_id, now_secs)
+                    .map(|write| (*candidate, write))
+            })
+            .collect::<Vec<_>>();
+        let accepted_skill_writes = accepted_skill_pairs
+            .iter()
+            .map(|(_, write)| write.clone())
+            .collect::<Vec<_>>();
+        let accepted_skill_writes = normalize_runtime_skill_write_names(accepted_skill_writes);
+        let accepted_normalized_skill_pairs = accepted_skill_pairs
+            .iter()
+            .zip(accepted_skill_writes.iter())
+            .map(|((candidate, _), write)| (*candidate, write.clone()))
+            .collect::<Vec<_>>();
+
+        let mut mutations = Vec::new();
+        let shared_fact_governance = if accepted_drafts.is_empty() {
+            None
+        } else {
+            let store = self.config.platform.long_term_memory_store();
+            let mut context = SharedFactWriteGovernanceContext::new(
+                self.config.memory_space_id.clone(),
+                self.config.scoped_runtime.mounted_subject_id.clone(),
+                self.config.scoped_runtime.actor_subject_id.clone(),
+                SharedMemoryWriteSource::ManualTool,
+            );
+            context.relationship_id = self
+                .config
+                .scoped_runtime
+                .relationship_scope
+                .as_ref()
+                .map(|scope| scope.relationship_id.clone());
+            let plan = plan_governed_shared_memory_in_space(
+                store.as_ref(),
+                &accepted_drafts,
+                now_secs,
+                context,
+            )?;
+            for entry in &plan.accepted_entries {
+                mutations.push(StoreMutation::PutJson {
+                    namespace: "long_term".to_string(),
+                    key: entry.id.clone(),
+                    value: serde_json::to_value(entry).map_err(|error| {
+                        Error::config("memory_write_transaction_plan", error.to_string())
+                    })?,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "long_term".to_string(),
+                    record_key: entry.id.clone(),
+                });
+            }
+            Some(plan.outcome)
+        };
+        let long_term_changed = shared_fact_governance
+            .as_ref()
+            .map(|outcome| outcome.changed)
+            .unwrap_or(0);
+        let governed_draft_pairs = shared_fact_governance
+            .as_ref()
+            .map(|outcome| {
+                accepted_draft_pairs
+                    .iter()
+                    .zip(outcome.reports.iter())
+                    .filter(|&((_candidate, _draft), report)| {
+                        matches!(report.action, SharedMemoryWriteAction::Accepted)
+                    })
+                    .map(|((candidate, draft), _report)| (*candidate, draft.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let (skill_changed, procedural_evolution, governed_skill_pairs) =
+            if accepted_skill_writes.is_empty() {
+                (0, None, Vec::new())
+            } else {
+                let storage = self.config.platform.skill_storage();
+                let plan = plan_governed_runtime_skills(
+                    storage.as_ref(),
+                    &accepted_skill_writes,
+                    RuntimeSkillWriteSource::Manual,
+                )?;
+                for mutation in &plan.mutations {
+                    match mutation {
+                        RuntimeSkillStorageMutation::Upsert { name, content } => {
+                            mutations.push(StoreMutation::PutBlob {
+                                namespace: "skills".to_string(),
+                                key: name.clone(),
+                                value: content.clone(),
+                                event_kind: MemoryStoreEventKind::MemoryWrite,
+                                plane: "skills".to_string(),
+                                record_key: name.clone(),
+                            });
+                        }
+                        RuntimeSkillStorageMutation::Delete { name } => {
+                            mutations.push(StoreMutation::DeleteBlob {
+                                namespace: "skills".to_string(),
+                                key: name.clone(),
+                                event_kind: MemoryStoreEventKind::MemoryDelete,
+                                plane: "skills".to_string(),
+                                record_key: name.clone(),
+                            });
+                        }
+                    }
+                }
+                let governed_skill_pairs = accepted_normalized_skill_pairs
+                    .iter()
+                    .zip(plan.outcome.reports.iter())
+                    .filter(|&((_candidate, _write), report)| {
+                        matches!(report.action, RuntimeSkillWriteAction::Accepted)
+                    })
+                    .map(|((candidate, write), _report)| (*candidate, write.clone()))
+                    .collect::<Vec<_>>();
+                let procedural_evolution = build_skill_evolution_report_from_write_outcome(
+                    &accepted_skill_writes,
+                    &plan.outcome,
+                );
+                (
+                    plan.outcome.changed,
+                    Some(procedural_evolution),
+                    governed_skill_pairs,
+                )
+            };
+
+        mutations.extend(plan_candidate_derived_memory_ref_mutations(
+            &self.config.subject_id,
+            &governed_draft_pairs,
+            &governed_skill_pairs,
+            now_secs,
+        )?);
+        mutations.extend(plan_soul_handoff_derived_memory_ref_mutations(
+            &self.config.subject_id,
+            &candidates,
+            now_secs,
+        )?);
+
+        let changed = long_term_changed + skill_changed;
+        let lifecycle_report = lifecycle.finish_success(
+            self.config.clock.now_secs(),
+            changed > 0,
+            "write.candidates",
+        );
+        mutations.push(StoreMutation::AppendEvent {
+            event: self.planned_lifecycle_store_event(
+                &transaction_id,
+                operation,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunMaintenance,
+                &lifecycle_report,
+                &[("changed_count", changed.to_string())],
+            )?,
+        });
+
+        let planned_mutations = mutations.len();
+        let store_report = store_platform.commit_mutation_batch(StoreMutationBatch {
+            transaction_id: transaction_id.clone(),
+            operation: operation.to_string(),
+            scope: self.memory_write_transaction_scope(),
+            mutations,
+        })?;
+        let transaction =
+            memory_write_transaction_report(operation, planned_mutations, changed, store_report);
+        let policy_reason = if suppressed_draft_count > 0 {
+            format!(
+                ", suppressed_by_long_term_policy={}, policy_ids={}",
+                suppressed_draft_count,
+                suppressed_long_term_policy_ids.join("|")
+            )
+        } else {
+            String::new()
+        };
+
+        Ok(MemoryWriteReport {
+            accepted: semantic_governance.accepted_count > 0
+                && semantic_governance.rejected_count == 0,
+            changed,
+            operation,
+            reason: format!(
+                "submitted={}, accepted={}, rejected={}, deferred={}{}",
+                semantic_governance.proposal_count,
+                semantic_governance.accepted_count,
+                semantic_governance.rejected_count,
+                semantic_governance.deferred_count,
+                policy_reason
+            ),
+            lifecycle_report,
+            transaction: Some(transaction),
+            semantic_governance: Some(semantic_governance),
+            shared_fact_governance,
+            procedural_evolution,
+            procedural_promotions: Vec::new(),
+            agent_tool_experience: None,
+        })
+    }
+
+    fn memory_write_transaction_scope(&self) -> StoreEventScope {
+        StoreEventScope::new(
+            self.config.identity.agent_id.clone(),
+            self.config.identity.owner_id.clone(),
+            self.config.scope.channel.clone(),
+            self.config.scope.chat_id.clone(),
+        )
+        .with_memory_space(self.config.memory_space_id.clone())
+        .with_subject(self.config.subject_id.clone())
+        .with_conversation(self.config.scope.chat_id.clone())
+    }
+
+    fn commit_memory_write_transaction(
+        &self,
+        lifecycle: RuntimeLifecycleReport,
+        operation: &'static str,
+        lifecycle_kind: RuntimeLifecycleEventKind,
+        lifecycle_effect: RuntimeLifecycleEffect,
+        changed: bool,
+        summary: impl Into<String>,
+        extra_payload: &[(&str, String)],
+        mut mutations: Vec<StoreMutation>,
+        changed_count: usize,
+    ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_write_transaction_unavailable",
+                "transactional memory writes require StorePlatform-backed runtime",
+            )
+        })?;
+        let transaction_id = format!("memory_write_txn_{}", lifecycle.event_id);
+        let lifecycle_report =
+            lifecycle.finish_success(self.config.clock.now_secs(), changed, summary);
+        mutations.push(StoreMutation::AppendEvent {
+            event: self.planned_lifecycle_store_event(
+                &transaction_id,
+                operation,
+                lifecycle_kind,
+                lifecycle_effect,
+                &lifecycle_report,
+                extra_payload,
+            )?,
+        });
+        let planned_mutations = mutations.len();
+        let store_report = store_platform.commit_mutation_batch(StoreMutationBatch {
+            transaction_id,
+            operation: operation.to_string(),
+            scope: self.memory_write_transaction_scope(),
+            mutations,
+        })?;
+        Ok((
+            lifecycle_report,
+            memory_write_transaction_report(
+                operation,
+                planned_mutations,
+                changed_count,
+                store_report,
+            ),
+        ))
+    }
+
+    fn commit_memory_mutation_batch(
+        &self,
+        operation: &str,
+        mutations: Vec<StoreMutation>,
+    ) -> Result<StoreMutationBatchReport> {
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_write_transaction_unavailable",
+                "transactional memory writes require StorePlatform-backed runtime",
+            )
+        })?;
+        let transaction_id = format!(
+            "memory_write_txn_{}",
+            stable_hash_hex(&(operation, self.config.clock.now_secs(), mutations.len()))
+        );
+        store_platform.commit_mutation_batch(StoreMutationBatch {
+            transaction_id,
+            operation: operation.to_string(),
+            scope: self.memory_write_transaction_scope(),
+            mutations,
+        })
+    }
+
+    fn run_long_term_memory_refresh_transactional(
+        &self,
+        http: &mut (dyn LlmHttpClient + '_),
+        llm: &(dyn CoreLlmClient + Send + Sync + '_),
+        ctx: LongTermMemoryRefreshContext<'_>,
+        chat_id: &str,
+        pressure: PressureLevel,
+        profile: MemoryProfile,
+    ) -> Result<LongTermMemoryRefreshOutcome> {
+        let planning_long_term = PlanningLongTermMemoryStore::new(ctx.long_term_memory_store);
+        let planning_skills = PlanningSkillStorage::new(ctx.skill_storage);
+        let outcome = run_long_term_memory_refresh(
+            http,
+            llm,
+            LongTermMemoryRefreshContext {
+                memory_store: ctx.memory_store,
+                session_store: ctx.session_store,
+                session_summary_store: ctx.session_summary_store,
+                long_term_memory_store: &planning_long_term,
+                extraction_state_store: ctx.extraction_state_store,
+                turn_ledger_store: ctx.turn_ledger_store,
+                skill_storage: &planning_skills,
+                draft_admission_policy: ctx.draft_admission_policy,
+            },
+            chat_id,
+            pressure,
+            profile,
+        );
+        let mut mutations = Vec::new();
+        match &outcome {
+            LongTermMemoryRefreshOutcome::Deferred {
+                previous_state,
+                next_state,
+            }
+            | LongTermMemoryRefreshOutcome::Failed {
+                previous_state,
+                next_state,
+                ..
+            } => {
+                if let Some(mutation) = long_term_extraction_state_mutation(
+                    chat_id,
+                    previous_state.as_ref(),
+                    next_state,
+                )? {
+                    mutations.push(mutation);
+                }
+            }
+            LongTermMemoryRefreshOutcome::Processed {
+                previous_state,
+                next_state,
+                apply_report,
+                ..
+            } => {
+                mutations.extend(planning_long_term.into_mutations()?);
+                mutations.extend(runtime_skill_storage_mutations_to_store_mutations(
+                    &planning_skills.into_mutations()?,
+                ));
+                mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
+                    &self.config.subject_id,
+                    &apply_report.accepted_upserts,
+                    &apply_report.accepted_skill_writes,
+                    self.config.clock.now_secs(),
+                )?);
+                if let Some(mutation) = long_term_extraction_state_mutation(
+                    chat_id,
+                    previous_state.as_ref(),
+                    next_state,
+                )? {
+                    mutations.push(mutation);
+                }
+            }
+        }
+        if !mutations.is_empty() {
+            self.commit_memory_mutation_batch("post_turn.long_term_refresh", mutations)?;
+        }
+        Ok(outcome)
+    }
+
+    fn plan_long_term_extraction_transaction(
+        &self,
+        extraction: &ParsedLongTermMemoryExtraction,
+        now_secs: u64,
+    ) -> Result<MemoryLongTermExtractionTransactionPlan> {
+        let store = self.config.platform.long_term_memory_store();
+        let skill_storage = self.config.platform.skill_storage();
+        let mut mutations = Vec::new();
+        let mut changed = 0usize;
+
+        for slot in &extraction.deletes {
+            let Some(id) = slot.stable_id() else {
+                continue;
+            };
+            if store.get(&id)?.is_some() {
+                mutations.push(StoreMutation::DeleteJson {
+                    namespace: "long_term".to_string(),
+                    key: id.clone(),
+                    event_kind: MemoryStoreEventKind::MemoryDelete,
+                    plane: "long_term".to_string(),
+                    record_key: id,
+                });
+                changed = changed.saturating_add(1);
+            }
+        }
+
+        let mut accepted_upserts = Vec::new();
+        let shared_fact_governance = if extraction.upserts.is_empty() {
+            None
+        } else {
+            let mut context = SharedFactWriteGovernanceContext::new(
+                self.config.memory_space_id.clone(),
+                self.config.scoped_runtime.mounted_subject_id.clone(),
+                self.config.scoped_runtime.actor_subject_id.clone(),
+                SharedMemoryWriteSource::Extraction,
+            );
+            context.relationship_id = self
+                .config
+                .scoped_runtime
+                .relationship_scope
+                .as_ref()
+                .map(|scope| scope.relationship_id.clone());
+            let plan = plan_governed_shared_memory_in_space(
+                store.as_ref(),
+                &extraction.upserts,
+                now_secs,
+                context,
+            )?;
+            for entry in &plan.accepted_entries {
+                mutations.push(StoreMutation::PutJson {
+                    namespace: "long_term".to_string(),
+                    key: entry.id.clone(),
+                    value: serde_json::to_value(entry).map_err(|error| {
+                        Error::config("memory_write_transaction_plan", error.to_string())
+                    })?,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "long_term".to_string(),
+                    record_key: entry.id.clone(),
+                });
+            }
+            changed = changed.saturating_add(plan.outcome.changed);
+            accepted_upserts = plan.accepted_drafts;
+            Some(plan.outcome)
+        };
+
+        let mut accepted_skill_writes = Vec::new();
+        let procedural_evolution = if extraction.skill_writes.is_empty() {
+            None
+        } else {
+            let skill_plan = plan_governed_runtime_skills(
+                skill_storage.as_ref(),
+                &extraction.skill_writes,
+                RuntimeSkillWriteSource::Extraction,
+            )?;
+            for mutation in &skill_plan.mutations {
+                mutations.extend(runtime_skill_storage_mutations_to_store_mutations(
+                    std::slice::from_ref(mutation),
+                ));
+            }
+            changed = changed.saturating_add(skill_plan.outcome.changed);
+            let accepted_topics = skill_plan
+                .outcome
+                .reports
+                .iter()
+                .filter(|report| matches!(report.action, RuntimeSkillWriteAction::Accepted))
+                .map(|report| report.topic.trim().to_string())
+                .collect::<HashSet<_>>();
+            accepted_skill_writes.extend(
+                extraction
+                    .skill_writes
+                    .iter()
+                    .filter(|write| accepted_topics.contains(write.topic.trim()))
+                    .cloned(),
+            );
+            Some(build_skill_evolution_report_from_write_outcome(
+                &extraction.skill_writes,
+                &skill_plan.outcome,
+            ))
+        };
+
+        mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
+            &self.config.subject_id,
+            &accepted_upserts,
+            &accepted_skill_writes,
+            now_secs,
+        )?);
+
+        Ok(MemoryLongTermExtractionTransactionPlan {
+            changed,
+            shared_fact_governance,
+            procedural_evolution,
+            mutations,
+        })
+    }
+
+    fn plan_long_term_control_mutation(
+        &self,
+        request: CoreLongTermMemoryControlMutationRequest,
+    ) -> Result<(
+        bm_core::memory::MemoryLongTermMutationReport,
+        Vec<StoreMutation>,
+    )> {
+        let store = self.config.platform.long_term_memory_store();
+        let control_store = self.config.platform.long_term_memory_control_store();
+        let planning_store = PlanningLongTermMemoryStore::new(store.as_ref());
+        let planning_control_store = PlanningLongTermControlStore::new(control_store.as_ref());
+        let report = apply_long_term_memory_control_mutation(
+            &planning_store,
+            &planning_control_store,
+            request,
+        )?;
+        let mut mutations = Vec::new();
+        if report.accepted && !report.dry_run {
+            mutations.extend(planning_store.into_mutations()?);
+            mutations.extend(planning_control_store.into_mutations()?);
+        }
+        Ok((report, mutations))
+    }
+
+    fn plan_memory_governance_policy_mutation(
+        &self,
+        operation: bm_core::memory::MemoryGovernancePolicyMutation,
+        reason: String,
+        dry_run: bool,
+        now_secs: u64,
+    ) -> Result<(
+        bm_core::memory::MemoryGovernancePolicyMutationReport,
+        Vec<StoreMutation>,
+    )> {
+        let control_store = self.config.platform.long_term_memory_control_store();
+        let planning_control_store = PlanningLongTermControlStore::new(control_store.as_ref());
+        let report = apply_long_term_memory_governance_policy_mutation(
+            &planning_control_store,
+            operation,
+            reason,
+            dry_run,
+            now_secs,
+        )?;
+        let mutations = if report.accepted && !report.dry_run {
+            planning_control_store.into_mutations()?
+        } else {
+            Vec::new()
+        };
+        Ok((report, mutations))
     }
 
     pub fn list_runtime_skills(
@@ -1203,11 +1694,16 @@ impl MemoryRuntime {
             .next()
             .ok_or_else(|| Error::config("skill_edit", "skill write missing"))?;
         let stored_name = normalized.name.clone();
-        let outcome = write_governed_runtime_skills(
+        let plan = plan_governed_runtime_skills(
             storage.as_ref(),
             &[normalized],
             RuntimeSkillWriteSource::Manual,
         )?;
+        let outcome = plan.outcome;
+        let mutations = runtime_skill_storage_mutations_to_store_mutations(&plan.mutations);
+        if !mutations.is_empty() {
+            self.commit_memory_mutation_batch("runtime_skill.edit", mutations)?;
+        }
         let accepted = outcome.accepted > 0;
         let reason = format!(
             "submitted={}, accepted={}, rejected={}",
@@ -1249,11 +1745,29 @@ impl MemoryRuntime {
             ));
         }
         let meta_store = platform.skill_meta_store();
-        let was_disabled = get_disabled_skills(meta_store.as_ref())
-            .into_iter()
-            .any(|value| value == name);
-        set_skill_enabled_record(meta_store.as_ref(), name, request.enabled)?;
+        let (_order, mut disabled) = meta_store.read_meta()?;
+        let was_disabled = disabled.iter().any(|value| value == name);
+        if request.enabled {
+            disabled.retain(|value| value != name);
+        } else if !disabled.iter().any(|value| value == name) {
+            disabled.push(name.to_string());
+        }
         let changed = was_disabled == request.enabled;
+        if changed {
+            self.commit_memory_mutation_batch(
+                "runtime_skill.set_enabled",
+                vec![StoreMutation::PutJson {
+                    namespace: "skill_meta".to_string(),
+                    key: "disabled".to_string(),
+                    value: serde_json::to_value(&disabled).map_err(|error| {
+                        Error::config("runtime_skill.set_enabled", error.to_string())
+                    })?,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "skill_meta".to_string(),
+                    record_key: "disabled".to_string(),
+                }],
+            )?;
+        }
         let operation = if request.enabled {
             "skill.enable"
         } else {
@@ -1293,15 +1807,39 @@ impl MemoryRuntime {
             self.audit("write.skills", false, "runtime_skill_not_found");
             return Err(Error::config("skill_delete", "runtime_skill_not_found"));
         }
-        delete_skill_record(storage.as_ref(), name)?;
         let meta_store = platform.skill_meta_store();
-        set_skill_enabled_record(meta_store.as_ref(), name, true)?;
-        let mut order = get_skills_order(meta_store.as_ref());
+        let (mut order, mut disabled) = meta_store.read_meta()?;
+        disabled.retain(|value| value != name);
         let before_len = order.len();
         order.retain(|value| value != name);
+        let mut mutations = vec![StoreMutation::DeleteBlob {
+            namespace: "skills".to_string(),
+            key: name.to_string(),
+            event_kind: MemoryStoreEventKind::MemoryDelete,
+            plane: "skills".to_string(),
+            record_key: name.to_string(),
+        }];
+        mutations.push(StoreMutation::PutJson {
+            namespace: "skill_meta".to_string(),
+            key: "disabled".to_string(),
+            value: serde_json::to_value(&disabled)
+                .map_err(|error| Error::config("runtime_skill.delete", error.to_string()))?,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: "skill_meta".to_string(),
+            record_key: "disabled".to_string(),
+        });
         if before_len != order.len() {
-            set_skills_order(meta_store.as_ref(), &order)?;
+            mutations.push(StoreMutation::PutJson {
+                namespace: "skill_meta".to_string(),
+                key: "order".to_string(),
+                value: serde_json::to_value(&order)
+                    .map_err(|error| Error::config("runtime_skill.delete", error.to_string()))?,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "skill_meta".to_string(),
+                record_key: "order".to_string(),
+            });
         }
+        self.commit_memory_mutation_batch("runtime_skill.delete", mutations)?;
         self.audit("write.skills", true, "skill_deleted");
         Ok(RuntimeSkillMutationReport {
             accepted: true,
@@ -1379,11 +1917,21 @@ impl MemoryRuntime {
             task_run_store: Some(task_run_store.as_ref()),
             task_learning_store: Some(task_learning_store.as_ref()),
         });
+        let source_candidate_ids = runtime_recall_graph_candidate_ids(
+            &procedural_hits,
+            &working,
+            self.config.clock.now_secs(),
+        );
+        let persistent_graph = self.load_persistent_recall_graph(&source_candidate_ids);
         let graph = build_recall_graph_report(
             &request.query,
             &procedural_hits,
             &working,
             self.config.clock.now_secs(),
+            &persistent_graph,
+            GraphRecallExpansionBudget::from_runtime_budget(
+                &self.config.runtime_budget.graph_expansion_budget,
+            ),
         );
         let hit_count = procedural_hits
             .len()
@@ -1410,6 +1958,7 @@ impl MemoryRuntime {
             agent_tool_hints: agent_tool_selection.tool_hints,
             tool_experience_status: agent_tool_selection.tool_experience_status,
             working,
+            graph_index_report: graph.index_report,
             graph_rerank: graph.rerank,
             graph_gate: graph.gate,
             compact_graph: graph.compact_graph,
@@ -1421,6 +1970,294 @@ impl MemoryRuntime {
                 "recall_completed",
                 &telemetry_payload,
             )?,
+        })
+    }
+
+    pub fn eval_recall(&self, request: MemoryEvalRecallRequest) -> Result<MemoryEvalRecallReport> {
+        self.ensure_visible("eval_recall", self.capabilities.recall)?;
+        let recall_limit = request.k.max(50).max(1);
+        let recall = self.recall(MemoryRecallRequest {
+            query: request.query.clone(),
+            limit: recall_limit,
+            tool_registry_refs: request.tool_registry_refs.clone(),
+        })?;
+        let source_candidates = recall
+            .graph_rerank
+            .candidate_ids
+            .iter()
+            .map(|candidate_id| {
+                build_eval_recall_candidate(
+                    candidate_id,
+                    &recall,
+                    request.include_graph_neighbors,
+                    request.include_score_breakdown,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expanded_candidates = if request.include_expanded_candidates {
+            recall
+                .graph_rerank
+                .expanded_candidate_ids
+                .iter()
+                .map(|candidate_id| {
+                    build_eval_recall_candidate(
+                        candidate_id,
+                        &recall,
+                        request.include_graph_neighbors,
+                        request.include_score_breakdown,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let reranked_candidates = recall
+            .graph_rerank
+            .selected_ids
+            .iter()
+            .map(|candidate_id| {
+                build_eval_recall_candidate(
+                    candidate_id,
+                    &recall,
+                    request.include_graph_neighbors,
+                    request.include_score_breakdown,
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_candidates = reranked_candidates
+            .iter()
+            .take(request.k.max(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        let metrics = build_eval_recall_metrics(
+            &request,
+            source_candidates.len(),
+            expanded_candidates.len(),
+            selected_candidates.len(),
+            selected_candidates.len(),
+            &reranked_candidates,
+        );
+        let missing_evidence_refs = if request.include_missing_evidence {
+            missing_evidence_for_k(
+                request
+                    .benchmark_context
+                    .as_ref()
+                    .map(|context| context.expected_evidence_refs.as_slice())
+                    .unwrap_or(&[]),
+                &reranked_candidates,
+                request.k.max(1),
+            )
+        } else {
+            Vec::new()
+        };
+        let privacy_report = build_eval_recall_privacy_report(&recall);
+
+        Ok(MemoryEvalRecallReport {
+            query: request.query,
+            benchmark_context: request.benchmark_context,
+            source_candidates,
+            expanded_candidates,
+            graph_neighbors: if request.include_graph_neighbors {
+                recall.graph_rerank.graph_neighbor_ids.clone()
+            } else {
+                Vec::new()
+            },
+            reranked_candidates,
+            selected_candidates: selected_candidates.clone(),
+            rendered_block_preview: render_eval_recall_block_preview(&selected_candidates),
+            metrics,
+            missing_evidence_refs,
+            budget_report: self.config.runtime_budget.clone(),
+            privacy_report,
+            graph_index_report: recall.graph_index_report,
+            graph_rerank: recall.graph_rerank,
+            graph_gate: recall.graph_gate,
+            compact_graph: recall.compact_graph,
+            lifecycle_report: recall.lifecycle_report,
+        })
+    }
+
+    fn load_persistent_recall_graph(
+        &self,
+        source_candidate_ids: &[String],
+    ) -> PersistentRecallGraphLoadReport {
+        let Some(store_platform) = self.config.store_platform.as_ref() else {
+            return PersistentRecallGraphLoadReport::default();
+        };
+        let mut failures = Vec::new();
+        let mut index_failures = Vec::new();
+        let index_keys = source_candidate_ids
+            .iter()
+            .map(|candidate_id| format!("graph_index:{candidate_id}"))
+            .collect::<Vec<_>>();
+        let indexes = read_persistent_graph_docs_by_keys::<MemoryGraphRecallIndexDoc>(
+            store_platform,
+            "memory_graph_indexes",
+            &index_keys,
+            &mut index_failures,
+        );
+        let limits = &self.config.runtime_budget.graph_expansion_budget;
+        let node_keys = bounded_persistent_graph_keys(
+            indexed_node_keys(source_candidate_ids, &indexes),
+            limits.max_graph_nodes_loaded,
+            "memory_graph_nodes_loaded_budget_exceeded",
+            &mut failures,
+        );
+        let edge_keys = bounded_persistent_graph_keys(
+            indexed_edge_keys(&indexes),
+            limits.max_graph_edges_loaded,
+            "memory_graph_edges_loaded_budget_exceeded",
+            &mut failures,
+        );
+        let backlink_keys = bounded_persistent_graph_keys(
+            indexed_backlink_keys(&indexes),
+            limits.max_backlinks_loaded,
+            "memory_graph_backlinks_loaded_budget_exceeded",
+            &mut failures,
+        );
+
+        let nodes = read_persistent_graph_docs_by_keys::<MemoryGraphNode>(
+            store_platform,
+            "memory_graph_nodes",
+            &node_keys,
+            &mut failures,
+        );
+        let edges = read_persistent_graph_docs_by_keys::<MemoryGraphEdge>(
+            store_platform,
+            "memory_graph_edges",
+            &edge_keys,
+            &mut failures,
+        );
+        let backlinks = read_persistent_graph_docs_by_keys::<EvidenceBacklink>(
+            store_platform,
+            "memory_graph_backlinks",
+            &backlink_keys,
+            &mut failures,
+        );
+
+        if !failures.is_empty() {
+            return PersistentRecallGraphLoadReport {
+                graph: Some(build_temporal_memory_graph_from_parts(
+                    nodes, edges, backlinks,
+                )),
+                indexes,
+                failures,
+                index_failures,
+            };
+        }
+        if nodes.is_empty() && edges.is_empty() && backlinks.is_empty() {
+            return PersistentRecallGraphLoadReport::default();
+        }
+
+        PersistentRecallGraphLoadReport {
+            graph: Some(build_temporal_memory_graph_from_parts(
+                nodes, edges, backlinks,
+            )),
+            indexes,
+            failures,
+            index_failures,
+        }
+    }
+
+    pub fn write_temporal_memory_graph(
+        &self,
+        request: TemporalMemoryGraphWriteRequest,
+    ) -> Result<TemporalMemoryGraphMutationReport> {
+        self.ensure_visible("write.memory_graph", self.capabilities.write)?;
+        let operation = if request.operation.trim().is_empty() {
+            "memory_graph.write"
+        } else {
+            request.operation.trim()
+        };
+        if operation != "memory_graph.write" {
+            return Err(Error::config(
+                "temporal_memory_graph_write",
+                format!("unsupported temporal memory graph operation {operation}"),
+            ));
+        }
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::SdkCall,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let plan = plan_temporal_memory_graph_write(
+            "memory_graph.write",
+            request.nodes,
+            request.edges,
+            request.backlinks,
+        );
+        if !plan.accepted {
+            let lifecycle_report = self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::Noop,
+                false,
+                "temporal_memory_graph_write_rejected",
+            )?;
+            return Ok(TemporalMemoryGraphMutationReport {
+                accepted: false,
+                operation: plan.operation,
+                node_count: plan.node_count,
+                edge_count: plan.edge_count,
+                backlink_count: plan.backlink_count,
+                revision_count: plan.revision_count,
+                index_count: 0,
+                index_revision: None,
+                gate_failures: plan.gate_failures,
+                transaction: None,
+                lifecycle_report,
+            });
+        }
+
+        let planned = temporal_memory_graph_plan_mutations(
+            &plan,
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+        )?;
+        let TemporalMemoryGraphPlannedMutations {
+            mutations,
+            index_count,
+            index_revision,
+        } = planned;
+        let changed_count = plan
+            .node_count
+            .saturating_add(plan.edge_count)
+            .saturating_add(plan.backlink_count)
+            .saturating_add(plan.revision_count)
+            .saturating_add(index_count);
+        let extra_payload = [
+            ("node_count", plan.node_count.to_string()),
+            ("edge_count", plan.edge_count.to_string()),
+            ("backlink_count", plan.backlink_count.to_string()),
+            ("revision_count", plan.revision_count.to_string()),
+            ("index_count", index_count.to_string()),
+            ("index_revision", index_revision.clone()),
+            ("gate_failures", plan.gate_failures.join(",")),
+        ];
+        let (lifecycle_report, transaction) = self.commit_memory_write_transaction(
+            lifecycle,
+            "memory_graph.write",
+            RuntimeLifecycleEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEffect::RunMaintenance,
+            true,
+            "temporal_memory_graph_write_committed",
+            &extra_payload,
+            mutations,
+            changed_count,
+        )?;
+
+        Ok(TemporalMemoryGraphMutationReport {
+            accepted: true,
+            operation: plan.operation,
+            node_count: plan.node_count,
+            edge_count: plan.edge_count,
+            backlink_count: plan.backlink_count,
+            revision_count: plan.revision_count,
+            index_count,
+            index_revision: Some(index_revision),
+            gate_failures: plan.gate_failures,
+            transaction: Some(transaction),
+            lifecycle_report,
         })
     }
 
@@ -1959,6 +2796,8 @@ impl MemoryRuntime {
         let self_model_store = platform.self_model_store();
         let private_doc_store = platform.private_doc_store();
         let private_garden_store = platform.private_garden_store();
+        let planning_private_garden_store =
+            PlanningPrivateGardenStore::new(private_garden_store.as_ref());
         let private_garden_self_work = match run_private_garden_governance(
             http,
             governance_llm,
@@ -1968,7 +2807,7 @@ impl MemoryRuntime {
                 execution_state_store: execution_state_store.as_ref(),
                 self_model_store: self_model_store.as_ref(),
                 private_doc_store: private_doc_store.as_ref(),
-                private_garden_store: private_garden_store.as_ref(),
+                private_garden_store: &planning_private_garden_store,
             },
             PrivateGardenGovernanceInput {
                 chat_id: &self.config.scope.chat_id,
@@ -1991,14 +2830,17 @@ impl MemoryRuntime {
                 deletes,
                 manifest,
             } => {
-                record_private_garden_derived_memory_refs(
-                    platform,
+                let mut mutations = planning_private_garden_store.into_mutations()?;
+                mutations.extend(plan_private_garden_derived_memory_ref_mutations(
                     &self.config.memory_space_id,
                     &self.config.subject_id,
                     &request.turn,
                     &manifest,
                     self.config.clock.now_secs(),
-                )?;
+                )?);
+                if !mutations.is_empty() {
+                    self.commit_memory_mutation_batch("post_turn.private_garden", mutations)?;
+                }
                 PostTurnPrivateGardenReport::applied_with_manifest(writes, moves, deletes, manifest)
             }
         };
@@ -2018,7 +2860,7 @@ impl MemoryRuntime {
         let long_term_refresh = if semantic_refresh_allowed {
             let draft_admission_policy =
                 self.long_term_draft_admission_policy(self.config.clock.now_secs())?;
-            let outcome = run_long_term_memory_refresh(
+            let outcome = self.run_long_term_memory_refresh_transactional(
                 http,
                 governance_llm,
                 LongTermMemoryRefreshContext {
@@ -2036,17 +2878,7 @@ impl MemoryRuntime {
                 &self.config.scope.chat_id,
                 pressure,
                 self.memory_profile(),
-            );
-            outcome.persist(extraction_state_store.as_ref(), &self.config.scope.chat_id);
-            if let LongTermMemoryRefreshOutcome::Processed { apply_report, .. } = &outcome {
-                record_long_term_extraction_derived_memory_refs(
-                    platform,
-                    &self.config.subject_id,
-                    &apply_report.accepted_upserts,
-                    &apply_report.accepted_skill_writes,
-                    self.config.clock.now_secs(),
-                )?;
-            }
+            )?;
             Some(outcome)
         } else {
             None
@@ -2990,13 +3822,63 @@ impl MemoryRuntime {
         Ok(finished)
     }
 
-    fn record_lifecycle_event(
+    fn planned_lifecycle_store_event(
+        &self,
+        transaction_id: &str,
+        transaction_operation: &str,
+        kind: RuntimeLifecycleEventKind,
+        effect: RuntimeLifecycleEffect,
+        report: &RuntimeLifecycleReport,
+        extra_payload: &[(&str, String)],
+    ) -> Result<MemoryStoreEvent> {
+        let event = self.build_lifecycle_event(kind, effect, report, extra_payload);
+        let event_value = serde_json::to_value(&event)
+            .map_err(|error| Error::config("runtime_lifecycle_event", error.to_string()))?;
+        let content_hash = stable_hash_json(&event_value)?;
+        let kind = match event.kind {
+            RuntimeLifecycleEventKind::RuntimeLifecycle => MemoryStoreEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEventKind::OperatorAction => MemoryStoreEventKind::OperatorAction,
+        };
+        let mut store_event = MemoryStoreEvent::new(
+            event.event_id,
+            kind,
+            StoreEventScope::system(event.operation.as_str()),
+            event.timestamp_unix_secs,
+        )
+        .with_plane("runtime_lifecycle")
+        .with_record_key(event.operation.as_str())
+        .with_content_hash(content_hash)
+        .with_payload("runtime_operation", event.operation.as_str())
+        .with_payload("operation", transaction_operation)
+        .with_payload("trigger", event.trigger.as_str())
+        .with_payload("disposition", event.disposition.as_str())
+        .with_payload("effect", event.effect.as_str())
+        .with_payload("profile", event.profile.as_str())
+        .with_payload("mode", event.mode.as_str())
+        .with_payload(
+            "pressure",
+            format!("{:?}", event.pressure).to_ascii_lowercase(),
+        )
+        .with_payload("reason", event.reason)
+        .with_payload("result", event.result)
+        .with_payload("error_stage", event.error_stage.unwrap_or_default())
+        .with_payload("transaction_id", transaction_id);
+        for (key, value) in event.payload {
+            if key == "operation" || key == "transaction_id" {
+                continue;
+            }
+            store_event = store_event.with_payload(key, value);
+        }
+        Ok(store_event)
+    }
+
+    fn build_lifecycle_event(
         &self,
         kind: RuntimeLifecycleEventKind,
         effect: RuntimeLifecycleEffect,
         report: &RuntimeLifecycleReport,
         extra_payload: &[(&str, String)],
-    ) -> Result<()> {
+    ) -> RuntimeLifecycleEvent {
         let mut event =
             RuntimeLifecycleEvent::from_report(kind, effect, report, self.config.clock.now_secs())
                 .with_payload("changed", report.changed.to_string())
@@ -3076,6 +3958,17 @@ impl MemoryRuntime {
         for (key, value) in extra_payload {
             event = event.with_payload(*key, value.clone());
         }
+        event
+    }
+
+    fn record_lifecycle_event(
+        &self,
+        kind: RuntimeLifecycleEventKind,
+        effect: RuntimeLifecycleEffect,
+        report: &RuntimeLifecycleReport,
+        extra_payload: &[(&str, String)],
+    ) -> Result<()> {
+        let event = self.build_lifecycle_event(kind, effect, report, extra_payload);
         self.config
             .platform
             .runtime_lifecycle_event_sink()
@@ -4328,6 +5221,15 @@ struct RuntimeRecallGraphReport {
     rerank: GraphRecallRerankReport,
     gate: TemporalMemoryGraphGateReport,
     compact_graph: CompactMemoryGraph,
+    index_report: MemoryGraphRecallIndexReport,
+}
+
+#[derive(Default)]
+struct PersistentRecallGraphLoadReport {
+    graph: Option<TemporalMemoryGraphBuildReport>,
+    indexes: Vec<MemoryGraphRecallIndexDoc>,
+    failures: Vec<String>,
+    index_failures: Vec<String>,
 }
 
 fn build_recall_graph_report(
@@ -4335,7 +5237,103 @@ fn build_recall_graph_report(
     procedural_hits: &[crate::RuntimeSkillHit],
     working: &crate::WorkingRecallInspection,
     now_secs: u64,
+    persistent_graph: &PersistentRecallGraphLoadReport,
+    expansion_budget: GraphRecallExpansionBudget,
 ) -> RuntimeRecallGraphReport {
+    let mut evidence = runtime_recall_graph_evidence(procedural_hits, working, now_secs);
+    let candidate_ids = retain_unique_recall_graph_evidence(&mut evidence);
+    let graph = build_temporal_memory_graph_from_evidence(evidence);
+    let mut index_report = build_memory_graph_index_report(
+        &persistent_graph.indexes,
+        &persistent_graph.index_failures,
+        &candidate_ids,
+        persistent_graph.graph.is_some(),
+    );
+    append_index_report_failures(&mut index_report, &persistent_graph.failures);
+    if let Some(persistent) = persistent_graph.graph.as_ref() {
+        if candidate_ids.iter().any(|candidate_id| {
+            persistent
+                .nodes
+                .iter()
+                .any(|node| node.node_id == *candidate_id)
+        }) {
+            let indexed_graph = if index_report.used {
+                filter_temporal_graph_for_index(
+                    persistent,
+                    &candidate_ids,
+                    &index_report.expanded_node_ids,
+                )
+            } else {
+                persistent.clone()
+            };
+            record_index_graph_input_counts(&mut index_report, &indexed_graph);
+            let rerank = rerank_recall_with_temporal_graph(
+                query,
+                candidate_ids.clone(),
+                &indexed_graph,
+                expansion_budget,
+            );
+            let mut gate = indexed_graph.gate.clone();
+            gate.failures.extend(persistent_graph.failures.clone());
+            gate.failures.sort();
+            gate.failures.dedup();
+            gate.high_confidence_projection_allowed =
+                gate.high_confidence_projection_allowed && gate.failures.is_empty();
+            return RuntimeRecallGraphReport {
+                rerank,
+                gate,
+                compact_graph: indexed_graph.compact_graph,
+                index_report,
+            };
+        }
+    }
+
+    let rerank = rerank_recall_with_temporal_graph(query, candidate_ids, &graph, expansion_budget);
+    record_index_graph_input_counts(&mut index_report, &graph);
+    let mut gate = graph.gate;
+    gate.high_confidence_projection_allowed = false;
+    if !gate
+        .failures
+        .iter()
+        .any(|failure| failure == "runtime_recall_graph_preview_not_persistent")
+    {
+        gate.failures
+            .push("runtime_recall_graph_preview_not_persistent".to_string());
+    }
+    if persistent_graph.graph.is_some()
+        && !gate
+            .failures
+            .iter()
+            .any(|failure| failure == "persistent_recall_graph_source_anchor_missing")
+    {
+        gate.failures
+            .push("persistent_recall_graph_source_anchor_missing".to_string());
+    }
+    gate.failures.extend(persistent_graph.failures.clone());
+    gate.failures.sort();
+    gate.failures.dedup();
+    RuntimeRecallGraphReport {
+        rerank,
+        gate,
+        compact_graph: graph.compact_graph,
+        index_report,
+    }
+}
+
+fn runtime_recall_graph_candidate_ids(
+    procedural_hits: &[crate::RuntimeSkillHit],
+    working: &crate::WorkingRecallInspection,
+    now_secs: u64,
+) -> Vec<String> {
+    let mut evidence = runtime_recall_graph_evidence(procedural_hits, working, now_secs);
+    retain_unique_recall_graph_evidence(&mut evidence)
+}
+
+fn runtime_recall_graph_evidence(
+    procedural_hits: &[crate::RuntimeSkillHit],
+    working: &crate::WorkingRecallInspection,
+    now_secs: u64,
+) -> Vec<MemoryGraphEvidence> {
     let mut evidence = Vec::new();
     for hit in procedural_hits {
         push_recall_graph_evidence(
@@ -4362,7 +5360,10 @@ fn build_recall_graph_report(
     if let Some(report) = working.task_recall_report.as_ref() {
         append_recall_report_graph_evidence(&mut evidence, report, now_secs);
     }
+    evidence
+}
 
+fn retain_unique_recall_graph_evidence(evidence: &mut Vec<MemoryGraphEvidence>) -> Vec<String> {
     let mut candidate_ids = Vec::new();
     evidence.retain(|item| {
         if candidate_ids
@@ -4375,23 +5376,245 @@ fn build_recall_graph_report(
             true
         }
     });
-    let graph = build_temporal_memory_graph_from_evidence(evidence);
-    let rerank = rerank_recall_with_temporal_graph(query, candidate_ids, &graph);
-    let mut gate = graph.gate;
-    gate.high_confidence_projection_allowed = false;
-    if !gate
-        .failures
+    candidate_ids
+}
+
+fn build_memory_graph_index_report(
+    indexes: &[MemoryGraphRecallIndexDoc],
+    index_failures: &[String],
+    candidate_ids: &[String],
+    persistent_graph_available: bool,
+) -> MemoryGraphRecallIndexReport {
+    let mut failures = index_failures.to_vec();
+    let matched = indexes
         .iter()
-        .any(|failure| failure == "runtime_recall_graph_preview_not_persistent")
-    {
-        gate.failures
-            .push("runtime_recall_graph_preview_not_persistent".to_string());
-        gate.failures.sort();
+        .filter(|index| {
+            candidate_ids
+                .iter()
+                .any(|candidate_id| candidate_id == &index.source_anchor_id)
+        })
+        .collect::<Vec<_>>();
+    if persistent_graph_available && indexes.is_empty() {
+        failures.push("memory_graph_index_missing".to_string());
+    } else if persistent_graph_available && matched.is_empty() {
+        failures.push("memory_graph_index_source_anchor_missing".to_string());
     }
-    RuntimeRecallGraphReport {
-        rerank,
-        gate,
-        compact_graph: graph.compact_graph,
+
+    failures.sort();
+    failures.dedup();
+
+    let mut source_anchor_ids = matched
+        .iter()
+        .map(|index| index.source_anchor_id.clone())
+        .collect::<Vec<_>>();
+    source_anchor_ids.sort();
+    source_anchor_ids.dedup();
+    let mut expanded_node_ids = matched
+        .iter()
+        .flat_map(|index| index.neighbor_node_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    expanded_node_ids.sort();
+    expanded_node_ids.dedup();
+    let mut unmatched_source_anchor_ids = candidate_ids
+        .iter()
+        .filter(|candidate_id| {
+            !source_anchor_ids
+                .iter()
+                .any(|source_anchor_id| source_anchor_id == *candidate_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    unmatched_source_anchor_ids.sort();
+    unmatched_source_anchor_ids.dedup();
+    let mut revisions = matched
+        .iter()
+        .map(|index| index.revision_id.clone())
+        .collect::<Vec<_>>();
+    revisions.sort();
+    revisions.dedup();
+    let used = !source_anchor_ids.is_empty() && index_failures.is_empty();
+
+    MemoryGraphRecallIndexReport {
+        owner: "bm-sdk::MemoryRuntime".to_string(),
+        used,
+        fallback_full_scan: persistent_graph_available && !used,
+        source_candidate_count: candidate_ids.len(),
+        matched_source_anchor_count: source_anchor_ids.len(),
+        source_anchor_ids,
+        unmatched_source_anchor_ids,
+        indexed_neighbor_count: expanded_node_ids.len(),
+        expanded_node_ids,
+        index_doc_count: indexes.len(),
+        index_revision: revisions.first().cloned(),
+        filtered_node_count: 0,
+        filtered_edge_count: 0,
+        filtered_backlink_count: 0,
+        failures,
+    }
+}
+
+fn record_index_graph_input_counts(
+    index_report: &mut MemoryGraphRecallIndexReport,
+    graph: &TemporalMemoryGraphBuildReport,
+) {
+    index_report.filtered_node_count = graph.nodes.len();
+    index_report.filtered_edge_count = graph.edges.len();
+    index_report.filtered_backlink_count = graph.backlinks.len();
+}
+
+fn append_index_report_failures(
+    index_report: &mut MemoryGraphRecallIndexReport,
+    failures: &[String],
+) {
+    index_report.failures.extend(failures.iter().cloned());
+    index_report.failures.sort();
+    index_report.failures.dedup();
+}
+
+fn indexed_node_keys(
+    source_candidate_ids: &[String],
+    indexes: &[MemoryGraphRecallIndexDoc],
+) -> Vec<String> {
+    let mut keys = source_candidate_ids.to_vec();
+    for index in indexes {
+        push_unique_string(&mut keys, index.source_anchor_id.clone());
+        for neighbor in &index.neighbor_node_ids {
+            push_unique_string(&mut keys, neighbor.clone());
+        }
+    }
+    keys
+}
+
+fn indexed_edge_keys(indexes: &[MemoryGraphRecallIndexDoc]) -> Vec<String> {
+    let mut keys = Vec::new();
+    for index in indexes {
+        for edge_id in &index.edge_ids {
+            push_unique_string(&mut keys, edge_id.clone());
+        }
+    }
+    keys
+}
+
+fn indexed_backlink_keys(indexes: &[MemoryGraphRecallIndexDoc]) -> Vec<String> {
+    let mut keys = Vec::new();
+    for index in indexes {
+        for key in &index.evidence_backlink_keys {
+            push_unique_string(&mut keys, key.clone());
+        }
+    }
+    keys
+}
+
+fn bounded_persistent_graph_keys(
+    keys: Vec<String>,
+    max_loaded: usize,
+    failure: &str,
+    failures: &mut Vec<String>,
+) -> Vec<String> {
+    let mut unique = Vec::new();
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        if seen.insert(key.clone()) {
+            unique.push(key);
+        }
+    }
+    if unique.len() > max_loaded {
+        failures.push(failure.to_string());
+        unique.truncate(max_loaded);
+    }
+    unique
+}
+
+fn filter_temporal_graph_for_index(
+    graph: &TemporalMemoryGraphBuildReport,
+    candidate_ids: &[String],
+    expanded_node_ids: &[String],
+) -> TemporalMemoryGraphBuildReport {
+    let mut allowed_node_ids = candidate_ids.to_vec();
+    for node_id in expanded_node_ids {
+        if !allowed_node_ids.iter().any(|existing| existing == node_id) {
+            allowed_node_ids.push(node_id.clone());
+        }
+    }
+
+    let nodes = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            allowed_node_ids
+                .iter()
+                .any(|allowed| allowed == &node.node_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let edges = graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            allowed_node_ids
+                .iter()
+                .any(|allowed| allowed == &edge.from_node_id)
+                && allowed_node_ids
+                    .iter()
+                    .any(|allowed| allowed == &edge.to_node_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let evidence_refs = nodes
+        .iter()
+        .flat_map(|node| node.evidence_refs.iter())
+        .chain(edges.iter().flat_map(|edge| edge.evidence_refs.iter()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let backlinks = graph
+        .backlinks
+        .iter()
+        .filter(|backlink| {
+            evidence_refs
+                .iter()
+                .any(|evidence_ref| evidence_ref == &backlink.source_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    build_temporal_memory_graph_from_parts(nodes, edges, backlinks)
+}
+
+fn read_persistent_graph_docs_by_keys<T>(
+    store_platform: &StorePlatform,
+    namespace: &str,
+    keys: &[String],
+    failures: &mut Vec<String>,
+) -> Vec<T>
+where
+    T: DeserializeOwned,
+{
+    let docs = match store_platform.read_json_docs_by_keys(namespace, keys) {
+        Ok(docs) => docs,
+        Err(error) => {
+            failures.push(format!(
+                "persistent_graph_namespace_read_failed:{namespace}:{}",
+                error.stage()
+            ));
+            return Vec::new();
+        }
+    };
+    let mut records = Vec::new();
+    for doc in docs {
+        let key = doc.key;
+        match serde_json::from_value::<T>(doc.value) {
+            Ok(record) => records.push(record),
+            Err(error) => failures.push(format!(
+                "persistent_graph_doc_decode_failed:{namespace}:{key}:{error}"
+            )),
+        }
+    }
+    records
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
     }
 }
 
@@ -4474,6 +5697,307 @@ fn push_recall_graph_evidence(
         supports: Vec::new(),
         supersedes: None,
     });
+}
+
+fn build_eval_recall_candidate(
+    candidate_id: &str,
+    recall: &MemoryRecallReport,
+    include_graph_neighbors: bool,
+    include_score_breakdown: bool,
+) -> MemoryEvalRecallCandidate {
+    let node = recall
+        .compact_graph
+        .nodes
+        .iter()
+        .find(|node| node.node_id == candidate_id);
+    let evidence_refs = node
+        .map(|node| node.evidence_refs.clone())
+        .unwrap_or_default();
+    let graph_neighbor_ids = if include_graph_neighbors {
+        recall
+            .compact_graph
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                if edge.from_node_id == candidate_id {
+                    Some(edge.to_node_id.clone())
+                } else if edge.to_node_id == candidate_id {
+                    Some(edge.from_node_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let score_breakdown = if include_score_breakdown {
+        recall
+            .graph_rerank
+            .score_breakdown
+            .iter()
+            .find(|score| score.candidate_id == candidate_id)
+            .cloned()
+            .unwrap_or_else(|| GraphRecallCandidateScore {
+                candidate_id: candidate_id.to_string(),
+                ..GraphRecallCandidateScore::default()
+            })
+    } else {
+        GraphRecallCandidateScore {
+            candidate_id: candidate_id.to_string(),
+            ..GraphRecallCandidateScore::default()
+        }
+    };
+    MemoryEvalRecallCandidate {
+        candidate_id: candidate_id.to_string(),
+        source: evidence_refs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string()),
+        evidence_refs,
+        graph_neighbor_ids,
+        score_breakdown,
+    }
+}
+
+fn build_eval_recall_metrics(
+    request: &MemoryEvalRecallRequest,
+    source_candidate_count: usize,
+    expanded_candidate_count: usize,
+    selected_candidate_count: usize,
+    rendered_candidate_count: usize,
+    reranked_candidates: &[MemoryEvalRecallCandidate],
+) -> MemoryEvalRecallMetrics {
+    let expected_evidence_refs = request
+        .benchmark_context
+        .as_ref()
+        .map(|context| context.expected_evidence_refs.as_slice())
+        .unwrap_or(&[]);
+    let recall_at_k = [5_usize, 10, 20, 50]
+        .into_iter()
+        .map(|k| {
+            let matched_evidence_refs =
+                matched_evidence_for_k(expected_evidence_refs, reranked_candidates, k);
+            let missing_evidence_refs =
+                missing_from_expected(expected_evidence_refs, &matched_evidence_refs);
+            MemoryEvalRecallAtK {
+                k,
+                any_evidence_hit: !matched_evidence_refs.is_empty(),
+                all_evidence_hit: !expected_evidence_refs.is_empty()
+                    && missing_evidence_refs.is_empty(),
+                matched_evidence_refs,
+                missing_evidence_refs,
+            }
+        })
+        .collect::<Vec<_>>();
+    let requested_matched = matched_evidence_for_k(
+        expected_evidence_refs,
+        reranked_candidates,
+        request.k.max(1),
+    );
+    let requested_missing = missing_from_expected(expected_evidence_refs, &requested_matched);
+
+    MemoryEvalRecallMetrics {
+        requested_k: request.k.max(1),
+        source_candidate_count,
+        expanded_candidate_count,
+        selected_candidate_count,
+        rendered_candidate_count,
+        expected_evidence_count: expected_evidence_refs.len(),
+        recall_at_k,
+        any_evidence_hit: !requested_matched.is_empty(),
+        all_evidence_hit: !expected_evidence_refs.is_empty() && requested_missing.is_empty(),
+        mrr_bps: mean_reciprocal_rank_bps(expected_evidence_refs, reranked_candidates),
+        question_type: request
+            .benchmark_context
+            .as_ref()
+            .map(|context| context.question_type.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn matched_evidence_for_k(
+    expected_evidence_refs: &[String],
+    candidates: &[MemoryEvalRecallCandidate],
+    k: usize,
+) -> Vec<String> {
+    let mut matched = Vec::new();
+    for expected in expected_evidence_refs {
+        if candidates.iter().take(k).any(|candidate| {
+            candidate
+                .evidence_refs
+                .iter()
+                .any(|actual| actual == expected)
+        }) {
+            matched.push(expected.clone());
+        }
+    }
+    matched
+}
+
+fn missing_evidence_for_k(
+    expected_evidence_refs: &[String],
+    candidates: &[MemoryEvalRecallCandidate],
+    k: usize,
+) -> Vec<String> {
+    let matched = matched_evidence_for_k(expected_evidence_refs, candidates, k);
+    missing_from_expected(expected_evidence_refs, &matched)
+}
+
+fn missing_from_expected(expected_evidence_refs: &[String], matched: &[String]) -> Vec<String> {
+    expected_evidence_refs
+        .iter()
+        .filter(|expected| !matched.iter().any(|item| item == *expected))
+        .cloned()
+        .collect()
+}
+
+fn mean_reciprocal_rank_bps(
+    expected_evidence_refs: &[String],
+    candidates: &[MemoryEvalRecallCandidate],
+) -> u32 {
+    if expected_evidence_refs.is_empty() {
+        return 0;
+    }
+    candidates
+        .iter()
+        .position(|candidate| {
+            candidate.evidence_refs.iter().any(|actual| {
+                expected_evidence_refs
+                    .iter()
+                    .any(|expected| expected == actual)
+            })
+        })
+        .map(|index| 10_000_u32 / (index as u32 + 1))
+        .unwrap_or(0)
+}
+
+fn build_eval_recall_privacy_report(recall: &MemoryRecallReport) -> MemoryEvalRecallPrivacyReport {
+    let failures = recall
+        .graph_gate
+        .failures
+        .iter()
+        .filter(|failure| failure.contains("raw_soul_private"))
+        .cloned()
+        .collect::<Vec<_>>();
+    MemoryEvalRecallPrivacyReport {
+        passed: failures.is_empty(),
+        private_raw_candidate_count: failures.len() as u32,
+        redacted_candidate_ids: Vec::new(),
+        failures,
+    }
+}
+
+fn render_eval_recall_block_preview(candidates: &[MemoryEvalRecallCandidate]) -> String {
+    candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{} [{}]",
+                candidate.candidate_id,
+                candidate.evidence_refs.join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct TemporalMemoryGraphPlannedMutations {
+    mutations: Vec<StoreMutation>,
+    index_count: usize,
+    index_revision: String,
+}
+
+fn temporal_memory_graph_plan_mutations(
+    plan: &MemoryGraphWritePlan,
+    memory_space_id: &str,
+    subject_id: &str,
+) -> Result<TemporalMemoryGraphPlannedMutations> {
+    let mut mutations = Vec::new();
+    for node in &plan.nodes {
+        mutations.push(StoreMutation::PutJson {
+            namespace: "memory_graph_nodes".to_string(),
+            key: node.node_id.clone(),
+            value: serde_json::to_value(node)
+                .map_err(|error| Error::config("memory_graph_node_serialize", error.to_string()))?,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: "memory_graph".to_string(),
+            record_key: node.node_id.clone(),
+        });
+    }
+    for edge in &plan.edges {
+        mutations.push(StoreMutation::PutJson {
+            namespace: "memory_graph_edges".to_string(),
+            key: edge.edge_id.clone(),
+            value: serde_json::to_value(edge)
+                .map_err(|error| Error::config("memory_graph_edge_serialize", error.to_string()))?,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: "memory_graph".to_string(),
+            record_key: edge.edge_id.clone(),
+        });
+    }
+    for backlink in &plan.backlinks {
+        mutations.push(StoreMutation::PutJson {
+            namespace: "memory_graph_backlinks".to_string(),
+            key: memory_graph_backlink_key(&backlink.source_kind, &backlink.source_id),
+            value: serde_json::to_value(backlink).map_err(|error| {
+                Error::config("memory_graph_backlink_serialize", error.to_string())
+            })?,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: "memory_graph".to_string(),
+            record_key: backlink.source_id.clone(),
+        });
+    }
+    let revision = serde_json::json!({
+        "operation": plan.operation,
+        "memory_space_id": memory_space_id,
+        "subject_id": subject_id,
+        "node_count": plan.node_count,
+        "edge_count": plan.edge_count,
+        "backlink_count": plan.backlink_count,
+        "gate_failures": plan.gate_failures,
+    });
+    let index_revision = format!(
+        "revision:{}",
+        stable_hash_json(&revision).map_err(|error| {
+            Error::config("memory_graph_revision_fingerprint", error.to_string())
+        })?
+    );
+    mutations.push(StoreMutation::PutJson {
+        namespace: "memory_graph_revisions".to_string(),
+        key: index_revision.clone(),
+        value: revision,
+        event_kind: MemoryStoreEventKind::MemoryWrite,
+        plane: "memory_graph".to_string(),
+        record_key: "memory_graph_revision".to_string(),
+    });
+    let index_docs = build_memory_graph_recall_index_docs(
+        "bm-sdk::MemoryRuntime",
+        &index_revision,
+        memory_space_id,
+        subject_id,
+        &plan.nodes,
+        &plan.edges,
+        &plan.backlinks,
+    );
+    let index_count = index_docs.len();
+    for index_doc in index_docs {
+        mutations.push(StoreMutation::PutJson {
+            namespace: "memory_graph_indexes".to_string(),
+            key: index_doc.index_id.clone(),
+            value: serde_json::to_value(index_doc).map_err(|error| {
+                Error::config("memory_graph_index_serialize", error.to_string())
+            })?,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: "memory_graph".to_string(),
+            record_key: "memory_graph_index".to_string(),
+        });
+    }
+    Ok(TemporalMemoryGraphPlannedMutations {
+        mutations,
+        index_count,
+        index_revision,
+    })
 }
 
 fn first_non_empty<'a>(values: &[&'a str]) -> &'a str {
@@ -5783,60 +7307,6 @@ fn candidate_semantically_accepted(
         })
 }
 
-fn record_long_term_extraction_derived_memory_refs(
-    platform: &dyn Platform,
-    subject_id: &str,
-    accepted_upserts: &[LongTermMemoryDraft],
-    accepted_skill_writes: &[RuntimeSkillWrite],
-    now_secs: u64,
-) -> Result<()> {
-    let transcript_store = platform.conversation_transcript_store();
-    for draft in accepted_upserts {
-        let Some(stable_id) = draft.stable_id() else {
-            continue;
-        };
-        let plane = long_term_extraction_derived_plane(draft);
-        let store_key = match plane {
-            DerivedMemoryPlane::SharedFact => format!("shared_fact:{stable_id}"),
-            _ => format!("long_term:{stable_id}"),
-        };
-        for source in transcript_evidence_refs_from_display_citations(
-            &draft.supporting_citations,
-            subject_id,
-            None,
-        ) {
-            append_candidate_derived_memory_ref(
-                transcript_store.as_ref(),
-                plane,
-                &store_key,
-                subject_id,
-                source,
-                now_secs,
-            )?;
-        }
-    }
-    for write in accepted_skill_writes {
-        let name = write.name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let store_key = format!("runtime_skill:{name}");
-        for source in
-            transcript_evidence_refs_from_display_citations(&write.citations, subject_id, None)
-        {
-            append_candidate_derived_memory_ref(
-                transcript_store.as_ref(),
-                DerivedMemoryPlane::ProceduralSkill,
-                &store_key,
-                subject_id,
-                source,
-                now_secs,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 fn long_term_extraction_derived_plane(draft: &LongTermMemoryDraft) -> DerivedMemoryPlane {
     if draft.kind == LongTermMemoryKind::Fact
         || matches!(draft.source_scope, Some(LongTermMemorySourceScope::World))
@@ -5847,18 +7317,16 @@ fn long_term_extraction_derived_plane(draft: &LongTermMemoryDraft) -> DerivedMem
     }
 }
 
-fn record_private_garden_derived_memory_refs(
-    platform: &dyn Platform,
+fn plan_private_garden_derived_memory_ref_mutations(
     memory_space_id: &str,
     subject_id: &str,
     turn: &CanonicalTurnDelta,
     manifest: &[PrivateGardenGovernanceManifestEntry],
     now_secs: u64,
-) -> Result<()> {
+) -> Result<Vec<StoreMutation>> {
     if manifest.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let transcript_store = platform.conversation_transcript_store();
     let conversation_id = turn
         .conversation
         .conversation_id
@@ -5873,27 +7341,74 @@ fn record_private_garden_derived_memory_refs(
         subject_id: Some(subject_id.to_string()),
         authority: Some(MemoryEvidenceAuthority::PrivateGardenInternal),
     };
-    for entry in manifest {
-        append_candidate_derived_memory_ref(
-            transcript_store.as_ref(),
-            DerivedMemoryPlane::PrivateGarden,
-            &entry.store_key,
-            subject_id,
-            source.clone(),
-            now_secs,
-        )?;
-    }
-    Ok(())
+    manifest
+        .iter()
+        .map(|entry| {
+            candidate_derived_memory_ref_mutation(
+                DerivedMemoryPlane::PrivateGarden,
+                &entry.store_key,
+                subject_id,
+                source.clone(),
+                now_secs,
+            )
+        })
+        .collect()
 }
 
-fn record_candidate_derived_memory_refs(
-    platform: &dyn Platform,
+fn plan_long_term_extraction_derived_memory_ref_mutations(
+    subject_id: &str,
+    accepted_upserts: &[LongTermMemoryDraft],
+    accepted_skill_writes: &[RuntimeSkillWrite],
+    now_secs: u64,
+) -> Result<Vec<StoreMutation>> {
+    let mut mutations = Vec::new();
+    for draft in accepted_upserts {
+        let Some(stable_id) = draft.stable_id() else {
+            continue;
+        };
+        let plane = long_term_extraction_derived_plane(draft);
+        let store_key = match plane {
+            DerivedMemoryPlane::SharedFact => format!("shared_fact:{stable_id}"),
+            _ => format!("long_term:{stable_id}"),
+        };
+        for source in transcript_evidence_refs_from_display_citations(
+            &draft.supporting_citations,
+            subject_id,
+            None,
+        ) {
+            mutations.push(candidate_derived_memory_ref_mutation(
+                plane, &store_key, subject_id, source, now_secs,
+            )?);
+        }
+    }
+    for write in accepted_skill_writes {
+        let name = write.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let store_key = format!("runtime_skill:{name}");
+        for source in
+            transcript_evidence_refs_from_display_citations(&write.citations, subject_id, None)
+        {
+            mutations.push(candidate_derived_memory_ref_mutation(
+                DerivedMemoryPlane::ProceduralSkill,
+                &store_key,
+                subject_id,
+                source,
+                now_secs,
+            )?);
+        }
+    }
+    Ok(mutations)
+}
+
+fn plan_candidate_derived_memory_ref_mutations(
     subject_id: &str,
     accepted_draft_pairs: &[(&MemoryWriteCandidate, LongTermMemoryDraft)],
     accepted_skill_pairs: &[(&MemoryWriteCandidate, RuntimeSkillWrite)],
     now_secs: u64,
-) -> Result<()> {
-    let transcript_store = platform.conversation_transcript_store();
+) -> Result<Vec<StoreMutation>> {
+    let mut mutations = Vec::new();
     for (candidate, draft) in accepted_draft_pairs {
         let Some(stable_id) = draft.stable_id() else {
             continue;
@@ -5909,14 +7424,9 @@ fn record_candidate_derived_memory_refs(
             _ => format!("long_term:{stable_id}"),
         };
         for source in candidate_transcript_evidence_refs(candidate, subject_id) {
-            append_candidate_derived_memory_ref(
-                transcript_store.as_ref(),
-                plane,
-                &store_key,
-                subject_id,
-                source,
-                now_secs,
-            )?;
+            mutations.push(candidate_derived_memory_ref_mutation(
+                plane, &store_key, subject_id, source, now_secs,
+            )?);
         }
     }
     for (candidate, write) in accepted_skill_pairs {
@@ -5926,26 +7436,24 @@ fn record_candidate_derived_memory_refs(
         }
         let store_key = format!("runtime_skill:{name}");
         for source in candidate_transcript_evidence_refs(candidate, subject_id) {
-            append_candidate_derived_memory_ref(
-                transcript_store.as_ref(),
+            mutations.push(candidate_derived_memory_ref_mutation(
                 DerivedMemoryPlane::ProceduralSkill,
                 &store_key,
                 subject_id,
                 source,
                 now_secs,
-            )?;
+            )?);
         }
     }
-    Ok(())
+    Ok(mutations)
 }
 
-fn record_soul_handoff_derived_memory_refs(
-    platform: &dyn Platform,
+fn plan_soul_handoff_derived_memory_ref_mutations(
     subject_id: &str,
     candidates: &[MemoryWriteCandidate],
     now_secs: u64,
-) -> Result<()> {
-    let transcript_store = platform.conversation_transcript_store();
+) -> Result<Vec<StoreMutation>> {
+    let mut mutations = Vec::new();
     for candidate in candidates {
         let target = candidate.governed_target().unwrap_or(&candidate.target);
         let surface = match target {
@@ -5962,42 +7470,900 @@ fn record_soul_handoff_derived_memory_refs(
             format!("soul_handoff:{surface}:{candidate_id}")
         };
         for source in candidate_transcript_evidence_refs(candidate, subject_id) {
-            append_candidate_derived_memory_ref(
-                transcript_store.as_ref(),
+            mutations.push(candidate_derived_memory_ref_mutation(
                 DerivedMemoryPlane::SoulCandidateHandoff,
                 &store_key,
                 subject_id,
                 source,
                 now_secs,
-            )?;
+            )?);
         }
     }
-    Ok(())
+    Ok(mutations)
 }
 
-fn append_candidate_derived_memory_ref(
-    transcript_store: &dyn bm_core::memory::ConversationTranscriptStore,
+fn candidate_derived_memory_ref_mutation(
     plane: DerivedMemoryPlane,
     store_key: &str,
     subject_id: &str,
     source: TranscriptEvidenceRef,
     now_secs: u64,
-) -> Result<()> {
+) -> Result<StoreMutation> {
     let key = ConversationKey::new(
         source.memory_space_id.clone(),
         source.channel_id.clone(),
         source.conversation_id.clone(),
     )?;
-    transcript_store.append_derived_memory_ref(
-        &key,
-        &DerivedMemoryRef {
-            plane,
-            store_key: store_key.to_string(),
-            subject_id: Some(subject_id.to_string()),
-            source,
-            created_at: now_secs,
-        },
-    )
+    let derived = DerivedMemoryRef {
+        plane,
+        store_key: store_key.to_string(),
+        subject_id: Some(subject_id.to_string()),
+        source,
+        created_at: now_secs,
+    };
+    validate_planned_derived_ref_matches_key(&key, &derived)?;
+    let record_key = transcript_derived_ref_storage_key(&key, &derived)?;
+    Ok(StoreMutation::PutJson {
+        namespace: "conversation_transcript_derived_ref".to_string(),
+        key: record_key.clone(),
+        value: serde_json::to_value(&derived).map_err(|error| {
+            Error::config("conversation_transcript_derived_ref", error.to_string())
+        })?,
+        event_kind: MemoryStoreEventKind::MemoryWrite,
+        plane: "conversation_transcript_derived_ref".to_string(),
+        record_key,
+    })
+}
+
+fn validate_planned_derived_ref_matches_key(
+    key: &ConversationKey,
+    derived: &DerivedMemoryRef,
+) -> Result<()> {
+    if derived.source.memory_space_id != key.memory_space_id
+        || derived.source.channel_id != key.channel_id
+        || derived.source.conversation_id != key.conversation_id
+    {
+        return Err(Error::config(
+            "conversation_transcript_derived_ref",
+            "derived memory ref source does not match conversation key",
+        ));
+    }
+    if derived.source.turn_id.trim().is_empty() {
+        return Err(Error::config(
+            "conversation_transcript_derived_ref",
+            "derived memory ref turn_id must not be empty",
+        ));
+    }
+    if derived.store_key.trim().is_empty() {
+        return Err(Error::config(
+            "conversation_transcript_derived_ref",
+            "derived memory ref store_key must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn transcript_derived_ref_storage_key(
+    key: &ConversationKey,
+    derived: &DerivedMemoryRef,
+) -> Result<String> {
+    let payload = serde_json::to_string(derived)
+        .map_err(|error| Error::config("conversation_transcript_derived_ref", error.to_string()))?;
+    Ok(format!(
+        "{}__derived_ref__{}",
+        key.storage_key(),
+        stable_hash_hex(&payload)
+    ))
+}
+
+fn memory_write_transaction_report(
+    operation: &str,
+    planned_mutations: usize,
+    changed_count: usize,
+    report: StoreMutationBatchReport,
+) -> MemoryWriteTransactionReport {
+    MemoryWriteTransactionReport {
+        transaction_id: report.transaction_id,
+        operation: operation.to_string(),
+        planned_mutations,
+        committed_mutations: report.mutations,
+        event_ids: report.event_ids,
+        budget_report: report.budget_report,
+        changed_count,
+        partial_write: false,
+    }
+}
+
+struct MemoryLongTermExtractionTransactionPlan {
+    changed: usize,
+    shared_fact_governance: Option<SharedMemoryWriteOutcome>,
+    procedural_evolution: Option<SkillEvolutionReport>,
+    mutations: Vec<StoreMutation>,
+}
+
+struct PlanningLongTermMemoryStore<'a> {
+    base: &'a dyn LongTermMemoryStore,
+    changes: Mutex<BTreeMap<String, Option<LongTermMemoryEntry>>>,
+}
+
+impl<'a> PlanningLongTermMemoryStore<'a> {
+    fn new(base: &'a dyn LongTermMemoryStore) -> Self {
+        Self {
+            base,
+            changes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn into_mutations(self) -> Result<Vec<StoreMutation>> {
+        let changes = self
+            .changes
+            .into_inner()
+            .map_err(|_| Error::config("long_term_control_plan", "planning store poisoned"))?;
+        changes
+            .into_iter()
+            .map(|(id, value)| match value {
+                Some(entry) => Ok(StoreMutation::PutJson {
+                    namespace: "long_term".to_string(),
+                    key: id.clone(),
+                    value: serde_json::to_value(&entry).map_err(|error| {
+                        Error::config("long_term_control_plan", error.to_string())
+                    })?,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "long_term".to_string(),
+                    record_key: id,
+                }),
+                None => Ok(StoreMutation::DeleteJson {
+                    namespace: "long_term".to_string(),
+                    key: id.clone(),
+                    event_kind: MemoryStoreEventKind::MemoryDelete,
+                    plane: "long_term".to_string(),
+                    record_key: id,
+                }),
+            })
+            .collect()
+    }
+}
+
+impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
+    fn upsert_many(&self, drafts: &[LongTermMemoryDraft], now_secs: u64) -> Result<usize> {
+        let mut changed = 0usize;
+        for draft in drafts {
+            let Some(normalized) = draft.normalized() else {
+                continue;
+            };
+            let Some(id) = normalized.stable_id() else {
+                continue;
+            };
+            let prior = LongTermMemoryStore::get(self, &id)?;
+            let observed_at = normalized.observed_at.unwrap_or(now_secs);
+            let last_confirmed_at = normalized
+                .last_confirmed_at
+                .unwrap_or(observed_at)
+                .max(observed_at);
+            let entry = LongTermMemoryEntry {
+                id: id.clone(),
+                kind: normalized.kind,
+                topic: normalized.topic,
+                content: normalized.content,
+                keywords: normalized.keywords,
+                source_chat_id: normalized.source_chat_id,
+                source_type: normalized.source_type.unwrap_or_default(),
+                source_scope: normalized.source_scope.unwrap_or_default(),
+                confidence: normalized.confidence.unwrap_or_default(),
+                freshness: normalized.freshness.unwrap_or_default(),
+                stale_hint: normalized.stale_hint.unwrap_or_default(),
+                supporting_citations: normalized.supporting_citations,
+                evidence_count: normalized.evidence_count.unwrap_or(0),
+                created_at: prior
+                    .as_ref()
+                    .map(|entry| entry.created_at)
+                    .unwrap_or(now_secs),
+                updated_at: now_secs,
+                observed_at,
+                last_confirmed_at,
+                source_revision: normalized.source_revision.unwrap_or(0),
+                last_used_at: prior.as_ref().map(|entry| entry.last_used_at).unwrap_or(0),
+            };
+            self.changes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(id, Some(entry));
+            changed = changed.saturating_add(1);
+        }
+        Ok(changed)
+    }
+
+    fn recall(
+        &self,
+        query: &str,
+        source_chat_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryEntry>> {
+        let mut entries = LongTermMemoryStore::list(self, usize::MAX)?;
+        let query = query.trim().to_lowercase();
+        if !query.is_empty() {
+            entries.retain(|entry| {
+                entry.topic.to_lowercase().contains(&query)
+                    || entry.content.to_lowercase().contains(&query)
+                    || entry
+                        .keywords
+                        .iter()
+                        .any(|keyword| keyword.to_lowercase().contains(&query))
+            });
+        }
+        entries.sort_by(|left, right| {
+            let left_scope = usize::from(left.source_chat_id.as_deref() == source_chat_id);
+            let right_scope = usize::from(right.source_chat_id.as_deref() == source_chat_id);
+            right_scope
+                .cmp(&left_scope)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
+        if limit > 0 {
+            entries.truncate(limit);
+        }
+        Ok(entries)
+    }
+
+    fn get(&self, id: &str) -> Result<Option<LongTermMemoryEntry>> {
+        if let Some(value) = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .cloned()
+        {
+            return Ok(value);
+        }
+        self.base.get(id)
+    }
+
+    fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
+        let mut map = self
+            .base
+            .list(usize::MAX)?
+            .into_iter()
+            .map(|entry| (entry.id.clone(), entry))
+            .collect::<BTreeMap<_, _>>();
+        for (id, value) in self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+        {
+            match value {
+                Some(entry) => {
+                    map.insert(id.clone(), entry.clone());
+                }
+                None => {
+                    map.remove(id);
+                }
+            }
+        }
+        let mut entries = map.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        if limit > 0 {
+            entries.truncate(limit);
+        }
+        Ok(entries)
+    }
+
+    fn delete(&self, id: &str) -> Result<bool> {
+        if LongTermMemoryStore::get(self, id)?.is_some() {
+            self.changes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(id.to_string(), None);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn delete_slot(&self, slot: &bm_core::memory::LongTermMemorySlot) -> Result<bool> {
+        let Some(id) = slot.stable_id() else {
+            return Ok(false);
+        };
+        LongTermMemoryStore::delete(self, &id)
+    }
+
+    fn count(&self) -> Result<usize> {
+        Ok(LongTermMemoryStore::list(self, usize::MAX)?.len())
+    }
+}
+
+struct PlanningSkillStorage<'a> {
+    base: &'a dyn SkillStorage,
+    changes: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
+}
+
+impl<'a> PlanningSkillStorage<'a> {
+    fn new(base: &'a dyn SkillStorage) -> Self {
+        Self {
+            base,
+            changes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn into_mutations(self) -> Result<Vec<RuntimeSkillStorageMutation>> {
+        let changes = self.changes.into_inner().map_err(|_| {
+            Error::config("skill_transaction_plan", "planning skill store poisoned")
+        })?;
+        Ok(changes
+            .into_iter()
+            .map(|(name, value)| match value {
+                Some(content) => RuntimeSkillStorageMutation::Upsert { name, content },
+                None => RuntimeSkillStorageMutation::Delete { name },
+            })
+            .collect())
+    }
+}
+
+impl SkillStorage for PlanningSkillStorage<'_> {
+    fn list_names(&self) -> Result<Vec<String>> {
+        let mut names = self
+            .base
+            .list_names()?
+            .into_iter()
+            .map(|name| (name, ()))
+            .collect::<BTreeMap<_, ()>>();
+        for (name, value) in self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+        {
+            if value.is_some() {
+                names.insert(name.clone(), ());
+            } else {
+                names.remove(name);
+            }
+        }
+        Ok(names.into_keys().collect())
+    }
+
+    fn read(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(value) = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(name)
+        {
+            return Ok(value.clone().unwrap_or_default());
+        }
+        self.base.read(name)
+    }
+
+    fn write(&self, name: &str, content: &[u8]) -> Result<()> {
+        self.changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(name.to_string(), Some(content.to_vec()));
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> Result<()> {
+        self.changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(name.to_string(), None);
+        Ok(())
+    }
+}
+
+struct PlanningPrivateGardenStore<'a> {
+    base: &'a dyn PrivateGardenStore,
+    changes: Mutex<BTreeMap<String, Option<PrivateGardenDoc>>>,
+}
+
+impl<'a> PlanningPrivateGardenStore<'a> {
+    fn new(base: &'a dyn PrivateGardenStore) -> Self {
+        Self {
+            base,
+            changes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn into_mutations(self) -> Result<Vec<StoreMutation>> {
+        let changes = self
+            .changes
+            .into_inner()
+            .map_err(|_| Error::config("private_garden_plan", "planning store poisoned"))?;
+        changes
+            .into_iter()
+            .map(|(key, value)| match value {
+                Some(doc) => Ok(StoreMutation::PutJson {
+                    namespace: "private_garden".to_string(),
+                    key: key.clone(),
+                    value: serde_json::to_value(&doc)
+                        .map_err(|error| Error::config("private_garden_plan", error.to_string()))?,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "private_garden".to_string(),
+                    record_key: key,
+                }),
+                None => Ok(StoreMutation::DeleteJson {
+                    namespace: "private_garden".to_string(),
+                    key: key.clone(),
+                    event_kind: MemoryStoreEventKind::MemoryDelete,
+                    plane: "private_garden".to_string(),
+                    record_key: key,
+                }),
+            })
+            .collect()
+    }
+}
+
+impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
+    fn list(&self, chat_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
+        let mut records = self
+            .base
+            .list(chat_id, usize::MAX)?
+            .into_iter()
+            .map(|record| (record.path.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let prefix = private_garden_storage_key_prefix(chat_id);
+        for (key, value) in self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+        {
+            let path = key.trim_start_matches(&prefix).to_string();
+            match value {
+                Some(doc) => {
+                    records.insert(path, private_garden_doc_record(doc));
+                }
+                None => {
+                    records.remove(&path);
+                }
+            }
+        }
+        let mut rows = records.into_values().collect::<Vec<_>>();
+        rows.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        if limit > 0 {
+            rows.truncate(limit);
+        }
+        Ok(rows)
+    }
+
+    fn read(&self, chat_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
+        let path = normalize_private_garden_doc_path(doc_path)?;
+        let key = private_garden_storage_key(chat_id, &path);
+        if let Some(value) = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(value);
+        }
+        self.base.read(chat_id, &path)
+    }
+
+    fn write(
+        &self,
+        chat_id: &str,
+        doc_path: &str,
+        content: &str,
+        now_secs: u64,
+    ) -> Result<PrivateGardenDocRecord> {
+        if content.len() > PRIVATE_GARDEN_MAX_DOC_BYTES {
+            return Err(Error::config(
+                "private_garden_write",
+                format!(
+                    "document size {} exceeds {}",
+                    content.len(),
+                    PRIVATE_GARDEN_MAX_DOC_BYTES
+                ),
+            ));
+        }
+        let path = normalize_private_garden_doc_path(doc_path)?;
+        let revision = PrivateGardenStore::read(self, chat_id, &path)?
+            .map(|doc| doc.revision.saturating_add(1))
+            .unwrap_or(1);
+        let doc = PrivateGardenDoc {
+            path: path.clone(),
+            content: content.to_string(),
+            updated_at: now_secs,
+            revision,
+        };
+        self.changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                private_garden_storage_key(chat_id, &path),
+                Some(doc.clone()),
+            );
+        Ok(private_garden_doc_record(&doc))
+    }
+
+    fn move_doc(
+        &self,
+        chat_id: &str,
+        from_path: &str,
+        to_path: &str,
+        now_secs: u64,
+    ) -> Result<Option<PrivateGardenDocRecord>> {
+        let from = normalize_private_garden_doc_path(from_path)?;
+        let to = normalize_private_garden_doc_path(to_path)?;
+        let Some(doc) = PrivateGardenStore::read(self, chat_id, &from)? else {
+            return Ok(None);
+        };
+        PrivateGardenStore::delete(self, chat_id, &from)?;
+        Ok(Some(PrivateGardenStore::write(
+            self,
+            chat_id,
+            &to,
+            &doc.content,
+            now_secs,
+        )?))
+    }
+
+    fn delete(&self, chat_id: &str, doc_path: &str) -> Result<bool> {
+        let path = normalize_private_garden_doc_path(doc_path)?;
+        if PrivateGardenStore::read(self, chat_id, &path)?.is_some() {
+            self.changes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(private_garden_storage_key(chat_id, &path), None);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+fn private_garden_storage_key_prefix(chat_id: &str) -> String {
+    format!("{chat_id}::")
+}
+
+fn private_garden_storage_key(chat_id: &str, doc_path: &str) -> String {
+    format!("{}{doc_path}", private_garden_storage_key_prefix(chat_id))
+}
+
+fn private_garden_doc_record(doc: &PrivateGardenDoc) -> PrivateGardenDocRecord {
+    PrivateGardenDocRecord {
+        path: doc.path.clone(),
+        updated_at: doc.updated_at,
+        revision: doc.revision,
+        bytes: doc.content.len(),
+        preview: doc.content.chars().take(160).collect(),
+    }
+}
+
+struct PlanningLongTermControlStore<'a> {
+    base: &'a dyn LongTermMemoryControlStore,
+    revisions: Mutex<BTreeMap<String, LongTermMemoryControlRevision>>,
+    tombstones: Mutex<BTreeMap<String, LongTermMemoryTombstone>>,
+    policies: Mutex<BTreeMap<String, Option<MemoryLongTermGovernancePolicy>>>,
+    audits: Mutex<BTreeMap<String, LongTermMemoryControlAuditEvent>>,
+}
+
+impl<'a> PlanningLongTermControlStore<'a> {
+    fn new(base: &'a dyn LongTermMemoryControlStore) -> Self {
+        Self {
+            base,
+            revisions: Mutex::new(BTreeMap::new()),
+            tombstones: Mutex::new(BTreeMap::new()),
+            policies: Mutex::new(BTreeMap::new()),
+            audits: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn into_mutations(self) -> Result<Vec<StoreMutation>> {
+        let mut mutations = Vec::new();
+        for (id, revision) in self
+            .revisions
+            .into_inner()
+            .map_err(|_| Error::config("long_term_control_plan", "revision plan poisoned"))?
+        {
+            mutations.push(planned_json_put(
+                LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                id,
+                &revision,
+                MemoryStoreEventKind::MemoryControl,
+            )?);
+        }
+        for (record_id, tombstone) in self
+            .tombstones
+            .into_inner()
+            .map_err(|_| Error::config("long_term_control_plan", "tombstone plan poisoned"))?
+        {
+            mutations.push(planned_json_put(
+                LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                record_id,
+                &tombstone,
+                MemoryStoreEventKind::MemoryDelete,
+            )?);
+        }
+        for (policy_id, value) in self
+            .policies
+            .into_inner()
+            .map_err(|_| Error::config("long_term_control_plan", "policy plan poisoned"))?
+        {
+            match value {
+                Some(policy) => mutations.push(planned_json_put(
+                    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+                    policy_id,
+                    &policy,
+                    MemoryStoreEventKind::MemoryPolicy,
+                )?),
+                None => mutations.push(StoreMutation::DeleteJson {
+                    namespace: LONG_TERM_GOVERNANCE_POLICY_NAMESPACE.to_string(),
+                    key: policy_id.clone(),
+                    event_kind: MemoryStoreEventKind::MemoryPolicy,
+                    plane: LONG_TERM_GOVERNANCE_POLICY_NAMESPACE.to_string(),
+                    record_key: policy_id,
+                }),
+            }
+        }
+        for (id, audit) in self
+            .audits
+            .into_inner()
+            .map_err(|_| Error::config("long_term_control_plan", "audit plan poisoned"))?
+        {
+            mutations.push(planned_json_put(
+                LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                id,
+                &audit,
+                MemoryStoreEventKind::MemoryControl,
+            )?);
+        }
+        Ok(mutations)
+    }
+}
+
+impl LongTermMemoryControlStore for PlanningLongTermControlStore<'_> {
+    fn put_long_term_control_revision(
+        &self,
+        revision: &LongTermMemoryControlRevision,
+    ) -> Result<()> {
+        self.revisions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(revision.revision_id.clone(), revision.clone());
+        Ok(())
+    }
+
+    fn list_long_term_control_revisions(
+        &self,
+        record_id: &str,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryControlRevision>> {
+        let mut revisions = self
+            .base
+            .list_long_term_control_revisions(record_id, usize::MAX)?;
+        revisions.extend(
+            self.revisions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .filter(|revision| revision.record_id == record_id)
+                .cloned(),
+        );
+        revisions.sort_by(|left, right| {
+            right
+                .revision
+                .cmp(&left.revision)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+        });
+        if limit > 0 {
+            revisions.truncate(limit);
+        }
+        Ok(revisions)
+    }
+
+    fn put_long_term_control_tombstone(&self, tombstone: &LongTermMemoryTombstone) -> Result<()> {
+        self.tombstones
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(tombstone.record_id.clone(), tombstone.clone());
+        Ok(())
+    }
+
+    fn get_long_term_control_tombstone(
+        &self,
+        record_id: &str,
+    ) -> Result<Option<LongTermMemoryTombstone>> {
+        if let Some(tombstone) = self
+            .tombstones
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(record_id)
+            .cloned()
+        {
+            return Ok(Some(tombstone));
+        }
+        self.base.get_long_term_control_tombstone(record_id)
+    }
+
+    fn list_long_term_control_tombstones(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryTombstone>> {
+        let mut tombstones = self.base.list_long_term_control_tombstones(usize::MAX)?;
+        tombstones.extend(
+            self.tombstones
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .cloned(),
+        );
+        tombstones.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        tombstones.dedup_by(|left, right| left.record_id == right.record_id);
+        if limit > 0 {
+            tombstones.truncate(limit);
+        }
+        Ok(tombstones)
+    }
+
+    fn put_long_term_governance_policy(
+        &self,
+        policy: &MemoryLongTermGovernancePolicy,
+    ) -> Result<()> {
+        self.policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(policy.policy_id.clone(), Some(policy.clone()));
+        Ok(())
+    }
+
+    fn delete_long_term_governance_policy(&self, policy_id: &str) -> Result<bool> {
+        let existed = self
+            .list_long_term_governance_policies(usize::MAX)?
+            .iter()
+            .any(|policy| policy.policy_id == policy_id);
+        if existed {
+            self.policies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(policy_id.to_string(), None);
+        }
+        Ok(existed)
+    }
+
+    fn list_long_term_governance_policies(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MemoryLongTermGovernancePolicy>> {
+        let mut map = self
+            .base
+            .list_long_term_governance_policies(usize::MAX)?
+            .into_iter()
+            .map(|policy| (policy.policy_id.clone(), policy))
+            .collect::<BTreeMap<_, _>>();
+        for (policy_id, value) in self
+            .policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+        {
+            match value {
+                Some(policy) => {
+                    map.insert(policy_id.clone(), policy.clone());
+                }
+                None => {
+                    map.remove(policy_id);
+                }
+            }
+        }
+        let mut policies = map.into_values().collect::<Vec<_>>();
+        policies.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        if limit > 0 {
+            policies.truncate(limit);
+        }
+        Ok(policies)
+    }
+
+    fn put_long_term_control_audit(&self, event: &LongTermMemoryControlAuditEvent) -> Result<()> {
+        self.audits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(event.event_id.clone(), event.clone());
+        Ok(())
+    }
+
+    fn list_long_term_control_audit(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryControlAuditEvent>> {
+        let mut events = self.base.list_long_term_control_audit(usize::MAX)?;
+        events.extend(
+            self.audits
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .cloned(),
+        );
+        events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        if limit > 0 {
+            events.truncate(limit);
+        }
+        Ok(events)
+    }
+}
+
+fn planned_json_put<T: serde::Serialize>(
+    namespace: &str,
+    key: String,
+    value: &T,
+    event_kind: MemoryStoreEventKind,
+) -> Result<StoreMutation> {
+    Ok(StoreMutation::PutJson {
+        namespace: namespace.to_string(),
+        key: key.clone(),
+        value: serde_json::to_value(value)
+            .map_err(|error| Error::config("long_term_control_plan", error.to_string()))?,
+        event_kind,
+        plane: namespace.to_string(),
+        record_key: key,
+    })
+}
+
+fn long_term_extraction_state_mutation(
+    chat_id: &str,
+    previous: Option<&LongTermMemoryExtractionState>,
+    next: &LongTermMemoryExtractionState,
+) -> Result<Option<StoreMutation>> {
+    if previous == Some(next) {
+        return Ok(None);
+    }
+    if next == &LongTermMemoryExtractionState::default() {
+        return Ok(Some(StoreMutation::DeleteJson {
+            namespace: "long_term_extraction_state".to_string(),
+            key: chat_id.to_string(),
+            event_kind: MemoryStoreEventKind::MemoryDelete,
+            plane: "long_term_extraction_state".to_string(),
+            record_key: chat_id.to_string(),
+        }));
+    }
+    Ok(Some(StoreMutation::PutJson {
+        namespace: "long_term_extraction_state".to_string(),
+        key: chat_id.to_string(),
+        value: serde_json::to_value(next)
+            .map_err(|error| Error::config("long_term_extraction_state", error.to_string()))?,
+        event_kind: MemoryStoreEventKind::MemoryWrite,
+        plane: "long_term_extraction_state".to_string(),
+        record_key: chat_id.to_string(),
+    }))
+}
+
+fn runtime_skill_storage_mutations_to_store_mutations(
+    mutations: &[RuntimeSkillStorageMutation],
+) -> Vec<StoreMutation> {
+    mutations
+        .iter()
+        .map(|mutation| match mutation {
+            RuntimeSkillStorageMutation::Upsert { name, content } => StoreMutation::PutBlob {
+                namespace: "skills".to_string(),
+                key: name.clone(),
+                value: content.clone(),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "skills".to_string(),
+                record_key: name.clone(),
+            },
+            RuntimeSkillStorageMutation::Delete { name } => StoreMutation::DeleteBlob {
+                namespace: "skills".to_string(),
+                key: name.clone(),
+                event_kind: MemoryStoreEventKind::MemoryDelete,
+                plane: "skills".to_string(),
+                record_key: name.clone(),
+            },
+        })
+        .collect()
+}
+
+fn stable_hash_json(value: &serde_json::Value) -> Result<String> {
+    let encoded = serde_json::to_string(value)
+        .map_err(|error| Error::config("stable_hash_json", error.to_string()))?;
+    Ok(stable_hash_hex(&encoded))
+}
+
+fn stable_hash_hex<T: Hash>(value: &T) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn candidate_transcript_evidence_refs(

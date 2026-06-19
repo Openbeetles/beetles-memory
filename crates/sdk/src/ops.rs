@@ -17,14 +17,21 @@ use bm_core::memory::{
     TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRedactionReportItem,
     TranscriptRepairReport, TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
 };
-use bm_core::memory::{CompactMemoryGraph, GraphRecallRerankReport, TemporalMemoryGraphGateReport};
+use bm_core::memory::{
+    CompactMemoryGraph, EvidenceBacklink, GraphRecallCandidateScore, GraphRecallRerankReport,
+    MemoryGraphEdge, MemoryGraphNode, TemporalMemoryGraphGateReport,
+};
 use bm_core::skills::{
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentSkillRecallHit,
     AgentToolExperienceGovernanceReport, AgentToolExperienceStatusReport, AgentToolHint,
     AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
     AgentToolUsageFeedback, ProjectedAgentSkillHint,
 };
-use bm_core::{budget::RuntimeRetentionQuotaReport, feature_gate::ProfileId};
+use bm_core::{
+    budget::{RuntimeBudgetReport, RuntimeRetentionQuotaReport},
+    feature_gate::ProfileId,
+};
+use bm_store::StoreMutationBudgetReport;
 
 use crate::{
     ContinuitySnapshot, ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome,
@@ -218,6 +225,7 @@ pub struct MemoryWriteReport {
     pub operation: &'static str,
     pub reason: String,
     pub lifecycle_report: RuntimeLifecycleReport,
+    pub transaction: Option<MemoryWriteTransactionReport>,
     pub semantic_governance: Option<PostTurnSemanticGovernanceReport>,
     pub shared_fact_governance: Option<bm_core::memory::SharedMemoryWriteOutcome>,
     pub procedural_evolution: Option<SkillEvolutionReport>,
@@ -225,11 +233,147 @@ pub struct MemoryWriteReport {
     pub agent_tool_experience: Option<AgentToolExperienceGovernanceReport>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryWriteTransactionReport {
+    pub transaction_id: String,
+    pub operation: String,
+    pub planned_mutations: usize,
+    pub committed_mutations: usize,
+    pub event_ids: Vec<String>,
+    pub budget_report: StoreMutationBudgetReport,
+    pub changed_count: usize,
+    pub partial_write: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryRecallRequest {
     pub query: String,
     pub limit: usize,
     pub tool_registry_refs: Vec<AgentToolRegistryRef>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallBenchmarkContext {
+    pub suite: String,
+    pub question_id: String,
+    pub question_type: String,
+    pub expected_evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryEvalRecallRequest {
+    pub query: String,
+    pub k: usize,
+    pub include_expanded_candidates: bool,
+    pub include_graph_neighbors: bool,
+    pub include_score_breakdown: bool,
+    pub include_missing_evidence: bool,
+    pub benchmark_context: Option<MemoryEvalRecallBenchmarkContext>,
+    pub tool_registry_refs: Vec<AgentToolRegistryRef>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallCandidate {
+    pub candidate_id: String,
+    pub source: String,
+    pub evidence_refs: Vec<String>,
+    pub graph_neighbor_ids: Vec<String>,
+    pub score_breakdown: GraphRecallCandidateScore,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallAtK {
+    pub k: usize,
+    pub matched_evidence_refs: Vec<String>,
+    pub missing_evidence_refs: Vec<String>,
+    pub any_evidence_hit: bool,
+    pub all_evidence_hit: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallMetrics {
+    pub requested_k: usize,
+    pub source_candidate_count: usize,
+    pub expanded_candidate_count: usize,
+    pub selected_candidate_count: usize,
+    pub rendered_candidate_count: usize,
+    pub expected_evidence_count: usize,
+    pub recall_at_k: Vec<MemoryEvalRecallAtK>,
+    pub any_evidence_hit: bool,
+    pub all_evidence_hit: bool,
+    pub mrr_bps: u32,
+    pub question_type: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallPrivacyReport {
+    pub passed: bool,
+    pub private_raw_candidate_count: u32,
+    pub redacted_candidate_ids: Vec<String>,
+    pub failures: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryGraphRecallIndexReport {
+    pub owner: String,
+    pub used: bool,
+    pub fallback_full_scan: bool,
+    pub source_candidate_count: usize,
+    pub matched_source_anchor_count: usize,
+    pub source_anchor_ids: Vec<String>,
+    pub unmatched_source_anchor_ids: Vec<String>,
+    pub expanded_node_ids: Vec<String>,
+    pub indexed_neighbor_count: usize,
+    pub index_doc_count: usize,
+    pub index_revision: Option<String>,
+    pub filtered_node_count: usize,
+    pub filtered_edge_count: usize,
+    pub filtered_backlink_count: usize,
+    pub failures: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryEvalRecallReport {
+    pub query: String,
+    pub benchmark_context: Option<MemoryEvalRecallBenchmarkContext>,
+    pub source_candidates: Vec<MemoryEvalRecallCandidate>,
+    pub expanded_candidates: Vec<MemoryEvalRecallCandidate>,
+    pub graph_neighbors: Vec<String>,
+    pub reranked_candidates: Vec<MemoryEvalRecallCandidate>,
+    pub selected_candidates: Vec<MemoryEvalRecallCandidate>,
+    pub rendered_block_preview: String,
+    pub metrics: MemoryEvalRecallMetrics,
+    pub missing_evidence_refs: Vec<String>,
+    pub budget_report: RuntimeBudgetReport,
+    pub privacy_report: MemoryEvalRecallPrivacyReport,
+    pub graph_index_report: MemoryGraphRecallIndexReport,
+    pub graph_rerank: GraphRecallRerankReport,
+    pub graph_gate: TemporalMemoryGraphGateReport,
+    pub compact_graph: CompactMemoryGraph,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug)]
+pub struct TemporalMemoryGraphWriteRequest {
+    pub operation: String,
+    pub nodes: Vec<MemoryGraphNode>,
+    pub edges: Vec<MemoryGraphEdge>,
+    pub backlinks: Vec<EvidenceBacklink>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TemporalMemoryGraphMutationReport {
+    pub accepted: bool,
+    pub operation: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub backlink_count: usize,
+    pub revision_count: usize,
+    pub index_count: usize,
+    pub index_revision: Option<String>,
+    pub gate_failures: Vec<String>,
+    pub transaction: Option<MemoryWriteTransactionReport>,
+    pub lifecycle_report: RuntimeLifecycleReport,
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +384,7 @@ pub struct MemoryRecallReport {
     pub agent_tool_hints: Vec<AgentToolHint>,
     pub tool_experience_status: AgentToolExperienceStatusReport,
     pub working: WorkingRecallInspection,
+    pub graph_index_report: MemoryGraphRecallIndexReport,
     pub graph_rerank: GraphRecallRerankReport,
     pub graph_gate: TemporalMemoryGraphGateReport,
     pub compact_graph: CompactMemoryGraph,

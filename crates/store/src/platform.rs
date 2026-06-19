@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +27,8 @@ use crate::{
     embedded::EmbeddedStoreEngine, enforce_event_key_budget, enforce_logical_key_budget,
     file::FileStoreEngine, store_budget_error, InMemoryStoreEngine, MemoryStoreEvent,
     MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget, StoreEngine,
-    StoreEventLog, StoreEventScope, StoreOpenReport, StoreRepairReport, StoreSchemaManifest,
+    StoreEventLog, StoreEventScope, StoreMutation, StoreMutationBatch, StoreMutationBatchReport,
+    StoreMutationBudgetReport, StoreOpenReport, StoreRepairReport, StoreSchemaManifest,
     StoreSnapshot, StoreSnapshotBlob, StoreSnapshotExportReport, StoreSnapshotImportReport,
     StoreSnapshotJsonDoc, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
 };
@@ -120,6 +121,250 @@ impl StorePlatform {
         &self.open_report
     }
 
+    pub fn commit_mutation_batch(
+        &self,
+        batch: StoreMutationBatch,
+    ) -> Result<StoreMutationBatchReport> {
+        if batch.transaction_id.trim().is_empty() {
+            return Err(Error::config(
+                "memory_write_transaction_preflight_failed",
+                "transaction_id is required",
+            ));
+        }
+        if batch.operation.trim().is_empty() {
+            return Err(Error::config(
+                "memory_write_transaction_preflight_failed",
+                "operation is required",
+            ));
+        }
+
+        let mut json_docs = self
+            .snapshot_json_map()
+            .map_err(memory_write_transaction_preflight_error)?;
+        let mut blob_docs = self
+            .snapshot_blob_map()
+            .map_err(memory_write_transaction_preflight_error)?;
+        let mut events = self
+            .engine
+            .read_events()
+            .map_err(memory_write_transaction_preflight_error)?;
+
+        let initial_json_docs = json_docs.clone();
+        let initial_blob_docs = blob_docs.clone();
+        let initial_event_count = events.len();
+        let mut changed_json = BTreeSet::new();
+        let mut changed_blobs = BTreeSet::new();
+
+        for mutation in &batch.mutations {
+            match mutation {
+                StoreMutation::PutJson {
+                    namespace,
+                    key,
+                    value,
+                    event_kind,
+                    plane,
+                    record_key,
+                } => {
+                    ensure_batch_json_namespace(namespace)?;
+                    enforce_logical_key_budget(
+                        self.config.capacity,
+                        namespace,
+                        key,
+                        "memory_write_transaction",
+                    )
+                    .map_err(memory_write_transaction_preflight_error)?;
+                    let event = self.build_batch_event(
+                        &batch,
+                        event_kind.clone(),
+                        plane,
+                        record_key,
+                        stable_hash_json(value)
+                            .map_err(memory_write_transaction_preflight_error)?,
+                    );
+                    enforce_event_key_budget(
+                        self.config.capacity,
+                        &event,
+                        "memory_write_transaction",
+                    )
+                    .map_err(memory_write_transaction_preflight_error)?;
+                    json_docs.insert((namespace.clone(), key.clone()), value.clone());
+                    changed_json.insert((namespace.clone(), key.clone()));
+                    events.push(event);
+                }
+                StoreMutation::DeleteJson {
+                    namespace,
+                    key,
+                    event_kind,
+                    plane,
+                    record_key,
+                } => {
+                    ensure_batch_json_namespace(namespace)?;
+                    enforce_logical_key_budget(
+                        self.config.capacity,
+                        namespace,
+                        key,
+                        "memory_write_transaction",
+                    )
+                    .map_err(memory_write_transaction_preflight_error)?;
+                    if json_docs
+                        .remove(&(namespace.clone(), key.clone()))
+                        .is_some()
+                    {
+                        let event = self.build_batch_event(
+                            &batch,
+                            event_kind.clone(),
+                            plane,
+                            record_key,
+                            stable_hash_hex(&("delete", namespace, key)),
+                        );
+                        enforce_event_key_budget(
+                            self.config.capacity,
+                            &event,
+                            "memory_write_transaction",
+                        )
+                        .map_err(memory_write_transaction_preflight_error)?;
+                        changed_json.insert((namespace.clone(), key.clone()));
+                        events.push(event);
+                    }
+                }
+                StoreMutation::PutBlob {
+                    namespace,
+                    key,
+                    value,
+                    event_kind,
+                    plane,
+                    record_key,
+                } => {
+                    ensure_batch_blob_namespace(namespace)?;
+                    enforce_logical_key_budget(
+                        self.config.capacity,
+                        namespace,
+                        key,
+                        "memory_write_transaction",
+                    )
+                    .map_err(memory_write_transaction_preflight_error)?;
+                    let event = self.build_batch_event(
+                        &batch,
+                        event_kind.clone(),
+                        plane,
+                        record_key,
+                        stable_hash_hex(value),
+                    );
+                    enforce_event_key_budget(
+                        self.config.capacity,
+                        &event,
+                        "memory_write_transaction",
+                    )
+                    .map_err(memory_write_transaction_preflight_error)?;
+                    blob_docs.insert((namespace.clone(), key.clone()), value.clone());
+                    changed_blobs.insert((namespace.clone(), key.clone()));
+                    events.push(event);
+                }
+                StoreMutation::DeleteBlob {
+                    namespace,
+                    key,
+                    event_kind,
+                    plane,
+                    record_key,
+                } => {
+                    ensure_batch_blob_namespace(namespace)?;
+                    enforce_logical_key_budget(
+                        self.config.capacity,
+                        namespace,
+                        key,
+                        "memory_write_transaction",
+                    )
+                    .map_err(memory_write_transaction_preflight_error)?;
+                    if blob_docs
+                        .remove(&(namespace.clone(), key.clone()))
+                        .is_some()
+                    {
+                        let event = self.build_batch_event(
+                            &batch,
+                            event_kind.clone(),
+                            plane,
+                            record_key,
+                            stable_hash_hex(&("delete", namespace, key)),
+                        );
+                        enforce_event_key_budget(
+                            self.config.capacity,
+                            &event,
+                            "memory_write_transaction",
+                        )
+                        .map_err(memory_write_transaction_preflight_error)?;
+                        changed_blobs.insert((namespace.clone(), key.clone()));
+                        events.push(event);
+                    }
+                }
+                StoreMutation::AppendEvent { event } => {
+                    enforce_event_key_budget(
+                        self.config.capacity,
+                        event,
+                        "memory_write_transaction",
+                    )
+                    .map_err(memory_write_transaction_preflight_error)?;
+                    events.push(event.clone());
+                }
+            }
+        }
+
+        validate_mutation_batch_budget(self.config.capacity, &json_docs, &blob_docs, &events)
+            .map_err(memory_write_transaction_preflight_error)?;
+        validate_unique_event_ids(&events)?;
+
+        let final_json_docs = json_docs
+            .into_iter()
+            .map(|((namespace, key), value)| StoreSnapshotJsonDoc {
+                namespace,
+                key,
+                value,
+            })
+            .collect::<Vec<_>>();
+        let final_blobs = blob_docs
+            .into_iter()
+            .map(|((namespace, key), value)| StoreSnapshotBlob {
+                namespace,
+                key,
+                value,
+            })
+            .collect::<Vec<_>>();
+        let event_ids = events[initial_event_count..]
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect::<Vec<_>>();
+        let budget_report = mutation_budget_report(
+            self.config.capacity,
+            &initial_json_docs,
+            &initial_blob_docs,
+            initial_event_count,
+            &final_json_docs,
+            &final_blobs,
+            events.len(),
+        );
+
+        self.engine
+            .replace_snapshot(
+                JSON_SNAPSHOT_NAMESPACES,
+                BLOB_SNAPSHOT_NAMESPACES,
+                &final_json_docs,
+                &final_blobs,
+                &events,
+            )
+            .map_err(memory_write_transaction_commit_error)?;
+
+        Ok(StoreMutationBatchReport {
+            transaction_id: batch.transaction_id,
+            admitted: true,
+            committed: true,
+            mutations: batch.mutations.len(),
+            events: event_ids.len(),
+            changed_json: changed_json.len(),
+            changed_blobs: changed_blobs.len(),
+            budget_report,
+            event_ids,
+        })
+    }
+
     pub fn into_arc(self) -> Arc<dyn Platform> {
         Arc::new(self)
     }
@@ -127,6 +372,44 @@ impl StorePlatform {
     pub fn export_store_snapshot(&self) -> Result<StoreSnapshot> {
         self.export_store_snapshot_with_report()
             .map(|(snapshot, _report)| snapshot)
+    }
+
+    pub fn read_json_namespace(&self, namespace: &str) -> Result<Vec<StoreSnapshotJsonDoc>> {
+        ensure_json_snapshot_namespace(namespace, "store_json_namespace_read")?;
+        let mut docs = Vec::new();
+        for key in self.engine.list_json_keys(namespace)? {
+            if let Some(value) = self.engine.get_json_value(namespace, &key)? {
+                docs.push(StoreSnapshotJsonDoc {
+                    namespace: namespace.to_string(),
+                    key,
+                    value,
+                });
+            }
+        }
+        Ok(docs)
+    }
+
+    pub fn read_json_docs_by_keys(
+        &self,
+        namespace: &str,
+        keys: &[String],
+    ) -> Result<Vec<StoreSnapshotJsonDoc>> {
+        ensure_json_snapshot_namespace(namespace, "store_json_namespace_read")?;
+        let mut seen = BTreeSet::new();
+        let mut docs = Vec::new();
+        for key in keys {
+            if !seen.insert(key.as_str()) {
+                continue;
+            }
+            if let Some(value) = self.engine.get_json_value(namespace, key)? {
+                docs.push(StoreSnapshotJsonDoc {
+                    namespace: namespace.to_string(),
+                    key: key.clone(),
+                    value,
+                });
+            }
+        }
+        Ok(docs)
     }
 
     pub fn export_store_snapshot_with_report(
@@ -334,6 +617,51 @@ impl StorePlatform {
         .with_content_hash(content_hash)
     }
 
+    fn build_batch_event(
+        &self,
+        batch: &StoreMutationBatch,
+        kind: MemoryStoreEventKind,
+        plane: &str,
+        record_key: &str,
+        content_hash: String,
+    ) -> MemoryStoreEvent {
+        MemoryStoreEvent::new(
+            next_event_id(),
+            kind,
+            batch.scope.clone(),
+            current_unix_secs(),
+        )
+        .with_plane(plane)
+        .with_record_key(record_key)
+        .with_content_hash(content_hash)
+        .with_payload("transaction_id", batch.transaction_id.as_str())
+        .with_payload("operation", batch.operation.as_str())
+    }
+
+    fn snapshot_json_map(&self) -> Result<BTreeMap<(String, String), serde_json::Value>> {
+        let mut json_docs = BTreeMap::new();
+        for namespace in JSON_SNAPSHOT_NAMESPACES {
+            for key in self.engine.list_json_keys(namespace)? {
+                if let Some(value) = self.engine.get_json_value(namespace, &key)? {
+                    json_docs.insert(((*namespace).to_string(), key), value);
+                }
+            }
+        }
+        Ok(json_docs)
+    }
+
+    fn snapshot_blob_map(&self) -> Result<BTreeMap<(String, String), Vec<u8>>> {
+        let mut blobs = BTreeMap::new();
+        for namespace in BLOB_SNAPSHOT_NAMESPACES {
+            for key in self.engine.list_blob_keys(namespace)? {
+                if let Some(value) = self.engine.get_blob(namespace, &key)? {
+                    blobs.insert(((*namespace).to_string(), key), value);
+                }
+            }
+        }
+        Ok(blobs)
+    }
+
     fn emit_runtime_event(&self, operation: &str) -> Result<()> {
         let event = MemoryStoreEvent::new(
             next_event_id(),
@@ -371,6 +699,121 @@ impl StorePlatform {
     }
 }
 
+fn ensure_batch_json_namespace(namespace: &str) -> Result<()> {
+    ensure_json_snapshot_namespace(namespace, "memory_write_transaction_preflight_failed")
+}
+
+fn ensure_json_snapshot_namespace(namespace: &str, stage: &'static str) -> Result<()> {
+    if JSON_SNAPSHOT_NAMESPACES.contains(&namespace) {
+        return Ok(());
+    }
+    Err(Error::config(
+        stage,
+        format!("unsupported json namespace {namespace}"),
+    ))
+}
+
+fn ensure_batch_blob_namespace(namespace: &str) -> Result<()> {
+    if BLOB_SNAPSHOT_NAMESPACES.contains(&namespace) {
+        return Ok(());
+    }
+    Err(Error::config(
+        "memory_write_transaction_preflight_failed",
+        format!("unsupported blob namespace {namespace}"),
+    ))
+}
+
+fn validate_mutation_batch_budget(
+    capacity: StoreCapacityBudget,
+    json_docs: &BTreeMap<(String, String), serde_json::Value>,
+    blobs: &BTreeMap<(String, String), Vec<u8>>,
+    events: &[MemoryStoreEvent],
+) -> Result<()> {
+    if events.len() > capacity.event_log_max_items {
+        return Err(store_budget_error(format!(
+            "memory_write_transaction events {} exceed {}",
+            events.len(),
+            capacity.event_log_max_items
+        )));
+    }
+    let kv_entries = json_docs.len() + blobs.len();
+    if kv_entries > capacity.kv_max_entries {
+        return Err(store_budget_error(format!(
+            "memory_write_transaction entries {} exceed {}",
+            kv_entries, capacity.kv_max_entries
+        )));
+    }
+    let blob_bytes = blobs.values().map(Vec::len).sum::<usize>();
+    if blob_bytes > capacity.blob_max_bytes {
+        return Err(store_budget_error(format!(
+            "memory_write_transaction blob bytes {} exceed {}",
+            blob_bytes, capacity.blob_max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn validate_unique_event_ids(events: &[MemoryStoreEvent]) -> Result<()> {
+    let mut event_ids = BTreeSet::new();
+    for event in events {
+        if !event_ids.insert(event.event_id.as_str()) {
+            return Err(Error::config(
+                "memory_write_transaction_preflight_failed",
+                format!("duplicate event id {}", event.event_id),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn mutation_budget_report(
+    capacity: StoreCapacityBudget,
+    initial_json_docs: &BTreeMap<(String, String), serde_json::Value>,
+    initial_blob_docs: &BTreeMap<(String, String), Vec<u8>>,
+    initial_event_count: usize,
+    final_json_docs: &[StoreSnapshotJsonDoc],
+    final_blobs: &[StoreSnapshotBlob],
+    final_event_count: usize,
+) -> StoreMutationBudgetReport {
+    let initial_kv_entries = initial_json_docs.len() + initial_blob_docs.len();
+    let final_kv_entries = final_json_docs.len() + final_blobs.len();
+    let initial_blob_bytes = initial_blob_docs.values().map(Vec::len).sum::<usize>();
+    let final_blob_bytes = final_blobs
+        .iter()
+        .map(|blob| blob.value.len())
+        .sum::<usize>();
+    StoreMutationBudgetReport {
+        required_events: final_event_count.saturating_sub(initial_event_count),
+        remaining_events: capacity
+            .event_log_max_items
+            .saturating_sub(final_event_count),
+        required_kv_entries: final_kv_entries.saturating_sub(initial_kv_entries),
+        remaining_kv_entries: capacity.kv_max_entries.saturating_sub(final_kv_entries),
+        required_blob_bytes: final_blob_bytes.saturating_sub(initial_blob_bytes),
+        remaining_blob_bytes: capacity.blob_max_bytes.saturating_sub(final_blob_bytes),
+    }
+}
+
+fn memory_write_transaction_preflight_error(error: Error) -> Error {
+    if error.stage() == "memory_write_transaction_preflight_failed" {
+        error
+    } else {
+        Error::config(
+            "memory_write_transaction_preflight_failed",
+            error.to_string(),
+        )
+    }
+}
+
+fn memory_write_transaction_commit_error(error: Error) -> Error {
+    match error.stage() {
+        "store_budget_exceeded" | "store_event_log" | "store_snapshot_import" => {
+            memory_write_transaction_preflight_error(error)
+        }
+        _ => Error::config("memory_write_transaction_commit_failed", error.to_string()),
+    }
+}
+
 const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
     "skill_meta",
     "active_work",
@@ -397,6 +840,11 @@ const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
     "conversation_transcript_alias",
     "conversation_transcript_attr",
     "conversation_transcript_derived_ref",
+    "memory_graph_nodes",
+    "memory_graph_edges",
+    "memory_graph_backlinks",
+    "memory_graph_indexes",
+    "memory_graph_revisions",
     LONG_TERM_CONTROL_REVISION_NAMESPACE,
     LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
