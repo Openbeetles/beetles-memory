@@ -63,6 +63,8 @@ rg -Fq "w4_external_noisy_wall_w4_1_diagnostics_missing" dev-docs/temporal-memor
 rg -Fq "w4_1_diagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs
 rg -Fq "召回质量优化" dev-docs/next-gen-soul-memory-roadmap.md dev-docs/README.md
 rg -Fq "W4.1 Recall Quality Optimization" dev-docs/temporal-memory-graph-plan.md
+rg -Fq "W4.3 Evidence Source Safety Pass" dev-docs/temporal-memory-graph-plan.md
+rg -Fq "quality net" dev-docs/temporal-memory-graph-plan.md || rg -Fq "质量净提升" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "candidate pool split" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "memory-owned hybrid source retrieval" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "query-aware graph expansion" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
@@ -77,6 +79,8 @@ rg -Fq "full external noisy wall" dev-docs/temporal-memory-graph-plan.md dev-doc
 rg -Fq "check_w4_external_noisy_wall_operator: ok" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq -- "--shard-total" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "repeated_external_eval_source_maps_distinct_chunk_topics_without_anchor_collision" dev-docs/temporal-memory-graph-plan.md
+rg -Fq "temporal_memory_graph_scores_distinct_external_eval_sources_as_multi_evidence_groups" dev-docs/temporal-memory-graph-plan.md crates/core/tests/next_gen_contract.rs
+rg -Fq "source_authority_recognizes_archive_locator_citations" dev-docs/temporal-memory-graph-plan.md crates/core/src/memory/long_term.rs
 rg -Fq "w4_external_noisy_summary_with_provenance" dev-docs/temporal-memory-graph-plan.md crates/replay/src/bench.rs crates/replay/src/lib.rs
 rg -Fq "w4_external_noisy_wall_stage_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 rg -Fq "W4ExternalNoisyIndexDiagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/src/lib.rs

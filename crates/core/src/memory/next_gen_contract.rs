@@ -3,6 +3,7 @@ use crate::util::{collect_retrieval_terms, normalize_retrieval_text};
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
+use super::recall_anchor::recall_evidence_group_key;
 use super::CoreRevisionConflictClass;
 use super::{
     CoreRevisionLedger, CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange,
@@ -1737,7 +1738,7 @@ fn graph_recall_candidate_score(
             .saturating_mul(100),
         );
     let multi_evidence_coverage_score = node
-        .map(|node| graph_evidence_group_count(node).saturating_mul(120))
+        .map(|node| graph_multi_evidence_coverage_score(graph_evidence_group_count(node)))
         .unwrap_or(0);
     let source_authority_score = node
         .map(|node| {
@@ -1902,18 +1903,22 @@ fn graph_temporal_reasoning_score(node_id: &str, graph: &TemporalMemoryGraphBuil
 }
 
 fn graph_evidence_group_count(node: &MemoryGraphNode) -> u32 {
-    let mut groups = Vec::new();
+    let mut groups: Vec<String> = Vec::new();
     for evidence_ref in &node.evidence_refs {
-        let group = evidence_ref
-            .split([':', '#', '/'])
-            .next()
-            .unwrap_or(evidence_ref)
-            .trim();
-        if !group.is_empty() && !groups.iter().any(|existing| existing == group) {
-            groups.push(group.to_string());
+        let group = recall_evidence_group_key(evidence_ref);
+        if !group.is_empty() && !groups.iter().any(|existing| existing == &group) {
+            groups.push(group);
         }
     }
     groups.len() as u32
+}
+
+fn graph_multi_evidence_coverage_score(group_count: u32) -> u32 {
+    if group_count == 0 {
+        0
+    } else {
+        120u32.saturating_add(group_count.saturating_sub(1).saturating_mul(40))
+    }
 }
 
 fn graph_anchor_is_temporal(term: &str) -> bool {

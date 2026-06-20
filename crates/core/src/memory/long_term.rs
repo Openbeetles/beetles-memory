@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
+use super::recall_anchor::recall_source_authority_score;
 use super::{
     memory_policy, shared_long_term_governance_policy, LongTermRecallPolicy, MemoryProfile,
     SessionMessage,
@@ -2018,22 +2019,7 @@ fn long_term_source_authority_score(entry: &LongTermMemoryEntry) -> u32 {
 }
 
 fn long_term_citation_authority_score(citation: &str) -> u32 {
-    let normalized = citation.trim().to_ascii_lowercase();
-    if normalized.starts_with("external_eval:")
-        || normalized.starts_with("transcript:")
-        || normalized.starts_with("turn:")
-        || normalized.starts_with("turn_ledger:")
-        || normalized.starts_with("session_")
-        || normalized.starts_with("archive:")
-    {
-        16
-    } else if normalized.contains("scratchpad") || normalized.contains("debug") {
-        1
-    } else if normalized.is_empty() {
-        0
-    } else {
-        6
-    }
+    recall_source_authority_score(citation)
 }
 
 fn long_term_stale_recall_penalty(entry: &LongTermMemoryEntry, now_secs: u64) -> u32 {
@@ -3126,6 +3112,18 @@ mod tests {
             .reason_fragments
             .iter()
             .any(|reason| reason == "temporal anchor"));
+    }
+
+    #[test]
+    fn source_authority_recognizes_archive_locator_citations() {
+        assert_eq!(
+            long_term_citation_authority_score("daily_note:2026-06-20.md"),
+            long_term_citation_authority_score("transcript:chat-a#message=1")
+        );
+        assert_eq!(
+            long_term_citation_authority_score("turn_log:chat-a#turn=12"),
+            long_term_citation_authority_score("transcript:chat-a#message=1")
+        );
     }
 
     #[test]

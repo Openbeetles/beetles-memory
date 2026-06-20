@@ -936,6 +936,86 @@ fn temporal_memory_graph_expansion_uses_entity_time_and_evidence_aliases_before_
 }
 
 #[test]
+fn temporal_memory_graph_scores_distinct_external_eval_sources_as_multi_evidence_groups() {
+    let mut multi_evidence = graph_node(
+        "fact:multi-evidence",
+        MemoryGraphNodeKind::Task,
+        "Release decision supported by two external sources",
+    );
+    multi_evidence.evidence_refs = vec![
+        "external_eval:D1:12".to_string(),
+        "external_eval:D1:13".to_string(),
+    ];
+    let mut single_evidence = graph_node(
+        "fact:single-evidence",
+        MemoryGraphNodeKind::Task,
+        "Release decision supported by one external source",
+    );
+    single_evidence.evidence_refs = vec!["external_eval:D1:12".to_string()];
+
+    let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
+        vec![
+            graph_node("fact:seed", MemoryGraphNodeKind::MemoryRecord, "Seed fact"),
+            multi_evidence,
+            single_evidence,
+        ],
+        vec![
+            graph_edge(
+                "edge:seed:multi",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:multi-evidence",
+            ),
+            graph_edge(
+                "edge:seed:single",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:single-evidence",
+            ),
+        ],
+        vec![
+            graph_backlink("turn:seed"),
+            EvidenceBacklink {
+                source_kind: "conversation_transcript".to_string(),
+                source_id: "external_eval:D1:12".to_string(),
+                fingerprint: "fp-d1-12".to_string(),
+            },
+            EvidenceBacklink {
+                source_kind: "conversation_transcript".to_string(),
+                source_id: "external_eval:D1:13".to_string(),
+                fingerprint: "fp-d1-13".to_string(),
+            },
+        ],
+    );
+
+    let report = rerank_recall_with_temporal_graph(
+        "release decision",
+        vec!["fact:seed".to_string()],
+        &graph,
+        GraphRecallExpansionBudget {
+            max_hops: 1,
+            max_neighbors_per_candidate: 2,
+            max_expanded_candidates: 3,
+        },
+    );
+    let multi_score = report
+        .score_breakdown
+        .iter()
+        .find(|score| score.candidate_id == "fact:multi-evidence")
+        .expect("multi evidence score");
+    let single_score = report
+        .score_breakdown
+        .iter()
+        .find(|score| score.candidate_id == "fact:single-evidence")
+        .expect("single evidence score");
+
+    assert!(
+        multi_score.multi_evidence_coverage_score > single_score.multi_evidence_coverage_score,
+        "distinct external_eval source ids must not collapse into one evidence group"
+    );
+}
+
+#[test]
 fn temporal_memory_graph_rerank_penalizes_valid_until_and_superseded_by_without_supersedes_edge() {
     let mut stale_edge = graph_edge(
         "edge:old:context",

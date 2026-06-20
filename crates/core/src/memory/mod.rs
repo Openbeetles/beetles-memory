@@ -60,6 +60,7 @@ mod profile;
 mod prompt_context;
 mod prompt_context_stages;
 mod prompt_sanitizer;
+mod recall_anchor;
 #[cfg(all(
     any(test, feature = "replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
