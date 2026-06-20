@@ -607,6 +607,78 @@ fn temporal_memory_graph_expansion_budget_blocks_second_hop_until_profile_allows
 }
 
 #[test]
+fn temporal_memory_graph_recall_index_carries_two_hop_neighbors_and_evidence() {
+    let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
+        vec![
+            graph_node("fact:seed", MemoryGraphNodeKind::MemoryRecord, "Seed fact"),
+            graph_node(
+                "fact:first-hop",
+                MemoryGraphNodeKind::Task,
+                "First hop evidence",
+            ),
+            graph_node(
+                "fact:second-hop",
+                MemoryGraphNodeKind::Project,
+                "Second hop evidence",
+            ),
+        ],
+        vec![
+            graph_edge(
+                "edge:seed:first",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:first-hop",
+            ),
+            graph_edge(
+                "edge:first:second",
+                MemoryGraphEdgeKind::DerivedFrom,
+                "fact:first-hop",
+                "fact:second-hop",
+            ),
+        ],
+        vec![
+            graph_backlink("turn:seed"),
+            graph_backlink("turn:first-hop"),
+            graph_backlink("turn:second-hop"),
+        ],
+    );
+
+    let indexes = bm_core::memory::build_memory_graph_recall_index_docs(
+        "bm-core-test",
+        "revision:test",
+        "memory-space:test",
+        "subject:test",
+        &graph.nodes,
+        &graph.edges,
+        &graph.backlinks,
+    );
+
+    let seed_index = indexes
+        .iter()
+        .find(|index| index.source_anchor_id == "fact:seed")
+        .expect("seed index");
+    assert!(seed_index
+        .neighbor_node_ids
+        .iter()
+        .any(|node_id| node_id == "fact:first-hop"));
+    assert!(seed_index
+        .neighbor_node_ids
+        .iter()
+        .any(|node_id| node_id == "fact:second-hop"));
+    assert!(seed_index
+        .edge_ids
+        .iter()
+        .any(|edge_id| edge_id == "edge:first:second"));
+    assert!(seed_index
+        .evidence_refs
+        .iter()
+        .any(|evidence_ref| evidence_ref == "turn:second-hop"));
+    assert!(seed_index.evidence_backlink_keys.iter().any(|key| {
+        key == &bm_core::memory::memory_graph_backlink_key("turn_ledger", "turn:second-hop")
+    }));
+}
+
+#[test]
 fn temporal_memory_graph_expansion_budget_truncates_neighbors_before_render() {
     let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
         vec![
@@ -712,6 +784,226 @@ fn temporal_memory_graph_expansion_uses_query_relevance_before_node_id_order() {
         .iter()
         .any(|candidate| candidate == "fact:a"));
     assert_eq!(report.expansion_budget.truncated_candidate_count, 1);
+}
+
+#[test]
+fn temporal_memory_graph_expansion_uses_entity_time_and_evidence_aliases_before_degree() {
+    let mut relevant = graph_node(
+        "fact:target",
+        MemoryGraphNodeKind::Task,
+        "Target evidence packet",
+    );
+    relevant.evidence_refs = vec![
+        "external_eval:D1:12".to_string(),
+        "session_1#turn=12".to_string(),
+        "date:2026-06-20".to_string(),
+    ];
+    let mut noisy = graph_node(
+        "fact:a-noisy",
+        MemoryGraphNodeKind::Task,
+        "Noisy archive packet",
+    );
+    noisy.evidence_refs = vec!["scratchpad:recent".to_string()];
+
+    let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
+        vec![
+            graph_node("fact:seed", MemoryGraphNodeKind::MemoryRecord, "Seed fact"),
+            relevant,
+            noisy,
+            graph_node(
+                "fact:noisy:1",
+                MemoryGraphNodeKind::MemoryRecord,
+                "Noisy one",
+            ),
+            graph_node(
+                "fact:noisy:2",
+                MemoryGraphNodeKind::MemoryRecord,
+                "Noisy two",
+            ),
+            graph_node(
+                "fact:noisy:3",
+                MemoryGraphNodeKind::MemoryRecord,
+                "Noisy three",
+            ),
+            graph_node(
+                "fact:noisy:4",
+                MemoryGraphNodeKind::MemoryRecord,
+                "Noisy four",
+            ),
+            graph_node(
+                "fact:noisy:5",
+                MemoryGraphNodeKind::MemoryRecord,
+                "Noisy five",
+            ),
+        ],
+        vec![
+            graph_edge(
+                "edge:seed:target",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:target",
+            ),
+            graph_edge(
+                "edge:seed:noisy",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:a-noisy",
+            ),
+            graph_edge(
+                "edge:noisy:1",
+                MemoryGraphEdgeKind::Supports,
+                "fact:a-noisy",
+                "fact:noisy:1",
+            ),
+            graph_edge(
+                "edge:noisy:2",
+                MemoryGraphEdgeKind::Supports,
+                "fact:a-noisy",
+                "fact:noisy:2",
+            ),
+            graph_edge(
+                "edge:noisy:3",
+                MemoryGraphEdgeKind::Supports,
+                "fact:a-noisy",
+                "fact:noisy:3",
+            ),
+            graph_edge(
+                "edge:noisy:4",
+                MemoryGraphEdgeKind::Supports,
+                "fact:a-noisy",
+                "fact:noisy:4",
+            ),
+            graph_edge(
+                "edge:noisy:5",
+                MemoryGraphEdgeKind::Supports,
+                "fact:a-noisy",
+                "fact:noisy:5",
+            ),
+        ],
+        vec![
+            graph_backlink("turn:seed"),
+            EvidenceBacklink {
+                source_kind: "conversation_transcript".to_string(),
+                source_id: "external_eval:D1:12".to_string(),
+                fingerprint: "fp-external-d1-12".to_string(),
+            },
+            EvidenceBacklink {
+                source_kind: "turn_ledger".to_string(),
+                source_id: "session_1#turn=12".to_string(),
+                fingerprint: "fp-session-1-12".to_string(),
+            },
+            EvidenceBacklink {
+                source_kind: "conversation_transcript".to_string(),
+                source_id: "date:2026-06-20".to_string(),
+                fingerprint: "fp-date-2026-06-20".to_string(),
+            },
+            graph_backlink("scratchpad:recent"),
+            graph_backlink("turn:noisy:1"),
+            graph_backlink("turn:noisy:2"),
+            graph_backlink("turn:noisy:3"),
+            graph_backlink("turn:noisy:4"),
+            graph_backlink("turn:noisy:5"),
+        ],
+    );
+
+    let report = rerank_recall_with_temporal_graph(
+        "Acme target 2026-06-20 session_1 D1:12",
+        vec!["fact:seed".to_string()],
+        &graph,
+        GraphRecallExpansionBudget {
+            max_hops: 1,
+            max_neighbors_per_candidate: 1,
+            max_expanded_candidates: 2,
+        },
+    );
+
+    assert!(report
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:target"));
+    assert!(!report
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:a-noisy"));
+    let target_score = report
+        .score_breakdown
+        .iter()
+        .find(|score| score.candidate_id == "fact:target")
+        .expect("target score");
+    assert!(target_score.lexical_score > 0);
+    assert!(target_score.evidence_quality_score > 0);
+    assert!(target_score.source_authority_score > 0);
+}
+
+#[test]
+fn temporal_memory_graph_rerank_penalizes_valid_until_and_superseded_by_without_supersedes_edge() {
+    let mut stale_edge = graph_edge(
+        "edge:old:context",
+        MemoryGraphEdgeKind::Supports,
+        "fact:old-target",
+        "fact:context",
+    );
+    stale_edge.validity.valid_until = Some(1_700_000_000);
+    stale_edge.validity.superseded_by = Some("fact:new-target".to_string());
+
+    let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
+        vec![
+            graph_node(
+                "fact:old-target",
+                MemoryGraphNodeKind::Task,
+                "Acme target before update",
+            ),
+            graph_node(
+                "fact:new-target",
+                MemoryGraphNodeKind::Task,
+                "Acme target after 2026-06-20 update",
+            ),
+            graph_node("fact:context", MemoryGraphNodeKind::MemoryRecord, "Context"),
+        ],
+        vec![
+            stale_edge,
+            graph_edge(
+                "edge:new:context",
+                MemoryGraphEdgeKind::Supports,
+                "fact:new-target",
+                "fact:context",
+            ),
+        ],
+        vec![
+            graph_backlink("turn:old-target"),
+            graph_backlink("turn:new-target"),
+            graph_backlink("turn:context"),
+        ],
+    );
+
+    let report = rerank_recall_with_temporal_graph(
+        "Acme target after update",
+        vec!["fact:old-target".to_string(), "fact:new-target".to_string()],
+        &graph,
+        GraphRecallExpansionBudget {
+            max_hops: 1,
+            max_neighbors_per_candidate: 1,
+            max_expanded_candidates: 3,
+        },
+    );
+
+    let old_score = report
+        .score_breakdown
+        .iter()
+        .find(|score| score.candidate_id == "fact:old-target")
+        .expect("old score");
+    let new_score = report
+        .score_breakdown
+        .iter()
+        .find(|score| score.candidate_id == "fact:new-target")
+        .expect("new score");
+
+    assert!(old_score.stale_superseded_penalty > 0);
+    assert_eq!(new_score.stale_superseded_penalty, 0);
+    assert_eq!(
+        report.selected_ids.first().map(String::as_str),
+        Some("fact:new-target")
+    );
 }
 
 fn graph_node(node_id: &str, kind: MemoryGraphNodeKind, label: &str) -> MemoryGraphNode {

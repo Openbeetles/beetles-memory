@@ -78,6 +78,10 @@ pub struct RecallScoreBreakdown {
     #[serde(default)]
     pub exact_match_score: u32,
     #[serde(default)]
+    pub entity_anchor_score: u32,
+    #[serde(default)]
+    pub temporal_anchor_score: u32,
+    #[serde(default)]
     pub recency_score: u32,
     #[serde(default)]
     pub confidence_score: u32,
@@ -88,7 +92,11 @@ pub struct RecallScoreBreakdown {
     #[serde(default)]
     pub governance_score: u32,
     #[serde(default)]
+    pub evidence_quality_score: u32,
+    #[serde(default)]
     pub source_score: u32,
+    #[serde(default)]
+    pub stale_penalty: u32,
     #[serde(default)]
     pub total_score: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -254,6 +262,8 @@ fn build_shared_factual_candidate(
                 .saturating_add(breakdown.keyword_score),
             semantic_score: breakdown.semantic_score,
             exact_match_score: breakdown.exact_match_score,
+            entity_anchor_score: breakdown.entity_anchor_score,
+            temporal_anchor_score: breakdown.temporal_anchor_score,
             recency_score: breakdown
                 .recency_score
                 .saturating_add(breakdown.last_used_score),
@@ -261,7 +271,9 @@ fn build_shared_factual_candidate(
             importance_score: entry.evidence_count.min(4),
             scope_affinity_score: breakdown.scope_affinity_score,
             governance_score: breakdown.governance_score,
-            source_score: 0,
+            evidence_quality_score: breakdown.evidence_quality_score,
+            source_score: breakdown.source_authority_score,
+            stale_penalty: breakdown.stale_penalty,
             total_score: breakdown.total_score,
             reason_fragments: reasons,
         },
@@ -480,6 +492,7 @@ pub fn inspect_archive_recall(
                         .map(|value| value.score.total_score)
                         .unwrap_or(hit.score),
                     reason_fragments: reasons,
+                    ..RecallScoreBreakdown::default()
                 },
             }
         })
@@ -547,6 +560,7 @@ pub fn inspect_runtime_skill_recall(
                     source_score: hit.score_breakdown.source_score,
                     total_score: hit.score_breakdown.total_score,
                     reason_fragments: normalize_reason_fragments(hit.reasons),
+                    ..RecallScoreBreakdown::default()
                 },
             })
             .collect(),
@@ -644,6 +658,7 @@ pub fn inspect_task_recall(
                 source_score: hit.score_breakdown.source_score,
                 total_score: hit.score,
                 reason_fragments: normalize_reason_fragments(hit.reasons),
+                ..RecallScoreBreakdown::default()
             },
         })
         .collect();

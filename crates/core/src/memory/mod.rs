@@ -423,8 +423,8 @@ pub use recall_inspection::{
     WorkingRecallInspectionInput,
 };
 pub(crate) use recall_rerank::{
-    build_cross_plane_rerank_result, plane_signal_score, CrossPlaneRerankInput,
-    CrossPlaneRerankResult,
+    build_cross_plane_rerank_result, build_cross_plane_router_signal_result, plane_signal_score,
+    CrossPlaneRerankInput, CrossPlaneRerankResult,
 };
 #[cfg(test)]
 pub(crate) use recall_rerank::{CrossPlanePlaneSignal, CrossPlaneRerankCandidate};

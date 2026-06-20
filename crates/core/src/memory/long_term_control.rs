@@ -40,18 +40,13 @@ pub enum MemoryLongTermTarget {
     Query(MemoryLongTermSelector),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum MemorySubjectVisibilityPolicy {
+    #[default]
     AllSubjects,
     OnlySubjects(Vec<SubjectId>),
     HiddenFromSubjects(Vec<SubjectId>),
-}
-
-impl Default for MemorySubjectVisibilityPolicy {
-    fn default() -> Self {
-        Self::AllSubjects
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,7 +704,7 @@ fn apply_correct(
     let audit_event_id = write_record_audit(
         control_store,
         "correct",
-        &[previous.id.clone()],
+        std::slice::from_ref(&previous.id),
         request,
         request.dry_run,
     )?;
@@ -764,7 +759,7 @@ fn apply_supersede(
     if !request.dry_run {
         control_store.put_long_term_control_tombstone(&tombstone)?;
         store.delete(&previous.id)?;
-        store.upsert_many(&[replacement.clone()], request.now_secs)?;
+        store.upsert_many(std::slice::from_ref(replacement), request.now_secs)?;
         control_store.put_long_term_control_revision(&LongTermMemoryControlRevision {
             revision_id: stable_id(
                 "ltmr",
@@ -840,7 +835,7 @@ fn apply_delete(
     let audit_event_id = write_record_audit(
         control_store,
         operation_label,
-        &[previous.id.clone()],
+        std::slice::from_ref(&previous.id),
         request,
         request.dry_run,
     )?;
@@ -1040,7 +1035,7 @@ fn apply_change_scope(
     let audit_event_id = write_record_audit(
         control_store,
         "change_scope",
-        &[previous.id.clone()],
+        std::slice::from_ref(&previous.id),
         request,
         request.dry_run,
     )?;

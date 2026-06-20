@@ -1,4 +1,5 @@
 use crate::feature_gate::ProfileId;
+use crate::util::{collect_retrieval_terms, normalize_retrieval_text};
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
@@ -751,9 +752,14 @@ pub struct EvidenceBacklink {
 pub struct GraphRecallCandidateScore {
     pub candidate_id: String,
     pub lexical_score: u32,
+    pub entity_alias_score: u32,
+    pub temporal_anchor_score: u32,
+    pub session_alias_score: u32,
     pub graph_neighborhood_score: u32,
     pub temporal_validity_score: u32,
+    pub temporal_reasoning_score: u32,
     pub evidence_quality_score: u32,
+    pub multi_evidence_coverage_score: u32,
     pub source_authority_score: u32,
     pub privacy_profile_eligibility_score: u32,
     pub stale_superseded_penalty: u32,
@@ -1370,12 +1376,13 @@ pub fn build_memory_graph_recall_index_docs(
     nodes
         .iter()
         .map(|node| {
-            let mut neighbor_node_ids = Vec::new();
-            let mut edge_ids = Vec::new();
-            for edge in edges
+            let recall_edges = edges
                 .iter()
                 .filter(|edge| graph_edge_allows_recall_expansion(edge.kind))
-            {
+                .collect::<Vec<_>>();
+            let mut neighbor_node_ids = Vec::new();
+            let mut edge_ids = Vec::new();
+            for edge in &recall_edges {
                 if edge.from_node_id == node.node_id {
                     push_unique(&mut neighbor_node_ids, edge.to_node_id.clone());
                     push_unique(&mut edge_ids, edge.edge_id.clone());
@@ -1384,9 +1391,33 @@ pub fn build_memory_graph_recall_index_docs(
                     push_unique(&mut edge_ids, edge.edge_id.clone());
                 }
             }
+            let direct_neighbor_node_ids = neighbor_node_ids.clone();
+            for direct_neighbor_node_id in &direct_neighbor_node_ids {
+                for edge in &recall_edges {
+                    if edge.from_node_id == *direct_neighbor_node_id {
+                        if edge.to_node_id != node.node_id {
+                            push_unique(&mut neighbor_node_ids, edge.to_node_id.clone());
+                        }
+                        push_unique(&mut edge_ids, edge.edge_id.clone());
+                    } else if edge.to_node_id == *direct_neighbor_node_id {
+                        if edge.from_node_id != node.node_id {
+                            push_unique(&mut neighbor_node_ids, edge.from_node_id.clone());
+                        }
+                        push_unique(&mut edge_ids, edge.edge_id.clone());
+                    }
+                }
+            }
             neighbor_node_ids.sort();
             edge_ids.sort();
             let mut evidence_refs = node.evidence_refs.clone();
+            for neighbor in nodes
+                .iter()
+                .filter(|neighbor| neighbor_node_ids.iter().any(|id| id == &neighbor.node_id))
+            {
+                for evidence_ref in &neighbor.evidence_refs {
+                    push_unique(&mut evidence_refs, evidence_ref.clone());
+                }
+            }
             for edge in edges
                 .iter()
                 .filter(|edge| edge_ids.iter().any(|id| id == &edge.edge_id))
@@ -1629,21 +1660,9 @@ fn graph_expansion_neighbor_score(
     query: &str,
     node_id: &str,
     graph: &TemporalMemoryGraphBuildReport,
-    node: Option<&MemoryGraphNode>,
+    _node: Option<&MemoryGraphNode>,
 ) -> u32 {
-    lexical_graph_score(query, node)
-        .saturating_add(
-            graph
-                .edges
-                .iter()
-                .filter(|edge| edge.from_node_id == node_id || edge.to_node_id == node_id)
-                .count() as u32
-                * 10,
-        )
-        .saturating_add(
-            node.map(|node| node.evidence_refs.len() as u32 * 5)
-                .unwrap_or(0),
-        )
+    graph_recall_candidate_score(query, node_id, graph).total_score
 }
 
 fn graph_edge_allows_recall_expansion(kind: MemoryGraphEdgeKind) -> bool {
@@ -1686,7 +1705,7 @@ fn graph_recall_candidate_score(
                             .backlinks
                             .iter()
                             .find(|backlink| backlink.source_id == *evidence_ref)
-                            .and_then(|_| Some(1))
+                            .map(|_| 1)
                     })
                     .max()
             })
@@ -1695,6 +1714,10 @@ fn graph_recall_candidate_score(
     let lexical_score = lexical_graph_score(query, node);
     let graph_neighborhood_score = (connected_edges.len() as u32).saturating_mul(100);
     let temporal_validity_score = observed_rank.min(10_000) as u32;
+    let entity_alias_score = graph_entity_alias_score(query, node);
+    let temporal_anchor_score = graph_temporal_anchor_score(query, node);
+    let session_alias_score = graph_session_alias_score(query, node);
+    let temporal_reasoning_score = graph_temporal_reasoning_score(node_id, graph);
     let evidence_quality_score = node
         .map(|node| node.evidence_refs.len() as u32)
         .unwrap_or(0)
@@ -1713,6 +1736,9 @@ fn graph_recall_candidate_score(
             .unwrap_or(0)
             .saturating_mul(100),
         );
+    let multi_evidence_coverage_score = node
+        .map(|node| graph_evidence_group_count(node).saturating_mul(120))
+        .unwrap_or(0);
     let source_authority_score = node
         .map(|node| {
             node.evidence_refs
@@ -1728,11 +1754,14 @@ fn graph_recall_candidate_score(
                 .unwrap_or(0)
         })
         .unwrap_or(0);
-    let privacy_profile_eligibility_score = node
+    let privacy_profile_eligibility_score = if node
         .map(|node| node.validate_contract().accepted)
         .unwrap_or(false)
-        .then_some(100)
-        .unwrap_or(0);
+    {
+        100
+    } else {
+        0
+    };
     let supersedes_bonus =
         if graph.edges.iter().any(|edge| {
             edge.kind == MemoryGraphEdgeKind::Supersedes && edge.from_node_id == node_id
@@ -1747,9 +1776,14 @@ fn graph_recall_candidate_score(
         0
     };
     let total_score = lexical_score
+        .saturating_add(entity_alias_score)
+        .saturating_add(temporal_anchor_score)
+        .saturating_add(session_alias_score)
         .saturating_add(graph_neighborhood_score)
         .saturating_add(temporal_validity_score)
+        .saturating_add(temporal_reasoning_score)
         .saturating_add(evidence_quality_score)
+        .saturating_add(multi_evidence_coverage_score)
         .saturating_add(source_authority_score)
         .saturating_add(privacy_profile_eligibility_score)
         .saturating_add(supersedes_bonus)
@@ -1758,9 +1792,14 @@ fn graph_recall_candidate_score(
     GraphRecallCandidateScore {
         candidate_id: node_id.to_string(),
         lexical_score,
+        entity_alias_score,
+        temporal_anchor_score,
+        session_alias_score,
         graph_neighborhood_score,
         temporal_validity_score,
+        temporal_reasoning_score,
         evidence_quality_score,
+        multi_evidence_coverage_score,
         source_authority_score,
         privacy_profile_eligibility_score,
         stale_superseded_penalty,
@@ -1772,12 +1811,143 @@ fn lexical_graph_score(query: &str, node: Option<&MemoryGraphNode>) -> u32 {
     let Some(node) = node else {
         return 0;
     };
-    let haystack = format!("{} {}", node.node_id, node.label).to_lowercase();
-    query
-        .split_whitespace()
-        .filter(|term| haystack.contains(&term.to_lowercase()))
+    let haystack = graph_node_retrieval_text(node);
+    collect_retrieval_terms(query, 2, 32, &[2, 3])
+        .into_iter()
+        .filter(|term| haystack.contains(term))
         .count() as u32
         * 25
+}
+
+fn graph_node_retrieval_text(node: &MemoryGraphNode) -> String {
+    let mut parts = vec![node.node_id.as_str(), node.label.as_str()];
+    parts.extend(node.evidence_refs.iter().map(String::as_str));
+    let normalized = normalize_retrieval_text(&parts.join(" "));
+    let compact = normalized.replace(' ', "");
+    if compact.is_empty() {
+        normalized
+    } else {
+        format!("{normalized} {compact}")
+    }
+}
+
+fn graph_entity_alias_score(query: &str, node: Option<&MemoryGraphNode>) -> u32 {
+    let Some(node) = node else {
+        return 0;
+    };
+    let haystack = graph_node_retrieval_text(node);
+    collect_retrieval_terms(query, 2, 32, &[2, 3])
+        .into_iter()
+        .filter(|term| !graph_anchor_is_noise(term))
+        .filter(|term| !graph_anchor_is_temporal(term))
+        .filter(|term| haystack.contains(term))
+        .fold(0u32, |score, term| {
+            score.saturating_add(if term.len() >= 4 { 80 } else { 40 })
+        })
+        .min(400)
+}
+
+fn graph_temporal_anchor_score(query: &str, node: Option<&MemoryGraphNode>) -> u32 {
+    let Some(node) = node else {
+        return 0;
+    };
+    let haystack = graph_node_retrieval_text(node);
+    collect_retrieval_terms(query, 2, 32, &[2, 3])
+        .into_iter()
+        .filter(|term| graph_anchor_is_temporal(term))
+        .filter(|term| haystack.contains(term))
+        .fold(0u32, |score, term| {
+            score.saturating_add(if term.len() >= 4 { 120 } else { 45 })
+        })
+        .min(360)
+}
+
+fn graph_session_alias_score(query: &str, node: Option<&MemoryGraphNode>) -> u32 {
+    let Some(node) = node else {
+        return 0;
+    };
+    let haystack = graph_node_retrieval_text(node);
+    let normalized_query = normalize_retrieval_text(query);
+    let compact_query = normalized_query.replace(' ', "");
+    let mut score = 0u32;
+    for term in collect_retrieval_terms(query, 2, 32, &[2, 3]) {
+        if (term.starts_with("session") || term.starts_with('d')) && haystack.contains(&term) {
+            score = score.saturating_add(120);
+        }
+    }
+    if !compact_query.is_empty() && haystack.contains(&compact_query) {
+        score = score.saturating_add(160);
+    }
+    score.min(360)
+}
+
+fn graph_temporal_reasoning_score(node_id: &str, graph: &TemporalMemoryGraphBuildReport) -> u32 {
+    graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from_node_id == node_id || edge.to_node_id == node_id)
+        .map(|edge| {
+            let mut score = edge.validity.observed_at.min(10_000) as u32 / 10;
+            if edge.validity.valid_until.is_none() && edge.validity.superseded_by.is_none() {
+                score = score.saturating_add(80);
+            }
+            if matches!(edge.kind, MemoryGraphEdgeKind::Supersedes) && edge.from_node_id == node_id
+            {
+                score = score.saturating_add(120);
+            }
+            score
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn graph_evidence_group_count(node: &MemoryGraphNode) -> u32 {
+    let mut groups = Vec::new();
+    for evidence_ref in &node.evidence_refs {
+        let group = evidence_ref
+            .split([':', '#', '/'])
+            .next()
+            .unwrap_or(evidence_ref)
+            .trim();
+        if !group.is_empty() && !groups.iter().any(|existing| existing == group) {
+            groups.push(group.to_string());
+        }
+    }
+    groups.len() as u32
+}
+
+fn graph_anchor_is_temporal(term: &str) -> bool {
+    let digits = term.chars().filter(|ch| ch.is_ascii_digit()).count();
+    (term.len() == 4 && digits == 4 && ("1900"..="2100").contains(&term))
+        || (term.len() == 2
+            && digits == 2
+            && term
+                .parse::<u8>()
+                .is_ok_and(|value| (1..=31).contains(&value)))
+}
+
+fn graph_anchor_is_noise(term: &str) -> bool {
+    matches!(
+        term,
+        "what"
+            | "when"
+            | "where"
+            | "which"
+            | "that"
+            | "this"
+            | "with"
+            | "from"
+            | "into"
+            | "was"
+            | "were"
+            | "the"
+            | "and"
+            | "for"
+            | "target"
+            | "session"
+            | "evidence"
+            | "packet"
+    )
 }
 
 fn source_authority_score(source_kind: &str) -> u32 {
@@ -1805,10 +1975,33 @@ fn graph_node_rank(node_id: &str, graph: &TemporalMemoryGraphBuildReport) -> u64
 }
 
 fn graph_node_is_superseded(node_id: &str, graph: &TemporalMemoryGraphBuildReport) -> bool {
+    let graph_observed_at = graph_reference_observed_at(graph);
+    graph.edges.iter().any(|edge| {
+        let touches_node = edge.from_node_id == node_id || edge.to_node_id == node_id;
+        (edge.kind == MemoryGraphEdgeKind::Supersedes && edge.to_node_id == node_id)
+            || (touches_node
+                && edge
+                    .validity
+                    .superseded_by
+                    .as_deref()
+                    .is_some_and(|superseded_by| {
+                        !superseded_by.trim().is_empty() && superseded_by != node_id
+                    }))
+            || (touches_node
+                && edge
+                    .validity
+                    .valid_until
+                    .is_some_and(|valid_until| valid_until < graph_observed_at))
+    })
+}
+
+fn graph_reference_observed_at(graph: &TemporalMemoryGraphBuildReport) -> u64 {
     graph
         .edges
         .iter()
-        .any(|edge| edge.kind == MemoryGraphEdgeKind::Supersedes && edge.to_node_id == node_id)
+        .map(|edge| edge.validity.observed_at)
+        .max()
+        .unwrap_or(0)
 }
 
 fn estimate_compact_graph_budget_bytes(

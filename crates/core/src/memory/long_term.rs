@@ -221,11 +221,16 @@ pub(crate) struct LongTermRecallScoreBreakdown {
     pub semantic_score: u32,
     pub exact_match_score: u32,
     pub keyword_score: u32,
+    pub entity_anchor_score: u32,
+    pub temporal_anchor_score: u32,
+    pub evidence_quality_score: u32,
+    pub source_authority_score: u32,
     pub recency_score: u32,
     pub last_used_score: u32,
     pub confidence_score: u32,
     pub scope_affinity_score: u32,
     pub governance_score: u32,
+    pub stale_penalty: u32,
     pub total_score: u32,
     pub reason_fragments: Vec<String>,
 }
@@ -1860,8 +1865,21 @@ pub(crate) fn score_long_term_memory_recall_breakdown(
     if semantic_score > 0 {
         reasons.push("semantic overlap".to_string());
     }
-    if lexical_score == 0 && exact_match_score == 0 && keyword_score == 0 && semantic_score == 0 {
-        return LongTermRecallScoreBreakdown::default();
+    let entity_anchor_score = long_term_entity_anchor_score(query, entry);
+    if entity_anchor_score > 0 {
+        reasons.push("entity anchor".to_string());
+    }
+    let temporal_anchor_score = long_term_temporal_anchor_score(query, entry);
+    if temporal_anchor_score > 0 {
+        reasons.push("temporal anchor".to_string());
+    }
+    let evidence_quality_score = long_term_evidence_quality_score(entry);
+    if evidence_quality_score > 0 {
+        reasons.push("evidence quality".to_string());
+    }
+    let source_authority_score = long_term_source_authority_score(entry);
+    if source_authority_score > 0 {
+        reasons.push("source authority".to_string());
     }
 
     let scope_affinity_score = source_chat_id
@@ -1875,28 +1893,203 @@ pub(crate) fn score_long_term_memory_recall_breakdown(
     let recency_score = recall_recency_bonus(now_secs, entry_observed_at(entry));
     let last_used_score = recall_last_used_bonus(now_secs, entry.last_used_at);
     let governance_score = long_term_governance_recall_score(entry, now_secs);
+    let stale_penalty = long_term_stale_recall_penalty(entry, now_secs);
+    if stale_penalty > 0 {
+        reasons.push("stale penalty".to_string());
+    }
+    if lexical_score == 0
+        && exact_match_score == 0
+        && keyword_score == 0
+        && semantic_score == 0
+        && entity_anchor_score == 0
+        && temporal_anchor_score == 0
+        && evidence_quality_score == 0
+        && source_authority_score == 0
+    {
+        return LongTermRecallScoreBreakdown::default();
+    }
     let total_score = lexical_score
         .saturating_add(semantic_score)
         .saturating_add(exact_match_score)
         .saturating_add(keyword_score)
+        .saturating_add(entity_anchor_score)
+        .saturating_add(temporal_anchor_score)
+        .saturating_add(evidence_quality_score)
+        .saturating_add(source_authority_score)
         .saturating_add(recency_score)
         .saturating_add(last_used_score)
         .saturating_add(confidence_score)
         .saturating_add(scope_affinity_score)
-        .saturating_add(governance_score);
+        .saturating_add(governance_score)
+        .saturating_sub(stale_penalty);
     LongTermRecallScoreBreakdown {
         lexical_score,
         semantic_score,
         exact_match_score,
         keyword_score,
+        entity_anchor_score,
+        temporal_anchor_score,
+        evidence_quality_score,
+        source_authority_score,
         recency_score,
         last_used_score,
         confidence_score,
         scope_affinity_score,
         governance_score,
+        stale_penalty,
         total_score,
         reason_fragments: reasons,
     }
+}
+
+fn long_term_entry_retrieval_text(entry: &LongTermMemoryEntry) -> String {
+    let mut parts = vec![entry.topic.as_str(), entry.content.as_str()];
+    parts.extend(entry.keywords.iter().map(String::as_str));
+    parts.extend(entry.supporting_citations.iter().map(String::as_str));
+    normalize_for_match(&parts.join(" "))
+}
+
+fn long_term_entity_anchor_score(query: &str, entry: &LongTermMemoryEntry) -> u32 {
+    let entry_text = long_term_entry_retrieval_text(entry);
+    collect_retrieval_terms(query, 2, 32, &[2, 3])
+        .into_iter()
+        .filter(|term| !long_term_anchor_is_noise(term))
+        .filter(|term| !long_term_anchor_is_temporal(term))
+        .fold(0u32, |score, term| {
+            let in_topic = normalize_for_match(&entry.topic).contains(&term);
+            let in_keyword = entry
+                .keywords
+                .iter()
+                .any(|keyword| normalize_for_match(keyword).contains(&term));
+            let in_citation = entry
+                .supporting_citations
+                .iter()
+                .any(|citation| normalize_for_match(citation).contains(&term));
+            let in_entry = entry_text.contains(&term);
+            score
+                .saturating_add(u32::from(in_topic) * 10)
+                .saturating_add(u32::from(in_keyword) * 8)
+                .saturating_add(u32::from(in_citation) * 6)
+                .saturating_add(u32::from(in_entry) * 3)
+        })
+        .min(96)
+}
+
+fn long_term_temporal_anchor_score(query: &str, entry: &LongTermMemoryEntry) -> u32 {
+    let anchors = collect_temporal_anchor_terms(query);
+    if anchors.is_empty() {
+        return 0;
+    }
+    let entry_text = long_term_entry_retrieval_text(entry);
+    anchors
+        .into_iter()
+        .fold(0u32, |score, anchor| {
+            score.saturating_add(if entry_text.contains(&anchor) {
+                if anchor.len() >= 4 {
+                    12
+                } else {
+                    4
+                }
+            } else {
+                0
+            })
+        })
+        .min(64)
+}
+
+fn long_term_evidence_quality_score(entry: &LongTermMemoryEntry) -> u32 {
+    let evidence_count =
+        effective_evidence_count(entry.supporting_citations.len(), entry.evidence_count);
+    evidence_count
+        .saturating_mul(6)
+        .saturating_add((entry.supporting_citations.len() as u32).saturating_mul(2))
+        .min(64)
+}
+
+fn long_term_source_authority_score(entry: &LongTermMemoryEntry) -> u32 {
+    entry
+        .supporting_citations
+        .iter()
+        .map(|citation| long_term_citation_authority_score(citation))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(u32::from(!entry.source_chat_id.as_deref().unwrap_or("").is_empty()) * 2)
+        .min(64)
+}
+
+fn long_term_citation_authority_score(citation: &str) -> u32 {
+    let normalized = citation.trim().to_ascii_lowercase();
+    if normalized.starts_with("external_eval:")
+        || normalized.starts_with("transcript:")
+        || normalized.starts_with("turn:")
+        || normalized.starts_with("turn_ledger:")
+        || normalized.starts_with("session_")
+        || normalized.starts_with("archive:")
+    {
+        16
+    } else if normalized.contains("scratchpad") || normalized.contains("debug") {
+        1
+    } else if normalized.is_empty() {
+        0
+    } else {
+        6
+    }
+}
+
+fn long_term_stale_recall_penalty(entry: &LongTermMemoryEntry, now_secs: u64) -> u32 {
+    if memory_policy(MemoryProfile::Standard)
+        .long_term_recall
+        .is_stale(entry, now_secs)
+    {
+        24
+    } else if matches!(
+        age_state_for_entry(entry, now_secs),
+        LongTermMemoryAgeState::Stale
+    ) {
+        8
+    } else {
+        0
+    }
+}
+
+fn collect_temporal_anchor_terms(input: &str) -> Vec<String> {
+    collect_retrieval_terms(input, 2, 24, &[2, 3])
+        .into_iter()
+        .filter(|term| long_term_anchor_is_temporal(term))
+        .collect()
+}
+
+fn long_term_anchor_is_temporal(term: &str) -> bool {
+    let digits = term.chars().filter(|ch| ch.is_ascii_digit()).count();
+    (term.len() == 4 && digits == 4 && ("1900"..="2100").contains(&term))
+        || (term.len() == 2
+            && digits == 2
+            && term
+                .parse::<u8>()
+                .is_ok_and(|value| (1..=31).contains(&value)))
+}
+
+fn long_term_anchor_is_noise(term: &str) -> bool {
+    matches!(
+        term,
+        "what"
+            | "when"
+            | "where"
+            | "which"
+            | "that"
+            | "this"
+            | "with"
+            | "from"
+            | "into"
+            | "was"
+            | "were"
+            | "the"
+            | "and"
+            | "for"
+            | "release"
+            | "target"
+            | "session"
+    )
 }
 
 fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
@@ -2881,6 +3074,58 @@ mod tests {
                 .map(|entry| entry.id.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn hybrid_source_recall_scores_entity_time_evidence_and_source_authority() {
+        let mut targeted = test_entry(
+            "ltm-targeted",
+            LongTermMemoryKind::Fact,
+            "release_target_acme",
+            "The Acme release target was confirmed on 2026-06-20 for session_1.",
+            vec!["acme", "release", "2026-06-20", "session_1"],
+            Some("chat-a"),
+            20,
+            20,
+        );
+        targeted.supporting_citations = vec![
+            "external_eval:D1:12".to_string(),
+            "session_1#turn=12".to_string(),
+        ];
+        targeted.evidence_count = 2;
+
+        let mut stale_unrelated = test_entry(
+            "ltm-recent-weak",
+            LongTermMemoryKind::Fact,
+            "release_note_recent",
+            "A release note was edited recently, but it does not mention the target.",
+            vec!["release"],
+            Some("chat-a"),
+            100,
+            100,
+        );
+        stale_unrelated.supporting_citations = vec!["scratchpad:recent".to_string()];
+        stale_unrelated.evidence_count = 1;
+
+        let query = "What was the Acme release target on 2026-06-20 in session_1?";
+        let targeted_score =
+            score_long_term_memory_recall_breakdown(query, Some("chat-a"), 200, &targeted);
+        let weak_score =
+            score_long_term_memory_recall_breakdown(query, Some("chat-a"), 200, &stale_unrelated);
+
+        assert!(targeted_score.entity_anchor_score > 0);
+        assert!(targeted_score.temporal_anchor_score > 0);
+        assert!(targeted_score.evidence_quality_score > weak_score.evidence_quality_score);
+        assert!(targeted_score.source_authority_score > weak_score.source_authority_score);
+        assert!(targeted_score.total_score > weak_score.total_score);
+        assert!(targeted_score
+            .reason_fragments
+            .iter()
+            .any(|reason| reason == "entity anchor"));
+        assert!(targeted_score
+            .reason_fragments
+            .iter()
+            .any(|reason| reason == "temporal anchor"));
     }
 
     #[test]

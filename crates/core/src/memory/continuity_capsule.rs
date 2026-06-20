@@ -1468,6 +1468,7 @@ fn build_continuity_capsule_candidate(
             source_score: u32::from(!capsule.run_id.is_empty()) * 2,
             total_score,
             reason_fragments,
+            ..RecallScoreBreakdown::default()
         },
     }
 }

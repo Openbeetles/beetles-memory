@@ -2,7 +2,7 @@
 //! Prompt 阶段的 recall 路由：根据结构信号与各 plane 命中质量决定主提示词投影顺序。
 
 use super::{
-    build_cross_plane_rerank_result, plane_signal_score, CrossPlaneRerankInput, RecallPlane,
+    build_cross_plane_router_signal_result, plane_signal_score, CrossPlaneRerankInput, RecallPlane,
     RecallSelectionReport, SessionMessage,
 };
 use crate::agent::ActiveWorkRecord;
@@ -166,7 +166,7 @@ pub(crate) fn decide_prompt_recall_route(
     }
 
     let query_is_weak = structurally_weak_query(input.user_query);
-    let factual_rerank = build_cross_plane_rerank_result(CrossPlaneRerankInput {
+    let factual_rerank = build_cross_plane_router_signal_result(CrossPlaneRerankInput {
         intent: PromptRecallIntent::Factual,
         shared_factual_report: input.shared_factual_report,
         continuity_capsule_report: input.continuity_capsule_report,
@@ -174,7 +174,7 @@ pub(crate) fn decide_prompt_recall_route(
         runtime_skill_report: input.runtime_skill_report,
         task_recall_report: input.task_recall_report,
     });
-    let procedural_rerank = build_cross_plane_rerank_result(CrossPlaneRerankInput {
+    let procedural_rerank = build_cross_plane_router_signal_result(CrossPlaneRerankInput {
         intent: PromptRecallIntent::Procedural,
         shared_factual_report: input.shared_factual_report,
         continuity_capsule_report: input.continuity_capsule_report,
@@ -182,7 +182,7 @@ pub(crate) fn decide_prompt_recall_route(
         runtime_skill_report: input.runtime_skill_report,
         task_recall_report: input.task_recall_report,
     });
-    let continuity_rerank = build_cross_plane_rerank_result(CrossPlaneRerankInput {
+    let continuity_rerank = build_cross_plane_router_signal_result(CrossPlaneRerankInput {
         intent: PromptRecallIntent::Continuity,
         shared_factual_report: input.shared_factual_report,
         continuity_capsule_report: input.continuity_capsule_report,
@@ -190,7 +190,7 @@ pub(crate) fn decide_prompt_recall_route(
         runtime_skill_report: input.runtime_skill_report,
         task_recall_report: input.task_recall_report,
     });
-    let evidence_rerank = build_cross_plane_rerank_result(CrossPlaneRerankInput {
+    let evidence_rerank = build_cross_plane_router_signal_result(CrossPlaneRerankInput {
         intent: PromptRecallIntent::Evidence,
         shared_factual_report: input.shared_factual_report,
         continuity_capsule_report: input.continuity_capsule_report,

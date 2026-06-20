@@ -2,11 +2,17 @@
 //! 跨记忆平面的统一重排内核：给 prompt 路由和 recall inspection 提供同构信号。
 
 use super::{RecallPlane, RecallSelectionReport};
-use crate::memory::PromptRecallIntent;
+use crate::memory::{PromptRecallIntent, RecallScoreBreakdown};
 use serde::{Deserialize, Serialize};
 
 const CROSS_PLANE_TOP_CANDIDATES: usize = 6;
 const PLANE_SIGNAL_TOP_K: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrossPlaneRerankPurpose {
+    CandidateRanking,
+    RouterSignal,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CrossPlaneRerankCandidate {
@@ -65,6 +71,19 @@ pub(crate) struct CrossPlaneRerankInput<'a> {
 pub(crate) fn build_cross_plane_rerank_result(
     input: CrossPlaneRerankInput<'_>,
 ) -> CrossPlaneRerankResult {
+    build_cross_plane_rerank_result_for(input, CrossPlaneRerankPurpose::CandidateRanking)
+}
+
+pub(crate) fn build_cross_plane_router_signal_result(
+    input: CrossPlaneRerankInput<'_>,
+) -> CrossPlaneRerankResult {
+    build_cross_plane_rerank_result_for(input, CrossPlaneRerankPurpose::RouterSignal)
+}
+
+fn build_cross_plane_rerank_result_for(
+    input: CrossPlaneRerankInput<'_>,
+    purpose: CrossPlaneRerankPurpose,
+) -> CrossPlaneRerankResult {
     let reports = [
         Some(input.shared_factual_report),
         Some(input.continuity_capsule_report),
@@ -86,7 +105,7 @@ pub(crate) fn build_cross_plane_rerank_result(
                 source: candidate.source.clone(),
                 selected: candidate.selected,
                 original_total_score: candidate.score.total_score,
-                rerank_score: rerank_candidate_score(input.intent, report, candidate),
+                rerank_score: rerank_candidate_score(input.intent, report, candidate, purpose),
                 reasons: rerank_reason_fragments(input.intent, report, candidate),
             })
             .filter(|candidate| candidate.rerank_score > 0)
@@ -172,6 +191,7 @@ fn rerank_candidate_score(
     intent: PromptRecallIntent,
     report: &RecallSelectionReport,
     candidate: &super::RecallCandidate,
+    purpose: CrossPlaneRerankPurpose,
 ) -> u32 {
     let score = &candidate.score;
     let mut rerank = plane_intent_bonus(intent, candidate.plane);
@@ -179,6 +199,12 @@ fn rerank_candidate_score(
         .saturating_add(score.exact_match_score.min(24).saturating_mul(2))
         .saturating_add(score.lexical_score.min(24))
         .saturating_add(score.semantic_score.min(20))
+        .saturating_add(match purpose {
+            CrossPlaneRerankPurpose::CandidateRanking => {
+                w42_hybrid_source_rerank_bonus(intent, candidate.plane, score)
+            }
+            CrossPlaneRerankPurpose::RouterSignal => 0,
+        })
         .saturating_add(score.scope_affinity_score.min(12).saturating_mul(2))
         .saturating_add(score.recency_score.min(8))
         .saturating_add(score.confidence_score.min(8))
@@ -196,6 +222,38 @@ fn rerank_candidate_score(
         rerank = rerank.saturating_add(16);
     }
     rerank
+}
+
+fn w42_hybrid_source_rerank_bonus(
+    intent: PromptRecallIntent,
+    plane: RecallPlane,
+    score: &RecallScoreBreakdown,
+) -> u32 {
+    let source_bonus = score
+        .entity_anchor_score
+        .min(32)
+        .saturating_mul(2)
+        .saturating_add(score.temporal_anchor_score.min(24).saturating_mul(2))
+        .saturating_add(score.evidence_quality_score.min(24))
+        .saturating_sub(score.stale_penalty.min(24));
+
+    match intent {
+        PromptRecallIntent::Factual => source_bonus,
+        PromptRecallIntent::Mixed => match plane {
+            RecallPlane::SharedFactual | RecallPlane::Archive => source_bonus,
+            RecallPlane::ContinuityCapsule
+            | RecallPlane::RuntimeSkill
+            | RecallPlane::TaskRecall => source_bonus / 2,
+        },
+        PromptRecallIntent::Evidence => match plane {
+            RecallPlane::Archive => score.evidence_quality_score.min(24),
+            RecallPlane::SharedFactual
+            | RecallPlane::ContinuityCapsule
+            | RecallPlane::RuntimeSkill
+            | RecallPlane::TaskRecall => 0,
+        },
+        PromptRecallIntent::Continuity | PromptRecallIntent::Procedural => 0,
+    }
 }
 
 fn rerank_reason_fragments(
@@ -344,5 +402,63 @@ mod tests {
         });
         assert_eq!(result.plane_signals[0].plane, RecallPlane::Archive);
         assert_eq!(result.top_candidates[0].plane, RecallPlane::Archive);
+    }
+
+    #[test]
+    fn factual_rerank_uses_w42_hybrid_source_signals_before_weak_total_score() {
+        let mut shared_report = report(RecallPlane::SharedFactual, &[]);
+        shared_report.candidates = vec![
+            RecallCandidate {
+                plane: RecallPlane::SharedFactual,
+                candidate_id: "weak-recent".to_string(),
+                title: "weak-recent".to_string(),
+                selected: true,
+                score: RecallScoreBreakdown {
+                    total_score: 80,
+                    lexical_score: 8,
+                    reason_fragments: vec!["weak total".to_string()],
+                    ..RecallScoreBreakdown::default()
+                },
+                ..RecallCandidate::default()
+            },
+            RecallCandidate {
+                plane: RecallPlane::SharedFactual,
+                candidate_id: "hybrid-target".to_string(),
+                title: "hybrid-target".to_string(),
+                selected: true,
+                citation: Some("external_eval:D1:12".to_string()),
+                score: RecallScoreBreakdown {
+                    total_score: 28,
+                    entity_anchor_score: 40,
+                    temporal_anchor_score: 24,
+                    evidence_quality_score: 16,
+                    reason_fragments: vec![
+                        "entity anchor".to_string(),
+                        "temporal anchor".to_string(),
+                    ],
+                    ..RecallScoreBreakdown::default()
+                },
+                ..RecallCandidate::default()
+            },
+        ];
+        shared_report.candidate_count = shared_report.candidates.len();
+        shared_report.selected_count = shared_report.candidates.len();
+
+        let result = build_cross_plane_rerank_result(CrossPlaneRerankInput {
+            intent: PromptRecallIntent::Factual,
+            shared_factual_report: &shared_report,
+            continuity_capsule_report: &report(RecallPlane::ContinuityCapsule, &[]),
+            archive_report: &report(RecallPlane::Archive, &[]),
+            runtime_skill_report: &report(RecallPlane::RuntimeSkill, &[]),
+            task_recall_report: None,
+        });
+
+        assert_eq!(
+            result
+                .top_candidates
+                .first()
+                .map(|candidate| candidate.candidate_id.as_str()),
+            Some("hybrid-target")
+        );
     }
 }
