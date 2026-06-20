@@ -92,8 +92,11 @@ use crate::{
     resolve_memory_capabilities, Error, LLMRuntimeProjectionEnvelope, LlmClient,
     MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
     MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest, MemoryEvalRecallAtK,
-    MemoryEvalRecallCandidate, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
-    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryExportReport, MemoryExportRequest,
+    MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
+    MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallGoldRank,
+    MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
+    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryEvalRecallStageDiagnostics,
+    MemoryEvalRecallStageEvidenceRefs, MemoryExportReport, MemoryExportRequest,
     MemoryGovernancePolicyMutationReport, MemoryGraphRecallIndexReport, MemoryImportReport,
     MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
     MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
@@ -1917,17 +1920,27 @@ impl MemoryRuntime {
             task_run_store: Some(task_run_store.as_ref()),
             task_learning_store: Some(task_learning_store.as_ref()),
         });
-        let source_candidate_ids = runtime_recall_graph_candidate_ids(
+        let source_evidence = runtime_recall_graph_source_evidence(
             &procedural_hits,
             &working,
             self.config.clock.now_secs(),
         );
-        let persistent_graph = self.load_persistent_recall_graph(&source_candidate_ids);
-        let graph = build_recall_graph_report(
-            &request.query,
+        let source_candidate_ids = recall_graph_candidate_ids(&source_evidence);
+        let graph_anchor_evidence = runtime_recall_graph_anchor_evidence(
             &procedural_hits,
             &working,
             self.config.clock.now_secs(),
+            self.config
+                .runtime_budget
+                .graph_expansion_budget
+                .max_seed_candidates,
+        );
+        let graph_anchor_candidate_ids = recall_graph_candidate_ids(&graph_anchor_evidence);
+        let persistent_graph = self.load_persistent_recall_graph(&graph_anchor_candidate_ids);
+        let graph = build_recall_graph_report(
+            &request.query,
+            graph_anchor_evidence,
+            &graph_anchor_candidate_ids,
             &persistent_graph,
             GraphRecallExpansionBudget::from_runtime_budget(
                 &self.config.runtime_budget.graph_expansion_budget,
@@ -1958,9 +1971,12 @@ impl MemoryRuntime {
             agent_tool_hints: agent_tool_selection.tool_hints,
             tool_experience_status: agent_tool_selection.tool_experience_status,
             working,
+            source_candidate_ids,
+            graph_anchor_candidate_ids,
             graph_index_report: graph.index_report,
             graph_rerank: graph.rerank,
             graph_gate: graph.gate,
+            graph_candidate_evidence_ref_index: graph.candidate_evidence_ref_index,
             compact_graph: graph.compact_graph,
             lifecycle_report: self.finish_lifecycle_success_with_payload(
                 lifecycle,
@@ -1981,60 +1997,73 @@ impl MemoryRuntime {
             limit: recall_limit,
             tool_registry_refs: request.tool_registry_refs.clone(),
         })?;
-        let source_candidates = recall
-            .graph_rerank
-            .candidate_ids
-            .iter()
-            .map(|candidate_id| {
-                build_eval_recall_candidate(
-                    candidate_id,
-                    &recall,
-                    request.include_graph_neighbors,
-                    request.include_score_breakdown,
-                )
-            })
-            .collect::<Vec<_>>();
+        let source_candidates = build_eval_recall_candidates(
+            &recall.source_candidate_ids,
+            &recall,
+            request.include_graph_neighbors,
+            request.include_score_breakdown,
+        );
+        let graph_anchor_candidates = build_eval_recall_candidates(
+            &recall.graph_anchor_candidate_ids,
+            &recall,
+            request.include_graph_neighbors,
+            request.include_score_breakdown,
+        );
+        let all_expanded_candidates = build_eval_recall_candidates(
+            &recall.graph_rerank.expanded_candidate_ids,
+            &recall,
+            request.include_graph_neighbors,
+            request.include_score_breakdown,
+        );
         let expanded_candidates = if request.include_expanded_candidates {
-            recall
-                .graph_rerank
-                .expanded_candidate_ids
-                .iter()
-                .map(|candidate_id| {
-                    build_eval_recall_candidate(
-                        candidate_id,
-                        &recall,
-                        request.include_graph_neighbors,
-                        request.include_score_breakdown,
-                    )
-                })
-                .collect::<Vec<_>>()
+            all_expanded_candidates.clone()
         } else {
             Vec::new()
         };
-        let reranked_candidates = recall
-            .graph_rerank
-            .selected_ids
-            .iter()
-            .map(|candidate_id| {
-                build_eval_recall_candidate(
-                    candidate_id,
-                    &recall,
-                    request.include_graph_neighbors,
-                    request.include_score_breakdown,
-                )
-            })
-            .collect::<Vec<_>>();
+        let reranked_candidates = build_eval_recall_candidates(
+            &recall.graph_rerank.selected_ids,
+            &recall,
+            request.include_graph_neighbors,
+            request.include_score_breakdown,
+        );
         let selected_candidates = reranked_candidates
             .iter()
             .take(request.k.max(1))
             .cloned()
             .collect::<Vec<_>>();
+        let rendered_candidates = selected_candidates
+            .iter()
+            .filter(|candidate| {
+                recall
+                    .source_candidate_ids
+                    .iter()
+                    .any(|source_id| source_id == &candidate.candidate_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let eval_candidate_pool = build_eval_candidate_pool(
+            &source_candidates,
+            &graph_anchor_candidates,
+            &all_expanded_candidates,
+            &reranked_candidates,
+        );
+        let evidence_ref_index = build_eval_recall_evidence_ref_index(&eval_candidate_pool);
+        let stage_diagnostics = build_eval_recall_stage_diagnostics(
+            request.benchmark_context.as_ref(),
+            &source_candidates,
+            &graph_anchor_candidates,
+            &all_expanded_candidates,
+            &reranked_candidates,
+            &selected_candidates,
+            &rendered_candidates,
+            &recall,
+        );
         let metrics = build_eval_recall_metrics(
             &request,
             source_candidates.len(),
-            expanded_candidates.len(),
+            all_expanded_candidates.len(),
             selected_candidates.len(),
-            selected_candidates.len(),
+            rendered_candidates.len(),
             &reranked_candidates,
         );
         let missing_evidence_refs = if request.include_missing_evidence {
@@ -2056,7 +2085,9 @@ impl MemoryRuntime {
             query: request.query,
             benchmark_context: request.benchmark_context,
             source_candidates,
+            graph_anchor_candidates,
             expanded_candidates,
+            eval_candidate_pool,
             graph_neighbors: if request.include_graph_neighbors {
                 recall.graph_rerank.graph_neighbor_ids.clone()
             } else {
@@ -2064,7 +2095,10 @@ impl MemoryRuntime {
             },
             reranked_candidates,
             selected_candidates: selected_candidates.clone(),
-            rendered_block_preview: render_eval_recall_block_preview(&selected_candidates),
+            rendered_candidates: rendered_candidates.clone(),
+            rendered_block_preview: render_eval_recall_block_preview(&rendered_candidates),
+            evidence_ref_index,
+            stage_diagnostics,
             metrics,
             missing_evidence_refs,
             budget_report: self.config.runtime_budget.clone(),
@@ -5222,6 +5256,7 @@ struct RuntimeRecallGraphReport {
     gate: TemporalMemoryGraphGateReport,
     compact_graph: CompactMemoryGraph,
     index_report: MemoryGraphRecallIndexReport,
+    candidate_evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,
 }
 
 #[derive(Default)]
@@ -5234,24 +5269,22 @@ struct PersistentRecallGraphLoadReport {
 
 fn build_recall_graph_report(
     query: &str,
-    procedural_hits: &[crate::RuntimeSkillHit],
-    working: &crate::WorkingRecallInspection,
-    now_secs: u64,
+    mut evidence: Vec<MemoryGraphEvidence>,
+    graph_anchor_candidate_ids: &[String],
     persistent_graph: &PersistentRecallGraphLoadReport,
     expansion_budget: GraphRecallExpansionBudget,
 ) -> RuntimeRecallGraphReport {
-    let mut evidence = runtime_recall_graph_evidence(procedural_hits, working, now_secs);
     let candidate_ids = retain_unique_recall_graph_evidence(&mut evidence);
     let graph = build_temporal_memory_graph_from_evidence(evidence);
     let mut index_report = build_memory_graph_index_report(
         &persistent_graph.indexes,
         &persistent_graph.index_failures,
-        &candidate_ids,
+        graph_anchor_candidate_ids,
         persistent_graph.graph.is_some(),
     );
     append_index_report_failures(&mut index_report, &persistent_graph.failures);
     if let Some(persistent) = persistent_graph.graph.as_ref() {
-        if candidate_ids.iter().any(|candidate_id| {
+        if graph_anchor_candidate_ids.iter().any(|candidate_id| {
             persistent
                 .nodes
                 .iter()
@@ -5260,7 +5293,7 @@ fn build_recall_graph_report(
             let indexed_graph = if index_report.used {
                 filter_temporal_graph_for_index(
                     persistent,
-                    &candidate_ids,
+                    graph_anchor_candidate_ids,
                     &index_report.expanded_node_ids,
                 )
             } else {
@@ -5269,7 +5302,7 @@ fn build_recall_graph_report(
             record_index_graph_input_counts(&mut index_report, &indexed_graph);
             let rerank = rerank_recall_with_temporal_graph(
                 query,
-                candidate_ids.clone(),
+                graph_anchor_candidate_ids.to_vec(),
                 &indexed_graph,
                 expansion_budget,
             );
@@ -5282,6 +5315,7 @@ fn build_recall_graph_report(
             return RuntimeRecallGraphReport {
                 rerank,
                 gate,
+                candidate_evidence_ref_index: graph_candidate_evidence_ref_index(&indexed_graph),
                 compact_graph: indexed_graph.compact_graph,
                 index_report,
             };
@@ -5290,6 +5324,7 @@ fn build_recall_graph_report(
 
     let rerank = rerank_recall_with_temporal_graph(query, candidate_ids, &graph, expansion_budget);
     record_index_graph_input_counts(&mut index_report, &graph);
+    let candidate_evidence_ref_index = graph_candidate_evidence_ref_index(&graph);
     let mut gate = graph.gate;
     gate.high_confidence_projection_allowed = false;
     if !gate
@@ -5315,21 +5350,13 @@ fn build_recall_graph_report(
     RuntimeRecallGraphReport {
         rerank,
         gate,
+        candidate_evidence_ref_index,
         compact_graph: graph.compact_graph,
         index_report,
     }
 }
 
-fn runtime_recall_graph_candidate_ids(
-    procedural_hits: &[crate::RuntimeSkillHit],
-    working: &crate::WorkingRecallInspection,
-    now_secs: u64,
-) -> Vec<String> {
-    let mut evidence = runtime_recall_graph_evidence(procedural_hits, working, now_secs);
-    retain_unique_recall_graph_evidence(&mut evidence)
-}
-
-fn runtime_recall_graph_evidence(
+fn runtime_recall_graph_source_evidence(
     procedural_hits: &[crate::RuntimeSkillHit],
     working: &crate::WorkingRecallInspection,
     now_secs: u64,
@@ -5361,6 +5388,68 @@ fn runtime_recall_graph_evidence(
         append_recall_report_graph_evidence(&mut evidence, report, now_secs);
     }
     evidence
+}
+
+fn runtime_recall_graph_anchor_evidence(
+    procedural_hits: &[crate::RuntimeSkillHit],
+    working: &crate::WorkingRecallInspection,
+    now_secs: u64,
+    limit: usize,
+) -> Vec<MemoryGraphEvidence> {
+    let mut evidence = runtime_recall_graph_source_evidence(procedural_hits, working, now_secs);
+    append_recall_report_graph_anchor_evidence(
+        &mut evidence,
+        &working.shared_factual_report,
+        now_secs,
+    );
+    append_recall_report_graph_anchor_evidence(
+        &mut evidence,
+        &working.continuity_capsule_report,
+        now_secs,
+    );
+    append_recall_report_graph_anchor_evidence(
+        &mut evidence,
+        &working.archive_recall_report,
+        now_secs,
+    );
+    append_recall_report_graph_anchor_evidence(
+        &mut evidence,
+        &working.runtime_skill_report,
+        now_secs,
+    );
+    if let Some(report) = working.task_recall_report.as_ref() {
+        append_recall_report_graph_anchor_evidence(&mut evidence, report, now_secs);
+    }
+    let mut candidate_ids = Vec::new();
+    evidence.retain(|item| {
+        if item.node_id.trim().is_empty() {
+            return false;
+        }
+        if candidate_ids
+            .iter()
+            .any(|candidate| candidate == &item.node_id)
+        {
+            return false;
+        }
+        candidate_ids.push(item.node_id.clone());
+        limit == 0 || candidate_ids.len() <= limit
+    });
+    evidence
+}
+
+fn recall_graph_candidate_ids(evidence: &[MemoryGraphEvidence]) -> Vec<String> {
+    let mut candidate_ids = Vec::new();
+    for item in evidence {
+        if item.node_id.trim().is_empty()
+            || candidate_ids
+                .iter()
+                .any(|candidate| candidate == &item.node_id)
+        {
+            continue;
+        }
+        candidate_ids.push(item.node_id.clone());
+    }
+    candidate_ids
 }
 
 fn retain_unique_recall_graph_evidence(evidence: &mut Vec<MemoryGraphEvidence>) -> Vec<String> {
@@ -5460,6 +5549,19 @@ fn record_index_graph_input_counts(
     index_report.filtered_node_count = graph.nodes.len();
     index_report.filtered_edge_count = graph.edges.len();
     index_report.filtered_backlink_count = graph.backlinks.len();
+}
+
+fn graph_candidate_evidence_ref_index(
+    graph: &TemporalMemoryGraphBuildReport,
+) -> Vec<MemoryEvalRecallEvidenceRefIndexEntry> {
+    graph
+        .nodes
+        .iter()
+        .map(|node| MemoryEvalRecallEvidenceRefIndexEntry {
+            candidate_id: node.node_id.clone(),
+            evidence_refs: node.evidence_refs.clone(),
+        })
+        .collect()
 }
 
 fn append_index_report_failures(
@@ -5659,6 +5761,29 @@ fn append_recall_report_graph_evidence(
     }
 }
 
+fn append_recall_report_graph_anchor_evidence(
+    evidence: &mut Vec<MemoryGraphEvidence>,
+    report: &RecallSelectionReport,
+    now_secs: u64,
+) {
+    for candidate in &report.candidates {
+        let node_id = candidate.candidate_id.trim();
+        if node_id.is_empty() {
+            continue;
+        }
+        let label = first_non_empty(&[&candidate.title, &candidate.excerpt, node_id]);
+        push_recall_graph_evidence(
+            evidence,
+            node_id.to_string(),
+            MemoryGraphNodeKind::MemoryRecord,
+            label.to_string(),
+            report.plane.label(),
+            format!("{}:{node_id}", report.plane.label()),
+            candidate.observed_at.unwrap_or(now_secs),
+        );
+    }
+}
+
 fn selected_recall_candidates(report: &RecallSelectionReport) -> Vec<&RecallCandidate> {
     report
         .candidates
@@ -5699,6 +5824,272 @@ fn push_recall_graph_evidence(
     });
 }
 
+fn build_eval_recall_candidates(
+    candidate_ids: &[String],
+    recall: &MemoryRecallReport,
+    include_graph_neighbors: bool,
+    include_score_breakdown: bool,
+) -> Vec<MemoryEvalRecallCandidate> {
+    candidate_ids
+        .iter()
+        .map(|candidate_id| {
+            build_eval_recall_candidate(
+                candidate_id,
+                recall,
+                include_graph_neighbors,
+                include_score_breakdown,
+            )
+        })
+        .collect()
+}
+
+fn build_eval_candidate_pool(
+    source_candidates: &[MemoryEvalRecallCandidate],
+    graph_anchor_candidates: &[MemoryEvalRecallCandidate],
+    expanded_candidates: &[MemoryEvalRecallCandidate],
+    reranked_candidates: &[MemoryEvalRecallCandidate],
+) -> Vec<MemoryEvalRecallCandidate> {
+    let mut pool = Vec::new();
+    for candidate in source_candidates
+        .iter()
+        .chain(graph_anchor_candidates.iter())
+        .chain(expanded_candidates.iter())
+        .chain(reranked_candidates.iter())
+    {
+        push_unique_eval_candidate(&mut pool, candidate.clone());
+    }
+    pool
+}
+
+fn push_unique_eval_candidate(
+    candidates: &mut Vec<MemoryEvalRecallCandidate>,
+    candidate: MemoryEvalRecallCandidate,
+) {
+    if !candidates
+        .iter()
+        .any(|existing| existing.candidate_id == candidate.candidate_id)
+    {
+        candidates.push(candidate);
+    }
+}
+
+fn build_eval_recall_evidence_ref_index(
+    candidates: &[MemoryEvalRecallCandidate],
+) -> Vec<MemoryEvalRecallEvidenceRefIndexEntry> {
+    candidates
+        .iter()
+        .map(|candidate| MemoryEvalRecallEvidenceRefIndexEntry {
+            candidate_id: candidate.candidate_id.clone(),
+            evidence_refs: candidate.evidence_refs.clone(),
+        })
+        .collect()
+}
+
+fn build_eval_recall_stage_diagnostics(
+    benchmark_context: Option<&MemoryEvalRecallBenchmarkContext>,
+    source_candidates: &[MemoryEvalRecallCandidate],
+    graph_anchor_candidates: &[MemoryEvalRecallCandidate],
+    expanded_candidates: &[MemoryEvalRecallCandidate],
+    reranked_candidates: &[MemoryEvalRecallCandidate],
+    selected_candidates: &[MemoryEvalRecallCandidate],
+    rendered_candidates: &[MemoryEvalRecallCandidate],
+    recall: &MemoryRecallReport,
+) -> MemoryEvalRecallStageDiagnostics {
+    let gold_evidence_refs = benchmark_context
+        .map(|context| context.expected_evidence_refs.clone())
+        .unwrap_or_default();
+    let stages = [
+        ("source", source_candidates),
+        ("expanded", expanded_candidates),
+        ("reranked", reranked_candidates),
+        ("selected", selected_candidates),
+        ("rendered", rendered_candidates),
+    ];
+    let mut matched_gold_by_stage = Vec::new();
+    let mut missing_gold_by_stage = Vec::new();
+    let mut gold_rank_by_stage = Vec::new();
+    let mut first_any_hit_stage = None;
+    let mut first_all_hit_stage = None;
+    let mut expanded_missing = gold_evidence_refs.clone();
+
+    for (stage, candidates) in stages {
+        let matched_evidence_refs =
+            matched_evidence_for_k(&gold_evidence_refs, candidates, candidates.len().max(1));
+        let missing_evidence_refs =
+            missing_from_expected(&gold_evidence_refs, &matched_evidence_refs);
+        if stage == "expanded" {
+            expanded_missing = missing_evidence_refs.clone();
+        }
+        if first_any_hit_stage.is_none() && !matched_evidence_refs.is_empty() {
+            first_any_hit_stage = Some(stage.to_string());
+        }
+        if first_all_hit_stage.is_none()
+            && !gold_evidence_refs.is_empty()
+            && missing_evidence_refs.is_empty()
+        {
+            first_all_hit_stage = Some(stage.to_string());
+        }
+        matched_gold_by_stage.push(MemoryEvalRecallStageEvidenceRefs {
+            stage: stage.to_string(),
+            evidence_refs: matched_evidence_refs,
+        });
+        missing_gold_by_stage.push(MemoryEvalRecallStageEvidenceRefs {
+            stage: stage.to_string(),
+            evidence_refs: missing_evidence_refs,
+        });
+        for evidence_ref in &gold_evidence_refs {
+            gold_rank_by_stage.push(MemoryEvalRecallGoldRank {
+                stage: stage.to_string(),
+                evidence_ref: evidence_ref.clone(),
+                rank: evidence_rank_in_candidates(evidence_ref, candidates),
+            });
+        }
+    }
+
+    let mut source_anchor_ids = recall.graph_index_report.source_anchor_ids.clone();
+    if source_anchor_ids.is_empty() {
+        source_anchor_ids = source_candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect();
+    }
+    let graph_anchor_candidate_ids = graph_anchor_candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect::<Vec<_>>();
+    let expanded_node_ids = if recall.graph_index_report.expanded_node_ids.is_empty() {
+        recall.graph_rerank.graph_neighbor_ids.clone()
+    } else {
+        recall.graph_index_report.expanded_node_ids.clone()
+    };
+    let mut rendered_evidence_refs = Vec::new();
+    for candidate in rendered_candidates {
+        for evidence_ref in &candidate.evidence_refs {
+            push_unique_string(&mut rendered_evidence_refs, evidence_ref.clone());
+        }
+    }
+
+    MemoryEvalRecallStageDiagnostics {
+        suite: benchmark_context
+            .map(|context| context.suite.clone())
+            .unwrap_or_default(),
+        question_id: benchmark_context
+            .map(|context| context.question_id.clone())
+            .unwrap_or_default(),
+        question_type: benchmark_context
+            .map(|context| context.question_type.clone())
+            .unwrap_or_default(),
+        evidence_count: gold_evidence_refs.len(),
+        gold_evidence_refs: gold_evidence_refs.clone(),
+        first_any_hit_stage,
+        first_all_hit_stage,
+        matched_gold_by_stage,
+        missing_gold_by_stage,
+        gold_rank_by_stage,
+        miss_after_expanded: !gold_evidence_refs.is_empty() && !expanded_missing.is_empty(),
+        source_anchor_ids,
+        graph_anchor_candidate_ids,
+        expanded_node_ids,
+        graph_neighbor_ids: recall.graph_rerank.graph_neighbor_ids.clone(),
+        graph_distance_to_gold: graph_distance_to_gold(
+            &gold_evidence_refs,
+            source_candidates,
+            graph_anchor_candidates,
+            expanded_candidates,
+            &recall.graph_rerank.graph_neighbor_ids,
+        ),
+        expansion_budget: recall.graph_rerank.expansion_budget.clone(),
+        truncated_count: recall
+            .graph_rerank
+            .expansion_budget
+            .truncated_candidate_count,
+        blocked_reasons: recall.graph_rerank.expansion_budget.blocked_reasons.clone(),
+        selected_candidate_ids: selected_candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect(),
+        rendered_candidate_ids: rendered_candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect(),
+        rendered_evidence_refs,
+    }
+}
+
+fn evidence_rank_in_candidates(
+    evidence_ref: &str,
+    candidates: &[MemoryEvalRecallCandidate],
+) -> Option<usize> {
+    candidates
+        .iter()
+        .position(|candidate| {
+            candidate
+                .evidence_refs
+                .iter()
+                .any(|actual| actual == evidence_ref)
+        })
+        .map(|index| index + 1)
+}
+
+fn graph_distance_to_gold(
+    expected_evidence_refs: &[String],
+    source_candidates: &[MemoryEvalRecallCandidate],
+    graph_anchor_candidates: &[MemoryEvalRecallCandidate],
+    expanded_candidates: &[MemoryEvalRecallCandidate],
+    graph_neighbor_ids: &[String],
+) -> Vec<MemoryEvalRecallGraphDistanceToGold> {
+    let mut distances = Vec::new();
+    for candidate in expanded_candidates {
+        for evidence_ref in expected_evidence_refs {
+            if !candidate
+                .evidence_refs
+                .iter()
+                .any(|actual| actual == evidence_ref)
+            {
+                continue;
+            }
+            distances.push(MemoryEvalRecallGraphDistanceToGold {
+                candidate_id: candidate.candidate_id.clone(),
+                evidence_ref: evidence_ref.clone(),
+                distance: graph_candidate_distance(
+                    candidate,
+                    source_candidates,
+                    graph_anchor_candidates,
+                    graph_neighbor_ids,
+                ),
+            });
+        }
+    }
+    distances
+}
+
+fn graph_candidate_distance(
+    candidate: &MemoryEvalRecallCandidate,
+    source_candidates: &[MemoryEvalRecallCandidate],
+    graph_anchor_candidates: &[MemoryEvalRecallCandidate],
+    graph_neighbor_ids: &[String],
+) -> Option<u8> {
+    if source_candidates
+        .iter()
+        .any(|source| source.candidate_id == candidate.candidate_id)
+    {
+        Some(0)
+    } else if graph_neighbor_ids
+        .iter()
+        .any(|neighbor| neighbor == &candidate.candidate_id)
+    {
+        Some(1)
+    } else if candidate.graph_neighbor_ids.iter().any(|neighbor| {
+        graph_anchor_candidates
+            .iter()
+            .any(|anchor| anchor.candidate_id == *neighbor)
+    }) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 fn build_eval_recall_candidate(
     candidate_id: &str,
     recall: &MemoryRecallReport,
@@ -5710,8 +6101,12 @@ fn build_eval_recall_candidate(
         .nodes
         .iter()
         .find(|node| node.node_id == candidate_id);
-    let evidence_refs = node
-        .map(|node| node.evidence_refs.clone())
+    let evidence_refs = recall
+        .graph_candidate_evidence_ref_index
+        .iter()
+        .find(|entry| entry.candidate_id == candidate_id)
+        .map(|entry| entry.evidence_refs.clone())
+        .or_else(|| node.map(|node| node.evidence_refs.clone()))
         .unwrap_or_default();
     let graph_neighbor_ids = if include_graph_neighbors {
         recall

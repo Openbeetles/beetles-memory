@@ -65,6 +65,7 @@ fn is_expected_current_baseline_block(blocked_reasons: &[String]) -> bool {
                 "w4_external_noisy_wall_improvement_not_proven"
                     | "w4_external_noisy_wall_stage_diagnostics_missing"
                     | "w4_external_noisy_wall_index_diagnostics_missing"
+                    | "w4_external_noisy_wall_w4_1_diagnostics_missing"
                     | "w4_external_noisy_wall_stage_attribution_not_proven"
                     | "w4_external_noisy_wall_index_effect_not_proven"
             )

@@ -57,13 +57,19 @@ rg -Fq "W4 GraphRecallRerankReport 已由 MemoryRuntime::recall() 返回" dev-do
 rg -Fq "W4 graph expansion budget" dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "W4 production recall index" dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "W4 external noisy wall summary/operator contract" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4 external noisy stage/index diagnostics" dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "W4 external noisy stage/index/W4.1 diagnostics" dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "W4ExternalNoisyW41Diagnostics" dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs crates/replay/src/lib.rs
+rg -Fq "w4_external_noisy_wall_w4_1_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs crates/replay/src/bin/bm-w4-external-noisy-wall.rs
+rg -Fq "w4_1_diagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs
 rg -Fq "召回质量优化" dev-docs/next-gen-soul-memory-roadmap.md dev-docs/README.md
 rg -Fq "W4.1 Recall Quality Optimization" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "candidate pool split" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "memory-owned hybrid source retrieval" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "query-aware graph expansion" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "graph_anchor_candidates" dev-docs/temporal-memory-graph-plan.md
+rg -Fq "source_candidate_ids" dev-docs/temporal-memory-graph-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "graph_anchor_candidate_ids" dev-docs/temporal-memory-graph-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "fallback_recall_candidates_are_query_scored_before_recency" crates/core/src/memory/long_term.rs
 rg -Fq "external runner temporal graph anchor binding" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "memory_graph_index_source_anchor_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
 rg -Fq "write_chunks_creates_indexed_eval_recall_path" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md

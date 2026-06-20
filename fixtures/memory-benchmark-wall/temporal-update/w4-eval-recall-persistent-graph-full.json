@@ -92,7 +92,12 @@
     "question_type": "temporal_update",
     "expected_evidence_refs": ["turn:release-manifest"],
     "source_candidates": ["runtime_skill__release_guard"],
+    "graph_anchor_candidates": ["runtime_skill__release_guard"],
     "expanded_candidates": [
+      "runtime_skill__release_guard",
+      "graph:release_manifest_check"
+    ],
+    "eval_candidate_pool": [
       "runtime_skill__release_guard",
       "graph:release_manifest_check"
     ],
@@ -100,8 +105,110 @@
       "graph:release_manifest_check",
       "runtime_skill__release_guard"
     ],
+    "rendered_candidates": ["graph:release_manifest_check"],
     "rendered_block_preview": "graph:release_manifest_check [turn:release-manifest]",
+    "rendered_evidence_refs": ["turn:release-manifest"],
+    "evidence_ref_index": [
+      {
+        "candidate_id": "runtime_skill__release_guard",
+        "evidence_refs": ["runtime_skill:runtime_skill__release_guard"]
+      },
+      {
+        "candidate_id": "graph:release_manifest_check",
+        "evidence_refs": ["turn:release-manifest"]
+      }
+    ],
     "missing_evidence_refs": [],
+    "diagnostics": {
+      "evidence_count": 1,
+      "first_any_hit_stage": "expanded",
+      "first_all_hit_stage": "expanded",
+      "matched_gold_by_stage": [
+        {
+          "stage": "source",
+          "evidence_refs": []
+        },
+        {
+          "stage": "expanded",
+          "evidence_refs": ["turn:release-manifest"]
+        },
+        {
+          "stage": "reranked",
+          "evidence_refs": ["turn:release-manifest"]
+        },
+        {
+          "stage": "selected",
+          "evidence_refs": ["turn:release-manifest"]
+        },
+        {
+          "stage": "rendered",
+          "evidence_refs": ["turn:release-manifest"]
+        }
+      ],
+      "missing_gold_by_stage": [
+        {
+          "stage": "source",
+          "evidence_refs": ["turn:release-manifest"]
+        },
+        {
+          "stage": "expanded",
+          "evidence_refs": []
+        },
+        {
+          "stage": "reranked",
+          "evidence_refs": []
+        },
+        {
+          "stage": "selected",
+          "evidence_refs": []
+        },
+        {
+          "stage": "rendered",
+          "evidence_refs": []
+        }
+      ],
+      "gold_rank_by_stage": [
+        {
+          "stage": "source",
+          "evidence_ref": "turn:release-manifest",
+          "rank": null
+        },
+        {
+          "stage": "expanded",
+          "evidence_ref": "turn:release-manifest",
+          "rank": 2
+        },
+        {
+          "stage": "reranked",
+          "evidence_ref": "turn:release-manifest",
+          "rank": 1
+        },
+        {
+          "stage": "selected",
+          "evidence_ref": "turn:release-manifest",
+          "rank": 1
+        },
+        {
+          "stage": "rendered",
+          "evidence_ref": "turn:release-manifest",
+          "rank": 1
+        }
+      ],
+      "miss_after_expanded": false,
+      "source_anchor_ids": ["runtime_skill__release_guard"],
+      "graph_anchor_candidate_ids": ["runtime_skill__release_guard"],
+      "expanded_node_ids": ["graph:release_manifest_check"],
+      "graph_neighbor_ids": ["graph:release_manifest_check"],
+      "graph_distance_to_gold": [
+        {
+          "candidate_id": "graph:release_manifest_check",
+          "evidence_ref": "turn:release-manifest",
+          "distance": 1
+        }
+      ],
+      "truncated_count": 0,
+      "blocked_reasons": []
+    },
     "metrics": {
       "recall_at_k": [
         {

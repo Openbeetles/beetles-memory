@@ -1446,7 +1446,12 @@ pub(crate) fn select_long_term_recall_entries(
             used_fallback = true;
         }
     }
-    reorder_recall_candidates_for_chat(chat_id, &mut candidates);
+    reorder_recall_candidates_for_query(
+        chat_id,
+        &recall_query,
+        crate::util::current_unix_secs(),
+        &mut candidates,
+    );
     let selected = policy.select_entries(candidates.clone(), desired);
     LongTermRecallSelection {
         recall_query,
@@ -1560,8 +1565,27 @@ fn render_exact_long_term_memory_body(
     out
 }
 
-fn reorder_recall_candidates_for_chat(chat_id: &str, candidates: &mut [LongTermMemoryEntry]) {
-    candidates.sort_by_key(|entry| recall_scope_priority(chat_id, entry));
+fn reorder_recall_candidates_for_query(
+    chat_id: &str,
+    query: &str,
+    now_secs: u64,
+    candidates: &mut [LongTermMemoryEntry],
+) {
+    candidates.sort_by(|left, right| {
+        let left_score =
+            score_long_term_memory_recall_breakdown(query, Some(chat_id), now_secs, left);
+        let right_score =
+            score_long_term_memory_recall_breakdown(query, Some(chat_id), now_secs, right);
+        right_score
+            .total_score
+            .cmp(&left_score.total_score)
+            .then_with(|| {
+                recall_scope_priority(chat_id, left).cmp(&recall_scope_priority(chat_id, right))
+            })
+            .then_with(|| entry_observed_at(right).cmp(&entry_observed_at(left)))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.created_at.cmp(&left.created_at))
+    });
 }
 
 fn recall_scope_priority(chat_id: &str, entry: &LongTermMemoryEntry) -> u8 {
@@ -2790,6 +2814,73 @@ mod tests {
         let preferred = score_long_term_memory_recall("memory project", Some("chat-a"), 100, &base);
         let fallback = score_long_term_memory_recall("memory project", Some("chat-a"), 100, &older);
         assert!(preferred > fallback);
+    }
+
+    #[test]
+    fn fallback_recall_candidates_are_query_scored_before_recency() {
+        let store = StubLongTermMemoryStore {
+            recall_entries: vec![test_entry(
+                "ltm-direct",
+                LongTermMemoryKind::Fact,
+                "release_general",
+                "Release memory is available.",
+                vec!["release"],
+                Some("chat-a"),
+                30,
+                30,
+            )],
+            list_entries: vec![
+                test_entry(
+                    "ltm-recent-unrelated",
+                    LongTermMemoryKind::Fact,
+                    "release_recent_unrelated",
+                    "Release note mentions packaging only.",
+                    vec!["release"],
+                    Some("chat-a"),
+                    100,
+                    100,
+                ),
+                test_entry(
+                    "ltm-older-matching",
+                    LongTermMemoryKind::Fact,
+                    "release_manifest_exception",
+                    "The release manifest exception belongs to the Acme rollout.",
+                    vec!["release", "manifest", "exception", "acme"],
+                    Some("chat-a"),
+                    20,
+                    20,
+                ),
+            ],
+        };
+
+        let selection = select_long_term_recall_entries(
+            &store,
+            "chat-a",
+            "manifest exception acme",
+            None,
+            &[],
+            MemoryProfile::Standard,
+        );
+
+        let matching_index = selection
+            .candidates
+            .iter()
+            .position(|entry| entry.id == "ltm-older-matching")
+            .expect("matching fallback candidate");
+        let unrelated_index = selection
+            .candidates
+            .iter()
+            .position(|entry| entry.id == "ltm-recent-unrelated")
+            .expect("unrelated fallback candidate");
+        assert!(
+            matching_index < unrelated_index,
+            "query-matching fallback should outrank recent unrelated fallback: {:?}",
+            selection
+                .candidates
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

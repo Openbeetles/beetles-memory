@@ -1,8 +1,10 @@
 use bm_replay::{
     evaluate_w4_external_noisy_wall, load_memory_benchmark_fixture_dir, run_memory_benchmark_wall,
     w4_external_noisy_summary_with_provenance, MemoryBenchmarkClass, MemoryBenchmarkEvalRecall,
-    MemoryBenchmarkEvalRecallAtK, MemoryBenchmarkEvalRecallMetrics, MemoryBenchmarkMode,
-    MemoryBenchmarkSemanticDimension, W4ExternalNoisyBenchmarkSummary,
+    MemoryBenchmarkEvalRecallAtK, MemoryBenchmarkEvalRecallDiagnostics,
+    MemoryBenchmarkEvalRecallEvidenceRefIndexEntry, MemoryBenchmarkEvalRecallGoldRank,
+    MemoryBenchmarkEvalRecallGraphDistanceToGold, MemoryBenchmarkEvalRecallMetrics,
+    MemoryBenchmarkMode, MemoryBenchmarkSemanticDimension, W4ExternalNoisyBenchmarkSummary,
 };
 use bm_sdk::ProfileId;
 use std::{fs, process::Command};
@@ -358,6 +360,7 @@ fn memory_benchmark_wall_rejects_incomplete_w4_eval_recall_fixture() {
             }],
             mrr_bps: 0,
         },
+        ..MemoryBenchmarkEvalRecall::default()
     });
 
     let report = run_memory_benchmark_wall(&[target]);
@@ -368,6 +371,109 @@ fn memory_benchmark_wall_rejects_incomplete_w4_eval_recall_fixture() {
             && failure.reason.contains("expanded_candidates")
             && failure.reason.contains("recall_at_k:50")
             && failure.reason.contains("missing_evidence_refs")
+    }));
+}
+
+#[test]
+fn memory_benchmark_wall_rejects_w41_eval_recall_without_diagnostics_and_pool_split() {
+    let fixtures =
+        load_memory_benchmark_fixture_dir(fixture_root()).expect("memory benchmark wall fixtures");
+    let mut target = fixtures
+        .iter()
+        .find(|fixture| fixture.fixture_id == "recall-multisession-full-baseline")
+        .expect("recall multisession full baseline")
+        .clone();
+    target.fixture_id = "w41-eval-recall-diagnostic-missing-full".to_string();
+    target
+        .semantic_contract
+        .provided_keys
+        .push("w4_eval_recall".to_string());
+    target.eval_recall = Some(MemoryBenchmarkEvalRecall {
+        suite: "internal_w41_contract".to_string(),
+        split: "synthetic_diagnostic".to_string(),
+        question_id: "q-w41-missing".to_string(),
+        question_type: "temporal_update".to_string(),
+        expected_evidence_refs: vec!["turn:release-manifest".to_string()],
+        source_candidates: vec!["runtime_skill__release_guard".to_string()],
+        graph_anchor_candidates: Vec::new(),
+        expanded_candidates: vec![
+            "runtime_skill__release_guard".to_string(),
+            "graph:release_manifest_check".to_string(),
+        ],
+        eval_candidate_pool: Vec::new(),
+        selected_candidates: vec!["graph:release_manifest_check".to_string()],
+        rendered_candidates: vec!["graph:release_manifest_check".to_string()],
+        rendered_block_preview: "graph:release_manifest_check [turn:release-manifest]".to_string(),
+        rendered_evidence_refs: Vec::new(),
+        evidence_ref_index: vec![MemoryBenchmarkEvalRecallEvidenceRefIndexEntry {
+            candidate_id: "graph:release_manifest_check".to_string(),
+            evidence_refs: vec!["turn:release-manifest".to_string()],
+        }],
+        missing_evidence_refs: Vec::new(),
+        diagnostics: MemoryBenchmarkEvalRecallDiagnostics {
+            evidence_count: 0,
+            first_any_hit_stage: String::new(),
+            first_all_hit_stage: String::new(),
+            matched_gold_by_stage: Vec::new(),
+            missing_gold_by_stage: Vec::new(),
+            gold_rank_by_stage: vec![MemoryBenchmarkEvalRecallGoldRank {
+                stage: "expanded".to_string(),
+                evidence_ref: "turn:release-manifest".to_string(),
+                rank: Some(2),
+            }],
+            miss_after_expanded: false,
+            source_anchor_ids: Vec::new(),
+            graph_anchor_candidate_ids: Vec::new(),
+            expanded_node_ids: Vec::new(),
+            graph_neighbor_ids: Vec::new(),
+            graph_distance_to_gold: vec![MemoryBenchmarkEvalRecallGraphDistanceToGold {
+                candidate_id: "graph:release_manifest_check".to_string(),
+                evidence_ref: "turn:release-manifest".to_string(),
+                distance: Some(1),
+            }],
+            truncated_count: 0,
+            blocked_reasons: Vec::new(),
+        },
+        metrics: MemoryBenchmarkEvalRecallMetrics {
+            recall_at_k: vec![
+                MemoryBenchmarkEvalRecallAtK {
+                    k: 5,
+                    any_evidence_hit: true,
+                    all_evidence_hit: true,
+                    matched_evidence_refs: vec!["turn:release-manifest".to_string()],
+                },
+                MemoryBenchmarkEvalRecallAtK {
+                    k: 10,
+                    any_evidence_hit: true,
+                    all_evidence_hit: true,
+                    matched_evidence_refs: vec!["turn:release-manifest".to_string()],
+                },
+                MemoryBenchmarkEvalRecallAtK {
+                    k: 20,
+                    any_evidence_hit: true,
+                    all_evidence_hit: true,
+                    matched_evidence_refs: vec!["turn:release-manifest".to_string()],
+                },
+                MemoryBenchmarkEvalRecallAtK {
+                    k: 50,
+                    any_evidence_hit: true,
+                    all_evidence_hit: true,
+                    matched_evidence_refs: vec!["turn:release-manifest".to_string()],
+                },
+            ],
+            mrr_bps: 10_000,
+        },
+    });
+
+    let report = run_memory_benchmark_wall(&[target]);
+
+    assert!(!report.passed);
+    assert!(report.failures.iter().any(|failure| {
+        failure.stage == "w4_eval_recall_contract"
+            && failure.reason.contains("graph_anchor_candidates")
+            && failure.reason.contains("eval_candidate_pool")
+            && failure.reason.contains("rendered_evidence_refs")
+            && failure.reason.contains("w4_1_diagnostics")
     }));
 }
 
@@ -545,7 +651,12 @@ fn w4_external_noisy_wall_reports_stage_hit_diagnostics_when_runner_uses_eval_re
         .collect();
     m_cleaned.stage_hit_counts = locomo.stage_hit_counts.clone();
 
-    let report = evaluate_w4_external_noisy_wall(&[locomo, oracle, s_cleaned, m_cleaned]);
+    let report = evaluate_w4_external_noisy_wall(&[
+        attach_w41_diagnostics(locomo),
+        attach_w41_diagnostics(oracle),
+        attach_w41_diagnostics(s_cleaned),
+        attach_w41_diagnostics(m_cleaned),
+    ]);
 
     assert!(report.stage_diagnostics_attached);
     assert!(!report
@@ -622,7 +733,12 @@ fn w4_external_noisy_wall_requires_index_diagnostics_for_noisy_index_effect_proo
     m_cleaned.stage_hit_counts = locomo.stage_hit_counts.clone();
     m_cleaned.index_diagnostics = locomo.index_diagnostics.clone();
 
-    let report = evaluate_w4_external_noisy_wall(&[locomo, oracle, s_cleaned, m_cleaned]);
+    let report = evaluate_w4_external_noisy_wall(&[
+        attach_w41_diagnostics(locomo),
+        attach_w41_diagnostics(oracle),
+        attach_w41_diagnostics(s_cleaned),
+        attach_w41_diagnostics(m_cleaned),
+    ]);
 
     assert!(report.index_diagnostics_attached);
     assert!(!report
@@ -708,7 +824,12 @@ fn w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_attri
         60,
     );
 
-    let report = evaluate_w4_external_noisy_wall(&[locomo, oracle, s_cleaned, m_cleaned]);
+    let report = evaluate_w4_external_noisy_wall(&[
+        attach_w41_diagnostics(locomo),
+        attach_w41_diagnostics(oracle),
+        attach_w41_diagnostics(s_cleaned),
+        attach_w41_diagnostics(m_cleaned),
+    ]);
 
     assert!(report.noisy_improvement_proven);
     assert!(report.stage_attributed_improvement_proven);
@@ -721,6 +842,78 @@ fn w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_attri
         .expect("m_cleaned report");
     assert!(m_report.stage_attributed_improvement);
     assert!(m_report.index_effect_proven);
+}
+
+#[test]
+fn w4_external_noisy_wall_requires_w41_summary_diagnostics_for_current_release() {
+    let locomo = external_summary_with_stage_and_index(
+        "locomo", 10, 1986, 1982, 21, 13, 21, 13, 21, 13, 21, 13, 40, 10, 30, 120, 30,
+    );
+    let oracle = external_summary_with_stage_and_index(
+        "longmemeval_oracle",
+        500,
+        500,
+        500,
+        494,
+        491,
+        494,
+        491,
+        494,
+        491,
+        494,
+        491,
+        120,
+        80,
+        40,
+        240,
+        40,
+    );
+    let s_cleaned = external_summary_with_stage_and_index(
+        "longmemeval_s_cleaned",
+        500,
+        500,
+        500,
+        111,
+        26,
+        111,
+        26,
+        111,
+        26,
+        111,
+        26,
+        100,
+        20,
+        80,
+        160,
+        80,
+    );
+    let m_cleaned = external_summary_with_stage_and_index(
+        "longmemeval_m_cleaned",
+        500,
+        500,
+        500,
+        12,
+        4,
+        10,
+        3,
+        12,
+        4,
+        12,
+        4,
+        90,
+        30,
+        60,
+        180,
+        60,
+    );
+
+    let report = evaluate_w4_external_noisy_wall(&[locomo, oracle, s_cleaned, m_cleaned]);
+
+    assert!(!report.w4_1_diagnostics_attached);
+    assert!(!report.release_gate_passed);
+    assert!(report
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_w4_1_diagnostics_missing".to_string()));
 }
 
 #[test]
@@ -1070,6 +1263,7 @@ fn external_summary(
         recall_errors: 0,
         stage_hit_counts: None,
         index_diagnostics: None,
+        w4_1_diagnostics: None,
     }
 }
 
@@ -1140,6 +1334,45 @@ fn external_summary_with_stage_and_index(
         }
     }))
     .expect("summary with stage and index diagnostics")
+}
+
+fn attach_w41_diagnostics(
+    mut summary: W4ExternalNoisyBenchmarkSummary,
+) -> W4ExternalNoisyBenchmarkSummary {
+    summary.w4_1_diagnostics = Some(bm_replay::W4ExternalNoisyW41Diagnostics {
+        questions_with_w4_1_diagnostics: summary.questions,
+        first_any_hit_stage_counts: [("expanded".to_string(), summary.questions)]
+            .into_iter()
+            .collect(),
+        first_all_hit_stage_counts: [("selected".to_string(), summary.all_evidence_hit)]
+            .into_iter()
+            .collect(),
+        missing_gold_by_stage_counts: [(
+            "source".to_string(),
+            summary
+                .evidence_questions
+                .saturating_sub(summary.any_evidence_hit),
+        )]
+        .into_iter()
+        .collect(),
+        miss_after_expanded_count: summary
+            .evidence_questions
+            .saturating_sub(summary.any_evidence_hit),
+        gold_rank_found_count: summary.any_evidence_hit,
+        gold_rank_missing_count: summary
+            .evidence_questions
+            .saturating_sub(summary.any_evidence_hit),
+        gold_rank_sum: summary.any_evidence_hit,
+        truncated_count: 0,
+        blocked_reason_counts: Default::default(),
+        question_type_counts: [("external_noisy".to_string(), summary.questions)]
+            .into_iter()
+            .collect(),
+        evidence_count_buckets: [("1".to_string(), summary.questions)].into_iter().collect(),
+        source_signature_count: summary.questions.max(1),
+        repeated_source_signature_questions: 0,
+    });
+    summary
 }
 
 fn fixture_root() -> String {

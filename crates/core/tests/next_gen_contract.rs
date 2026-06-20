@@ -655,6 +655,65 @@ fn temporal_memory_graph_expansion_budget_truncates_neighbors_before_render() {
         .contains(&"graph_expansion_neighbor_budget_exhausted".to_string()));
 }
 
+#[test]
+fn temporal_memory_graph_expansion_uses_query_relevance_before_node_id_order() {
+    let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
+        vec![
+            graph_node("fact:seed", MemoryGraphNodeKind::MemoryRecord, "Seed fact"),
+            graph_node(
+                "fact:a",
+                MemoryGraphNodeKind::Task,
+                "Unrelated archive receipt",
+            ),
+            graph_node(
+                "fact:b",
+                MemoryGraphNodeKind::Task,
+                "Release manifest check for signed artifact",
+            ),
+        ],
+        vec![
+            graph_edge(
+                "edge:seed:a",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:a",
+            ),
+            graph_edge(
+                "edge:seed:b",
+                MemoryGraphEdgeKind::Supports,
+                "fact:seed",
+                "fact:b",
+            ),
+        ],
+        vec![
+            graph_backlink("turn:seed"),
+            graph_backlink("turn:a"),
+            graph_backlink("turn:b"),
+        ],
+    );
+
+    let report = rerank_recall_with_temporal_graph(
+        "release manifest signed artifact",
+        vec!["fact:seed".to_string()],
+        &graph,
+        GraphRecallExpansionBudget {
+            max_hops: 1,
+            max_neighbors_per_candidate: 1,
+            max_expanded_candidates: 2,
+        },
+    );
+
+    assert!(report
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:b"));
+    assert!(!report
+        .expanded_candidate_ids
+        .iter()
+        .any(|candidate| candidate == "fact:a"));
+    assert_eq!(report.expansion_budget.truncated_candidate_count, 1);
+}
+
 fn graph_node(node_id: &str, kind: MemoryGraphNodeKind, label: &str) -> MemoryGraphNode {
     MemoryGraphNode {
         node_id: node_id.to_string(),

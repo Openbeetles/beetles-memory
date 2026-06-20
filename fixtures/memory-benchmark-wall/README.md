@@ -32,8 +32,10 @@ The current Phase 0 dimensions are:
   management, requires governed experience before returning tool hints, and
   forbids cold-start routing from tool descriptions or schemas.
 - `w4_eval_recall_semantics`: requires W4 eval recall report separation across
-  source, expanded, selected, and rendered layers, with recall@k, MRR, missing
-  evidence refs, and persistent graph evidence gate coverage.
+  source, graph anchor, expanded, eval candidate pool, selected, and rendered
+  layers, with recall@k, MRR, missing evidence refs, W4.1 first-hit / missing /
+  gold-rank diagnostics, candidate-to-evidence refs, and persistent graph
+  evidence gate coverage.
 
 W4 external LoCoMo / LongMemEval raw datasets and local runner outputs are not
 stored in this fixture directory. They remain local benchmark inputs outside the
@@ -43,8 +45,9 @@ shape and SDK-owned report semantics.
 The explicit W4 external noisy wall operator is `scripts/check_w4_external_noisy_wall_operator.sh`.
 It requires `BM_W4_EXTERNAL_BENCH_ROOT` and reads only the external merged summary
 files plus runner source to attach hash provenance before calling `bm-replay`.
-External merged summaries must include `stage_hit_counts` before they can explain
-whether a noisy split failed in source recall, graph expansion, rerank, selection,
-or render. Missing stage diagnostics are a hard W4 external wall blocker, not a
-release-ready baseline. The operator is not part of the default fixture wall and
-must not copy external data here.
+External merged summaries must include `stage_hit_counts`, `index_diagnostics`,
+and `w4_1_diagnostics` before they can explain whether a noisy split failed in
+source recall, graph expansion, rerank, selection, render, production index, or
+W4.1 first-hit / missing / gold-rank coverage. Missing diagnostics are hard W4
+external wall blockers, not release-ready baselines. The operator is not part of
+the default fixture wall and must not copy external data here.

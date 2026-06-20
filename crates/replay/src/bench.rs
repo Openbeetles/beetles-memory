@@ -6,7 +6,7 @@ use bm_core::{Error, Result};
 use bm_sdk::ProfileId;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -152,15 +152,95 @@ pub struct MemoryBenchmarkEvalRecall {
     #[serde(default)]
     pub source_candidates: Vec<String>,
     #[serde(default)]
+    pub graph_anchor_candidates: Vec<String>,
+    #[serde(default)]
     pub expanded_candidates: Vec<String>,
+    #[serde(default)]
+    pub eval_candidate_pool: Vec<String>,
     #[serde(default)]
     pub selected_candidates: Vec<String>,
     #[serde(default)]
+    pub rendered_candidates: Vec<String>,
+    #[serde(default)]
     pub rendered_block_preview: String,
+    #[serde(default)]
+    pub rendered_evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_ref_index: Vec<MemoryBenchmarkEvalRecallEvidenceRefIndexEntry>,
     #[serde(default)]
     pub missing_evidence_refs: Vec<String>,
     #[serde(default)]
+    pub diagnostics: MemoryBenchmarkEvalRecallDiagnostics,
+    #[serde(default)]
     pub metrics: MemoryBenchmarkEvalRecallMetrics,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecallEvidenceRefIndexEntry {
+    #[serde(default)]
+    pub candidate_id: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecallStageEvidenceRefs {
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecallGoldRank {
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub evidence_ref: String,
+    #[serde(default)]
+    pub rank: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecallGraphDistanceToGold {
+    #[serde(default)]
+    pub candidate_id: String,
+    #[serde(default)]
+    pub evidence_ref: String,
+    #[serde(default)]
+    pub distance: Option<u8>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryBenchmarkEvalRecallDiagnostics {
+    #[serde(default)]
+    pub evidence_count: usize,
+    #[serde(default)]
+    pub first_any_hit_stage: String,
+    #[serde(default)]
+    pub first_all_hit_stage: String,
+    #[serde(default)]
+    pub matched_gold_by_stage: Vec<MemoryBenchmarkEvalRecallStageEvidenceRefs>,
+    #[serde(default)]
+    pub missing_gold_by_stage: Vec<MemoryBenchmarkEvalRecallStageEvidenceRefs>,
+    #[serde(default)]
+    pub gold_rank_by_stage: Vec<MemoryBenchmarkEvalRecallGoldRank>,
+    #[serde(default)]
+    pub miss_after_expanded: bool,
+    #[serde(default)]
+    pub source_anchor_ids: Vec<String>,
+    #[serde(default)]
+    pub graph_anchor_candidate_ids: Vec<String>,
+    #[serde(default)]
+    pub expanded_node_ids: Vec<String>,
+    #[serde(default)]
+    pub graph_neighbor_ids: Vec<String>,
+    #[serde(default)]
+    pub graph_distance_to_gold: Vec<MemoryBenchmarkEvalRecallGraphDistanceToGold>,
+    #[serde(default)]
+    pub truncated_count: usize,
+    #[serde(default)]
+    pub blocked_reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -391,6 +471,8 @@ pub struct W4EvalRecallBenchmarkJudgeReport {
     pub required_k_covered: bool,
     pub missing_evidence_reported: bool,
     pub source_expanded_selected_split_covered: bool,
+    pub w4_1_diagnostic_schema_covered: bool,
+    pub w4_1_candidate_pool_split_covered: bool,
     pub mrr_covered: bool,
     pub noisy_external_wall_required: bool,
     pub blocked_reasons: Vec<String>,
@@ -426,6 +508,8 @@ pub struct W4ExternalNoisyBenchmarkSummary {
     pub stage_hit_counts: Option<W4ExternalNoisyStageHitCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_diagnostics: Option<W4ExternalNoisyIndexDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w4_1_diagnostics: Option<W4ExternalNoisyW41Diagnostics>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -479,6 +563,38 @@ pub struct W4ExternalNoisyIndexDiagnostics {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4ExternalNoisyW41Diagnostics {
+    #[serde(default)]
+    pub questions_with_w4_1_diagnostics: usize,
+    #[serde(default)]
+    pub first_any_hit_stage_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub first_all_hit_stage_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub missing_gold_by_stage_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub miss_after_expanded_count: usize,
+    #[serde(default)]
+    pub gold_rank_found_count: usize,
+    #[serde(default)]
+    pub gold_rank_missing_count: usize,
+    #[serde(default)]
+    pub gold_rank_sum: usize,
+    #[serde(default)]
+    pub truncated_count: usize,
+    #[serde(default)]
+    pub blocked_reason_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub question_type_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub evidence_count_buckets: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub source_signature_count: usize,
+    #[serde(default)]
+    pub repeated_source_signature_questions: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct W4ExternalNoisySuiteReport {
     pub suite: String,
     pub completed: bool,
@@ -508,6 +624,7 @@ pub struct W4ExternalNoisySuiteReport {
     pub improved_against_baseline: bool,
     pub stage_hit_counts: Option<W4ExternalNoisyStageHitCounts>,
     pub index_diagnostics: Option<W4ExternalNoisyIndexDiagnostics>,
+    pub w4_1_diagnostics: Option<W4ExternalNoisyW41Diagnostics>,
     pub stage_attributed_improvement: bool,
     pub index_effect_proven: bool,
 }
@@ -524,6 +641,7 @@ pub struct W4ExternalNoisyWallReport {
     pub provenance_attached: bool,
     pub stage_diagnostics_attached: bool,
     pub index_diagnostics_attached: bool,
+    pub w4_1_diagnostics_attached: bool,
     pub oracle_sanity_only: bool,
     pub noisy_improvement_proven: bool,
     pub stage_attributed_improvement_proven: bool,
@@ -593,6 +711,11 @@ pub fn evaluate_w4_external_noisy_wall(
             .iter()
             .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
             .all(|summary| summary.index_diagnostics.is_some());
+    let w4_1_diagnostics_attached = required_suites_covered
+        && summaries
+            .iter()
+            .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
+            .all(w4_external_w41_diagnostics_cover_summary);
     let oracle_sanity_only = true;
     let noisy_reports = suite_reports
         .iter()
@@ -664,6 +787,11 @@ pub fn evaluate_w4_external_noisy_wall(
     );
     push_missing(
         &mut blocked_reasons,
+        !required_suites_covered || w4_1_diagnostics_attached,
+        "w4_external_noisy_wall_w4_1_diagnostics_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
         noisy_improvement_proven,
         "w4_external_noisy_wall_improvement_not_proven",
     );
@@ -691,6 +819,7 @@ pub fn evaluate_w4_external_noisy_wall(
         provenance_attached,
         stage_diagnostics_attached,
         index_diagnostics_attached,
+        w4_1_diagnostics_attached,
         oracle_sanity_only,
         noisy_improvement_proven,
         stage_attributed_improvement_proven,
@@ -800,9 +929,27 @@ fn w4_external_noisy_suite_report(
         improved_against_baseline,
         stage_hit_counts: summary.stage_hit_counts.clone(),
         index_diagnostics: summary.index_diagnostics.clone(),
+        w4_1_diagnostics: summary.w4_1_diagnostics.clone(),
         stage_attributed_improvement,
         index_effect_proven,
     }
+}
+
+fn w4_external_w41_diagnostics_cover_summary(summary: &W4ExternalNoisyBenchmarkSummary) -> bool {
+    let Some(diagnostics) = summary.w4_1_diagnostics.as_ref() else {
+        return false;
+    };
+    diagnostics.questions_with_w4_1_diagnostics == summary.questions
+        && diagnostics.questions_with_w4_1_diagnostics > 0
+        && !diagnostics.first_any_hit_stage_counts.is_empty()
+        && !diagnostics.missing_gold_by_stage_counts.is_empty()
+        && !diagnostics.question_type_counts.is_empty()
+        && !diagnostics.evidence_count_buckets.is_empty()
+        && diagnostics
+            .gold_rank_found_count
+            .saturating_add(diagnostics.gold_rank_missing_count)
+            > 0
+        && diagnostics.source_signature_count > 0
 }
 
 fn stage_counts_show_graph_attributed_gain(
@@ -1243,6 +1390,20 @@ fn build_w4_eval_recall_benchmark_judge(
             .as_ref()
             .is_some_and(w4_eval_has_report_split)
     });
+    let w4_1_diagnostic_schema_covered = !w4_fixtures.is_empty()
+        && w4_fixtures.iter().all(|fixture| {
+            fixture
+                .eval_recall
+                .as_ref()
+                .is_some_and(w4_1_diagnostic_contract_holds)
+        });
+    let w4_1_candidate_pool_split_covered = !w4_fixtures.is_empty()
+        && w4_fixtures.iter().all(|fixture| {
+            fixture
+                .eval_recall
+                .as_ref()
+                .is_some_and(w4_1_candidate_pool_split_holds)
+        });
     let mrr_covered = !w4_fixtures.is_empty()
         && w4_fixtures.iter().all(|fixture| {
             fixture.eval_recall.as_ref().is_some_and(|eval| {
@@ -1277,6 +1438,16 @@ fn build_w4_eval_recall_benchmark_judge(
     );
     push_missing(
         &mut blocked_reasons,
+        w4_1_diagnostic_schema_covered,
+        "w4_eval_recall_w4_1_diagnostics_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        w4_1_candidate_pool_split_covered,
+        "w4_eval_recall_candidate_pool_split_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
         mrr_covered,
         "w4_eval_recall_mrr_missing",
     );
@@ -1290,6 +1461,8 @@ fn build_w4_eval_recall_benchmark_judge(
         required_k_covered,
         missing_evidence_reported,
         source_expanded_selected_split_covered,
+        w4_1_diagnostic_schema_covered,
+        w4_1_candidate_pool_split_covered,
         mrr_covered,
         noisy_external_wall_required,
         blocked_reasons,
@@ -1316,6 +1489,91 @@ fn w4_eval_has_report_split(eval: &MemoryBenchmarkEvalRecall) -> bool {
                 .iter()
                 .any(|source| source == candidate)
         })
+}
+
+fn w4_1_candidate_pool_split_holds(eval: &MemoryBenchmarkEvalRecall) -> bool {
+    !eval.graph_anchor_candidates.is_empty()
+        && !eval.eval_candidate_pool.is_empty()
+        && !eval.rendered_candidates.is_empty()
+        && eval.eval_candidate_pool.iter().all(|candidate| {
+            eval.source_candidates
+                .iter()
+                .any(|source| source == candidate)
+                || eval
+                    .graph_anchor_candidates
+                    .iter()
+                    .any(|anchor| anchor == candidate)
+                || eval
+                    .expanded_candidates
+                    .iter()
+                    .any(|expanded| expanded == candidate)
+                || eval
+                    .selected_candidates
+                    .iter()
+                    .any(|selected| selected == candidate)
+        })
+        && eval.eval_candidate_pool.iter().any(|candidate| {
+            !eval
+                .rendered_candidates
+                .iter()
+                .any(|rendered| rendered == candidate)
+        })
+}
+
+fn w4_1_diagnostic_contract_holds(eval: &MemoryBenchmarkEvalRecall) -> bool {
+    let expected = &eval.expected_evidence_refs;
+    let diagnostics = &eval.diagnostics;
+    let rendered_refs_match = !eval.rendered_evidence_refs.is_empty()
+        && eval.rendered_evidence_refs.iter().all(|evidence_ref| {
+            eval.evidence_ref_index.iter().any(|entry| {
+                eval.rendered_candidates
+                    .iter()
+                    .any(|candidate| candidate == &entry.candidate_id)
+                    && entry
+                        .evidence_refs
+                        .iter()
+                        .any(|indexed_ref| indexed_ref == evidence_ref)
+            })
+        });
+    diagnostics.evidence_count == expected.len()
+        && !expected.is_empty()
+        && !diagnostics.first_any_hit_stage.trim().is_empty()
+        && !diagnostics.first_all_hit_stage.trim().is_empty()
+        && stage_evidence_refs_cover(&diagnostics.matched_gold_by_stage, "expanded", expected)
+        && diagnostics
+            .missing_gold_by_stage
+            .iter()
+            .any(|stage| !stage.stage.trim().is_empty())
+        && expected.iter().all(|evidence_ref| {
+            diagnostics.gold_rank_by_stage.iter().any(|rank| {
+                rank.evidence_ref == *evidence_ref
+                    && !rank.stage.trim().is_empty()
+                    && rank.rank.is_some()
+            })
+        })
+        && !diagnostics.source_anchor_ids.is_empty()
+        && !diagnostics.graph_anchor_candidate_ids.is_empty()
+        && !diagnostics.expanded_node_ids.is_empty()
+        && !diagnostics.graph_neighbor_ids.is_empty()
+        && expected.iter().all(|evidence_ref| {
+            diagnostics.graph_distance_to_gold.iter().any(|distance| {
+                distance.evidence_ref == *evidence_ref && distance.distance.is_some()
+            })
+        })
+        && rendered_refs_match
+}
+
+fn stage_evidence_refs_cover(
+    stages: &[MemoryBenchmarkEvalRecallStageEvidenceRefs],
+    stage: &str,
+    expected_evidence_refs: &[String],
+) -> bool {
+    stages.iter().any(|entry| {
+        entry.stage == stage
+            && expected_evidence_refs
+                .iter()
+                .all(|expected| entry.evidence_refs.iter().any(|actual| actual == expected))
+    })
 }
 
 fn w4_missing_evidence_contract_holds(fixture: &MemoryBenchmarkFixture) -> bool {
@@ -1595,8 +1853,18 @@ fn validate_w4_eval_recall_fixture(
     );
     push_w4_missing(
         &mut missing,
+        !eval.graph_anchor_candidates.is_empty(),
+        "graph_anchor_candidates",
+    );
+    push_w4_missing(
+        &mut missing,
         !eval.expanded_candidates.is_empty(),
         "expanded_candidates",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.eval_candidate_pool.is_empty(),
+        "eval_candidate_pool",
     );
     push_w4_missing(
         &mut missing,
@@ -1605,8 +1873,23 @@ fn validate_w4_eval_recall_fixture(
     );
     push_w4_missing(
         &mut missing,
+        !eval.rendered_candidates.is_empty(),
+        "rendered_candidates",
+    );
+    push_w4_missing(
+        &mut missing,
         !eval.rendered_block_preview.trim().is_empty(),
         "rendered_block_preview",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.rendered_evidence_refs.is_empty(),
+        "rendered_evidence_refs",
+    );
+    push_w4_missing(
+        &mut missing,
+        !eval.evidence_ref_index.is_empty(),
+        "evidence_ref_index",
     );
     let required_k = [5_usize, 10, 20, 50];
     for k in required_k {
@@ -1630,6 +1913,16 @@ fn validate_w4_eval_recall_fixture(
                 .iter()
                 .all(|entry| !entry.any_evidence_hit && entry.matched_evidence_refs.is_empty()),
         "mrr_bps",
+    );
+    push_w4_missing(
+        &mut missing,
+        w4_1_candidate_pool_split_holds(eval),
+        "w4_1_candidate_pool_split",
+    );
+    push_w4_missing(
+        &mut missing,
+        w4_1_diagnostic_contract_holds(eval),
+        "w4_1_diagnostics",
     );
 
     if missing.is_empty() {

@@ -18,8 +18,9 @@ use bm_core::memory::{
     TranscriptRepairReport, TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
 };
 use bm_core::memory::{
-    CompactMemoryGraph, EvidenceBacklink, GraphRecallCandidateScore, GraphRecallRerankReport,
-    MemoryGraphEdge, MemoryGraphNode, TemporalMemoryGraphGateReport,
+    CompactMemoryGraph, EvidenceBacklink, GraphRecallCandidateScore,
+    GraphRecallExpansionBudgetReport, GraphRecallRerankReport, MemoryGraphEdge, MemoryGraphNode,
+    TemporalMemoryGraphGateReport,
 };
 use bm_core::skills::{
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentSkillRecallHit,
@@ -282,6 +283,58 @@ pub struct MemoryEvalRecallCandidate {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallEvidenceRefIndexEntry {
+    pub candidate_id: String,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallStageEvidenceRefs {
+    pub stage: String,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallGoldRank {
+    pub stage: String,
+    pub evidence_ref: String,
+    pub rank: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallGraphDistanceToGold {
+    pub candidate_id: String,
+    pub evidence_ref: String,
+    pub distance: Option<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallStageDiagnostics {
+    pub suite: String,
+    pub question_id: String,
+    pub question_type: String,
+    pub evidence_count: usize,
+    pub gold_evidence_refs: Vec<String>,
+    pub first_any_hit_stage: Option<String>,
+    pub first_all_hit_stage: Option<String>,
+    pub matched_gold_by_stage: Vec<MemoryEvalRecallStageEvidenceRefs>,
+    pub missing_gold_by_stage: Vec<MemoryEvalRecallStageEvidenceRefs>,
+    pub gold_rank_by_stage: Vec<MemoryEvalRecallGoldRank>,
+    pub miss_after_expanded: bool,
+    pub source_anchor_ids: Vec<String>,
+    pub graph_anchor_candidate_ids: Vec<String>,
+    pub expanded_node_ids: Vec<String>,
+    pub graph_neighbor_ids: Vec<String>,
+    pub graph_distance_to_gold: Vec<MemoryEvalRecallGraphDistanceToGold>,
+    pub expansion_budget: GraphRecallExpansionBudgetReport,
+    pub truncated_count: usize,
+    pub blocked_reasons: Vec<String>,
+    pub selected_candidate_ids: Vec<String>,
+    pub rendered_candidate_ids: Vec<String>,
+    pub rendered_evidence_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryEvalRecallAtK {
     pub k: usize,
     pub matched_evidence_refs: Vec<String>,
@@ -337,11 +390,16 @@ pub struct MemoryEvalRecallReport {
     pub query: String,
     pub benchmark_context: Option<MemoryEvalRecallBenchmarkContext>,
     pub source_candidates: Vec<MemoryEvalRecallCandidate>,
+    pub graph_anchor_candidates: Vec<MemoryEvalRecallCandidate>,
     pub expanded_candidates: Vec<MemoryEvalRecallCandidate>,
+    pub eval_candidate_pool: Vec<MemoryEvalRecallCandidate>,
     pub graph_neighbors: Vec<String>,
     pub reranked_candidates: Vec<MemoryEvalRecallCandidate>,
     pub selected_candidates: Vec<MemoryEvalRecallCandidate>,
+    pub rendered_candidates: Vec<MemoryEvalRecallCandidate>,
     pub rendered_block_preview: String,
+    pub evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,
+    pub stage_diagnostics: MemoryEvalRecallStageDiagnostics,
     pub metrics: MemoryEvalRecallMetrics,
     pub missing_evidence_refs: Vec<String>,
     pub budget_report: RuntimeBudgetReport,
@@ -384,9 +442,12 @@ pub struct MemoryRecallReport {
     pub agent_tool_hints: Vec<AgentToolHint>,
     pub tool_experience_status: AgentToolExperienceStatusReport,
     pub working: WorkingRecallInspection,
+    pub source_candidate_ids: Vec<String>,
+    pub graph_anchor_candidate_ids: Vec<String>,
     pub graph_index_report: MemoryGraphRecallIndexReport,
     pub graph_rerank: GraphRecallRerankReport,
     pub graph_gate: TemporalMemoryGraphGateReport,
+    pub graph_candidate_evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,
     pub compact_graph: CompactMemoryGraph,
     pub lifecycle_report: RuntimeLifecycleReport,
 }

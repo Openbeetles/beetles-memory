@@ -1442,7 +1442,7 @@ pub fn rerank_recall_with_temporal_graph(
         .iter()
         .filter(|candidate_id| graph_node_is_superseded(candidate_id, graph))
         .count() as u32;
-    let expansion = expand_recall_candidates(&candidate_ids, graph, expansion_budget);
+    let expansion = expand_recall_candidates(&query, &candidate_ids, graph, expansion_budget);
 
     let mut score_breakdown = expansion
         .expanded_candidate_ids
@@ -1479,6 +1479,7 @@ struct GraphRecallExpansion {
 }
 
 fn expand_recall_candidates(
+    query: &str,
     candidate_ids: &[String],
     graph: &TemporalMemoryGraphBuildReport,
     budget: GraphRecallExpansionBudget,
@@ -1501,7 +1502,7 @@ fn expand_recall_candidates(
     for hop in 1..=max_hops {
         let mut next_frontier = Vec::new();
         for source_id in &frontier {
-            let neighbors = graph_expansion_neighbors(source_id, graph);
+            let neighbors = graph_expansion_neighbors(query, source_id, graph);
             if max_neighbors_per_candidate == 0 && !neighbors.is_empty() {
                 truncated_candidate_count =
                     truncated_candidate_count.saturating_add(neighbors.len());
@@ -1550,7 +1551,7 @@ fn expand_recall_candidates(
 
     if max_hops < 2
         && hop1_frontier.iter().any(|node_id| {
-            graph_expansion_neighbors(node_id, graph)
+            graph_expansion_neighbors(query, node_id, graph)
                 .into_iter()
                 .any(|neighbor_id| {
                     !expanded_candidate_ids
@@ -1591,7 +1592,11 @@ fn expand_recall_candidates(
     }
 }
 
-fn graph_expansion_neighbors(node_id: &str, graph: &TemporalMemoryGraphBuildReport) -> Vec<String> {
+fn graph_expansion_neighbors(
+    query: &str,
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+) -> Vec<String> {
     let mut neighbors = graph
         .edges
         .iter()
@@ -1606,9 +1611,39 @@ fn graph_expansion_neighbors(node_id: &str, graph: &TemporalMemoryGraphBuildRepo
             }
         })
         .collect::<Vec<_>>();
-    neighbors.sort();
+    neighbors.sort_by(|left, right| {
+        let left_node = graph.nodes.iter().find(|node| node.node_id == *left);
+        let right_node = graph.nodes.iter().find(|node| node.node_id == *right);
+        graph_expansion_neighbor_score(query, right, graph, right_node)
+            .cmp(&graph_expansion_neighbor_score(
+                query, left, graph, left_node,
+            ))
+            .then_with(|| graph_node_rank(right, graph).cmp(&graph_node_rank(left, graph)))
+            .then_with(|| left.cmp(right))
+    });
     neighbors.dedup();
     neighbors
+}
+
+fn graph_expansion_neighbor_score(
+    query: &str,
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    node: Option<&MemoryGraphNode>,
+) -> u32 {
+    lexical_graph_score(query, node)
+        .saturating_add(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from_node_id == node_id || edge.to_node_id == node_id)
+                .count() as u32
+                * 10,
+        )
+        .saturating_add(
+            node.map(|node| node.evidence_refs.len() as u32 * 5)
+                .unwrap_or(0),
+        )
 }
 
 fn graph_edge_allows_recall_expansion(kind: MemoryGraphEdgeKind) -> bool {
