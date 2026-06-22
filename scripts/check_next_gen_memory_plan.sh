@@ -3,6 +3,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+require_in_file() {
+  local pattern="$1"
+  local file="$2"
+  rg -Fq "$pattern" "$file"
+}
+
+require_in_all() {
+  local pattern="$1"
+  shift
+  local file
+  for file in "$@"; do
+    require_in_file "$pattern" "$file"
+  done
+}
+
 bash scripts/check_memory_benchmark_wall.sh
 bash scripts/check_inhabited_projection_phase5_cleanup.sh
 bash scripts/check_replay_sandbox_contract.sh
@@ -64,6 +79,57 @@ rg -Fq "w4_1_diagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay
 rg -Fq "召回质量优化" dev-docs/next-gen-soul-memory-roadmap.md dev-docs/README.md
 rg -Fq "W4.1 Recall Quality Optimization" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "W4.3 Evidence Source Safety Pass" dev-docs/temporal-memory-graph-plan.md
+require_in_all "governed-memory-facet-index-plan.md" dev-docs/README.md dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "Governed Memory Facet Index / Hybrid Graph Retrieval Implementation Plan" dev-docs/governed-memory-facet-index-plan.md
+require_in_all "Evidence-Governed Hybrid Facet Graph Retrieval" dev-docs/governed-memory-facet-index-plan.md dev-docs/README.md dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "exact_facets" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "expanded_facets" dev-docs/governed-memory-facet-index-plan.md
+require_in_all "StructuredFacetParser" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
+require_in_all "EntityNormalizer" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
+require_in_all "TemporalAnchorParser" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
+require_in_all "CanonicalEvidenceRef" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
+rg -Fq "canonical_entity_id" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "derived_from_exact_facet_id" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "expansion_rule_id" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "canonical_evidence_group" dev-docs/governed-memory-facet-index-plan.md
+require_in_all "RankFusionReport" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
+require_in_all "CoverageSelectionReport" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
+require_in_all "GraphFacetPropagation" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
+rg -Fq "fallback_full_scan=false" dev-docs/governed-memory-facet-index-plan.md
+require_in_all "regex/substring" dev-docs/governed-memory-facet-index-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "上桌硬闸" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "FacetReportView" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "FacetIndexRebuildReport" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "HumanFacetSuggestion" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_index_remap_required" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "report_only_subject_visibility_not_indexed" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_off" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "rank_fusion_off" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "coverage_selection_off" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "LongMemEval-V2" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "From Recall to Forgetting" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "Temporal GraphRAG" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "long_term_memory_generates_governed_facets_from_accepted_fields" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_index_keeps_exact_and_expanded_hierarchical_facets_separate" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_index_uses_canonical_evidence_group_without_collapsing_distinct_sources" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_parser_rejects_regex_only_entity_and_time_facets" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_value_contract_uses_typed_values_not_display_string_splitting" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_rank_fusion_preserves_pool_provenance" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_recall_expands_graph_anchor_pool_without_render_growth" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_recall_respects_privacy_scope_and_profile_budget" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_recall_blocks_cross_subject_expanded_metadata_leakage" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "long_term_control_mutation_updates_facet_index" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "transcript_mask_redacts_or_blocks_facet_source_refs" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_index_rebuild_reports_orphan_and_schema_failures" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_report_view_redacts_sensitive_metadata_by_default" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "human_facet_suggestion_requires_governed_proposal" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "facet_migration_remap_required_fails_closed" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "eval_recall_reports_facet_stage_for_expanded_miss" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "eval_recall_reports_facet_ablation_contribution" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "external_noisy_wall_reports_facet_stage_diagnostics" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "external_noisy_wall_requires_facet_ablation_and_no_render_growth" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "quality net" dev-docs/temporal-memory-graph-plan.md || rg -Fq "质量净提升" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "candidate pool split" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "memory-owned hybrid source retrieval" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
