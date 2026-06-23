@@ -12,19 +12,20 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
     apply_long_term_memory_control_mutation, apply_long_term_memory_governance_policy_mutation,
-    build_deferred_governance_queue_report, build_memory_graph_recall_index_docs,
-    build_temporal_memory_graph_from_evidence, build_temporal_memory_graph_from_parts,
-    commit_canonical_turn_delta_with_transcript, compile_inhabited_subject_projection,
-    default_agent_subject_id, default_memory_space_id, export_continuity_snapshot,
-    filter_host_refs_for_transcript_view, govern_write_candidates, import_continuity_snapshot,
-    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
-    load_prompt_memory_context, memory_graph_backlink_key, normalize_private_garden_doc_path,
-    plan_governed_shared_memory_in_space, plan_temporal_memory_graph_write,
-    promote_task_experience_to_procedure, relationship_scope, rerank_recall_with_temporal_graph,
-    run_long_term_memory_refresh, run_memory_retention_compaction,
-    run_post_reply_memory_maintenance, run_private_garden_governance, CanonicalTurnDelta,
-    CompactMemoryGraph, ContinuitySnapshotExportContext, ContinuitySnapshotImportContext,
-    ContinuitySnapshotMode, ConversationKey, ConversationTranscriptStore, DeferredGovernanceJob,
+    build_deferred_governance_queue_report, build_long_term_memory_facet_index_doc,
+    build_memory_graph_recall_index_docs, build_temporal_memory_graph_from_evidence,
+    build_temporal_memory_graph_from_parts, commit_canonical_turn_delta_with_transcript,
+    compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
+    export_continuity_snapshot, filter_host_refs_for_transcript_view, govern_write_candidates,
+    import_continuity_snapshot, inspect_intelligence_replay, inspect_memory_hygiene,
+    inspect_working_recall, load_prompt_memory_context, memory_graph_backlink_key,
+    normalize_private_garden_doc_path, plan_governed_shared_memory_in_space,
+    plan_temporal_memory_graph_write, promote_task_experience_to_procedure, relationship_scope,
+    rerank_recall_with_temporal_graph, run_long_term_memory_refresh,
+    run_memory_retention_compaction, run_post_reply_memory_maintenance,
+    run_private_garden_governance, CanonicalTurnDelta, CompactMemoryGraph,
+    ContinuitySnapshotExportContext, ContinuitySnapshotImportContext, ContinuitySnapshotMode,
+    ConversationKey, ConversationTranscriptStore, DeferredGovernanceJob,
     DeferredGovernanceJobStatus, DeferredGovernanceQueueReport, DerivedMemoryPlane,
     DerivedMemoryRef, DroppedProjectionCandidate, EvidenceBacklink, GovernedWriteDecision,
     GraphRecallCandidateScore, GraphRecallExpansionBudget, GraphRecallRerankReport, IngressKind,
@@ -57,11 +58,13 @@ use bm_core::memory::{
     TemporalMemoryGraphGateReport, TranscriptAttrEnvelope, TranscriptAttrWriteRejection,
     TranscriptAttrWriteReport, TranscriptConversationAlias, TranscriptEvidenceRef,
     TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
-    TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptRedactionReason,
-    TranscriptRedactionReportItem, TranscriptRepairReport as CoreTranscriptRepairReport,
-    TranscriptReplayView, WorkingRecallInspectionInput, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptLifecycleTransition,
+    TranscriptRedactionReason, TranscriptRedactionReportItem,
+    TranscriptRepairReport as CoreTranscriptRepairReport, TranscriptReplayView,
+    WorkingRecallInspectionInput, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
     LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
-    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, PRIVATE_GARDEN_MAX_DOC_BYTES,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MEMORY_FACET_INDEX_NAMESPACE,
+    PRIVATE_GARDEN_MAX_DOC_BYTES,
 };
 use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
 use bm_core::platform::{Platform, SkillStorage};
@@ -93,23 +96,23 @@ use crate::{
     MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
     MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest, MemoryEvalRecallAtK,
     MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
-    MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallGoldRank,
-    MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
-    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryEvalRecallStageDiagnostics,
-    MemoryEvalRecallStageEvidenceRefs, MemoryExportReport, MemoryExportRequest,
-    MemoryGovernancePolicyMutationReport, MemoryGraphRecallIndexReport, MemoryImportReport,
-    MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
-    MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
-    MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
-    MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionAuditReport,
-    MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
-    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallReport,
-    MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport,
-    MemoryReplayRequest, MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest,
-    MemoryRuntimeSystemKind, MemorySpaceExportReport, MemorySpaceExportRequest,
-    MemorySpaceImportReport, MemorySpaceImportRequest, MemorySpaceMigrateApplyReport,
-    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
+    MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallFacetStageDiagnostics,
+    MemoryEvalRecallGoldRank, MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallMetrics,
+    MemoryEvalRecallPrivacyReport, MemoryEvalRecallReport, MemoryEvalRecallRequest,
+    MemoryEvalRecallStageDiagnostics, MemoryEvalRecallStageEvidenceRefs, MemoryExportReport,
+    MemoryExportRequest, MemoryFacetRecallIndexReport, MemoryGovernancePolicyMutationReport,
+    MemoryGraphRecallIndexReport, MemoryImportReport, MemoryImportRequest, MemoryInspectionReport,
+    MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
+    MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
+    MemoryMaintenanceRequest, MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryProfile,
+    MemoryProjectionAuditReport, MemoryProjectionPrivateGateAudit, MemoryProjectionReport,
+    MemoryProjectionRequest, MemoryProjectionSectionAudit, MemoryProjectionSourceAudit,
+    MemoryRecallReport, MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest,
+    MemoryReplayReport, MemoryReplayRequest, MemoryRetentionCompactionReport,
+    MemoryRetentionCompactionRequest, MemoryRuntimeSystemKind, MemorySpaceExportReport,
+    MemorySpaceExportRequest, MemorySpaceImportReport, MemorySpaceImportRequest,
+    MemorySpaceMigrateApplyReport, MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
     MemorySpaceMigratePreviewRequest, MemoryTranscriptAttrWriteReport,
     MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
     MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
@@ -1077,6 +1080,8 @@ impl MemoryRuntime {
                     record_key: entry.id.clone(),
                 });
             }
+            mutations
+                .extend(self.plan_long_term_facet_index_upsert_mutations(&plan.accepted_entries)?);
             Some(plan.outcome)
         };
         let long_term_changed = shared_fact_governance
@@ -1232,6 +1237,139 @@ impl MemoryRuntime {
         .with_conversation(self.config.scope.chat_id.clone())
     }
 
+    fn long_term_facet_index_subject_ids(&self) -> Vec<String> {
+        let mut subject_ids = BTreeSet::new();
+        for subject_id in [
+            self.config.subject_id.as_str(),
+            self.config.scoped_runtime.mounted_subject_id.as_str(),
+            self.config.scoped_runtime.actor_subject_id.as_str(),
+        ] {
+            let subject_id = subject_id.trim();
+            if !subject_id.is_empty() {
+                subject_ids.insert(subject_id.to_string());
+            }
+        }
+        subject_ids.into_iter().collect()
+    }
+
+    fn long_term_facet_index_upsert_mutation(
+        &self,
+        entry: &LongTermMemoryEntry,
+    ) -> Result<StoreMutation> {
+        let facet_index_revision = entry.source_revision.max(1);
+        let doc = build_long_term_memory_facet_index_doc(
+            entry,
+            self.config.memory_space_id.clone(),
+            self.long_term_facet_index_subject_ids(),
+            facet_index_revision,
+        );
+        let key = doc.store_key();
+        Ok(StoreMutation::PutJson {
+            namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
+            key: key.clone(),
+            value: serde_json::to_value(&doc)
+                .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
+            record_key: key,
+        })
+    }
+
+    fn long_term_facet_index_delete_mutation(
+        &self,
+        owner_record_id: &str,
+    ) -> Option<StoreMutation> {
+        let owner_record_id = owner_record_id.trim();
+        if owner_record_id.is_empty() {
+            return None;
+        }
+        let key = format!("facet-index:{owner_record_id}");
+        Some(StoreMutation::DeleteJson {
+            namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
+            key: key.clone(),
+            event_kind: MemoryStoreEventKind::MemoryDelete,
+            plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
+            record_key: key,
+        })
+    }
+
+    fn plan_long_term_facet_index_upsert_mutations(
+        &self,
+        entries: &[LongTermMemoryEntry],
+    ) -> Result<Vec<StoreMutation>> {
+        entries
+            .iter()
+            .map(|entry| self.long_term_facet_index_upsert_mutation(entry))
+            .collect()
+    }
+
+    fn plan_long_term_facet_index_delete_mutations(
+        &self,
+        owner_record_ids: &[String],
+    ) -> Vec<StoreMutation> {
+        owner_record_ids
+            .iter()
+            .filter_map(|owner_record_id| {
+                self.long_term_facet_index_delete_mutation(owner_record_id)
+            })
+            .collect()
+    }
+
+    fn plan_long_term_facet_index_mutations_for_store_mutations(
+        &self,
+        long_term_mutations: &[StoreMutation],
+    ) -> Result<Vec<StoreMutation>> {
+        let mut facet_mutations = Vec::new();
+        for mutation in long_term_mutations {
+            match mutation {
+                StoreMutation::PutJson {
+                    namespace, value, ..
+                } if namespace == "long_term" => {
+                    let entry = serde_json::from_value::<LongTermMemoryEntry>(value.clone())
+                        .map_err(|error| {
+                            Error::config("memory_facet_index_plan", error.to_string())
+                        })?;
+                    facet_mutations.push(self.long_term_facet_index_upsert_mutation(&entry)?);
+                }
+                StoreMutation::DeleteJson { namespace, key, .. } if namespace == "long_term" => {
+                    if let Some(mutation) = self.long_term_facet_index_delete_mutation(key) {
+                        facet_mutations.push(mutation);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(facet_mutations)
+    }
+
+    fn ensure_transcript_lifecycle_has_facet_impact_or_fails_closed(
+        &self,
+        key: &ConversationKey,
+        turn_id: Option<&str>,
+        transition: TranscriptLifecycleTransition,
+    ) -> Result<()> {
+        if !matches!(
+            transition,
+            TranscriptLifecycleTransition::Mask | TranscriptLifecycleTransition::DeleteRaw
+        ) {
+            return Ok(());
+        }
+        let Some(store_platform) = self.config.store_platform.as_ref() else {
+            return Ok(());
+        };
+        let facet_docs = store_platform.read_json_namespace(MEMORY_FACET_INDEX_NAMESPACE)?;
+        if !facet_docs
+            .iter()
+            .any(|doc| facet_doc_references_transcript_source(&doc.value, key, turn_id))
+        {
+            return Ok(());
+        }
+        Err(Error::config(
+            "transcript_lifecycle_facet_preflight",
+            "transcript_source_ref_redacted_facet_update_not_supported",
+        ))
+    }
+
     fn commit_memory_write_transaction(
         &self,
         lifecycle: RuntimeLifecycleReport,
@@ -1357,7 +1495,13 @@ impl MemoryRuntime {
                 apply_report,
                 ..
             } => {
-                mutations.extend(planning_long_term.into_mutations()?);
+                let long_term_mutations = planning_long_term.into_mutations()?;
+                let facet_index_mutations = self
+                    .plan_long_term_facet_index_mutations_for_store_mutations(
+                        &long_term_mutations,
+                    )?;
+                mutations.extend(long_term_mutations);
+                mutations.extend(facet_index_mutations);
                 mutations.extend(runtime_skill_storage_mutations_to_store_mutations(
                     &planning_skills.into_mutations()?,
                 ));
@@ -1402,8 +1546,9 @@ impl MemoryRuntime {
                     key: id.clone(),
                     event_kind: MemoryStoreEventKind::MemoryDelete,
                     plane: "long_term".to_string(),
-                    record_key: id,
+                    record_key: id.clone(),
                 });
+                mutations.extend(self.plan_long_term_facet_index_delete_mutations(&[id.clone()]));
                 changed = changed.saturating_add(1);
             }
         }
@@ -1442,6 +1587,8 @@ impl MemoryRuntime {
                     record_key: entry.id.clone(),
                 });
             }
+            mutations
+                .extend(self.plan_long_term_facet_index_upsert_mutations(&plan.accepted_entries)?);
             changed = changed.saturating_add(plan.outcome.changed);
             accepted_upserts = plan.accepted_drafts;
             Some(plan.outcome)
@@ -1515,7 +1662,11 @@ impl MemoryRuntime {
         )?;
         let mut mutations = Vec::new();
         if report.accepted && !report.dry_run {
-            mutations.extend(planning_store.into_mutations()?);
+            let long_term_mutations = planning_store.into_mutations()?;
+            let facet_index_mutations = self
+                .plan_long_term_facet_index_mutations_for_store_mutations(&long_term_mutations)?;
+            mutations.extend(long_term_mutations);
+            mutations.extend(facet_index_mutations);
             mutations.extend(planning_control_store.into_mutations()?);
         }
         Ok((report, mutations))
@@ -1946,6 +2097,7 @@ impl MemoryRuntime {
                 &self.config.runtime_budget.graph_expansion_budget,
             ),
         );
+        let facet_index_report = build_memory_facet_index_report(&source_candidate_ids);
         let hit_count = procedural_hits
             .len()
             .saturating_add(agent_skill_hits.len())
@@ -1974,6 +2126,7 @@ impl MemoryRuntime {
             source_candidate_ids,
             graph_anchor_candidate_ids,
             graph_index_report: graph.index_report,
+            facet_index_report,
             graph_rerank: graph.rerank,
             graph_gate: graph.gate,
             graph_candidate_evidence_ref_index: graph.candidate_evidence_ref_index,
@@ -2058,6 +2211,7 @@ impl MemoryRuntime {
             &rendered_candidates,
             &recall,
         );
+        let ablation_report = stage_diagnostics.ablation_report.clone();
         let metrics = build_eval_recall_metrics(
             &request,
             source_candidates.len(),
@@ -2103,6 +2257,8 @@ impl MemoryRuntime {
             missing_evidence_refs,
             budget_report: self.config.runtime_budget.clone(),
             privacy_report,
+            facet_index_report: recall.facet_index_report,
+            ablation_report,
             graph_index_report: recall.graph_index_report,
             graph_rerank: recall.graph_rerank,
             graph_gate: recall.graph_gate,
@@ -3530,6 +3686,11 @@ impl MemoryRuntime {
             request.memory_space_id,
             request.channel_id,
             request.conversation_id,
+        )?;
+        self.ensure_transcript_lifecycle_has_facet_impact_or_fails_closed(
+            &key,
+            request.turn_id.as_deref(),
+            request.transition,
         )?;
         let transcript_store = self.config.platform.conversation_transcript_store();
         let mut transcript =
@@ -5542,6 +5703,25 @@ fn build_memory_graph_index_report(
     }
 }
 
+fn build_memory_facet_index_report(
+    source_candidate_ids: &[String],
+) -> MemoryFacetRecallIndexReport {
+    MemoryFacetRecallIndexReport {
+        owner: "bm-sdk::MemoryRuntime".to_string(),
+        used: false,
+        report_only: true,
+        fallback_full_scan: false,
+        source_candidate_count: source_candidate_ids.len(),
+        matched_source_candidate_count: 0,
+        exact_facet_doc_count: 0,
+        expanded_facet_doc_count: 0,
+        exact_facet_candidate_ids: Vec::new(),
+        expanded_facet_candidate_ids: Vec::new(),
+        index_revision: None,
+        failures: vec!["memory_facet_index_not_loaded".to_string()],
+    }
+}
+
 fn record_index_graph_input_counts(
     index_report: &mut MemoryGraphRecallIndexReport,
     graph: &TemporalMemoryGraphBuildReport,
@@ -5968,6 +6148,13 @@ fn build_eval_recall_stage_diagnostics(
             push_unique_string(&mut rendered_evidence_refs, evidence_ref.clone());
         }
     }
+    let facet_stage = build_eval_recall_facet_stage_diagnostics(
+        recall,
+        !gold_evidence_refs.is_empty() && !expanded_missing.is_empty(),
+        expanded_missing.clone(),
+        rendered_candidates.len(),
+    );
+    let ablation_report = build_eval_recall_ablation_report(&facet_stage);
 
     MemoryEvalRecallStageDiagnostics {
         suite: benchmark_context
@@ -5998,6 +6185,8 @@ fn build_eval_recall_stage_diagnostics(
             expanded_candidates,
             &recall.graph_rerank.graph_neighbor_ids,
         ),
+        facet_stage,
+        ablation_report,
         expansion_budget: recall.graph_rerank.expansion_budget.clone(),
         truncated_count: recall
             .graph_rerank
@@ -6013,6 +6202,100 @@ fn build_eval_recall_stage_diagnostics(
             .map(|candidate| candidate.candidate_id.clone())
             .collect(),
         rendered_evidence_refs,
+    }
+}
+
+fn build_eval_recall_facet_stage_diagnostics(
+    recall: &MemoryRecallReport,
+    miss_after_expanded: bool,
+    expanded_missing_evidence_refs: Vec<String>,
+    rendered_candidate_count: usize,
+) -> MemoryEvalRecallFacetStageDiagnostics {
+    let mut blocked_reasons = recall.facet_index_report.failures.clone();
+    if recall.facet_index_report.report_only {
+        blocked_reasons.push("memory_facet_report_only".to_string());
+    }
+    if !recall.facet_index_report.used {
+        blocked_reasons.push("memory_facet_stage_not_used".to_string());
+    }
+    blocked_reasons.sort();
+    blocked_reasons.dedup();
+
+    MemoryEvalRecallFacetStageDiagnostics {
+        used: recall.facet_index_report.used,
+        report_only: recall.facet_index_report.report_only,
+        miss_after_expanded,
+        expanded_missing_evidence_refs,
+        exact_facet_candidate_ids: recall.facet_index_report.exact_facet_candidate_ids.clone(),
+        expanded_facet_candidate_ids: recall
+            .facet_index_report
+            .expanded_facet_candidate_ids
+            .clone(),
+        source_candidate_count: recall.facet_index_report.source_candidate_count,
+        matched_source_candidate_count: recall.facet_index_report.matched_source_candidate_count,
+        rendered_candidate_count,
+        blocked_reasons,
+    }
+}
+
+fn build_eval_recall_ablation_report(
+    facet_stage: &MemoryEvalRecallFacetStageDiagnostics,
+) -> crate::MemoryEvalRecallAblationReport {
+    let required_slices = [
+        "facet_off",
+        "lexical_sparse_off",
+        "graph_propagation_off",
+        "rank_fusion_off",
+        "coverage_selection_off",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect::<Vec<_>>();
+    let mut blocked_reasons = Vec::new();
+    if facet_stage.report_only {
+        blocked_reasons.push("memory_facet_ablation_report_only".to_string());
+    }
+    if !facet_stage.used {
+        blocked_reasons.push("memory_facet_index_not_used".to_string());
+    }
+    blocked_reasons.sort();
+    blocked_reasons.dedup();
+
+    let slices = required_slices
+        .iter()
+        .map(|name| {
+            let is_facet = name == "facet_off";
+            crate::MemoryEvalRecallAblationSlice {
+                name: name.clone(),
+                feature_enabled: false,
+                report_available: true,
+                contribution_proven: is_facet
+                    && facet_stage.used
+                    && !facet_stage.expanded_missing_evidence_refs.is_empty(),
+                affected_candidate_count: if is_facet {
+                    facet_stage
+                        .exact_facet_candidate_ids
+                        .len()
+                        .saturating_add(facet_stage.expanded_facet_candidate_ids.len())
+                } else {
+                    0
+                },
+                render_growth: 0,
+                blocked_reasons: if is_facet {
+                    blocked_reasons.clone()
+                } else {
+                    Vec::new()
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    crate::MemoryEvalRecallAblationReport {
+        required_slices,
+        contribution_proven: slices.iter().any(|slice| slice.contribution_proven),
+        render_growth: slices.iter().map(|slice| slice.render_growth).sum(),
+        slices,
+        blocked_reasons,
     }
 }
 
@@ -7442,6 +7725,34 @@ fn sanitize_transcript_lifecycle_report_for_view(
     report.affected_host_refs = host_refs;
     report.redacted_host_refs = report.redacted_host_refs.saturating_add(redacted_count);
     report.host_ref_redactions.append(&mut redactions);
+}
+
+fn facet_doc_references_transcript_source(
+    facet_doc: &serde_json::Value,
+    key: &ConversationKey,
+    turn_id: Option<&str>,
+) -> bool {
+    let conversation_ref = format!(
+        "transcript:{}/{}/{}",
+        key.memory_space_id, key.channel_id, key.conversation_id
+    );
+    facet_doc
+        .get("canonical_evidence_refs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|evidence| evidence.get("source_ref"))
+        .filter_map(serde_json::Value::as_str)
+        .any(|source_ref| {
+            let source_ref = source_ref.trim();
+            if !source_ref.starts_with(&conversation_ref) {
+                return false;
+            }
+            match turn_id {
+                Some(turn_id) => source_ref.contains(&format!("#turn={}", turn_id.trim())),
+                None => true,
+            }
+        })
 }
 
 fn apply_transcript_repair_budget(

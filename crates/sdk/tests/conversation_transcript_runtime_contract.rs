@@ -963,7 +963,7 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
         .unwrap();
     assert_eq!(write.changed, 1);
 
-    let lifecycle = runtime
+    let err = runtime
         .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
             memory_space_id: runtime.memory_space_id().to_string(),
             channel_id: "llm.gateway".to_string(),
@@ -972,13 +972,9 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
             transition: TranscriptLifecycleTransition::Mask,
             reason: "review_preference_source".to_string(),
         })
-        .unwrap();
+        .expect_err("facet-backed transcript source redaction must fail closed");
 
-    assert_eq!(lifecycle.transcript.derived_memory_refs.len(), 1);
-    assert_eq!(
-        lifecycle.transcript.derived_memory_refs[0].source.turn_id,
-        turn.turn_id
-    );
+    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
 }
 
 #[test]
@@ -1170,7 +1166,7 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
         .unwrap();
     assert_eq!(write.changed, 2);
 
-    let lifecycle = runtime
+    let err = runtime
         .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
             memory_space_id: runtime.memory_space_id().to_string(),
             channel_id: "llm.gateway".to_string(),
@@ -1179,21 +1175,9 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
             transition: TranscriptLifecycleTransition::Mask,
             reason: "review_extraction_source".to_string(),
         })
-        .unwrap();
+        .expect_err("facet-backed transcript source redaction must fail closed");
 
-    let planes = lifecycle
-        .transcript
-        .derived_memory_refs
-        .iter()
-        .map(|derived| derived.plane)
-        .collect::<Vec<_>>();
-    assert!(planes.contains(&DerivedMemoryPlane::LongTerm));
-    assert!(planes.contains(&DerivedMemoryPlane::ProceduralSkill));
-    assert!(lifecycle
-        .transcript
-        .derived_memory_refs
-        .iter()
-        .all(|derived| derived.source.turn_id == turn.turn_id));
+    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
 }
 
 #[test]
@@ -1258,7 +1242,7 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
         "automatic extraction should record derived refs: {derived_refs:?}"
     );
 
-    let lifecycle = runtime
+    let err = runtime
         .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
             memory_space_id: runtime.memory_space_id().to_string(),
             channel_id: "llm.gateway".to_string(),
@@ -1267,25 +1251,9 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
             transition: TranscriptLifecycleTransition::Mask,
             reason: "review_automatic_extraction_source".to_string(),
         })
-        .unwrap();
+        .expect_err("facet-backed transcript source redaction must fail closed");
 
-    let derived_ref = lifecycle
-        .transcript
-        .derived_memory_refs
-        .iter()
-        .find(|derived| {
-            derived.plane == DerivedMemoryPlane::SharedFact && derived.source.turn_id == turn_id
-        })
-        .expect("automatic extraction should be linked to transcript evidence");
-    assert_eq!(derived_ref.plane, DerivedMemoryPlane::SharedFact);
-    assert_eq!(derived_ref.source.turn_id, turn_id);
-    assert_eq!(
-        derived_ref.source.memory_space_id,
-        runtime.memory_space_id().to_string()
-    );
-    assert_eq!(derived_ref.source.channel_id, "llm.gateway");
-    assert_eq!(derived_ref.source.conversation_id, "conversation-a");
-    assert!(derived_ref.source.message_id.is_some());
+    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
 }
 
 #[test]

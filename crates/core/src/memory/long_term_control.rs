@@ -215,6 +215,8 @@ pub struct MemoryProjectionImpactReport {
     pub affected_record_ids: Vec<String>,
     pub subject_visibility: MemorySubjectVisibilityPolicy,
     pub recall_projection_must_refresh: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl Default for MemoryProjectionImpactReport {
@@ -223,6 +225,7 @@ impl Default for MemoryProjectionImpactReport {
             affected_record_ids: Vec::new(),
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             recall_projection_must_refresh: false,
+            notes: Vec::new(),
         }
     }
 }
@@ -726,6 +729,7 @@ fn apply_correct(
             affected_record_ids: vec![previous.id.clone()],
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             recall_projection_must_refresh: true,
+            notes: Vec::new(),
         },
     ))
 }
@@ -805,6 +809,7 @@ fn apply_supersede(
             affected_record_ids: vec![previous.id.clone(), new_id],
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             recall_projection_must_refresh: true,
+            notes: Vec::new(),
         },
     ))
 }
@@ -861,6 +866,7 @@ fn apply_delete(
             affected_record_ids: vec![previous.id.clone()],
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             recall_projection_must_refresh: true,
+            notes: Vec::new(),
         },
     ))
 }
@@ -932,6 +938,7 @@ fn apply_forget_by_query(
             affected_record_ids: Vec::new(),
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             recall_projection_must_refresh: true,
+            notes: Vec::new(),
         },
     ))
 }
@@ -1055,8 +1062,16 @@ fn apply_change_scope(
         audit_event_id,
         MemoryProjectionImpactReport {
             affected_record_ids: vec![previous.id.clone()],
-            subject_visibility,
+            subject_visibility: subject_visibility.clone(),
             recall_projection_must_refresh: true,
+            notes: if matches!(
+                subject_visibility,
+                MemorySubjectVisibilityPolicy::AllSubjects
+            ) {
+                Vec::new()
+            } else {
+                vec!["report_only_subject_visibility_not_indexed".to_string()]
+            },
         },
     ))
 }

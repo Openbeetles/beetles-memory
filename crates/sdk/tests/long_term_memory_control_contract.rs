@@ -2,18 +2,18 @@ mod support;
 
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, LongTermMemoryKind,
-    LongTermMemoryQuery, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
-    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
-    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemorySemanticJudgmentSource,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest,
+    CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
+    LongTermMemoryKind, LongTermMemoryQuery, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermListRequest,
+    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
+    MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy, MemoryTranscriptReplayRequest,
     MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
     MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
     ProfileId, RuntimeLifecycleModeInput, RuntimeLifecycleOperation, TranscriptEvidenceRef,
-    TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptReplayView,
+    TranscriptInputMessage, TranscriptReplayView,
 };
 
 use support::{StaticHttpClient, StaticLlmClient};
@@ -546,23 +546,28 @@ fn runtime_mutates_long_term_memory_from_transcript_derived_ref_target() {
             }],
         })
         .unwrap();
-    let lifecycle = runtime
-        .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
-            memory_space_id: runtime.memory_space_id().to_string(),
-            channel_id: "llm.gateway".to_string(),
-            conversation_id: "conversation-a".to_string(),
-            turn_id: Some(turn.turn_id.clone()),
-            transition: TranscriptLifecycleTransition::Mask,
-            reason: "review_preference_source".to_string(),
+    let record_id = runtime
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: None,
+            limit: 10,
+            view: MemoryLongTermControlView::Operator,
         })
-        .unwrap();
-    let derived_ref = lifecycle
-        .transcript
-        .derived_memory_refs
+        .unwrap()
+        .records
         .iter()
-        .find(|derived| derived.plane == DerivedMemoryPlane::LongTerm)
-        .expect("long-term derived ref")
+        .find(|record| record.record.topic == "response_style")
+        .expect("long-term record")
+        .record
+        .id
         .clone();
+    let derived_ref = DerivedMemoryRef {
+        plane: DerivedMemoryPlane::LongTerm,
+        store_key: record_id,
+        subject_id: Some("subject-default".to_string()),
+        source: evidence_ref,
+        created_at: 10,
+    };
 
     let report = runtime
         .mutate_long_term_memory(MemoryLongTermMutationRequest {

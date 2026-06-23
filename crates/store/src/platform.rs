@@ -845,6 +845,7 @@ const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
     "memory_graph_backlinks",
     "memory_graph_indexes",
     "memory_graph_revisions",
+    "memory_facet_indexes",
     LONG_TERM_CONTROL_REVISION_NAMESPACE,
     LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,

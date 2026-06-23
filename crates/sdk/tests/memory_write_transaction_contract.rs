@@ -1,20 +1,22 @@
 mod support;
 
+use bm_core::memory::LongTermMemorySlot;
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistrySnapshot,
     AgentToolUsageFeedback, EvidenceBacklink, LongTermMemoryDraft, LongTermMemoryKind,
-    LongTermMemoryQuery, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
-    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
-    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
-    MemoryPrivacyClass, MemoryScope, MemorySemanticJudgmentSource, MemoryWriteCandidate,
+    LongTermMemoryQuery, LongTermMemorySourceScope, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode,
+    MemoryGraphNodeKind, MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest,
+    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
+    MemoryLongTermTarget, MemoryPrivacyClass, MemoryScope, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryWriteCandidate,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, ProceduralMemoryPromotionInput, ProfileId,
     RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
     RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform, StoreRuntimeBudget,
-    TemporalMemoryGraphWriteRequest, TemporalValidity,
+    TemporalMemoryGraphWriteRequest, TemporalValidity, TranscriptLifecycleTransition,
 };
 
 use support::test_runtime_with_scope;
@@ -63,6 +65,15 @@ fn llm_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment 
         decision: MemoryCandidateSemanticDecision::Accept,
         governed_target: Some(target),
         reason: "llm_semantic_judgment".to_string(),
+    }
+}
+
+fn llm_reject() -> MemoryCandidateSemanticJudgment {
+    MemoryCandidateSemanticJudgment {
+        source: MemorySemanticJudgmentSource::LlmGovernance,
+        decision: MemoryCandidateSemanticDecision::Reject,
+        governed_target: None,
+        reason: "llm_rejected".to_string(),
     }
 }
 
@@ -247,6 +258,70 @@ fn assert_transaction_events(
         .all(|event| { event.payload.get("operation").map(String::as_str) == Some(operation) }));
 }
 
+fn facet_index_docs(platform: &StorePlatform) -> Vec<bm_store::StoreSnapshotJsonDoc> {
+    platform
+        .read_json_namespace("memory_facet_indexes")
+        .expect("facet index namespace")
+}
+
+fn assert_facet_index_doc_for_owner(
+    platform: &StorePlatform,
+    owner_record_id: &str,
+) -> serde_json::Value {
+    let docs = facet_index_docs(platform);
+    let doc = docs
+        .iter()
+        .find(|doc| doc.value["owner_record_id"] == owner_record_id)
+        .unwrap_or_else(|| panic!("missing facet index for owner {owner_record_id}"));
+    assert_eq!(doc.key, format!("facet-index:{owner_record_id}"));
+    assert_eq!(doc.value["owner_plane"], "long_term");
+    assert_eq!(doc.value["status"], "active");
+    assert!(doc.value["exact_facets"]
+        .as_array()
+        .is_some_and(|facets| !facets.is_empty()));
+    doc.value.clone()
+}
+
+fn assert_no_facet_index_doc_for_owner(platform: &StorePlatform, owner_record_id: &str) {
+    assert!(
+        !facet_index_docs(platform)
+            .iter()
+            .any(|doc| doc.value["owner_record_id"] == owner_record_id),
+        "facet index must be deleted with the owner record"
+    );
+}
+
+fn assert_operation_events_include_planes(
+    platform: &StorePlatform,
+    operation: &str,
+    expected_planes: &[&str],
+) {
+    let events = platform.read_events().expect("events");
+    let operation_events = events
+        .iter()
+        .filter(|event| event.payload.get("operation").map(String::as_str) == Some(operation))
+        .collect::<Vec<_>>();
+    assert!(
+        !operation_events.is_empty(),
+        "missing events for {operation}"
+    );
+    let transaction_id = operation_events[0]
+        .payload
+        .get("transaction_id")
+        .expect("transaction id");
+    assert!(operation_events
+        .iter()
+        .all(|event| event.payload.get("transaction_id") == Some(transaction_id)));
+    for expected_plane in expected_planes {
+        assert!(
+            operation_events
+                .iter()
+                .any(|event| event.plane == *expected_plane),
+            "missing plane {expected_plane} for {operation}"
+        );
+    }
+}
+
 #[test]
 fn candidate_write_event_budget_rejects_without_partial_memory() {
     let platform = store_with_event_budget(2);
@@ -324,6 +399,54 @@ fn candidate_write_success_reports_transaction_lineage() {
     assert!(transaction_events.iter().all(|event| {
         event.payload.get("operation").map(String::as_str) == Some("write.candidates")
     }));
+
+    let long_term_records = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list");
+    let owner_id = long_term_records
+        .iter()
+        .find(|entry| entry.topic == "transaction_profile")
+        .expect("accepted long-term entry")
+        .id
+        .clone();
+    let facet_doc = assert_facet_index_doc_for_owner(&platform, &owner_id);
+    assert_eq!(facet_doc["memory_space_id"], "space:owner-default");
+    assert!(facet_doc["subject_ids"]
+        .as_array()
+        .is_some_and(|subjects| !subjects.is_empty()));
+    assert!(facet_doc["source_revision"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn rejected_candidate_does_not_write_recallable_facet_index() {
+    let platform = store_with_event_budget(16);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::ServerLinuxDevFull,
+        "llm.gateway",
+        "chat-a",
+    );
+    let mut candidate = long_term_candidate();
+    candidate.semantic_judgment = Some(llm_reject());
+
+    let report = runtime
+        .write(MemoryWriteRequest::Candidates {
+            candidates: vec![candidate],
+        })
+        .expect("rejected candidate write");
+
+    assert!(!report.accepted);
+    assert_eq!(report.changed, 0);
+    assert_eq!(
+        platform.long_term_memory_store().count().unwrap(),
+        0,
+        "rejected candidate must not write long-term owner records"
+    );
+    assert!(
+        facet_index_docs(&platform).is_empty(),
+        "rejected candidate must not write recallable facet index docs"
+    );
 }
 
 #[test]
@@ -520,6 +643,125 @@ fn long_term_extraction_success_reports_transaction_lineage() {
         "write.long_term_extraction",
         transaction.event_ids.len(),
     );
+
+    let long_term_records = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list");
+    let owner_id = long_term_records
+        .iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("accepted extraction entry")
+        .id
+        .clone();
+    let facet_doc = assert_facet_index_doc_for_owner(&platform, &owner_id);
+    assert_eq!(facet_doc["source_revision"], 1);
+}
+
+#[test]
+fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
+    let platform = store_with_event_budget(16);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::ServerLinuxDevFull,
+        "llm.gateway",
+        "chat-a",
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed extraction");
+    let owner_id = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("accepted extraction entry")
+        .id;
+    assert_facet_index_doc_for_owner(&platform, &owner_id);
+
+    let report = runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: Vec::new(),
+                deletes: vec![LongTermMemorySlot {
+                    kind: LongTermMemoryKind::Profile,
+                    topic: "transaction_extraction".to_string(),
+                }],
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("delete extraction");
+
+    assert!(report.accepted);
+    let transaction = report.transaction.expect("transaction");
+    assert_eq!(transaction.operation, "write.long_term_extraction");
+    assert!(platform
+        .long_term_memory_store()
+        .get(&owner_id)
+        .expect("long-term get")
+        .is_none());
+    assert_no_facet_index_doc_for_owner(&platform, &owner_id);
+}
+
+#[test]
+fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
+    let platform = store_with_event_budget(16);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::ServerLinuxDevFull,
+        "llm.gateway",
+        "chat-a",
+    );
+    let turn_id = "turn-redact";
+    let mut draft = extraction_draft();
+    draft.supporting_citations = vec![format!(
+        "transcript:{}/{}/{}#turn={}",
+        runtime.memory_space_id(),
+        "llm.gateway",
+        "chat-a",
+        turn_id
+    )];
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![draft],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed transcript-backed extraction");
+    let owner_id = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("accepted extraction entry")
+        .id;
+    assert_facet_index_doc_for_owner(&platform, &owner_id);
+
+    let err = runtime
+        .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "chat-a".to_string(),
+            turn_id: Some(turn_id.to_string()),
+            transition: TranscriptLifecycleTransition::Mask,
+            reason: "mask_must_update_facet_source_ref".to_string(),
+        })
+        .expect_err("facet source impact must fail closed until redaction is supported");
+
+    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
+    assert_facet_index_doc_for_owner(&platform, &owner_id);
 }
 
 #[test]
@@ -706,6 +948,276 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
         .unwrap()
         .is_none());
     assert_eq!(platform.read_events().unwrap(), before_events);
+}
+
+#[test]
+fn long_term_control_delete_removes_facet_index_in_same_transaction() {
+    let platform = store_with_event_budget(24);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::ServerLinuxDevFull,
+        "llm.gateway",
+        "chat-a",
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed extraction");
+    let owner_id = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("accepted extraction entry")
+        .id;
+    assert_facet_index_doc_for_owner(&platform, &owner_id);
+
+    let report = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Delete {
+                target: MemoryLongTermTarget::RecordId(owner_id.clone()),
+            },
+            reason: "delete_must_update_facet_index".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("control delete");
+
+    assert!(report.accepted);
+    assert_eq!(report.operation, "delete");
+    assert_eq!(report.affected_records.len(), 1);
+    assert_eq!(report.affected_records[0].record_id, owner_id);
+    assert!(platform
+        .long_term_memory_store()
+        .get(&owner_id)
+        .expect("long-term get")
+        .is_none());
+    assert!(platform
+        .long_term_memory_control_store()
+        .get_long_term_control_tombstone(&owner_id)
+        .expect("control tombstone")
+        .is_some());
+    assert_no_facet_index_doc_for_owner(&platform, &owner_id);
+    assert_operation_events_include_planes(
+        &platform,
+        "long_term_control.mutation",
+        &["long_term", "memory_facet_indexes"],
+    );
+}
+
+#[test]
+fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() {
+    let platform = store_with_event_budget(24);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::ServerLinuxDevFull,
+        "llm.gateway",
+        "chat-a",
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed extraction");
+    let owner_id = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("accepted extraction entry")
+        .id;
+    let before_facet = assert_facet_index_doc_for_owner(&platform, &owner_id);
+    assert_eq!(before_facet["source_revision"].as_u64(), Some(1));
+    assert_eq!(before_facet["facet_index_revision"].as_u64(), Some(1));
+
+    let mut replacement = extraction_draft();
+    replacement.content =
+        "Corrected long-term extraction must update the governed facet index.".to_string();
+    replacement.keywords.push("corrected".to_string());
+
+    let report = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Correct {
+                target: MemoryLongTermTarget::RecordId(owner_id.clone()),
+                replacement,
+            },
+            reason: "correct_must_update_facet_index".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("control correct");
+
+    assert!(report.accepted);
+    assert_eq!(report.operation, "correct");
+    assert_eq!(report.affected_records.len(), 1);
+    assert_eq!(report.affected_records[0].record_id, owner_id);
+    assert_eq!(report.affected_records[0].new_revision, Some(2));
+    let updated = platform
+        .long_term_memory_store()
+        .get(&owner_id)
+        .expect("long-term get")
+        .expect("updated long-term owner");
+    assert_eq!(updated.source_revision, 2);
+    assert!(updated.content.contains("Corrected"));
+
+    let facet_doc = assert_facet_index_doc_for_owner(&platform, &owner_id);
+    assert_eq!(facet_doc["source_revision"].as_u64(), Some(2));
+    assert_eq!(facet_doc["facet_index_revision"].as_u64(), Some(2));
+    assert_operation_events_include_planes(
+        &platform,
+        "long_term_control.mutation",
+        &["long_term", "memory_facet_indexes"],
+    );
+}
+
+#[test]
+fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() {
+    let platform = store_with_event_budget(28);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::ServerLinuxDevFull,
+        "llm.gateway",
+        "chat-a",
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed extraction");
+    let old_owner_id = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("accepted extraction entry")
+        .id;
+    assert_facet_index_doc_for_owner(&platform, &old_owner_id);
+
+    let mut replacement = extraction_draft();
+    replacement.topic = "transaction_extraction_superseded".to_string();
+    replacement.content =
+        "Superseded owner record must receive a new active facet index.".to_string();
+
+    let report = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Supersede {
+                target: MemoryLongTermTarget::RecordId(old_owner_id.clone()),
+                replacement,
+            },
+            reason: "supersede_must_replace_facet_index".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("control supersede");
+
+    assert!(report.accepted);
+    assert_eq!(report.operation, "supersede");
+    assert!(platform
+        .long_term_memory_store()
+        .get(&old_owner_id)
+        .expect("old long-term get")
+        .is_none());
+    assert_no_facet_index_doc_for_owner(&platform, &old_owner_id);
+    let new_owner_id = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction_superseded")
+        .expect("new owner entry")
+        .id;
+    assert_facet_index_doc_for_owner(&platform, &new_owner_id);
+    assert_operation_events_include_planes(
+        &platform,
+        "long_term_control.mutation",
+        &["long_term", "memory_facet_indexes"],
+    );
+}
+
+#[test]
+fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_indexed() {
+    let platform = store_with_event_budget(24);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::ServerLinuxDevFull,
+        "llm.gateway",
+        "chat-a",
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed extraction");
+    let owner_id = platform
+        .long_term_memory_store()
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("accepted extraction entry")
+        .id;
+    assert_facet_index_doc_for_owner(&platform, &owner_id);
+
+    let report = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(owner_id.clone()),
+                source_scope: LongTermMemorySourceScope::Chat,
+                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![runtime
+                    .subject_id()
+                    .to_string()]),
+            },
+            reason: "change_scope_must_update_facet_index".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("control change scope");
+
+    assert!(report.accepted);
+    assert_eq!(report.operation, "change_scope");
+    assert!(report
+        .projection_impact
+        .notes
+        .contains(&"report_only_subject_visibility_not_indexed".to_string()));
+    let updated = platform
+        .long_term_memory_store()
+        .get(&owner_id)
+        .expect("long-term get")
+        .expect("updated owner");
+    assert_eq!(updated.source_revision, 2);
+    assert_eq!(updated.source_scope, LongTermMemorySourceScope::Chat);
+    let facet_doc = assert_facet_index_doc_for_owner(&platform, &owner_id);
+    assert_eq!(facet_doc["source_revision"].as_u64(), Some(2));
+    assert_eq!(facet_doc["facet_index_revision"].as_u64(), Some(2));
+    assert_operation_events_include_planes(
+        &platform,
+        "long_term_control.mutation",
+        &["long_term", "memory_facet_indexes"],
+    );
 }
 
 #[test]

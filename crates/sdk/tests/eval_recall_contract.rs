@@ -662,6 +662,81 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
 }
 
 #[test]
+fn eval_recall_reports_facet_stage_for_expanded_miss() {
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let store = platform.long_term_memory_store();
+
+    store
+        .upsert_many(
+            &[long_term_draft(
+                "release baseline source",
+                "release baseline source is visible without facet expansion",
+                "external_eval:baseline-source",
+            )],
+            1_800_000_000,
+        )
+        .expect("seed long-term memory");
+
+    let report = runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "release missing facet target".to_string(),
+            k: 5,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-expanded-miss".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec!["external_eval:facet-only-gold".to_string()],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("eval recall");
+
+    let facet_stage = &report.stage_diagnostics.facet_stage;
+    assert!(report.stage_diagnostics.miss_after_expanded);
+    assert!(facet_stage.miss_after_expanded);
+    assert!(facet_stage
+        .expanded_missing_evidence_refs
+        .iter()
+        .any(|evidence_ref| evidence_ref == "external_eval:facet-only-gold"));
+    assert!(report.facet_index_report.report_only);
+    assert!(!report.facet_index_report.used);
+    assert!(!report.facet_index_report.fallback_full_scan);
+    assert!(facet_stage
+        .blocked_reasons
+        .iter()
+        .any(|reason| reason == "memory_facet_index_not_loaded"));
+
+    let required = [
+        "facet_off",
+        "lexical_sparse_off",
+        "graph_propagation_off",
+        "rank_fusion_off",
+        "coverage_selection_off",
+    ];
+    for name in required {
+        assert!(report
+            .ablation_report
+            .slices
+            .iter()
+            .any(|slice| slice.name == name && slice.report_available && !slice.feature_enabled));
+    }
+    assert_eq!(report.ablation_report.render_growth, 0);
+    assert_eq!(
+        report.stage_diagnostics.ablation_report,
+        report.ablation_report
+    );
+    assert_eq!(
+        facet_stage.rendered_candidate_count,
+        report.rendered_candidates.len()
+    );
+}
+
+#[test]
 fn persistent_graph_recall_uses_sdk_owned_production_index_report() {
     let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
     let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);

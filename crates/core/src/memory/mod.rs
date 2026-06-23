@@ -36,6 +36,7 @@ mod long_term;
 mod long_term_control;
 mod long_term_extraction;
 mod maintenance;
+mod memory_facet;
 mod memory_governance;
 mod mental_privacy;
 mod next_gen_contract;
@@ -258,6 +259,14 @@ pub use maintenance::{
     run_post_reply_memory_maintenance, ContinuityCapsuleMaintenanceOutcome,
     LongTermMemoryRefreshRequestOutcome, PostReplyMemoryMaintenanceContext,
     PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome,
+};
+pub use memory_facet::{
+    build_long_term_memory_facet_index_doc, CanonicalEntityRef, CanonicalEvidenceRef,
+    FacetIndexRebuildReport, FacetReportAudience, FacetReportView, HumanFacetSuggestion,
+    MemoryFacet, MemoryFacetContractValidation, MemoryFacetIndexDoc, MemoryFacetNamespace,
+    MemoryFacetOwnerPlane, MemoryFacetStatus, MemoryFacetValue, StructuredFacetParseOutcome,
+    StructuredFacetParser, TemporalAnchor, TemporalAnchorKind, TemporalAnchorPrecision,
+    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
 };
 pub(crate) use memory_governance::run_memory_governance_kernel;
 pub use memory_governance::{

@@ -7,6 +7,8 @@ mod runtime;
 
 use std::collections::BTreeMap;
 
+use bm_core::memory::MEMORY_FACET_INDEX_NAMESPACE;
+
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ForegroundWorkStatus};
 pub use bm_core::budget::{
     compile_runtime_budget, AdapterRuntimeBudget, GraphExpansionRuntimeBudget, LlmGatewayBudget,
@@ -149,29 +151,31 @@ pub use capability_snapshot::{
 };
 pub use ops::{
     LLMRuntimeProjectionEnvelope, MemoryCloseReport, MemoryCloseRequest,
-    MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest, MemoryEvalRecallAtK,
+    MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest,
+    MemoryEvalRecallAblationReport, MemoryEvalRecallAblationSlice, MemoryEvalRecallAtK,
     MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
-    MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallGoldRank,
-    MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
-    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryEvalRecallStageDiagnostics,
-    MemoryEvalRecallStageEvidenceRefs, MemoryExportReport, MemoryExportRequest,
-    MemoryGovernancePolicyMutationReport, MemoryGraphRecallIndexReport, MemoryImportReport,
-    MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
-    MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
-    MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
-    MemoryProceduralWriteReport, MemoryProjectionAuditReport, MemoryProjectionPrivateGateAudit,
-    MemoryProjectionReport, MemoryProjectionRequest, MemoryProjectionSectionAudit,
-    MemoryProjectionSourceAudit, MemoryRecallReport, MemoryRecallRequest, MemoryRecoverReport,
-    MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest, MemoryRetentionCompactionReport,
-    MemoryRetentionCompactionRequest, MemorySpaceExportReport, MemorySpaceExportRequest,
-    MemorySpaceImportReport, MemorySpaceImportRequest, MemorySpaceMigrateApplyReport,
-    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewReport,
-    MemorySpaceMigratePreviewRequest, MemorySpaceMigrationManifest,
-    MemorySpaceMigrationPlaneReport, MemorySpaceMigrationPrivacyReport,
-    MemorySpaceSubjectRemapReport, MemoryTranscriptAttrWriteReport,
-    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
-    MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
+    MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallFacetStageDiagnostics,
+    MemoryEvalRecallGoldRank, MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallMetrics,
+    MemoryEvalRecallPrivacyReport, MemoryEvalRecallReport, MemoryEvalRecallRequest,
+    MemoryEvalRecallStageDiagnostics, MemoryEvalRecallStageEvidenceRefs, MemoryExportReport,
+    MemoryExportRequest, MemoryFacetRecallIndexReport, MemoryGovernancePolicyMutationReport,
+    MemoryGraphRecallIndexReport, MemoryImportReport, MemoryImportRequest, MemoryInspectionReport,
+    MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
+    MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
+    MemoryMaintenanceRequest, MemoryProceduralWriteReport, MemoryProjectionAuditReport,
+    MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
+    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallReport,
+    MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport,
+    MemoryReplayRequest, MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest,
+    MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
+    MemorySpaceImportRequest, MemorySpaceMigrateApplyReport, MemorySpaceMigrateApplyRequest,
+    MemorySpaceMigratePreviewReport, MemorySpaceMigratePreviewRequest,
+    MemorySpaceMigrationManifest, MemorySpaceMigrationPlaneReport,
+    MemorySpaceMigrationPrivacyReport, MemorySpaceSubjectRemapReport,
+    MemoryTranscriptAttrWriteReport, MemoryTranscriptAttrWriteRequest,
+    MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest, MemoryTranscriptExportReport,
+    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
     MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport,
@@ -244,6 +248,7 @@ pub fn import_memory_space(
     platform: &StorePlatform,
     request: MemorySpaceImportRequest,
 ) -> Result<MemorySpaceImportReport> {
+    ensure_memory_space_import_has_no_unremapped_facet_index(&request.snapshot)?;
     let import_report = platform.import_store_snapshot_with_report(&request.snapshot)?;
     Ok(MemorySpaceImportReport {
         memory_space_id: request.memory_space_id,
@@ -266,13 +271,16 @@ pub fn preview_memory_space_migration(
         privacy_policy_fingerprint: privacy_policy_fingerprint(privacy_redactions, loss_risk),
     };
     let vault_redaction = build_vault_redaction_report(&request.snapshot);
-    let vault_preflight = build_vault_migration_preflight(
+    let mut vault_preflight = build_vault_migration_preflight(
         vault_manifest.clone(),
         request.target_profile,
         vault_redaction.clone(),
         &request.snapshot.schema_id,
         bm_store::STORE_SCHEMA_ID,
     );
+    if snapshot_requires_facet_index_remap(&request.snapshot) {
+        vault_preflight.passed = false;
+    }
     let manifest = build_memory_space_migration_manifest(
         &request.source_memory_space_id,
         &request.target_memory_space_id,
@@ -318,6 +326,7 @@ pub fn apply_memory_space_migration(
             "vault migration preflight does not match snapshot",
         ));
     }
+    ensure_memory_space_import_has_no_unremapped_facet_index(&request.snapshot)?;
     let import_report = platform.import_store_snapshot_with_report(&request.snapshot)?;
     Ok(MemorySpaceMigrateApplyReport {
         target_memory_space_id: request.target_memory_space_id,
@@ -338,6 +347,29 @@ fn redact_private_snapshot_entries(snapshot: &mut StoreSnapshot) -> usize {
             && !is_private_snapshot_key(event.record_key.as_str())
     });
     redactions
+}
+
+fn snapshot_requires_facet_index_remap(snapshot: &StoreSnapshot) -> bool {
+    snapshot
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == MEMORY_FACET_INDEX_NAMESPACE)
+        || snapshot
+            .events
+            .iter()
+            .any(|event| event.plane == MEMORY_FACET_INDEX_NAMESPACE)
+}
+
+fn ensure_memory_space_import_has_no_unremapped_facet_index(
+    snapshot: &StoreSnapshot,
+) -> Result<()> {
+    if snapshot_requires_facet_index_remap(snapshot) {
+        return Err(Error::config(
+            "memory_space_import",
+            "facet_index_remap_required",
+        ));
+    }
+    Ok(())
 }
 
 fn count_private_snapshot_entries(snapshot: &StoreSnapshot) -> usize {
@@ -403,7 +435,7 @@ fn vault_preflight_for_snapshot(
     let report = snapshot.export_report();
     let privacy_redactions = count_private_snapshot_entries(snapshot);
     let loss_risk = snapshot.schema_id != bm_store::STORE_SCHEMA_ID;
-    build_vault_migration_preflight(
+    let mut preflight = build_vault_migration_preflight(
         VaultManifest {
             identity_id: "memory-space-preview".to_string(),
             profile: source_profile,
@@ -416,7 +448,11 @@ fn vault_preflight_for_snapshot(
         build_vault_redaction_report(snapshot),
         &snapshot.schema_id,
         bm_store::STORE_SCHEMA_ID,
-    )
+    );
+    if snapshot_requires_facet_index_remap(snapshot) {
+        preflight.passed = false;
+    }
+    preflight
 }
 
 fn privacy_policy_fingerprint(privacy_redactions: usize, loss_risk: bool) -> String {

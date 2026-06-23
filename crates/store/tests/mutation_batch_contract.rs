@@ -47,6 +47,30 @@ fn put_graph_json(namespace: &str, key: &str) -> StoreMutation {
     }
 }
 
+fn put_facet_index_json(key: &str) -> StoreMutation {
+    StoreMutation::PutJson {
+        namespace: "memory_facet_indexes".to_string(),
+        key: key.to_string(),
+        value: json!({
+            "owner_record_id": key,
+            "owner_plane": "long_term",
+            "schema_version": 1,
+            "facet_index_revision": 1,
+            "memory_space_id": "space:main",
+            "subject_ids": ["subject:user"],
+            "status": "active",
+            "exact_facets": [],
+            "expanded_facets": [],
+            "canonical_evidence_refs": [],
+            "source_revision": 1,
+            "updated_at": 1
+        }),
+        event_kind: MemoryStoreEventKind::MemoryWrite,
+        plane: "memory_facet_indexes".to_string(),
+        record_key: key.to_string(),
+    }
+}
+
 #[test]
 fn in_memory_batch_rejects_event_overflow_without_partial_state() {
     let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
@@ -188,4 +212,29 @@ fn json_namespace_read_exposes_admitted_docs_without_store_graph_semantics() {
         .read_json_namespace("memory_graph_unowned_semantics")
         .expect_err("unsupported namespace must fail closed");
     assert_eq!(err.stage(), "store_json_namespace_read");
+}
+
+#[test]
+fn memory_facet_index_namespace_is_admitted_without_store_semantics() {
+    let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
+        .expect("config")
+        .with_runtime_store_budget(transaction_budget(8, 8));
+    let platform = StorePlatform::open(config).expect("platform");
+
+    platform
+        .commit_mutation_batch(StoreMutationBatch {
+            transaction_id: "txn-facet-index".to_string(),
+            operation: "memory_facet_index.write".to_string(),
+            scope: StoreEventScope::system("memory_facet_index.write"),
+            mutations: vec![put_facet_index_json("facet-index:ltm:project")],
+        })
+        .expect("facet index batch commit");
+
+    let docs = platform
+        .read_json_namespace("memory_facet_indexes")
+        .expect("read facet index namespace");
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].namespace, "memory_facet_indexes");
+    assert_eq!(docs[0].key, "facet-index:ltm:project");
+    assert_eq!(docs[0].value["owner_plane"], "long_term");
 }

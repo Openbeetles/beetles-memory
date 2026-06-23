@@ -45,6 +45,10 @@ for required in \
   "commit_memory_write_transaction" \
   "commit_memory_mutation_batch" \
   "plan_long_term_extraction_transaction" \
+  "plan_long_term_facet_index_upsert_mutations" \
+  "plan_long_term_facet_index_delete_mutations" \
+  "plan_long_term_facet_index_mutations_for_store_mutations" \
+  "ensure_transcript_lifecycle_has_facet_impact_or_fails_closed" \
   "plan_agent_tool_experience_record" \
   "plan_long_term_control_mutation" \
   "plan_memory_governance_policy_mutation" \
@@ -64,6 +68,23 @@ for required in \
   "graph_index_report"; do
   if ! rg -n "${required}" crates/store/src/platform.rs crates/sdk/src/runtime.rs crates/sdk/src/ops.rs crates/sdk/tests/eval_recall_contract.rs >/dev/null; then
     echo "check_memory_write_transaction_contract: missing W4 graph index transaction/report marker ${required}" >&2
+    exit 1
+  fi
+done
+
+for required in \
+  "rejected_candidate_does_not_write_recallable_facet_index" \
+  "long_term_extraction_delete_removes_facet_index_in_same_transaction" \
+  "long_term_control_correct_updates_facet_index_revision_in_same_transaction" \
+  "long_term_control_delete_removes_facet_index_in_same_transaction" \
+  "long_term_control_supersede_replaces_owner_facet_index_in_same_transaction" \
+  "long_term_control_change_scope_updates_facet_and_reports_visibility_not_indexed" \
+  "report_only_subject_visibility_not_indexed" \
+  "transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted" \
+  "memory_space_migration_fails_closed_when_snapshot_contains_facet_index" \
+  "facet_index_remap_required"; do
+  if ! rg -n "${required}" crates/sdk/src/runtime.rs crates/sdk/src/lib.rs crates/sdk/tests/memory_write_transaction_contract.rs crates/sdk/tests/memory_space_migration_contract.rs >/dev/null; then
+    echo "check_memory_write_transaction_contract: missing P2 facet transaction marker ${required}" >&2
     exit 1
   fi
 done

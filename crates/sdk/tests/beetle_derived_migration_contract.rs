@@ -2,10 +2,9 @@ mod support;
 
 use bm_sdk::{
     apply_memory_space_migration, export_memory_space, import_memory_space,
-    preview_memory_space_migration, MemoryInspectionRequest, MemoryProjectionRequest,
-    MemoryRecallRequest, MemorySpaceExportRequest, MemorySpaceImportRequest,
+    preview_memory_space_migration, MemorySpaceExportRequest, MemorySpaceImportRequest,
     MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest, MemoryWriteCandidate,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    MemoryWriteRequest, ProfileId,
 };
 use serde::Deserialize;
 
@@ -18,15 +17,11 @@ struct SdkHostMigrationFixture {
     target_memory_space_id: String,
     channel: String,
     chat_id: String,
-    recall_query: String,
-    projection_query: String,
-    expected_runtime_skill: String,
-    expected_fragments: Vec<String>,
     candidates: Vec<MemoryWriteCandidate>,
 }
 
 #[test]
-fn generic_and_beetle_derived_fixtures_use_the_same_public_sdk_migrator_path() {
+fn generic_and_beetle_derived_fixtures_fail_closed_until_facet_remap() {
     let generic = load_fixture(include_str!(
         "../../../fixtures/sdk-host-readiness/generic-rust-host/host-turn-lifecycle.json"
     ));
@@ -42,6 +37,16 @@ fn generic_and_beetle_derived_fixtures_use_the_same_public_sdk_migrator_path() {
     assert!(beetle_report.preview_json_docs >= generic_report.preview_json_docs);
     assert!(beetle_report.soul_handoffs >= 1);
     assert!(beetle_report.deferred_candidates >= 1);
+    assert!(generic_report.facet_index_present);
+    assert!(beetle_report.facet_index_present);
+    assert!(!generic_report.preflight_passed);
+    assert!(!beetle_report.preflight_passed);
+    assert_eq!(generic_report.apply_error_stage, "memory_space_migration");
+    assert_eq!(beetle_report.apply_error_stage, "memory_space_migration");
+    assert_eq!(generic_report.import_error_stage, "memory_space_import");
+    assert_eq!(beetle_report.import_error_stage, "memory_space_import");
+    assert!(generic_report.target_unchanged);
+    assert!(beetle_report.target_unchanged);
 }
 
 #[derive(Debug)]
@@ -50,6 +55,11 @@ struct FixtureExerciseReport {
     preview_json_docs: usize,
     soul_handoffs: usize,
     deferred_candidates: usize,
+    facet_index_present: bool,
+    preflight_passed: bool,
+    apply_error_stage: &'static str,
+    import_error_stage: &'static str,
+    target_unchanged: bool,
 }
 
 fn load_fixture(raw: &str) -> SdkHostMigrationFixture {
@@ -89,6 +99,11 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         },
     )
     .expect("export memory space");
+    let facet_index_present = exported
+        .snapshot
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == "memory_facet_indexes");
 
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: fixture.source_memory_space_id.clone(),
@@ -108,7 +123,9 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
     );
 
     let target = empty_store_platform(profile);
-    let apply = apply_memory_space_migration(
+    let before = target.export_store_snapshot().expect("before");
+    let preflight_passed = preview.vault_preflight.passed;
+    let apply_error = apply_memory_space_migration(
         &target,
         MemorySpaceMigrateApplyRequest {
             target_memory_space_id: fixture.target_memory_space_id.clone(),
@@ -116,92 +133,28 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
             preflight: preview.vault_preflight.clone(),
         },
     )
-    .expect("apply memory-space migration");
-    assert_eq!(
-        apply.import_report.state_fingerprint,
-        preview.state_fingerprint
-    );
+    .expect_err("facet index remap preflight must fail closed");
 
-    let import = import_memory_space(
+    let import_error = import_memory_space(
         &target,
         MemorySpaceImportRequest {
             memory_space_id: fixture.target_memory_space_id.clone(),
             snapshot: exported.snapshot,
         },
     )
-    .expect("import memory space");
-    assert_eq!(
-        import.import_report.state_fingerprint,
-        preview.state_fingerprint
-    );
-
-    let target_runtime = test_runtime_with_scope(
-        target,
-        profile,
-        &fixture.channel,
-        &format!("{}-post-migration", fixture.chat_id),
-    );
-    let recall = target_runtime
-        .recall(MemoryRecallRequest {
-            query: fixture.recall_query.clone(),
-            limit: 8,
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("recall after migration");
-    let recalled_skill_names = recall
-        .procedural_hits
-        .iter()
-        .map(|hit| hit.record.name.as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        recalled_skill_names
-            .iter()
-            .any(|name| *name == fixture.expected_runtime_skill),
-        "fixture {} did not recall expected runtime skill {}; recalled {:?}",
-        fixture.fixture_id,
-        fixture.expected_runtime_skill,
-        recalled_skill_names
-    );
-
-    let inspect = target_runtime
-        .inspect(MemoryInspectionRequest {
-            query: fixture.recall_query.clone(),
-            system_max_len: 4096,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-        })
-        .expect("operator inspect after migration");
-    assert!(inspect.capabilities.inspection.visible);
-    assert!(inspect.working.runtime_skill_report.selected_count > 0);
-
-    let projection = target_runtime
-        .project(MemoryProjectionRequest {
-            user_query: fixture.projection_query.clone(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("project after migration");
-    let operator_text = format!(
-        "{}\n{}\n{}",
-        projection.system_memory_block,
-        inspect.working.runtime_skill_text.unwrap_or_default(),
-        inspect.working.long_term_memory_text.unwrap_or_default()
-    );
-    for fragment in &fixture.expected_fragments {
-        assert!(
-            operator_text.contains(fragment),
-            "fixture {} missing post-migration fragment {fragment}",
-            fixture.fixture_id
-        );
-    }
+    .expect_err("direct import must fail closed");
+    let after = target.export_store_snapshot().expect("after");
 
     FixtureExerciseReport {
-        helper_path: "public-sdk-write-export-preview-apply-import-inspect",
+        helper_path: "public-sdk-write-export-preview-facet-remap-preflight",
         preview_json_docs: preview.json_docs,
         soul_handoffs,
         deferred_candidates,
+        facet_index_present,
+        preflight_passed,
+        apply_error_stage: apply_error.stage(),
+        import_error_stage: import_error.stage(),
+        target_unchanged: before.state_fingerprint() == after.state_fingerprint()
+            && before.event_fingerprint() == after.event_fingerprint(),
     }
 }

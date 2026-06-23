@@ -32,6 +32,9 @@ cargo test -p bm-sdk --test memory_space_migration_contract
 cargo test -p bm-sdk --test public_surface next_gen_builders_are_sdk_public_without_adapter_ownership
 cargo test -p bm-sdk --test runtime_budget_contract graph_expansion_budget_is_profile_owned_and_not_provider_render_owned
 cargo test -p bm-sdk --test eval_recall_contract persistent_graph_recall_uses_sdk_owned_production_index_report
+cargo test -p bm-core --test memory_facet_contract
+cargo test -p bm-store --test mutation_batch_contract memory_facet_index_namespace_is_admitted_without_store_semantics
+cargo test -p bm-sdk --test eval_recall_contract eval_recall_reports_facet_stage_for_expanded_miss
 cargo test -p bm-core --test subject_registry_contract
 cargo test -p bm-core --test soul_non_regression_contract
 cargo test -p bm-core --test next_gen_contract temporal_memory_graph_rejects_raw_soul_private_material
@@ -101,6 +104,11 @@ rg -Fq "上桌硬闸" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "FacetReportView" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "FacetIndexRebuildReport" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "HumanFacetSuggestion" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "MemoryFacetIndexDoc" crates/core/src/memory/memory_facet.rs crates/core/tests/memory_facet_contract.rs
+rg -Fq "StructuredFacetParser" crates/core/src/memory/memory_facet.rs crates/core/tests/memory_facet_contract.rs
+rg -Fq "MemoryFacetRecallIndexReport" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "MemoryEvalRecallAblationReport" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "memory_facet_indexes" crates/store/src/platform.rs crates/store/tests/mutation_batch_contract.rs
 rg -Fq "facet_index_remap_required" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "report_only_subject_visibility_not_indexed" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "facet_off" dev-docs/governed-memory-facet-index-plan.md

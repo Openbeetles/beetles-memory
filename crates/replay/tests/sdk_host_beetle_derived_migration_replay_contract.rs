@@ -1,6 +1,3 @@
-use bm_replay::{
-    run_replay_fixture, ReplayExpectedOutcome, ReplayFixture, ReplayOperation, ReplayRunnerConfig,
-};
 use bm_sdk::{
     apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
     MemoryIdentity, MemoryProjectionRequest, MemoryScope, MemorySpaceExportRequest,
@@ -12,19 +9,16 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct SdkHostReplayFixture {
-    fixture_id: String,
     source_memory_space_id: String,
     target_memory_space_id: String,
     channel: String,
     chat_id: String,
-    recall_query: String,
     projection_query: String,
-    expected_report_fragments: Vec<String>,
     candidates: Vec<MemoryWriteCandidate>,
 }
 
 #[test]
-fn generic_and_beetle_derived_migration_outputs_replay_through_the_same_sdk_host_fixture_path() {
+fn generic_and_beetle_derived_migration_outputs_fail_closed_until_facet_remap() {
     let generic = load_fixture(include_str!(
         "../../../fixtures/sdk-host-readiness/generic-rust-host/host-turn-lifecycle.json"
     ));
@@ -32,19 +26,34 @@ fn generic_and_beetle_derived_migration_outputs_replay_through_the_same_sdk_host
         "../../../fixtures/sdk-host-readiness/beetle-derived/host-turn-lifecycle.json"
     ));
 
-    let generic_report = migrate_then_replay(&generic);
-    let beetle_report = migrate_then_replay(&beetle);
+    let generic_report = migrate_then_expect_facet_remap_preflight(&generic);
+    let beetle_report = migrate_then_expect_facet_remap_preflight(&beetle);
 
-    assert!(generic_report.passed, "{:?}", generic_report.failures);
-    assert!(beetle_report.passed, "{:?}", beetle_report.failures);
-    assert_eq!(generic_report.operations_run, beetle_report.operations_run);
+    assert_eq!(generic_report.apply_error_stage, "memory_space_migration");
+    assert_eq!(beetle_report.apply_error_stage, "memory_space_migration");
+    assert!(generic_report.target_unchanged);
+    assert!(beetle_report.target_unchanged);
+    assert!(generic_report.facet_index_present);
+    assert!(beetle_report.facet_index_present);
+    assert!(!generic_report.preflight_passed);
+    assert!(!beetle_report.preflight_passed);
 }
 
 fn load_fixture(raw: &str) -> SdkHostReplayFixture {
     serde_json::from_str(raw).expect("sdk host readiness fixture")
 }
 
-fn migrate_then_replay(fixture: &SdkHostReplayFixture) -> bm_replay::ReplayRunReport {
+#[derive(Debug)]
+struct MigrationFailClosedReport {
+    facet_index_present: bool,
+    preflight_passed: bool,
+    apply_error_stage: &'static str,
+    target_unchanged: bool,
+}
+
+fn migrate_then_expect_facet_remap_preflight(
+    fixture: &SdkHostReplayFixture,
+) -> MigrationFailClosedReport {
     let profile = ProfileId::ServerLinuxDevFull;
     let source =
         StorePlatform::open(StoreBackendConfig::in_memory(profile).expect("source config"))
@@ -82,6 +91,11 @@ fn migrate_then_replay(fixture: &SdkHostReplayFixture) -> bm_replay::ReplayRunRe
         },
     )
     .expect("export memory space");
+    let facet_index_present = exported
+        .snapshot
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == "memory_facet_indexes");
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: fixture.source_memory_space_id.clone(),
         target_memory_space_id: fixture.target_memory_space_id.clone(),
@@ -90,11 +104,13 @@ fn migrate_then_replay(fixture: &SdkHostReplayFixture) -> bm_replay::ReplayRunRe
         snapshot: exported.snapshot.clone(),
     });
     assert!(!preview.loss_risk);
+    let preflight_passed = preview.vault_preflight.passed;
 
     let migrated =
         StorePlatform::open(StoreBackendConfig::in_memory(profile).expect("target config"))
             .expect("target platform");
-    apply_memory_space_migration(
+    let before = migrated.export_store_snapshot().expect("before");
+    let apply_error = apply_memory_space_migration(
         &migrated,
         MemorySpaceMigrateApplyRequest {
             target_memory_space_id: fixture.target_memory_space_id.clone(),
@@ -102,50 +118,14 @@ fn migrate_then_replay(fixture: &SdkHostReplayFixture) -> bm_replay::ReplayRunRe
             preflight: preview.vault_preflight,
         },
     )
-    .expect("apply migration");
-    let migrated_snapshot = migrated.export_store_snapshot().expect("migrated snapshot");
+    .expect_err("facet index remap preflight must fail closed");
+    let after = migrated.export_store_snapshot().expect("after");
 
-    let replay_fixture = ReplayFixture {
-        fixture_id: fixture.fixture_id.clone(),
-        profile,
-        store_snapshot: migrated_snapshot,
-        operations: vec![
-            ReplayOperation::Recall {
-                query: fixture.recall_query.clone(),
-                limit: 8,
-            },
-            ReplayOperation::Project {
-                user_query: fixture.projection_query.clone(),
-                system_max_len: 4096,
-            },
-            ReplayOperation::Inspect {
-                query: fixture.recall_query.clone(),
-                system_max_len: 4096,
-            },
-            ReplayOperation::Replay {
-                chat_id: fixture.chat_id.clone(),
-                limit: 8,
-            },
-        ],
-        expected: ReplayExpectedOutcome {
-            state_fingerprint: String::new(),
-            event_fingerprint: String::new(),
-            lifecycle_operations: vec![
-                "recall".to_string(),
-                "project".to_string(),
-                "inspect".to_string(),
-                "replay".to_string(),
-            ],
-            min_reports: 4,
-            required_report_fragments: fixture.expected_report_fragments.clone(),
-        },
-    };
-
-    let mut config = ReplayRunnerConfig::for_backend(
-        StoreBackendConfig::in_memory(profile).expect("replay config"),
-    )
-    .expect("runner config");
-    config.identity = MemoryIdentity::new("sdk-host-agent", "sdk-host-owner").expect("identity");
-    config.scope = MemoryScope::new(&fixture.channel, &fixture.chat_id).expect("scope");
-    run_replay_fixture(&replay_fixture, config).expect("run replay fixture")
+    MigrationFailClosedReport {
+        facet_index_present,
+        preflight_passed,
+        apply_error_stage: apply_error.stage(),
+        target_unchanged: before.state_fingerprint() == after.state_fingerprint()
+            && before.event_fingerprint() == after.event_fingerprint(),
+    }
 }

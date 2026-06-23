@@ -309,6 +309,56 @@ pub struct MemoryEvalRecallGraphDistanceToGold {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryFacetRecallIndexReport {
+    pub owner: String,
+    pub used: bool,
+    pub report_only: bool,
+    pub fallback_full_scan: bool,
+    pub source_candidate_count: usize,
+    pub matched_source_candidate_count: usize,
+    pub exact_facet_doc_count: usize,
+    pub expanded_facet_doc_count: usize,
+    pub exact_facet_candidate_ids: Vec<String>,
+    pub expanded_facet_candidate_ids: Vec<String>,
+    pub index_revision: Option<String>,
+    pub failures: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallFacetStageDiagnostics {
+    pub used: bool,
+    pub report_only: bool,
+    pub miss_after_expanded: bool,
+    pub expanded_missing_evidence_refs: Vec<String>,
+    pub exact_facet_candidate_ids: Vec<String>,
+    pub expanded_facet_candidate_ids: Vec<String>,
+    pub source_candidate_count: usize,
+    pub matched_source_candidate_count: usize,
+    pub rendered_candidate_count: usize,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallAblationSlice {
+    pub name: String,
+    pub feature_enabled: bool,
+    pub report_available: bool,
+    pub contribution_proven: bool,
+    pub affected_candidate_count: usize,
+    pub render_growth: usize,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallAblationReport {
+    pub required_slices: Vec<String>,
+    pub slices: Vec<MemoryEvalRecallAblationSlice>,
+    pub contribution_proven: bool,
+    pub render_growth: usize,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryEvalRecallStageDiagnostics {
     pub suite: String,
     pub question_id: String,
@@ -326,6 +376,8 @@ pub struct MemoryEvalRecallStageDiagnostics {
     pub expanded_node_ids: Vec<String>,
     pub graph_neighbor_ids: Vec<String>,
     pub graph_distance_to_gold: Vec<MemoryEvalRecallGraphDistanceToGold>,
+    pub facet_stage: MemoryEvalRecallFacetStageDiagnostics,
+    pub ablation_report: MemoryEvalRecallAblationReport,
     pub expansion_budget: GraphRecallExpansionBudgetReport,
     pub truncated_count: usize,
     pub blocked_reasons: Vec<String>,
@@ -404,6 +456,8 @@ pub struct MemoryEvalRecallReport {
     pub missing_evidence_refs: Vec<String>,
     pub budget_report: RuntimeBudgetReport,
     pub privacy_report: MemoryEvalRecallPrivacyReport,
+    pub facet_index_report: MemoryFacetRecallIndexReport,
+    pub ablation_report: MemoryEvalRecallAblationReport,
     pub graph_index_report: MemoryGraphRecallIndexReport,
     pub graph_rerank: GraphRecallRerankReport,
     pub graph_gate: TemporalMemoryGraphGateReport,
@@ -445,6 +499,7 @@ pub struct MemoryRecallReport {
     pub source_candidate_ids: Vec<String>,
     pub graph_anchor_candidate_ids: Vec<String>,
     pub graph_index_report: MemoryGraphRecallIndexReport,
+    pub facet_index_report: MemoryFacetRecallIndexReport,
     pub graph_rerank: GraphRecallRerankReport,
     pub graph_gate: TemporalMemoryGraphGateReport,
     pub graph_candidate_evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,

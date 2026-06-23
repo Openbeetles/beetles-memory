@@ -28,6 +28,77 @@ fn llm_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment 
 fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
     let profile = ProfileId::ServerLinuxDevFull;
     let source = empty_store_platform(profile);
+    source
+        .session_store()
+        .append("chat-a", "user", "sdk migration contract")
+        .expect("seed session");
+
+    let exported = export_memory_space(
+        &source,
+        MemorySpaceExportRequest {
+            memory_space_id: "space-main".to_string(),
+            include_private: true,
+        },
+    )
+    .expect("export");
+    assert_eq!(exported.memory_space_id, "space-main");
+    assert!(exported.export_report.json_docs > 0 || exported.export_report.events > 0);
+
+    let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
+        source_memory_space_id: "space-main".to_string(),
+        target_memory_space_id: "space-copy".to_string(),
+        source_profile: profile,
+        target_profile: ProfileId::DesktopMacosEmbeddedSdk,
+        snapshot: exported.snapshot.clone(),
+    });
+    assert!(!preview.loss_risk);
+    assert_eq!(preview.manifest.source_memory_space_id, "space-main");
+    assert_eq!(preview.manifest.target_memory_space_id, "space-copy");
+    assert!(preview.manifest.whole_space_snapshot);
+    assert!(preview.manifest.subject_remap.required);
+    assert!(!preview.manifest.subject_remap.applied);
+    assert!(!preview.manifest.planes.is_empty());
+    assert_eq!(
+        preview.state_fingerprint,
+        exported.export_report.state_fingerprint
+    );
+    assert_eq!(
+        preview.vault_manifest.snapshot_fingerprint,
+        exported.export_report.state_fingerprint
+    );
+    assert_eq!(preview.vault_preflight.source_profile, profile);
+    assert!(preview.vault_preflight.lineage_allowed);
+    let target = empty_store_platform(profile);
+    let apply_report = apply_memory_space_migration(
+        &target,
+        MemorySpaceMigrateApplyRequest {
+            target_memory_space_id: "space-copy".to_string(),
+            snapshot: exported.snapshot.clone(),
+            preflight: preview.vault_preflight.clone(),
+        },
+    )
+    .expect("apply");
+    assert_eq!(apply_report.target_memory_space_id, "space-copy");
+    assert_eq!(
+        apply_report.import_report.state_fingerprint,
+        exported.export_report.state_fingerprint
+    );
+
+    let imported = import_memory_space(
+        &target,
+        MemorySpaceImportRequest {
+            memory_space_id: "space-copy".to_string(),
+            snapshot: exported.snapshot,
+        },
+    )
+    .expect("import");
+    assert_eq!(imported.memory_space_id, "space-copy");
+}
+
+#[test]
+fn memory_space_migration_fails_closed_when_snapshot_contains_facet_index() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let source = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(source.clone(), profile, "local", "chat-a");
     runtime
         .write(MemoryWriteRequest::Candidates {
@@ -61,8 +132,11 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
         },
     )
     .expect("export");
-    assert_eq!(exported.memory_space_id, "space-main");
-    assert!(exported.export_report.json_docs > 0 || exported.export_report.events > 0);
+    assert!(exported
+        .snapshot
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == "memory_facet_indexes"));
 
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: "space-main".to_string(),
@@ -71,53 +145,37 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
         target_profile: ProfileId::DesktopMacosEmbeddedSdk,
         snapshot: exported.snapshot.clone(),
     });
-    assert!(!preview.loss_risk);
-    assert_eq!(preview.manifest.source_memory_space_id, "space-main");
-    assert_eq!(preview.manifest.target_memory_space_id, "space-copy");
-    assert!(preview.manifest.whole_space_snapshot);
-    assert!(preview.manifest.subject_remap.required);
-    assert!(!preview.manifest.subject_remap.applied);
+    assert!(!preview.vault_preflight.passed);
     assert!(preview
         .manifest
         .planes
         .iter()
-        .any(|plane| plane.plane == "long_term" && plane.records > 0));
-    assert_eq!(
-        preview.state_fingerprint,
-        exported.export_report.state_fingerprint
-    );
-    assert_eq!(
-        preview.vault_manifest.snapshot_fingerprint,
-        exported.export_report.state_fingerprint
-    );
-    assert_eq!(preview.vault_preflight.source_profile, profile);
-    assert!(preview.vault_preflight.lineage_allowed);
+        .any(|plane| plane.plane == "memory_facet_indexes" && plane.records > 0));
 
     let target = empty_store_platform(profile);
-    let apply_report = apply_memory_space_migration(
+    let before = target.export_store_snapshot().expect("before");
+    let apply = apply_memory_space_migration(
         &target,
         MemorySpaceMigrateApplyRequest {
             target_memory_space_id: "space-copy".to_string(),
             snapshot: exported.snapshot.clone(),
-            preflight: preview.vault_preflight.clone(),
+            preflight: preview.vault_preflight,
         },
     )
-    .expect("apply");
-    assert_eq!(apply_report.target_memory_space_id, "space-copy");
-    assert_eq!(
-        apply_report.import_report.state_fingerprint,
-        exported.export_report.state_fingerprint
-    );
-
-    let imported = import_memory_space(
+    .expect_err("facet index remap preflight must fail closed");
+    assert_eq!(apply.stage(), "memory_space_migration");
+    let import = import_memory_space(
         &target,
         MemorySpaceImportRequest {
             memory_space_id: "space-copy".to_string(),
             snapshot: exported.snapshot,
         },
     )
-    .expect("import");
-    assert_eq!(imported.memory_space_id, "space-copy");
+    .expect_err("direct import must fail closed");
+    assert_eq!(import.stage(), "memory_space_import");
+    let after = target.export_store_snapshot().expect("after");
+    assert_eq!(before.state_fingerprint(), after.state_fingerprint());
+    assert_eq!(before.event_fingerprint(), after.event_fingerprint());
 }
 
 #[test]
