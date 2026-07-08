@@ -164,6 +164,7 @@ pub struct EntryConsoleWorkbenchReport {
     pub api_map: WorkbenchApiMap,
     pub benchmark_wall: EntryConsoleWorkbenchBenchmarkWall,
     pub recall_inspector: EntryConsoleWorkbenchRecallInspector,
+    pub facet_inspector: EntryConsoleWorkbenchFacetInspector,
     pub projection_inspector: EntryConsoleWorkbenchProjectionInspector,
     pub procedural_evolution: EntryConsoleWorkbenchProceduralEvolution,
     pub vault_migration: EntryConsoleWorkbenchVaultMigration,
@@ -339,6 +340,26 @@ pub struct EntryConsoleWorkbenchRecallInspector {
     pub agent_tool_hints: usize,
     pub tool_experience_reason: String,
     pub host_fallback_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsoleWorkbenchFacetInspector {
+    pub status: EntryConsoleWorkbenchStatus,
+    pub owner: String,
+    pub used: bool,
+    pub report_only: bool,
+    pub fallback_full_scan: bool,
+    pub source_candidate_count: usize,
+    pub matched_source_candidate_count: usize,
+    pub exact_facet_doc_count: usize,
+    pub expanded_facet_doc_count: usize,
+    pub index_revision: Option<String>,
+    pub render_growth: usize,
+    pub failures: Vec<String>,
+    pub direct_mutation_allowed: bool,
+    pub audit_markdown_format: String,
+    pub audit_markdown_preview: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

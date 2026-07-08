@@ -11,10 +11,11 @@ use bm_core::memory::MEMORY_FACET_INDEX_NAMESPACE;
 
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ForegroundWorkStatus};
 pub use bm_core::budget::{
-    compile_runtime_budget, AdapterRuntimeBudget, GraphExpansionRuntimeBudget, LlmGatewayBudget,
-    MaintenanceBudget, MemoryCoreBudget, ProjectionRenderBudget, ProjectionSourceBudget,
-    ProviderModelContextLimit, RuntimeBudgetInput, RuntimeBudgetReport, RuntimeDeploymentRole,
-    RuntimeJobBudget, StaticPlatformManifest, StoreRuntimeBudget, TranscriptGovernanceBudget,
+    compile_runtime_budget, AdapterRuntimeBudget, FacetRecallRuntimeBudget,
+    GraphExpansionRuntimeBudget, LlmGatewayBudget, MaintenanceBudget, MemoryCoreBudget,
+    ProjectionRenderBudget, ProjectionSourceBudget, ProviderModelContextLimit, RuntimeBudgetInput,
+    RuntimeBudgetReport, RuntimeDeploymentRole, RuntimeJobBudget, StaticPlatformManifest,
+    StoreRuntimeBudget, TranscriptGovernanceBudget,
 };
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{
@@ -79,21 +80,23 @@ pub use bm_core::memory::{
     build_soul_regression_suite_report, build_temporal_memory_graph_from_evidence,
     build_vault_migration_preflight, compile_edge_memory_budget_report,
     plan_memory_autopilot_for_profile, promote_task_experience_to_procedure,
-    rerank_recall_with_temporal_graph, CompactMemoryGraph, DroppedProjectionCandidate,
-    EvidenceBacklink, GraphRecallCandidateScore, GraphRecallExpansionBudget,
-    GraphRecallExpansionBudgetReport, GraphRecallRerankReport, MemoryAutopilotInput,
-    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence, MemoryGraphNode,
-    MemoryGraphNodeKind, MemoryGraphRecallIndexDoc, PrivateDisclosureIntegrityGuard,
-    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProjectionBudgetDecision,
-    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, RelationshipBoundaryAudit,
-    SkillEvolutionReport, SoulCompactDigest, SoulFeedbackReport, SoulGrowthDecision,
-    SoulGrowthProposal, SoulKernel2GateReport, SoulRegressionSuite,
-    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
-    SubjectProjectionWorkIntegrityReport, TemporalMemoryGraphBuildReport,
+    rerank_recall_with_temporal_graph, rerank_recall_with_temporal_graph_and_facets,
+    CompactMemoryGraph, DroppedProjectionCandidate, EvidenceBacklink, FacetCoverageSelectionReport,
+    FacetRankFusionCandidateReport, FacetRankFusionReport, GraphFacetPropagationContext,
+    GraphRecallCandidateScore, GraphRecallExpansionBudget, GraphRecallExpansionBudgetReport,
+    GraphRecallRerankReport, MemoryAutopilotInput, MemoryGraphEdge, MemoryGraphEdgeKind,
+    MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphRecallIndexDoc,
+    PrivateDisclosureIntegrityGuard, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
+    ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
+    ProjectionPrivacyDecision, RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest,
+    SoulFeedbackReport, SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport,
+    SoulRegressionSuite, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
+    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, TemporalMemoryGraphBuildReport,
     TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest, VaultMigrationPreflight,
     WorkbenchApiMap, WorkbenchSurface,
 };
+pub use bm_core::memory::{FacetReportView, MemoryFacetOwnerPlane, MemoryLongTermAffectedFacetDoc};
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;
 pub use bm_core::platform::{MemoryOperatorSurfaceSummary, Platform, ResponseBody};

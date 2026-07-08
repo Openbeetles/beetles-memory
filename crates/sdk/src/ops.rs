@@ -3,8 +3,8 @@ use bm_core::memory::{
     CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, DerivedMemoryRef,
     HostOpaqueRef, LongTermMemoryQuery, MemoryGovernancePolicyMutation,
     MemoryGovernancePolicyMutationReport as CoreMemoryGovernancePolicyMutationReport,
-    MemoryHygieneInspection, MemoryHygieneOutcome, MemoryLongTermAffectedRecord,
-    MemoryLongTermControlDecision, MemoryLongTermControlView,
+    MemoryHygieneInspection, MemoryHygieneOutcome, MemoryLongTermAffectedFacetDoc,
+    MemoryLongTermAffectedRecord, MemoryLongTermControlDecision, MemoryLongTermControlView,
     MemoryLongTermDetailReport as CoreMemoryLongTermDetailReport,
     MemoryLongTermListReport as CoreMemoryLongTermListReport, MemoryLongTermMutation,
     MemoryLongTermMutationReport as CoreMemoryLongTermMutationReport, MemoryLongTermTarget,
@@ -18,9 +18,9 @@ use bm_core::memory::{
     TranscriptRepairReport, TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
 };
 use bm_core::memory::{
-    CompactMemoryGraph, EvidenceBacklink, GraphRecallCandidateScore,
-    GraphRecallExpansionBudgetReport, GraphRecallRerankReport, MemoryGraphEdge, MemoryGraphNode,
-    TemporalMemoryGraphGateReport,
+    CompactMemoryGraph, EvidenceBacklink, FacetCoverageSelectionReport, FacetRankFusionReport,
+    GraphRecallCandidateScore, GraphRecallExpansionBudgetReport, GraphRecallRerankReport,
+    MemoryGraphEdge, MemoryGraphNode, TemporalMemoryGraphGateReport,
 };
 use bm_core::skills::{
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentSkillRecallHit,
@@ -172,6 +172,7 @@ pub struct MemoryLongTermMutationReport {
     pub operation: &'static str,
     pub target_report: MemoryLongTermTargetResolutionReport,
     pub affected_records: Vec<MemoryLongTermAffectedRecord>,
+    pub affected_facet_docs: Vec<MemoryLongTermAffectedFacetDoc>,
     pub tombstones: Vec<MemoryLongTermTombstoneRef>,
     pub evidence_refs: Vec<DerivedMemoryRef>,
     pub transcript_refs: Vec<TranscriptEvidenceRef>,
@@ -321,6 +322,7 @@ pub struct MemoryFacetRecallIndexReport {
     pub exact_facet_candidate_ids: Vec<String>,
     pub expanded_facet_candidate_ids: Vec<String>,
     pub index_revision: Option<String>,
+    pub render_growth: usize,
     pub failures: Vec<String>,
 }
 
@@ -351,6 +353,7 @@ pub struct MemoryEvalRecallAblationSlice {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryEvalRecallAblationReport {
+    pub method: String,
     pub required_slices: Vec<String>,
     pub slices: Vec<MemoryEvalRecallAblationSlice>,
     pub contribution_proven: bool,
@@ -457,6 +460,8 @@ pub struct MemoryEvalRecallReport {
     pub budget_report: RuntimeBudgetReport,
     pub privacy_report: MemoryEvalRecallPrivacyReport,
     pub facet_index_report: MemoryFacetRecallIndexReport,
+    pub rank_fusion_report: FacetRankFusionReport,
+    pub coverage_selection_report: FacetCoverageSelectionReport,
     pub ablation_report: MemoryEvalRecallAblationReport,
     pub graph_index_report: MemoryGraphRecallIndexReport,
     pub graph_rerank: GraphRecallRerankReport,
@@ -500,6 +505,8 @@ pub struct MemoryRecallReport {
     pub graph_anchor_candidate_ids: Vec<String>,
     pub graph_index_report: MemoryGraphRecallIndexReport,
     pub facet_index_report: MemoryFacetRecallIndexReport,
+    pub rank_fusion_report: FacetRankFusionReport,
+    pub coverage_selection_report: FacetCoverageSelectionReport,
     pub graph_rerank: GraphRecallRerankReport,
     pub graph_gate: TemporalMemoryGraphGateReport,
     pub graph_candidate_evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,

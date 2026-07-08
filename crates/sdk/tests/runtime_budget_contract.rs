@@ -136,6 +136,10 @@ fn runtime_exposes_compiled_budget_report() {
     assert_eq!(budget.profile, ProfileId::ServerLinuxMemoryGateway);
     assert!(budget.projection_source_budget.context_assembly_max_chars > 0);
     assert!(budget.projection_render_budget.system_block_max_chars > 0);
+    assert!(budget.facet_recall_budget.max_query_facets > 0);
+    assert!(budget.facet_recall_budget.max_facet_index_docs_read > 0);
+    assert!(budget.facet_recall_budget.max_facet_anchor_candidates > 0);
+    assert!(budget.facet_recall_budget.max_facet_expanded_candidates > 0);
     assert!(budget.adapter_budget.http_body_max_bytes > 0);
 }
 
@@ -180,6 +184,47 @@ fn graph_expansion_budget_is_profile_owned_and_not_provider_render_owned() {
     let provider_limited = compile_runtime_budget(provider_limited_input);
 
     assert_eq!(provider_limited.graph_expansion_budget, dev_full);
+    assert_eq!(
+        provider_limited
+            .projection_render_budget
+            .system_block_max_chars,
+        512
+    );
+}
+
+#[test]
+fn facet_recall_budget_is_profile_owned_and_not_graph_or_render_owned() {
+    let esp_embedded = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
+        .facet_recall_budget;
+    let linux_device =
+        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::LinuxDeviceStandaloneMemory)
+            .facet_recall_budget;
+    let server_gateway =
+        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxMemoryGateway)
+            .facet_recall_budget;
+    let dev_full = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
+        .facet_recall_budget;
+
+    assert!(esp_embedded.max_query_facets > 0);
+    assert!(esp_embedded.max_facet_index_docs_read > 0);
+    assert!(esp_embedded.max_facet_anchor_candidates > 0);
+    assert!(esp_embedded.max_facet_expanded_candidates > 0);
+    assert!(esp_embedded.max_facet_index_docs_read < server_gateway.max_facet_index_docs_read);
+    assert!(linux_device.max_facet_index_docs_read < dev_full.max_facet_index_docs_read);
+    assert!(linux_device.max_facet_anchor_candidates <= dev_full.max_facet_anchor_candidates);
+    assert!(linux_device.max_facet_expanded_candidates <= dev_full.max_facet_expanded_candidates);
+
+    let mut provider_limited_input =
+        RuntimeBudgetInput::static_for_profile(ProfileId::ServerLinuxDevFull);
+    provider_limited_input.provider_model_context_limit = Some(ProviderModelContextLimit {
+        provider: Some("local".to_string()),
+        model: Some("tiny-render".to_string()),
+        max_context_tokens: None,
+        max_prompt_chars: Some(512),
+    });
+    let provider_limited = compile_runtime_budget(provider_limited_input);
+
+    assert_eq!(provider_limited.facet_recall_budget, dev_full);
     assert_eq!(
         provider_limited
             .projection_render_budget

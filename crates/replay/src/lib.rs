@@ -20,8 +20,9 @@ pub use bench::{
     MemoryBenchmarkSemanticDimension, MemoryBenchmarkSemanticFailure, MemoryBenchmarkThresholds,
     SoulKernelBenchmarkJudgeReport, SubjectProjectionBenchmarkJudgeReport,
     W4EvalRecallBenchmarkJudgeReport, W4ExternalNoisyBenchmarkSummary,
-    W4ExternalNoisyIndexDiagnostics, W4ExternalNoisyStageHitCounts, W4ExternalNoisySuiteReport,
-    W4ExternalNoisyW41Diagnostics, W4ExternalNoisyWallReport,
+    W4ExternalNoisyFacetAblationDiagnostics, W4ExternalNoisyIndexDiagnostics,
+    W4ExternalNoisyStageHitCounts, W4ExternalNoisySuiteReport, W4ExternalNoisyW41Diagnostics,
+    W4ExternalNoisyWallReport,
 };
 pub use bm_core::memory::{
     inspect_intelligence_replay, ArchiveBenchmarkCase, ArchiveBenchmarkResult,

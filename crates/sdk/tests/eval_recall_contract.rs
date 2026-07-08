@@ -8,7 +8,7 @@ use bm_sdk::{
     RuntimeSkillWriteSource, TemporalMemoryGraphWriteRequest, TemporalValidity,
 };
 
-use support::{empty_store_platform, test_runtime};
+use support::{empty_store_platform, test_runtime, test_runtime_with_scope_subject_and_budget};
 
 fn graph_node(
     node_id: &str,
@@ -711,13 +711,8 @@ fn eval_recall_reports_facet_stage_for_expanded_miss() {
         .iter()
         .any(|reason| reason == "memory_facet_index_not_loaded"));
 
-    let required = [
-        "facet_off",
-        "lexical_sparse_off",
-        "graph_propagation_off",
-        "rank_fusion_off",
-        "coverage_selection_off",
-    ];
+    let required = ["facet_off", "rank_fusion_off", "coverage_selection_off"];
+    assert_eq!(report.ablation_report.method, "sdk_eval_recall_off_run_v1");
     for name in required {
         assert!(report
             .ablation_report
@@ -734,6 +729,656 @@ fn eval_recall_reports_facet_stage_for_expanded_miss() {
         facet_stage.rendered_candidate_count,
         report.rendered_candidates.len()
     );
+}
+
+#[test]
+fn facet_recall_expands_graph_anchor_pool_without_render_growth() {
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: bm_sdk::ParsedLongTermMemoryExtraction {
+                upserts: vec![
+                    long_term_draft(
+                        "release/facet/baseline",
+                        "Release baseline remains visible through ordinary source recall.",
+                        "external_eval:baseline-source",
+                    ),
+                    long_term_draft(
+                        "release/facet/rare-target",
+                        "Rare target is discoverable through the governed facet hierarchy.",
+                        "external_eval:facet-only-gold",
+                    ),
+                ],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed governed facet index docs");
+
+    let report = runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "release facet".to_string(),
+            k: 1,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-p3-anchor-pool".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec![
+                    "external_eval:baseline-source".to_string(),
+                    "external_eval:facet-only-gold".to_string(),
+                ],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("eval recall");
+
+    let facet_owner_ids = report
+        .facet_index_report
+        .exact_facet_candidate_ids
+        .iter()
+        .chain(
+            report
+                .facet_index_report
+                .expanded_facet_candidate_ids
+                .iter(),
+        )
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(report.facet_index_report.used);
+    assert!(!report.facet_index_report.report_only);
+    assert!(!report.facet_index_report.fallback_full_scan);
+    assert_eq!(report.facet_index_report.failures, Vec::<String>::new());
+    assert!(report.facet_index_report.exact_facet_doc_count > 0);
+    assert!(report.facet_index_report.expanded_facet_doc_count > 0);
+    assert!(facet_owner_ids.iter().any(|candidate_id| report
+        .graph_anchor_candidates
+        .iter()
+        .any(|candidate| candidate.candidate_id == *candidate_id)));
+    assert!(facet_owner_ids.iter().any(|candidate_id| report
+        .eval_candidate_pool
+        .iter()
+        .any(|candidate| candidate.candidate_id == *candidate_id)));
+    assert!(report.rendered_candidates.iter().all(|candidate| report
+        .source_candidates
+        .iter()
+        .any(|source| source.candidate_id == candidate.candidate_id)));
+    assert!(report.rendered_candidates.len() <= report.source_candidates.len());
+    assert!(report.facet_index_report.render_growth == 0);
+    assert!(report.rank_fusion_report.used);
+    assert!(report
+        .rank_fusion_report
+        .candidate_reports
+        .iter()
+        .any(|candidate| candidate.facet_rank.is_some()));
+    assert!(report.coverage_selection_report.used);
+    assert!(report
+        .coverage_selection_report
+        .selected_candidate_ids
+        .iter()
+        .all(|candidate_id| report
+            .graph_anchor_candidates
+            .iter()
+            .any(|candidate| candidate.candidate_id == *candidate_id)));
+    assert!(report.budget_report.facet_recall_budget.max_query_facets > 0);
+    assert!(
+        report
+            .budget_report
+            .facet_recall_budget
+            .max_facet_index_docs_read
+            > 0
+    );
+    assert!(
+        report
+            .budget_report
+            .facet_recall_budget
+            .max_facet_anchor_candidates
+            > 0
+    );
+    assert!(
+        report
+            .budget_report
+            .facet_recall_budget
+            .max_facet_expanded_candidates
+            > 0
+    );
+    assert_eq!(
+        report
+            .stage_diagnostics
+            .facet_stage
+            .rendered_candidate_count,
+        report.rendered_candidates.len()
+    );
+}
+
+#[test]
+fn facet_recall_respects_privacy_scope_and_profile_budget() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    budget.facet_recall_budget.max_facet_anchor_candidates = 1;
+    budget.facet_recall_budget.max_facet_expanded_candidates = 1;
+    let runtime = test_runtime_with_scope_subject_and_budget(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "facet-budget",
+        "subject-alpha",
+        budget.clone(),
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: bm_sdk::ParsedLongTermMemoryExtraction {
+                upserts: vec![
+                    long_term_draft(
+                        "facet/budget/alpha-one",
+                        "Alpha one should match facet budget recall.",
+                        "external_eval:facet-budget-alpha-one",
+                    ),
+                    long_term_draft(
+                        "facet/budget/alpha-two",
+                        "Alpha two should be budget truncated from facet recall.",
+                        "external_eval:facet-budget-alpha-two",
+                    ),
+                    long_term_draft(
+                        "facet/budget/alpha-three",
+                        "Alpha three should also be budget truncated from facet recall.",
+                        "external_eval:facet-budget-alpha-three",
+                    ),
+                ],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed subject-alpha facet docs");
+
+    let alpha = runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "facet budget".to_string(),
+            k: 5,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-p3-budget".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec![
+                    "external_eval:facet-budget-alpha-one".to_string(),
+                    "external_eval:facet-budget-alpha-two".to_string(),
+                ],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("alpha eval recall");
+
+    assert!(alpha.facet_index_report.used);
+    assert!(alpha.facet_index_report.exact_facet_candidate_ids.len() <= 1);
+    assert!(alpha.facet_index_report.expanded_facet_candidate_ids.len() <= 1);
+    assert!(alpha.facet_index_report.failures.iter().any(|failure| {
+        failure == "memory_facet_anchor_candidates_budget_truncated"
+            || failure == "memory_facet_expanded_candidates_budget_truncated"
+    }));
+    assert_eq!(alpha.facet_index_report.render_growth, 0);
+
+    let other_runtime = test_runtime_with_scope_subject_and_budget(
+        platform,
+        profile,
+        "llm.gateway",
+        "facet-budget",
+        "subject-beta",
+        budget,
+    );
+    let beta = other_runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "facet budget".to_string(),
+            k: 5,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-p3-cross-subject".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec![
+                    "external_eval:facet-budget-alpha-one".to_string(),
+                    "external_eval:facet-budget-alpha-two".to_string(),
+                ],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("beta eval recall");
+
+    assert!(beta.facet_index_report.used);
+    assert_eq!(
+        beta.facet_index_report.exact_facet_candidate_ids,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        beta.facet_index_report.expanded_facet_candidate_ids,
+        Vec::<String>::new()
+    );
+    assert!(!beta.eval_candidate_pool.iter().any(|candidate| candidate
+        .evidence_refs
+        .iter()
+        .any(|evidence| evidence.starts_with("external_eval:facet-budget-alpha"))));
+}
+
+#[test]
+fn facet_rank_fusion_preserves_pool_provenance() {
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: bm_sdk::ParsedLongTermMemoryExtraction {
+                upserts: vec![
+                    long_term_draft(
+                        "facet/fusion/source-visible",
+                        "Facet fusion source candidate remains visible to source recall.",
+                        "external_eval:facet-fusion-source",
+                    ),
+                    long_term_draft(
+                        "facet/fusion/exact-anchor",
+                        "Facet fusion exact candidate keeps exact pool provenance.",
+                        "external_eval:facet-fusion-exact",
+                    ),
+                    long_term_draft(
+                        "facet/fusion/expanded-anchor",
+                        "Facet fusion expanded candidate keeps expanded pool provenance.",
+                        "external_eval:facet-fusion-expanded",
+                    ),
+                ],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed fusion facet docs");
+
+    let report = runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "facet fusion".to_string(),
+            k: 5,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-p3-rank-fusion".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec![
+                    "external_eval:facet-fusion-source".to_string(),
+                    "external_eval:facet-fusion-exact".to_string(),
+                    "external_eval:facet-fusion-expanded".to_string(),
+                ],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("eval recall");
+
+    let fusion = &report.rank_fusion_report;
+    assert!(report.facet_index_report.used);
+    assert!(fusion.used);
+    assert_eq!(fusion.strategy, "rrf_source_facet_pool_v1");
+    assert!(fusion.source_pool_count > 0);
+    assert!(fusion.exact_facet_pool_count > 0);
+    assert!(fusion.expanded_facet_pool_count > 0);
+    assert!(fusion
+        .candidate_reports
+        .iter()
+        .any(|candidate| candidate.source_rank.is_some()));
+    assert!(fusion
+        .candidate_reports
+        .iter()
+        .any(|candidate| candidate.exact_facet_rank.is_some()));
+    assert!(fusion
+        .candidate_reports
+        .iter()
+        .any(|candidate| candidate.expanded_facet_rank.is_some()));
+    assert!(fusion
+        .candidate_reports
+        .iter()
+        .all(|candidate| candidate.fused_score_bps > 0));
+    let mut fused_ranks = fusion
+        .candidate_reports
+        .iter()
+        .map(|candidate| candidate.fused_rank)
+        .collect::<Vec<_>>();
+    fused_ranks.sort_unstable();
+    assert_eq!(
+        fused_ranks,
+        (1..=fusion.candidate_reports.len()).collect::<Vec<_>>()
+    );
+    assert_eq!(fusion.blocked_reasons, Vec::<String>::new());
+}
+
+#[test]
+fn facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    budget.graph_expansion_budget.max_seed_candidates = 2;
+    budget.facet_recall_budget.max_facet_anchor_candidates = 8;
+    budget.facet_recall_budget.max_facet_expanded_candidates = 8;
+    let runtime = test_runtime_with_scope_subject_and_budget(
+        platform,
+        profile,
+        "llm.gateway",
+        "facet-coverage",
+        "subject-coverage",
+        budget,
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: bm_sdk::ParsedLongTermMemoryExtraction {
+                upserts: vec![
+                    long_term_draft(
+                        "facet/coverage/shared-one",
+                        "Coverage shared one should not crowd out distinct evidence.",
+                        "external_eval:coverage-shared|turn=1",
+                    ),
+                    long_term_draft(
+                        "facet/coverage/shared-two",
+                        "Coverage shared two has the same canonical evidence group.",
+                        "external_eval:coverage-shared|turn=2",
+                    ),
+                    long_term_draft(
+                        "facet/coverage/distinct",
+                        "Coverage distinct should survive evidence-group selection.",
+                        "external_eval:coverage-distinct",
+                    ),
+                ],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed coverage facet docs");
+
+    let report = runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "facet coverage".to_string(),
+            k: 5,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-p3-coverage-selection".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec![
+                    "external_eval:coverage-shared|turn=1".to_string(),
+                    "external_eval:coverage-distinct".to_string(),
+                ],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("eval recall");
+
+    let coverage = &report.coverage_selection_report;
+    assert!(coverage.used);
+    assert_eq!(coverage.strategy, "evidence_group_coverage_v1");
+    assert_eq!(coverage.selected_candidate_ids.len(), 2);
+    assert!(coverage
+        .covered_evidence_groups
+        .iter()
+        .any(|group| group == "external_eval:coverage-shared"));
+    assert!(coverage
+        .covered_evidence_groups
+        .iter()
+        .any(|group| group == "external_eval:coverage-distinct"));
+    assert!(
+        !coverage.coverage_dropped_candidate_ids.is_empty()
+            || !coverage.budget_truncated_candidate_ids.is_empty()
+    );
+    assert!(coverage
+        .selected_candidate_ids
+        .iter()
+        .all(|candidate_id| report
+            .graph_anchor_candidates
+            .iter()
+            .any(|candidate| candidate.candidate_id == *candidate_id)));
+    assert!(report.rendered_candidates.iter().all(|candidate| report
+        .source_candidates
+        .iter()
+        .any(|source| source.candidate_id == candidate.candidate_id)));
+}
+
+#[test]
+fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = empty_store_platform(profile);
+    let alpha_runtime = test_runtime_with_scope_subject_and_budget(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "facet-hidden-alpha",
+        "subject-alpha",
+        bm_sdk::RuntimeBudgetReport::static_for_profile(profile),
+    );
+
+    alpha_runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: bm_sdk::ParsedLongTermMemoryExtraction {
+                upserts: vec![long_term_draft(
+                    "facet/hidden/alpha-only",
+                    "Alpha-only hidden metadata must stay out of beta facet recall.",
+                    "external_eval:facet-hidden-alpha",
+                )],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed subject-alpha hidden facet doc");
+
+    let beta_runtime = test_runtime_with_scope_subject_and_budget(
+        platform,
+        profile,
+        "llm.gateway",
+        "facet-hidden-beta",
+        "subject-beta",
+        bm_sdk::RuntimeBudgetReport::static_for_profile(profile),
+    );
+    let beta = beta_runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "facet hidden".to_string(),
+            k: 5,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-p3-cross-subject-expanded-metadata".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec!["external_eval:facet-hidden-alpha".to_string()],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("beta eval recall");
+
+    assert!(beta.facet_index_report.used);
+    assert!(beta
+        .facet_index_report
+        .failures
+        .iter()
+        .any(|failure| failure == "memory_facet_index_no_query_match"));
+    assert_eq!(
+        beta.facet_index_report.exact_facet_candidate_ids,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        beta.facet_index_report.expanded_facet_candidate_ids,
+        Vec::<String>::new()
+    );
+    assert!(!beta.rank_fusion_report.used);
+    assert!(!beta.coverage_selection_report.used);
+    assert_eq!(beta.ablation_report.method, "sdk_eval_recall_off_run_v1");
+    assert!(!beta.ablation_report.contribution_proven);
+    assert!(beta.ablation_report.blocked_reasons.is_empty());
+    let facet_off = beta
+        .ablation_report
+        .slices
+        .iter()
+        .find(|slice| slice.name == "facet_off")
+        .expect("facet_off ablation slice");
+    assert!(!facet_off.contribution_proven);
+    assert_eq!(facet_off.affected_candidate_count, 0);
+    assert!(facet_off.blocked_reasons.is_empty());
+}
+
+#[test]
+fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
+    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let anchor_draft = long_term_draft(
+        "facet/p4/propagation-anchor",
+        "Facet propagation anchor binds to persistent graph neighbors.",
+        "external_eval:facet-p4-anchor",
+    );
+    let anchor_id = anchor_draft.stable_id().expect("stable long-term id");
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: bm_sdk::ParsedLongTermMemoryExtraction {
+                upserts: vec![anchor_draft],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed facet graph anchor");
+    runtime
+        .write_temporal_memory_graph(TemporalMemoryGraphWriteRequest {
+            operation: "memory_graph.write".to_string(),
+            nodes: vec![
+                graph_node(
+                    &anchor_id,
+                    MemoryGraphNodeKind::MemoryRecord,
+                    "Facet P4 graph anchor",
+                    "external_eval:facet-p4-anchor",
+                ),
+                graph_node(
+                    "graph:facet-p4-distinct-alpha",
+                    MemoryGraphNodeKind::Task,
+                    "Facet P4 distinct alpha evidence",
+                    "external_eval:facet-p4-distinct-alpha",
+                ),
+                graph_node(
+                    "graph:facet-p4-distinct-beta",
+                    MemoryGraphNodeKind::Task,
+                    "Facet P4 distinct beta evidence",
+                    "external_eval:facet-p4-distinct-beta",
+                ),
+            ],
+            edges: vec![
+                graph_edge(
+                    "edge:facet-p4-anchor-alpha",
+                    &anchor_id,
+                    "graph:facet-p4-distinct-alpha",
+                    "external_eval:facet-p4-distinct-alpha",
+                ),
+                graph_edge(
+                    "edge:facet-p4-anchor-beta",
+                    &anchor_id,
+                    "graph:facet-p4-distinct-beta",
+                    "external_eval:facet-p4-distinct-beta",
+                ),
+            ],
+            backlinks: vec![
+                EvidenceBacklink {
+                    source_kind: "external_eval".to_string(),
+                    source_id: "external_eval:facet-p4-anchor".to_string(),
+                    fingerprint: "fp-facet-p4-anchor".to_string(),
+                },
+                EvidenceBacklink {
+                    source_kind: "external_eval".to_string(),
+                    source_id: "external_eval:facet-p4-distinct-alpha".to_string(),
+                    fingerprint: "fp-facet-p4-alpha".to_string(),
+                },
+                EvidenceBacklink {
+                    source_kind: "external_eval".to_string(),
+                    source_id: "external_eval:facet-p4-distinct-beta".to_string(),
+                    fingerprint: "fp-facet-p4-beta".to_string(),
+                },
+            ],
+        })
+        .expect("seed indexed graph");
+
+    let report = runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            query: "facet p4".to_string(),
+            k: 5,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_w4_facet".to_string(),
+                question_id: "facet-p4-graph-propagation".to_string(),
+                question_type: "multi_gold".to_string(),
+                expected_evidence_refs: vec![
+                    "external_eval:facet-p4-distinct-alpha".to_string(),
+                    "external_eval:facet-p4-distinct-beta".to_string(),
+                ],
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("eval recall");
+
+    assert!(report.facet_index_report.used);
+    assert!(report.graph_index_report.used);
+    assert!(!report.graph_index_report.fallback_full_scan);
+    assert!(report
+        .graph_index_report
+        .source_anchor_ids
+        .iter()
+        .any(|source| source == &anchor_id));
+    assert!(report
+        .graph_anchor_candidates
+        .iter()
+        .any(|candidate| candidate.candidate_id == anchor_id));
+    assert!(report
+        .expanded_candidates
+        .iter()
+        .any(|candidate| candidate.candidate_id == "graph:facet-p4-distinct-alpha"));
+    assert!(report
+        .expanded_candidates
+        .iter()
+        .any(|candidate| candidate.candidate_id == "graph:facet-p4-distinct-beta"));
+    let alpha = report
+        .eval_candidate_pool
+        .iter()
+        .find(|candidate| candidate.candidate_id == "graph:facet-p4-distinct-alpha")
+        .expect("alpha expanded candidate");
+    assert!(alpha.score_breakdown.facet_exact_score > 0);
+    assert!(alpha.score_breakdown.facet_diversity_score > 0);
+    assert!(alpha.score_breakdown.facet_temporal_score > 0);
+    assert!(alpha.score_breakdown.total_score >= alpha.score_breakdown.facet_exact_score);
+    assert!(report.metrics.all_evidence_hit);
+    assert_eq!(report.ablation_report.method, "sdk_eval_recall_off_run_v1");
+    assert!(report.ablation_report.blocked_reasons.is_empty());
+    let facet_off = report
+        .ablation_report
+        .slices
+        .iter()
+        .find(|slice| slice.name == "facet_off")
+        .expect("facet_off ablation slice");
+    assert!(facet_off.report_available);
+    assert_eq!(facet_off.render_growth, 0);
+    assert!(report.rendered_candidates.iter().all(|candidate| report
+        .source_candidates
+        .iter()
+        .any(|source| source.candidate_id == candidate.candidate_id)));
 }
 
 #[test]

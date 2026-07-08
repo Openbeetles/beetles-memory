@@ -510,6 +510,8 @@ pub struct W4ExternalNoisyBenchmarkSummary {
     pub index_diagnostics: Option<W4ExternalNoisyIndexDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub w4_1_diagnostics: Option<W4ExternalNoisyW41Diagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet_ablation: Option<W4ExternalNoisyFacetAblationDiagnostics>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -595,6 +597,28 @@ pub struct W4ExternalNoisyW41Diagnostics {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct W4ExternalNoisyFacetAblationDiagnostics {
+    #[serde(default)]
+    pub questions_with_ablation_report: usize,
+    #[serde(default)]
+    pub method_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub contribution_proven_questions: usize,
+    #[serde(default)]
+    pub render_growth: usize,
+    #[serde(default)]
+    pub required_slice_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub report_available_slice_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub contribution_proven_slice_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub affected_candidate_count: usize,
+    #[serde(default)]
+    pub blocked_reason_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct W4ExternalNoisySuiteReport {
     pub suite: String,
     pub completed: bool,
@@ -625,8 +649,11 @@ pub struct W4ExternalNoisySuiteReport {
     pub stage_hit_counts: Option<W4ExternalNoisyStageHitCounts>,
     pub index_diagnostics: Option<W4ExternalNoisyIndexDiagnostics>,
     pub w4_1_diagnostics: Option<W4ExternalNoisyW41Diagnostics>,
+    pub facet_ablation: Option<W4ExternalNoisyFacetAblationDiagnostics>,
     pub stage_attributed_improvement: bool,
     pub index_effect_proven: bool,
+    pub facet_ablation_effect_proven: bool,
+    pub facet_ablation_no_render_growth: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -638,14 +665,19 @@ pub struct W4ExternalNoisyWallReport {
     pub completed: bool,
     pub no_runner_errors: bool,
     pub row_counts_covered: bool,
+    pub shards_valid: bool,
     pub provenance_attached: bool,
     pub stage_diagnostics_attached: bool,
     pub index_diagnostics_attached: bool,
+    pub index_no_full_scan: bool,
     pub w4_1_diagnostics_attached: bool,
+    pub facet_ablation_attached: bool,
     pub oracle_sanity_only: bool,
     pub noisy_improvement_proven: bool,
     pub stage_attributed_improvement_proven: bool,
     pub index_effect_proven: bool,
+    pub facet_ablation_effect_proven: bool,
+    pub facet_ablation_no_render_growth: bool,
     pub suite_reports: Vec<W4ExternalNoisySuiteReport>,
     pub blocked_reasons: Vec<String>,
 }
@@ -687,6 +719,11 @@ pub fn evaluate_w4_external_noisy_wall(
             .iter()
             .filter(|report| required_suites.iter().any(|suite| report.suite == *suite))
             .all(|report| report.row_counts_valid);
+    let shards_valid = required_suites_covered
+        && suite_reports
+            .iter()
+            .filter(|report| required_suites.iter().any(|suite| report.suite == *suite))
+            .all(|report| report.shards_valid);
     let provenance_attached = required_suites_covered
         && summaries
             .iter()
@@ -711,25 +748,40 @@ pub fn evaluate_w4_external_noisy_wall(
             .iter()
             .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
             .all(|summary| summary.index_diagnostics.is_some());
+    let index_no_full_scan = required_suites_covered
+        && summaries
+            .iter()
+            .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
+            .all(w4_external_index_diagnostics_no_full_scan);
     let w4_1_diagnostics_attached = required_suites_covered
         && summaries
             .iter()
             .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
             .all(w4_external_w41_diagnostics_cover_summary);
+    let facet_ablation_attached = required_suites_covered
+        && summaries
+            .iter()
+            .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
+            .all(w4_external_facet_ablation_covers_summary);
+    let facet_ablation_no_render_growth = required_suites_covered
+        && summaries
+            .iter()
+            .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
+            .all(|summary| {
+                summary
+                    .facet_ablation
+                    .as_ref()
+                    .is_none_or(|diagnostics| diagnostics.render_growth == 0)
+            });
     let oracle_sanity_only = true;
     let noisy_reports = suite_reports
         .iter()
         .filter(|report| report.noisy_split)
         .collect::<Vec<_>>();
-    let noisy_not_regressed = noisy_splits_covered
+    let noisy_improvement_proven = noisy_splits_covered
         && noisy_reports
             .iter()
-            .all(|report| !report.regressed_against_baseline);
-    let m_cleaned_improved = suite_reports
-        .iter()
-        .find(|report| report.suite == "longmemeval_m_cleaned")
-        .is_some_and(|report| report.improved_against_baseline);
-    let noisy_improvement_proven = noisy_not_regressed && m_cleaned_improved;
+            .all(|report| report.improved_against_baseline);
     let stage_attributed_improvement_proven = suite_reports
         .iter()
         .find(|report| report.suite == "longmemeval_m_cleaned")
@@ -738,6 +790,10 @@ pub fn evaluate_w4_external_noisy_wall(
         .iter()
         .find(|report| report.suite == "longmemeval_m_cleaned")
         .is_some_and(|report| report.index_effect_proven);
+    let facet_ablation_effect_proven = suite_reports
+        .iter()
+        .find(|report| report.suite == "longmemeval_m_cleaned")
+        .is_some_and(|report| report.facet_ablation_effect_proven);
 
     let mut blocked_reasons = Vec::new();
     push_missing(
@@ -772,6 +828,11 @@ pub fn evaluate_w4_external_noisy_wall(
     );
     push_missing(
         &mut blocked_reasons,
+        shards_valid,
+        "w4_external_noisy_wall_shards_invalid",
+    );
+    push_missing(
+        &mut blocked_reasons,
         provenance_attached,
         "w4_external_noisy_wall_provenance_missing",
     );
@@ -787,8 +848,23 @@ pub fn evaluate_w4_external_noisy_wall(
     );
     push_missing(
         &mut blocked_reasons,
+        !required_suites_covered || index_no_full_scan,
+        "w4_external_noisy_wall_index_full_scan_detected",
+    );
+    push_missing(
+        &mut blocked_reasons,
         !required_suites_covered || w4_1_diagnostics_attached,
         "w4_external_noisy_wall_w4_1_diagnostics_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        !required_suites_covered || facet_ablation_attached,
+        "w4_external_noisy_wall_facet_ablation_missing",
+    );
+    push_missing(
+        &mut blocked_reasons,
+        !required_suites_covered || facet_ablation_no_render_growth,
+        "w4_external_noisy_wall_render_growth_detected",
     );
     push_missing(
         &mut blocked_reasons,
@@ -805,6 +881,11 @@ pub fn evaluate_w4_external_noisy_wall(
         index_effect_proven,
         "w4_external_noisy_wall_index_effect_not_proven",
     );
+    push_missing(
+        &mut blocked_reasons,
+        facet_ablation_effect_proven,
+        "w4_external_noisy_wall_facet_ablation_effect_not_proven",
+    );
     blocked_reasons.sort();
     blocked_reasons.dedup();
 
@@ -816,14 +897,19 @@ pub fn evaluate_w4_external_noisy_wall(
         completed,
         no_runner_errors,
         row_counts_covered,
+        shards_valid,
         provenance_attached,
         stage_diagnostics_attached,
         index_diagnostics_attached,
+        index_no_full_scan,
         w4_1_diagnostics_attached,
+        facet_ablation_attached,
         oracle_sanity_only,
         noisy_improvement_proven,
         stage_attributed_improvement_proven,
         index_effect_proven,
+        facet_ablation_effect_proven,
+        facet_ablation_no_render_growth,
         suite_reports,
         blocked_reasons,
     }
@@ -864,11 +950,20 @@ fn w4_external_noisy_suite_report(
     let expected = w4_external_suite_expectation(&summary.suite);
     let shard_count = summary.shards.len();
     let shards_valid = expected.is_some_and(|expected| {
-        shard_count == expected.shard_count
-            && summary
-                .shards
-                .iter()
-                .all(|shard| !shard.trim().is_empty() && shard.ends_with(".summary.json"))
+        let expected_names = (0..expected.shard_count)
+            .map(|index| {
+                format!(
+                    "{}.shard-{index}-of-{}.summary.json",
+                    summary.suite, expected.shard_count
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let actual_names = summary
+            .shards
+            .iter()
+            .map(|shard| shard.trim().to_string())
+            .collect::<BTreeSet<_>>();
+        actual_names == expected_names
     });
     let row_counts_valid = expected.is_some_and(|expected| {
         summary.samples == expected.samples
@@ -930,8 +1025,14 @@ fn w4_external_noisy_suite_report(
         stage_hit_counts: summary.stage_hit_counts.clone(),
         index_diagnostics: summary.index_diagnostics.clone(),
         w4_1_diagnostics: summary.w4_1_diagnostics.clone(),
+        facet_ablation: summary.facet_ablation.clone(),
         stage_attributed_improvement,
         index_effect_proven,
+        facet_ablation_effect_proven: w4_external_facet_ablation_proves_effect(summary),
+        facet_ablation_no_render_growth: summary
+            .facet_ablation
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.render_growth == 0),
     }
 }
 
@@ -952,6 +1053,49 @@ fn w4_external_w41_diagnostics_cover_summary(summary: &W4ExternalNoisyBenchmarkS
         && diagnostics.source_signature_count > 0
 }
 
+fn w4_external_facet_ablation_covers_summary(summary: &W4ExternalNoisyBenchmarkSummary) -> bool {
+    let Some(diagnostics) = summary.facet_ablation.as_ref() else {
+        return false;
+    };
+    let required_slices = ["facet_off", "rank_fusion_off", "coverage_selection_off"];
+    diagnostics.questions_with_ablation_report == summary.questions
+        && diagnostics
+            .method_counts
+            .get("sdk_eval_recall_off_run_v1")
+            .copied()
+            .unwrap_or(0)
+            == summary.questions
+        && required_slices.iter().all(|slice| {
+            diagnostics
+                .required_slice_counts
+                .get(*slice)
+                .copied()
+                .unwrap_or(0)
+                == summary.questions
+                && diagnostics
+                    .report_available_slice_counts
+                    .get(*slice)
+                    .copied()
+                    .unwrap_or(0)
+                    == summary.questions
+        })
+}
+
+fn w4_external_facet_ablation_proves_effect(summary: &W4ExternalNoisyBenchmarkSummary) -> bool {
+    let Some(diagnostics) = summary.facet_ablation.as_ref() else {
+        return false;
+    };
+    w4_external_facet_ablation_covers_summary(summary)
+        && diagnostics.contribution_proven_questions > 0
+        && diagnostics.blocked_reason_counts.is_empty()
+        && diagnostics
+            .contribution_proven_slice_counts
+            .get("facet_off")
+            .copied()
+            .unwrap_or(0)
+            > 0
+}
+
 fn stage_counts_show_graph_attributed_gain(
     summary: &W4ExternalNoisyBenchmarkSummary,
     baseline: Option<W4ExternalSuiteBaseline>,
@@ -964,12 +1108,16 @@ fn stage_counts_show_graph_attributed_gain(
     };
     let any_gain_after_source = stage.expanded_any_evidence_hit > stage.source_any_evidence_hit
         || stage.reranked_any_evidence_hit > stage.source_any_evidence_hit
-        || stage.selected_any_evidence_hit > stage.source_any_evidence_hit;
+        || stage.selected_any_evidence_hit > stage.source_any_evidence_hit
+        || stage.rendered_any_evidence_hit > stage.source_any_evidence_hit;
     let all_gain_after_source = stage.expanded_all_evidence_hit > stage.source_all_evidence_hit
         || stage.reranked_all_evidence_hit > stage.source_all_evidence_hit
-        || stage.selected_all_evidence_hit > stage.source_all_evidence_hit;
+        || stage.selected_all_evidence_hit > stage.source_all_evidence_hit
+        || stage.rendered_all_evidence_hit > stage.source_all_evidence_hit;
     stage.selected_any_evidence_hit > baseline.any_evidence_hit
         && stage.selected_all_evidence_hit > baseline.all_evidence_hit
+        && stage.rendered_any_evidence_hit > baseline.any_evidence_hit
+        && stage.rendered_all_evidence_hit > baseline.all_evidence_hit
         && any_gain_after_source
         && all_gain_after_source
 }
@@ -978,18 +1126,30 @@ fn index_diagnostics_show_index_effect(diagnostics: &W4ExternalNoisyIndexDiagnos
     diagnostics.questions_with_index_report > 0
         && diagnostics.index_used_questions > 0
         && diagnostics.index_used_questions <= diagnostics.questions_with_index_report
-        && diagnostics.fallback_full_scan_questions < diagnostics.questions_with_index_report
+        && diagnostics.fallback_full_scan_questions == 0
         && diagnostics.matched_source_anchor_count > 0
         && diagnostics.indexed_neighbor_count > 0
-        && diagnostics.failure_count < diagnostics.questions_with_index_report
+        && diagnostics.failure_count == 0
+}
+
+fn w4_external_index_diagnostics_no_full_scan(summary: &W4ExternalNoisyBenchmarkSummary) -> bool {
+    let Some(diagnostics) = summary.index_diagnostics.as_ref() else {
+        return true;
+    };
+    diagnostics.questions_with_index_report == summary.questions
+        && diagnostics.index_used_questions > 0
+        && diagnostics.fallback_full_scan_questions == 0
+        && diagnostics.failure_count == 0
+        && diagnostics.matched_source_anchor_count > 0
+        && diagnostics.indexed_neighbor_count > 0
 }
 
 #[derive(Clone, Copy)]
 struct W4ExternalSuiteExpectation {
-    shard_count: usize,
     samples: usize,
     questions: usize,
     evidence_questions: usize,
+    shard_count: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1001,21 +1161,21 @@ struct W4ExternalSuiteBaseline {
 fn w4_external_suite_expectation(suite: &str) -> Option<W4ExternalSuiteExpectation> {
     match suite {
         "locomo" => Some(W4ExternalSuiteExpectation {
-            shard_count: 1,
             samples: 10,
             questions: 1986,
             evidence_questions: 1982,
+            shard_count: 10,
         }),
         "longmemeval_oracle" | "longmemeval_s_cleaned" | "longmemeval_m_cleaned" => {
             Some(W4ExternalSuiteExpectation {
+                samples: 500,
+                questions: 500,
+                evidence_questions: 500,
                 shard_count: if suite == "longmemeval_m_cleaned" {
                     8
                 } else {
                     1
                 },
-                samples: 500,
-                questions: 500,
-                evidence_questions: 500,
             })
         }
         _ => None,
@@ -1032,16 +1192,16 @@ fn evidence_hit_bps(hits: usize, evidence_questions: usize) -> u32 {
 fn w4_external_suite_baseline(suite: &str) -> Option<W4ExternalSuiteBaseline> {
     match suite {
         "locomo" => Some(W4ExternalSuiteBaseline {
-            any_evidence_hit: 21,
-            all_evidence_hit: 13,
+            any_evidence_hit: 297,
+            all_evidence_hit: 189,
         }),
         "longmemeval_s_cleaned" => Some(W4ExternalSuiteBaseline {
-            any_evidence_hit: 111,
-            all_evidence_hit: 26,
+            any_evidence_hit: 451,
+            all_evidence_hit: 353,
         }),
         "longmemeval_m_cleaned" => Some(W4ExternalSuiteBaseline {
-            any_evidence_hit: 10,
-            all_evidence_hit: 3,
+            any_evidence_hit: 104,
+            all_evidence_hit: 33,
         }),
         _ => None,
     }

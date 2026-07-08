@@ -1506,7 +1506,7 @@ impl ConversationTranscriptStore for StorePlatform {
                 continue;
             };
             if let Err(error) = attr.validate_for_record(&turn) {
-                rejected_attrs.push(transcript_attr_rejection(attr, &error.to_string()));
+                rejected_attrs.push(transcript_attr_rejection(attr, error.to_string()));
                 continue;
             }
             self.json_put(

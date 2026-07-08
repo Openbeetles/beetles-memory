@@ -877,6 +877,11 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
 }
 .workbench-coverage-row span { color:var(--mu); font-size:10px; text-align:right; }
 .workbench-failure-list { display:grid; gap:5px; margin-top:8px; }
+.workbench-audit-preview {
+  max-height:180px; margin:8px 0 0; padding:8px 10px; overflow:auto;
+  border:1px solid var(--bd); background:var(--s0); border-radius:var(--r);
+  color:var(--tx); font-size:11px; line-height:1.5; white-space:pre-wrap;
+}
 .workbench-fingerprint {
   display:grid; gap:4px; margin-top:8px; padding:8px 10px;
   border:1px solid var(--bd); background:var(--s0); border-radius:var(--r);

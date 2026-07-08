@@ -46,6 +46,7 @@ fn workbench_api_map_is_entry_owned_and_private_raw_closed() {
         vec![
             "home",
             "recall_inspector",
+            "facet_inspector",
             "projection_inspector",
             "soul_health",
             "procedural_evolution",
@@ -68,6 +69,13 @@ fn workbench_api_map_is_entry_owned_and_private_raw_closed() {
         .surfaces
         .iter()
         .any(|surface| surface.report_api == "sdk.project.subject_projection"));
+    let facet_surface = map
+        .surfaces
+        .iter()
+        .find(|surface| surface.surface_id == "facet_inspector")
+        .expect("facet inspector surface");
+    assert_eq!(facet_surface.report_api, "sdk.recall.facet_index_report");
+    assert!(!facet_surface.private_raw_allowed);
 }
 
 #[test]
@@ -76,7 +84,14 @@ fn workbench_report_exposes_real_runtime_reports_without_private_raw_surfaces() 
 
     let report = runtime.console_workbench_report();
 
-    assert_eq!(report.api_map.surfaces.len(), 7);
+    assert_eq!(report.api_map.surfaces.len(), 8);
+    assert_eq!(report.facet_inspector.status.status, "ready");
+    assert!(report.facet_inspector.report_only);
+    assert_eq!(report.facet_inspector.direct_mutation_allowed, false);
+    assert_eq!(
+        report.facet_inspector.audit_markdown_format,
+        "obsidian-style-facet-audit-markdown"
+    );
     #[cfg(feature = "replay-harness")]
     {
         assert!(report.benchmark_wall.report.is_some());

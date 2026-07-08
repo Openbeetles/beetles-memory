@@ -1,6 +1,7 @@
 use crate::feature_gate::ProfileId;
 use crate::util::{collect_retrieval_terms, normalize_retrieval_text};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use super::recall_anchor::recall_evidence_group_key;
@@ -762,9 +763,34 @@ pub struct GraphRecallCandidateScore {
     pub evidence_quality_score: u32,
     pub multi_evidence_coverage_score: u32,
     pub source_authority_score: u32,
+    pub facet_exact_score: u32,
+    pub facet_expanded_score: u32,
+    pub facet_authority_score: u32,
+    pub facet_diversity_score: u32,
+    pub facet_temporal_score: u32,
+    pub facet_stale_penalty: u32,
     pub privacy_profile_eligibility_score: u32,
     pub stale_superseded_penalty: u32,
     pub total_score: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphFacetPropagationContext {
+    pub exact_anchor_ids: Vec<String>,
+    pub expanded_anchor_ids: Vec<String>,
+    pub covered_evidence_groups: Vec<String>,
+    pub candidate_evidence_groups: BTreeMap<String, Vec<String>>,
+    pub candidate_observed_at: BTreeMap<String, u64>,
+}
+
+impl GraphFacetPropagationContext {
+    fn is_empty(&self) -> bool {
+        self.exact_anchor_ids.is_empty()
+            && self.expanded_anchor_ids.is_empty()
+            && self.covered_evidence_groups.is_empty()
+            && self.candidate_evidence_groups.is_empty()
+            && self.candidate_observed_at.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1469,17 +1495,41 @@ pub fn rerank_recall_with_temporal_graph(
     graph: &TemporalMemoryGraphBuildReport,
     expansion_budget: GraphRecallExpansionBudget,
 ) -> GraphRecallRerankReport {
+    rerank_recall_with_temporal_graph_and_facets(
+        query,
+        candidate_ids,
+        graph,
+        expansion_budget,
+        &GraphFacetPropagationContext::default(),
+    )
+}
+
+pub fn rerank_recall_with_temporal_graph_and_facets(
+    query: impl Into<String>,
+    candidate_ids: Vec<String>,
+    graph: &TemporalMemoryGraphBuildReport,
+    expansion_budget: GraphRecallExpansionBudget,
+    facet_context: &GraphFacetPropagationContext,
+) -> GraphRecallRerankReport {
     let query = query.into();
     let stale_false_positive_count = candidate_ids
         .iter()
         .filter(|candidate_id| graph_node_is_superseded(candidate_id, graph))
         .count() as u32;
-    let expansion = expand_recall_candidates(&query, &candidate_ids, graph, expansion_budget);
+    let expansion = expand_recall_candidates(
+        &query,
+        &candidate_ids,
+        graph,
+        expansion_budget,
+        facet_context,
+    );
 
     let mut score_breakdown = expansion
         .expanded_candidate_ids
         .iter()
-        .map(|candidate_id| graph_recall_candidate_score(&query, candidate_id, graph))
+        .map(|candidate_id| {
+            graph_recall_candidate_score_with_facets(&query, candidate_id, graph, facet_context)
+        })
         .collect::<Vec<_>>();
     score_breakdown.sort_by(|left, right| {
         right
@@ -1515,6 +1565,7 @@ fn expand_recall_candidates(
     candidate_ids: &[String],
     graph: &TemporalMemoryGraphBuildReport,
     budget: GraphRecallExpansionBudget,
+    facet_context: &GraphFacetPropagationContext,
 ) -> GraphRecallExpansion {
     let max_hops = budget.max_hops.min(2);
     let max_neighbors_per_candidate = budget.max_neighbors_per_candidate;
@@ -1534,7 +1585,7 @@ fn expand_recall_candidates(
     for hop in 1..=max_hops {
         let mut next_frontier = Vec::new();
         for source_id in &frontier {
-            let neighbors = graph_expansion_neighbors(query, source_id, graph);
+            let neighbors = graph_expansion_neighbors(query, source_id, graph, facet_context);
             if max_neighbors_per_candidate == 0 && !neighbors.is_empty() {
                 truncated_candidate_count =
                     truncated_candidate_count.saturating_add(neighbors.len());
@@ -1583,7 +1634,7 @@ fn expand_recall_candidates(
 
     if max_hops < 2
         && hop1_frontier.iter().any(|node_id| {
-            graph_expansion_neighbors(query, node_id, graph)
+            graph_expansion_neighbors(query, node_id, graph, facet_context)
                 .into_iter()
                 .any(|neighbor_id| {
                     !expanded_candidate_ids
@@ -1628,6 +1679,7 @@ fn graph_expansion_neighbors(
     query: &str,
     node_id: &str,
     graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
 ) -> Vec<String> {
     let mut neighbors = graph
         .edges
@@ -1646,9 +1698,13 @@ fn graph_expansion_neighbors(
     neighbors.sort_by(|left, right| {
         let left_node = graph.nodes.iter().find(|node| node.node_id == *left);
         let right_node = graph.nodes.iter().find(|node| node.node_id == *right);
-        graph_expansion_neighbor_score(query, right, graph, right_node)
+        graph_expansion_neighbor_score(query, right, graph, right_node, facet_context)
             .cmp(&graph_expansion_neighbor_score(
-                query, left, graph, left_node,
+                query,
+                left,
+                graph,
+                left_node,
+                facet_context,
             ))
             .then_with(|| graph_node_rank(right, graph).cmp(&graph_node_rank(left, graph)))
             .then_with(|| left.cmp(right))
@@ -1662,8 +1718,187 @@ fn graph_expansion_neighbor_score(
     node_id: &str,
     graph: &TemporalMemoryGraphBuildReport,
     _node: Option<&MemoryGraphNode>,
+    facet_context: &GraphFacetPropagationContext,
 ) -> u32 {
-    graph_recall_candidate_score(query, node_id, graph).total_score
+    graph_recall_candidate_score_with_facets(query, node_id, graph, facet_context).total_score
+}
+
+fn graph_facet_exact_score(
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
+) -> u32 {
+    if facet_context
+        .exact_anchor_ids
+        .iter()
+        .any(|anchor| anchor == node_id)
+    {
+        700
+    } else if graph_node_connected_to_any(node_id, &facet_context.exact_anchor_ids, graph) {
+        350
+    } else {
+        0
+    }
+}
+
+fn graph_facet_expanded_score(
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
+) -> u32 {
+    if facet_context
+        .expanded_anchor_ids
+        .iter()
+        .any(|anchor| anchor == node_id)
+    {
+        350
+    } else if graph_node_connected_to_any(node_id, &facet_context.expanded_anchor_ids, graph) {
+        175
+    } else {
+        0
+    }
+}
+
+fn graph_node_connected_to_any(
+    node_id: &str,
+    anchors: &[String],
+    graph: &TemporalMemoryGraphBuildReport,
+) -> bool {
+    graph.edges.iter().any(|edge| {
+        anchors.iter().any(|anchor| {
+            (edge.from_node_id == node_id && edge.to_node_id == *anchor)
+                || (edge.to_node_id == node_id && edge.from_node_id == *anchor)
+        })
+    })
+}
+
+fn graph_facet_evidence_groups(
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
+) -> Vec<String> {
+    let mut groups = Vec::new();
+    if let Some(candidate_groups) = facet_context.candidate_evidence_groups.get(node_id) {
+        for group in candidate_groups {
+            push_unique(&mut groups, group.clone());
+        }
+    }
+    for anchor_id in facet_context
+        .exact_anchor_ids
+        .iter()
+        .chain(facet_context.expanded_anchor_ids.iter())
+    {
+        if !graph_node_connected_to_any(node_id, std::slice::from_ref(anchor_id), graph) {
+            continue;
+        }
+        if let Some(candidate_groups) = facet_context.candidate_evidence_groups.get(anchor_id) {
+            for group in candidate_groups {
+                push_unique(&mut groups, group.clone());
+            }
+        }
+    }
+    groups
+}
+
+fn graph_facet_authority_score(
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
+    base_source_authority_score: u32,
+    has_facet_groups: bool,
+) -> u32 {
+    if !has_facet_groups
+        && !facet_context
+            .exact_anchor_ids
+            .iter()
+            .chain(facet_context.expanded_anchor_ids.iter())
+            .any(|anchor| anchor == node_id)
+    {
+        return 0;
+    }
+    let graph_authority = graph
+        .nodes
+        .iter()
+        .find(|node| node.node_id == node_id)
+        .map(|node| {
+            node.evidence_refs
+                .iter()
+                .filter_map(|evidence_ref| {
+                    graph
+                        .backlinks
+                        .iter()
+                        .find(|backlink| backlink.source_id == *evidence_ref)
+                })
+                .map(|backlink| source_authority_score(&backlink.source_kind))
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    graph_authority.max(base_source_authority_score) / 2
+}
+
+fn graph_facet_diversity_score(
+    facet_groups: &[String],
+    facet_context: &GraphFacetPropagationContext,
+) -> u32 {
+    if facet_groups.is_empty() {
+        return 0;
+    }
+    let covered = facet_groups
+        .iter()
+        .filter(|group| {
+            facet_context
+                .covered_evidence_groups
+                .iter()
+                .any(|covered| covered == *group)
+        })
+        .count() as u32;
+    if covered == 0 {
+        120
+    } else {
+        180u32.saturating_add(covered.saturating_sub(1).saturating_mul(60))
+    }
+}
+
+fn graph_facet_temporal_score(
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
+) -> u32 {
+    let observed_at = graph_facet_observed_at(node_id, graph, facet_context);
+    if observed_at == 0 {
+        return 0;
+    }
+    80u32.saturating_add((observed_at.min(10_000) as u32) / 100)
+}
+
+fn graph_facet_observed_at(
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
+) -> u64 {
+    let mut observed_at = facet_context
+        .candidate_observed_at
+        .get(node_id)
+        .copied()
+        .unwrap_or(0);
+    for anchor_id in facet_context
+        .exact_anchor_ids
+        .iter()
+        .chain(facet_context.expanded_anchor_ids.iter())
+    {
+        if !graph_node_connected_to_any(node_id, std::slice::from_ref(anchor_id), graph) {
+            continue;
+        }
+        observed_at = observed_at.max(
+            facet_context
+                .candidate_observed_at
+                .get(anchor_id)
+                .copied()
+                .unwrap_or(0),
+        );
+    }
+    observed_at
 }
 
 fn graph_edge_allows_recall_expansion(kind: MemoryGraphEdgeKind) -> bool {
@@ -1686,6 +1921,20 @@ fn graph_recall_candidate_score(
     query: &str,
     node_id: &str,
     graph: &TemporalMemoryGraphBuildReport,
+) -> GraphRecallCandidateScore {
+    graph_recall_candidate_score_with_facets(
+        query,
+        node_id,
+        graph,
+        &GraphFacetPropagationContext::default(),
+    )
+}
+
+fn graph_recall_candidate_score_with_facets(
+    query: &str,
+    node_id: &str,
+    graph: &TemporalMemoryGraphBuildReport,
+    facet_context: &GraphFacetPropagationContext,
 ) -> GraphRecallCandidateScore {
     let node = graph.nodes.iter().find(|node| node.node_id == node_id);
     let connected_edges = graph
@@ -1755,6 +2004,18 @@ fn graph_recall_candidate_score(
                 .unwrap_or(0)
         })
         .unwrap_or(0);
+    let facet_exact_score = graph_facet_exact_score(node_id, graph, facet_context);
+    let facet_expanded_score = graph_facet_expanded_score(node_id, graph, facet_context);
+    let facet_groups = graph_facet_evidence_groups(node_id, graph, facet_context);
+    let facet_authority_score = graph_facet_authority_score(
+        node_id,
+        graph,
+        facet_context,
+        source_authority_score,
+        !facet_groups.is_empty(),
+    );
+    let facet_diversity_score = graph_facet_diversity_score(&facet_groups, facet_context);
+    let facet_temporal_score = graph_facet_temporal_score(node_id, graph, facet_context);
     let privacy_profile_eligibility_score = if node
         .map(|node| node.validate_contract().accepted)
         .unwrap_or(false)
@@ -1776,6 +2037,12 @@ fn graph_recall_candidate_score(
     } else {
         0
     };
+    let facet_stale_penalty =
+        if !facet_context.is_empty() && graph_node_is_superseded(node_id, graph) {
+            2_500
+        } else {
+            0
+        };
     let total_score = lexical_score
         .saturating_add(entity_alias_score)
         .saturating_add(temporal_anchor_score)
@@ -1786,8 +2053,14 @@ fn graph_recall_candidate_score(
         .saturating_add(evidence_quality_score)
         .saturating_add(multi_evidence_coverage_score)
         .saturating_add(source_authority_score)
+        .saturating_add(facet_exact_score)
+        .saturating_add(facet_expanded_score)
+        .saturating_add(facet_authority_score)
+        .saturating_add(facet_diversity_score)
+        .saturating_add(facet_temporal_score)
         .saturating_add(privacy_profile_eligibility_score)
         .saturating_add(supersedes_bonus)
+        .saturating_sub(facet_stale_penalty)
         .saturating_sub(stale_superseded_penalty);
 
     GraphRecallCandidateScore {
@@ -1802,6 +2075,12 @@ fn graph_recall_candidate_score(
         evidence_quality_score,
         multi_evidence_coverage_score,
         source_authority_score,
+        facet_exact_score,
+        facet_expanded_score,
+        facet_authority_score,
+        facet_diversity_score,
+        facet_temporal_score,
+        facet_stale_penalty,
         privacy_profile_eligibility_score,
         stale_superseded_penalty,
         total_score,

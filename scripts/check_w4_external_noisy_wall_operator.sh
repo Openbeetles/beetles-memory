@@ -59,14 +59,37 @@ if [[ "${BM_W4_EXTERNAL_EXPECT_BLOCKED:-}" == "1" ]]; then
     exit 1
   fi
   rg -q '"provenance_attached": true' "$report_path"
-  rg -q 'w4_external_noisy_wall_improvement_not_proven' "$report_path"
-  rg -q 'w4_external_noisy_wall_stage_attribution_not_proven' "$report_path"
-  rg -q 'w4_external_noisy_wall_index_effect_not_proven' "$report_path"
+  rg -q '"release_gate_passed": false' "$report_path"
+  rg -Fq '"blocked_reasons": [' "$report_path"
+  if rg -q '"noisy_improvement_proven": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_improvement_not_proven' "$report_path"
+  fi
+  if rg -q '"stage_attributed_improvement_proven": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_stage_attribution_not_proven' "$report_path"
+  fi
+  if rg -q '"index_effect_proven": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_index_effect_not_proven' "$report_path"
+  fi
   if rg -q '"stage_diagnostics_attached": false' "$report_path"; then
     rg -q 'w4_external_noisy_wall_stage_diagnostics_missing' "$report_path"
   fi
   if rg -q '"index_diagnostics_attached": false' "$report_path"; then
     rg -q 'w4_external_noisy_wall_index_diagnostics_missing' "$report_path"
+  fi
+  if rg -q '"shards_valid": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_shards_invalid' "$report_path"
+  fi
+  if rg -q '"index_no_full_scan": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_index_full_scan_detected' "$report_path"
+  fi
+  if rg -q '"facet_ablation_attached": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_facet_ablation_missing' "$report_path"
+  fi
+  if rg -q '"facet_ablation_effect_proven": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_facet_ablation_effect_not_proven' "$report_path"
+  fi
+  if rg -q '"facet_ablation_no_render_growth": false' "$report_path"; then
+    rg -q 'w4_external_noisy_wall_render_growth_detected' "$report_path"
   fi
   ! rg -q 'w4_external_noisy_wall_provenance_missing' "$report_path"
   echo "check_w4_external_noisy_wall_operator: baseline blocked as expected"
@@ -77,5 +100,8 @@ if [[ "$status" -ne 0 ]]; then
   cat "$report_path" >&2 || true
   exit "$status"
 fi
+
+rg -q '"shards_valid": true' "$report_path"
+rg -q '"index_no_full_scan": true' "$report_path"
 
 echo "check_w4_external_noisy_wall_operator: ok"

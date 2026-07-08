@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -10,14 +11,15 @@ use bm_adapter::{
 use bm_replay::{load_memory_benchmark_fixture_dir, run_memory_benchmark_wall};
 use bm_sdk::{
     compile_runtime_budget, probe_host_runtime_resource, resolve_memory_capabilities,
-    AgentSkillDirConfig, Error, MemoryCapabilityPolicy, MemoryCloseRequest, MemoryIdentity,
-    MemoryInspectionRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest,
-    NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeBudgetInput, RuntimeBudgetReport,
-    RuntimeLifecycleModeInput, RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest,
-    RuntimeSkillEditRequest, RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest,
-    StaticPlatformManifest, StoreBackendConfig, StoreBackendKind, StoreOpenReport, StorePlatform,
-    WorkbenchApiMap, WorkbenchSurface,
+    AgentSkillDirConfig, Error, MemoryCapabilityPolicy, MemoryCloseRequest,
+    MemoryFacetRecallIndexReport, MemoryIdentity, MemoryInspectionRequest, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest, NoopMemoryAuditSink, PressureLevel,
+    ProfileId, Result, RuntimeBudgetInput, RuntimeBudgetReport, RuntimeLifecycleModeInput,
+    RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
+    RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest, StaticPlatformManifest,
+    StoreBackendConfig, StoreBackendKind, StoreOpenReport, StorePlatform, WorkbenchApiMap,
+    WorkbenchSurface,
 };
 
 use crate::config::{enabled_capability_policy, privacy_policy};
@@ -30,15 +32,17 @@ use crate::{
     EntryConsoleRuntimeSkillEdit, EntryConsoleSession, EntryConsoleSkillDetail,
     EntryConsoleSkillList, EntryConsoleSkillMutation, EntryConsoleSkillSetEnabled,
     EntryConsoleState, EntryConsoleTransport, EntryConsoleTransportUpdate,
-    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchProceduralEvolution,
-    EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
-    EntryConsoleWorkbenchReport, EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth,
-    EntryConsoleWorkbenchStatus, EntryConsoleWorkbenchVaultMigration, EntryIdempotencyCache,
-    EntryIdempotencyConfig, EntryIdentity, EntryResponse, EntryScope, EntryStoreConfig,
-    EntryTransportConfig, EntryTransportContext,
+    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchFacetInspector,
+    EntryConsoleWorkbenchProceduralEvolution, EntryConsoleWorkbenchProjectionInspector,
+    EntryConsoleWorkbenchRecallInspector, EntryConsoleWorkbenchReport,
+    EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth, EntryConsoleWorkbenchStatus,
+    EntryConsoleWorkbenchVaultMigration, EntryIdempotencyCache, EntryIdempotencyConfig,
+    EntryIdentity, EntryResponse, EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryTransportContext,
 };
 
 pub const DEFAULT_SCOPED_RUNTIME_CACHE_LIMIT: usize = 256;
+const FACET_AUDIT_MARKDOWN_FORMAT: &str = "obsidian-style-facet-audit-markdown";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryRuntimeBaseConfig {
@@ -326,6 +330,11 @@ impl EntryRuntime {
                     private_raw_allowed: false,
                 },
                 WorkbenchSurface {
+                    surface_id: "facet_inspector".to_string(),
+                    report_api: "sdk.recall.facet_index_report".to_string(),
+                    private_raw_allowed: false,
+                },
+                WorkbenchSurface {
                     surface_id: "projection_inspector".to_string(),
                     report_api: "sdk.project.subject_projection".to_string(),
                     private_raw_allowed: false,
@@ -369,6 +378,7 @@ impl EntryRuntime {
             api_map: self.console_workbench_api_map(),
             benchmark_wall: self.console_workbench_benchmark_wall(),
             recall_inspector: self.console_workbench_recall_inspector(),
+            facet_inspector: self.console_workbench_facet_inspector(),
             projection_inspector: self.console_workbench_projection_inspector(),
             procedural_evolution: self.console_workbench_procedural_evolution(),
             vault_migration: self.console_workbench_vault_migration(),
@@ -466,6 +476,59 @@ impl EntryRuntime {
                 agent_tool_hints: 0,
                 tool_experience_reason: "recall_unavailable".to_string(),
                 host_fallback_required: true,
+            },
+        }
+    }
+
+    fn console_workbench_facet_inspector(&self) -> EntryConsoleWorkbenchFacetInspector {
+        let query = "workbench facet index inspection".to_string();
+        match self.runtime.recall(MemoryRecallRequest {
+            query,
+            limit: 6,
+            tool_registry_refs: Vec::new(),
+        }) {
+            Ok(report) => {
+                let facet = report.facet_index_report;
+                let direct_mutation_allowed = false;
+                EntryConsoleWorkbenchFacetInspector {
+                    status: EntryConsoleWorkbenchStatus::ready(
+                        "sdk_recall_facet_index_report_available",
+                    ),
+                    owner: facet.owner.clone(),
+                    used: facet.used,
+                    report_only: true,
+                    fallback_full_scan: facet.fallback_full_scan,
+                    source_candidate_count: facet.source_candidate_count,
+                    matched_source_candidate_count: facet.matched_source_candidate_count,
+                    exact_facet_doc_count: facet.exact_facet_doc_count,
+                    expanded_facet_doc_count: facet.expanded_facet_doc_count,
+                    index_revision: facet.index_revision.clone(),
+                    render_growth: facet.render_growth,
+                    failures: facet.failures.clone(),
+                    direct_mutation_allowed,
+                    audit_markdown_format: FACET_AUDIT_MARKDOWN_FORMAT.to_string(),
+                    audit_markdown_preview: facet_audit_markdown_preview(
+                        &facet,
+                        direct_mutation_allowed,
+                    ),
+                }
+            }
+            Err(error) => EntryConsoleWorkbenchFacetInspector {
+                status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
+                owner: "bm-sdk::MemoryRuntime".to_string(),
+                used: false,
+                report_only: true,
+                fallback_full_scan: false,
+                source_candidate_count: 0,
+                matched_source_candidate_count: 0,
+                exact_facet_doc_count: 0,
+                expanded_facet_doc_count: 0,
+                index_revision: None,
+                render_growth: 0,
+                failures: vec!["facet_index_report_unavailable".to_string()],
+                direct_mutation_allowed: false,
+                audit_markdown_format: FACET_AUDIT_MARKDOWN_FORMAT.to_string(),
+                audit_markdown_preview: String::new(),
             },
         }
     }
@@ -960,6 +1023,57 @@ fn vault_preflight_failures(
         failures.push("lineage_not_allowed".to_string());
     }
     failures
+}
+
+fn facet_audit_markdown_preview(
+    report: &MemoryFacetRecallIndexReport,
+    direct_mutation_allowed: bool,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "---");
+    let _ = writeln!(out, "beetle_view: facet_index_audit");
+    let _ = writeln!(out, "format: {FACET_AUDIT_MARKDOWN_FORMAT}");
+    let _ = writeln!(out, "report_only: true");
+    let _ = writeln!(out, "direct_mutation_allowed: {direct_mutation_allowed}");
+    let _ = writeln!(out, "hot_path: false");
+    let _ = writeln!(out, "---");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "# Facet Index Audit");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- Owner: {}", report.owner);
+    let _ = writeln!(out, "- Used: {}", report.used);
+    let _ = writeln!(out, "- Fallback full scan: {}", report.fallback_full_scan);
+    let _ = writeln!(
+        out,
+        "- Source candidates: {}",
+        report.source_candidate_count
+    );
+    let _ = writeln!(
+        out,
+        "- Matched source candidates: {}",
+        report.matched_source_candidate_count
+    );
+    let _ = writeln!(out, "- Exact facet docs: {}", report.exact_facet_doc_count);
+    let _ = writeln!(
+        out,
+        "- Expanded facet docs: {}",
+        report.expanded_facet_doc_count
+    );
+    let _ = writeln!(
+        out,
+        "- Index revision: {}",
+        report.index_revision.as_deref().unwrap_or("none")
+    );
+    let _ = writeln!(out, "- Render growth: {}", report.render_growth);
+    if report.failures.is_empty() {
+        let _ = writeln!(out, "- Failures: none");
+    } else {
+        let _ = writeln!(out, "- Failures:");
+        for failure in &report.failures {
+            let _ = writeln!(out, "  - {failure}");
+        }
+    }
+    out
 }
 
 pub fn entry_capability_view(

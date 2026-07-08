@@ -7,6 +7,7 @@
     LoaderCircle,
     RefreshCw,
     ShieldCheck,
+    Tags,
     Workflow,
   } from "lucide-svelte";
   import KvStack from "../components/KvStack.svelte";
@@ -41,6 +42,7 @@
   const benchmark = $derived(report?.benchmarkWall.report ?? null);
   const benchmarkStatus = $derived(report?.benchmarkWall.status ?? offlineStatus());
   const recallStatus = $derived(report?.recallInspector.status ?? offlineStatus());
+  const facetStatus = $derived(report?.facetInspector.status ?? offlineStatus());
   const projectionStatus = $derived(report?.projectionInspector.status ?? offlineStatus());
   const proceduralStatus = $derived(report?.proceduralEvolution.status ?? offlineStatus());
   const vaultStatus = $derived(report?.vaultMigration.status ?? offlineStatus());
@@ -90,6 +92,7 @@
     if (lang === "en") return value.replace(/_/g, " ");
     const labels: Record<string, string> = {
       memory_graph_nodes_empty: "还没有可展示的记忆关系",
+      memory_facet_index_no_query_match: "当前查询没有命中 facet index",
       runtime_recall_graph_preview_not_persistent: "当前是预览结果，未写入长期记忆图",
       inspection_unavailable: "健康检查暂时不可用",
       no_governed_tool_experience: "还没有可复用工具经验",
@@ -107,6 +110,7 @@
     const zh: Record<string, string> = {
       home: "总览",
       recall_inspector: "找记忆",
+      facet_inspector: "Facet 索引",
       projection_inspector: "整理上下文",
       soul_health: "健康状态",
       procedural_evolution: "习惯与技能",
@@ -116,6 +120,7 @@
     const en: Record<string, string> = {
       home: "Overview",
       recall_inspector: "Find memory",
+      facet_inspector: "Facet index",
       projection_inspector: "Prepare context",
       soul_health: "Health status",
       procedural_evolution: "Habits and skills",
@@ -129,6 +134,7 @@
     const zh: Record<string, string> = {
       home: "运行状态和关键数量",
       recall_inspector: "检查系统能不能找回相关记忆",
+      facet_inspector: "只读检查 facet index 和诊断",
       projection_inspector: "检查放进对话前的记忆上下文",
       soul_health: "检查治理队列和安全动作",
       procedural_evolution: "检查可复用的习惯与技能",
@@ -138,6 +144,7 @@
     const en: Record<string, string> = {
       home: "Runtime status and key counts",
       recall_inspector: "Checks whether relevant memories can be found",
+      facet_inspector: "Read-only facet index diagnostics",
       projection_inspector: "Checks the memory context before it enters a reply",
       soul_health: "Checks governance queues and safe actions",
       procedural_evolution: "Checks reusable habits and skills",
@@ -180,6 +187,20 @@
       { label: localLabel("候选工具", "Tool hints"), value: numberText(recall.agentToolHints) },
       { label: localLabel("工具经验", "Tool experience"), value: plainToken(recall.toolExperienceReason) },
       { label: localLabel("首次用工具", "First-use tools"), value: recall.hostFallbackRequired ? localLabel("由宿主决定", "Host decides") : wb.yes },
+    ];
+  }
+
+  function facetRows(): KVRow[] {
+    if (!report) return [];
+    const facet = report.facetInspector;
+    return [
+      { label: localLabel("Owner", "Owner"), value: facet.owner },
+      { label: localLabel("只读报告", "Report only"), value: boolText(facet.reportOnly) },
+      { label: localLabel("允许直接修改", "Direct mutation"), value: boolText(facet.directMutationAllowed) },
+      { label: localLabel("全量扫描回退", "Full-scan fallback"), value: boolText(facet.fallbackFullScan) },
+      { label: localLabel("命中来源", "Matched sources"), value: `${numberText(facet.matchedSourceCandidateCount)}/${numberText(facet.sourceCandidateCount)}` },
+      { label: localLabel("审计格式", "Audit format"), value: facet.auditMarkdownFormat },
+      { label: localLabel("索引版本", "Index revision"), value: facet.indexRevision ?? "none" },
     ];
   }
 
@@ -245,6 +266,7 @@
     <div class="skill-stats workbench-stat-strip">
       <div><span>{wb.benchmark}</span><strong>{statusText(benchmarkStatus)}</strong></div>
       <div><span>{wb.recall}</span><strong>{statusText(recallStatus)}</strong></div>
+      <div><span>{localLabel("Facet", "Facet")}</span><strong>{statusText(facetStatus)}</strong></div>
       <div><span>{wb.projection}</span><strong>{statusText(projectionStatus)}</strong></div>
       <div><span>{wb.vault}</span><strong>{statusText(vaultStatus)}</strong></div>
       <div><span>{wb.privateRawClosed}</span><strong>{boolText(allPrivateRawClosed)}</strong></div>
@@ -325,6 +347,24 @@
         <KvStack items={recallRows()} />
         {#if report.recallInspector.graphFailures.length > 0}
           <div class="chips">{#each report.recallInspector.graphFailures as failure}<span>{plainToken(failure)}</span>{/each}</div>
+        {/if}
+      </article>
+
+      <article class="panel">
+        <PanelHeader label={localLabel("Facet", "Facet")} title={localLabel("索引诊断", "Index diagnostics")} icon={Tags} />
+        <div class="workbench-metric-grid">
+          <div><span>{localLabel("Exact docs", "Exact docs")}</span><strong>{report.facetInspector.exactFacetDocCount}</strong></div>
+          <div><span>{localLabel("Expanded docs", "Expanded docs")}</span><strong>{report.facetInspector.expandedFacetDocCount}</strong></div>
+          <div><span>{localLabel("Render growth", "Render growth")}</span><strong>{report.facetInspector.renderGrowth}</strong></div>
+        </div>
+        <KvStack items={facetRows()} />
+        {#if report.facetInspector.failures.length > 0}
+          <div class="chips">{#each report.facetInspector.failures as failure}<span>{plainToken(failure)}</span>{/each}</div>
+        {:else}
+          <div class="skill-empty">{wb.emptyFailures}</div>
+        {/if}
+        {#if report.facetInspector.auditMarkdownPreview}
+          <pre class="workbench-audit-preview">{report.facetInspector.auditMarkdownPreview}</pre>
         {/if}
       </article>
 

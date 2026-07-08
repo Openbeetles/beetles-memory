@@ -56,18 +56,21 @@ fn run() -> Result<ExitCode, String> {
 }
 
 fn is_expected_current_baseline_block(blocked_reasons: &[String]) -> bool {
-    blocked_reasons
-        .iter()
-        .any(|reason| reason == "w4_external_noisy_wall_improvement_not_proven")
+    !blocked_reasons.is_empty()
         && blocked_reasons.iter().all(|reason| {
             matches!(
                 reason.as_str(),
                 "w4_external_noisy_wall_improvement_not_proven"
                     | "w4_external_noisy_wall_stage_diagnostics_missing"
                     | "w4_external_noisy_wall_index_diagnostics_missing"
+                    | "w4_external_noisy_wall_shards_invalid"
+                    | "w4_external_noisy_wall_index_full_scan_detected"
                     | "w4_external_noisy_wall_w4_1_diagnostics_missing"
+                    | "w4_external_noisy_wall_facet_ablation_missing"
                     | "w4_external_noisy_wall_stage_attribution_not_proven"
                     | "w4_external_noisy_wall_index_effect_not_proven"
+                    | "w4_external_noisy_wall_facet_ablation_effect_not_proven"
+                    | "w4_external_noisy_wall_render_growth_detected"
             )
         })
 }

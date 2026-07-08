@@ -5,15 +5,15 @@ use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
     LongTermMemoryKind, LongTermMemoryQuery, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
-    MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermListRequest,
-    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
-    MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
-    MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy, MemoryTranscriptReplayRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
-    ProfileId, RuntimeLifecycleModeInput, RuntimeLifecycleOperation, TranscriptEvidenceRef,
-    TranscriptInputMessage, TranscriptReplayView,
+    MemoryEvidenceAuthority, MemoryFacetOwnerPlane, MemoryGovernancePolicyMutation,
+    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryLongTermControlView,
+    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest,
+    MemoryRecallRequest, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
+    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest,
+    ParsedLongTermMemoryExtraction, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeLifecycleOperation, TranscriptEvidenceRef, TranscriptInputMessage, TranscriptReplayView,
 };
 
 use support::{StaticHttpClient, StaticLlmClient};
@@ -142,6 +142,81 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
         .any(|event| event.kind_name == "operator.action"
             && event.payload.get("action").map(String::as_str)
                 == Some("long_term_memory_control")));
+}
+
+#[test]
+fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() {
+    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let runtime = support::test_runtime_with_scope(
+        platform,
+        ProfileId::ServerLinuxDevFull,
+        "local",
+        "facet-control-chat",
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![bm_sdk::LongTermMemoryDraft {
+                    kind: LongTermMemoryKind::Project,
+                    topic: "facet control review".to_string(),
+                    content: "Workbench control deletes must expose affected facet docs."
+                        .to_string(),
+                    keywords: vec!["facet".to_string(), "control".to_string()],
+                    source_chat_id: Some("facet-control-chat".to_string()),
+                    source_type: None,
+                    source_scope: None,
+                    confidence: None,
+                    freshness: None,
+                    stale_hint: None,
+                    supporting_citations: vec!["external_eval:facet-control-review".to_string()],
+                    evidence_count: Some(1),
+                    observed_at: Some(1_800_000_000),
+                    last_confirmed_at: Some(1_800_000_000),
+                    source_revision: Some(1),
+                }],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed long-term facet docs");
+    let record_id = runtime
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: None,
+            limit: 10,
+            view: MemoryLongTermControlView::Operator,
+        })
+        .expect("list long-term")
+        .records[0]
+        .record
+        .id
+        .clone();
+
+    let delete = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Delete {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+            },
+            reason: "operator_deleted_record_and_needs_facet_impact".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("delete long-term record");
+
+    assert!(delete.accepted);
+    assert!(delete
+        .affected_facet_docs
+        .iter()
+        .any(|doc| doc.owner_record_id == record_id
+            && doc.action == "delete"
+            && doc.facet_doc_id.starts_with("facet-index:")
+            && doc.report_view.redacted_sensitive_metadata));
+    assert!(delete
+        .affected_facet_docs
+        .iter()
+        .all(|doc| !doc.facet_doc_id.trim().is_empty()
+            && doc.owner_plane == MemoryFacetOwnerPlane::LongTerm));
 }
 
 #[test]

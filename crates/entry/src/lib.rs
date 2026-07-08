@@ -26,10 +26,11 @@ pub use console::{
     EntryConsoleSkillDetail, EntryConsoleSkillList, EntryConsoleSkillMutation,
     EntryConsoleSkillSetEnabled, EntryConsoleSkillSummary, EntryConsoleState,
     EntryConsoleSystemInfo, EntryConsoleTransport, EntryConsoleTransportUpdate,
-    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchProceduralEvolution,
-    EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
-    EntryConsoleWorkbenchReport, EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth,
-    EntryConsoleWorkbenchStatus, EntryConsoleWorkbenchVaultMigration,
+    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchFacetInspector,
+    EntryConsoleWorkbenchProceduralEvolution, EntryConsoleWorkbenchProjectionInspector,
+    EntryConsoleWorkbenchRecallInspector, EntryConsoleWorkbenchReport,
+    EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth, EntryConsoleWorkbenchStatus,
+    EntryConsoleWorkbenchVaultMigration,
 };
 pub use error::EntryErrorKey;
 pub use idempotency::EntryIdempotencyCache;

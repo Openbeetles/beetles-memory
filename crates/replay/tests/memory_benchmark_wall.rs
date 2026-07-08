@@ -594,7 +594,18 @@ fn w4_external_noisy_summary_deserializes_current_merged_shape_without_hash_prov
         r#"{
           "suite": "locomo",
           "completed": true,
-          "shards": ["locomo.shard-0-of-1.summary.json"],
+          "shards": [
+            "locomo.shard-0-of-10.summary.json",
+            "locomo.shard-1-of-10.summary.json",
+            "locomo.shard-2-of-10.summary.json",
+            "locomo.shard-3-of-10.summary.json",
+            "locomo.shard-4-of-10.summary.json",
+            "locomo.shard-5-of-10.summary.json",
+            "locomo.shard-6-of-10.summary.json",
+            "locomo.shard-7-of-10.summary.json",
+            "locomo.shard-8-of-10.summary.json",
+            "locomo.shard-9-of-10.summary.json"
+          ],
           "samples": 10,
           "questions": 1986,
           "evidence_questions": 1982,
@@ -618,7 +629,18 @@ fn w4_external_noisy_wall_reports_stage_hit_diagnostics_when_runner_uses_eval_re
         r#"{
           "suite": "locomo",
           "completed": true,
-          "shards": ["locomo.shard-0-of-1.summary.json"],
+          "shards": [
+            "locomo.shard-0-of-10.summary.json",
+            "locomo.shard-1-of-10.summary.json",
+            "locomo.shard-2-of-10.summary.json",
+            "locomo.shard-3-of-10.summary.json",
+            "locomo.shard-4-of-10.summary.json",
+            "locomo.shard-5-of-10.summary.json",
+            "locomo.shard-6-of-10.summary.json",
+            "locomo.shard-7-of-10.summary.json",
+            "locomo.shard-8-of-10.summary.json",
+            "locomo.shard-9-of-10.summary.json"
+          ],
           "samples": 10,
           "questions": 1986,
           "evidence_questions": 1982,
@@ -652,10 +674,10 @@ fn w4_external_noisy_wall_reports_stage_hit_diagnostics_when_runner_uses_eval_re
     m_cleaned.stage_hit_counts = locomo.stage_hit_counts.clone();
 
     let report = evaluate_w4_external_noisy_wall(&[
-        attach_w41_diagnostics(locomo),
-        attach_w41_diagnostics(oracle),
-        attach_w41_diagnostics(s_cleaned),
-        attach_w41_diagnostics(m_cleaned),
+        attach_facet_ablation(attach_w41_diagnostics(locomo.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(oracle.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(s_cleaned.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(m_cleaned.clone()), 0),
     ]);
 
     assert!(report.stage_diagnostics_attached);
@@ -684,7 +706,18 @@ fn w4_external_noisy_wall_requires_index_diagnostics_for_noisy_index_effect_proo
         r#"{
           "suite": "locomo",
           "completed": true,
-          "shards": ["locomo.shard-0-of-1.summary.json"],
+          "shards": [
+            "locomo.shard-0-of-10.summary.json",
+            "locomo.shard-1-of-10.summary.json",
+            "locomo.shard-2-of-10.summary.json",
+            "locomo.shard-3-of-10.summary.json",
+            "locomo.shard-4-of-10.summary.json",
+            "locomo.shard-5-of-10.summary.json",
+            "locomo.shard-6-of-10.summary.json",
+            "locomo.shard-7-of-10.summary.json",
+            "locomo.shard-8-of-10.summary.json",
+            "locomo.shard-9-of-10.summary.json"
+          ],
           "samples": 10,
           "questions": 1986,
           "evidence_questions": 1982,
@@ -734,10 +767,10 @@ fn w4_external_noisy_wall_requires_index_diagnostics_for_noisy_index_effect_proo
     m_cleaned.index_diagnostics = locomo.index_diagnostics.clone();
 
     let report = evaluate_w4_external_noisy_wall(&[
-        attach_w41_diagnostics(locomo),
-        attach_w41_diagnostics(oracle),
-        attach_w41_diagnostics(s_cleaned),
-        attach_w41_diagnostics(m_cleaned),
+        attach_facet_ablation(attach_w41_diagnostics(locomo.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(oracle.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(s_cleaned.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(m_cleaned.clone()), 0),
     ]);
 
     assert!(report.index_diagnostics_attached);
@@ -764,7 +797,8 @@ fn w4_external_noisy_wall_requires_index_diagnostics_for_noisy_index_effect_proo
 #[test]
 fn w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_attribution() {
     let locomo = external_summary_with_stage_and_index(
-        "locomo", 10, 1986, 1982, 21, 13, 21, 13, 21, 13, 21, 13, 40, 10, 30, 120, 30,
+        "locomo", 10, 1986, 1982, 685, 553, 85, 57, 1914, 1874, 685, 553, 1986, 1986, 0, 1_111_121,
+        0,
     );
     let oracle = external_summary_with_stage_and_index(
         "longmemeval_oracle",
@@ -779,56 +813,56 @@ fn w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_attri
         491,
         494,
         491,
-        120,
-        80,
-        40,
-        240,
-        40,
+        500,
+        494,
+        0,
+        772,
+        0,
     );
     let s_cleaned = external_summary_with_stage_and_index(
         "longmemeval_s_cleaned",
         500,
         500,
         500,
-        111,
-        26,
-        111,
-        26,
-        111,
-        26,
-        111,
-        26,
-        100,
-        20,
-        80,
-        160,
-        80,
+        475,
+        405,
+        246,
+        95,
+        475,
+        405,
+        475,
+        405,
+        500,
+        500,
+        0,
+        17_632,
+        0,
     );
     let m_cleaned = external_summary_with_stage_and_index(
         "longmemeval_m_cleaned",
         500,
         500,
         500,
-        12,
-        4,
-        10,
-        3,
-        12,
-        4,
-        12,
-        4,
-        90,
-        30,
-        60,
-        180,
-        60,
+        201,
+        107,
+        20,
+        7,
+        319,
+        191,
+        201,
+        107,
+        500,
+        500,
+        0,
+        79_298,
+        0,
     );
 
     let report = evaluate_w4_external_noisy_wall(&[
-        attach_w41_diagnostics(locomo),
-        attach_w41_diagnostics(oracle),
-        attach_w41_diagnostics(s_cleaned),
-        attach_w41_diagnostics(m_cleaned),
+        attach_facet_ablation(attach_w41_diagnostics(locomo.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(oracle.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(s_cleaned.clone()), 0),
+        attach_facet_ablation(attach_w41_diagnostics(m_cleaned.clone()), 0),
     ]);
 
     assert!(report.noisy_improvement_proven);
@@ -842,12 +876,31 @@ fn w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_attri
         .expect("m_cleaned report");
     assert!(m_report.stage_attributed_improvement);
     assert!(m_report.index_effect_proven);
+
+    let mut rendered_gap_m_cleaned = attach_facet_ablation(attach_w41_diagnostics(m_cleaned), 0);
+    let rendered_gap_stage = rendered_gap_m_cleaned
+        .stage_hit_counts
+        .as_mut()
+        .expect("stage counts");
+    rendered_gap_stage.rendered_any_evidence_hit = 14;
+    rendered_gap_stage.rendered_all_evidence_hit = 5;
+    let rendered_gap_report = evaluate_w4_external_noisy_wall(&[
+        attach_facet_ablation(attach_w41_diagnostics(locomo), 0),
+        attach_facet_ablation(attach_w41_diagnostics(oracle), 0),
+        attach_facet_ablation(attach_w41_diagnostics(s_cleaned), 0),
+        rendered_gap_m_cleaned,
+    ]);
+    assert!(!rendered_gap_report.stage_attributed_improvement_proven);
+    assert!(rendered_gap_report
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_stage_attribution_not_proven".to_string()));
 }
 
 #[test]
 fn w4_external_noisy_wall_requires_w41_summary_diagnostics_for_current_release() {
     let locomo = external_summary_with_stage_and_index(
-        "locomo", 10, 1986, 1982, 21, 13, 21, 13, 21, 13, 21, 13, 40, 10, 30, 120, 30,
+        "locomo", 10, 1986, 1982, 685, 553, 85, 57, 1914, 1874, 685, 553, 1986, 1986, 0, 1_111_121,
+        0,
     );
     let oracle = external_summary_with_stage_and_index(
         "longmemeval_oracle",
@@ -862,30 +915,30 @@ fn w4_external_noisy_wall_requires_w41_summary_diagnostics_for_current_release()
         491,
         494,
         491,
-        120,
-        80,
-        40,
-        240,
-        40,
+        500,
+        494,
+        0,
+        772,
+        0,
     );
     let s_cleaned = external_summary_with_stage_and_index(
         "longmemeval_s_cleaned",
         500,
         500,
         500,
-        111,
-        26,
-        111,
-        26,
-        111,
-        26,
-        111,
-        26,
-        100,
-        20,
-        80,
-        160,
-        80,
+        475,
+        405,
+        246,
+        95,
+        475,
+        405,
+        475,
+        405,
+        500,
+        500,
+        0,
+        17_632,
+        0,
     );
     let m_cleaned = external_summary_with_stage_and_index(
         "longmemeval_m_cleaned",
@@ -917,9 +970,362 @@ fn w4_external_noisy_wall_requires_w41_summary_diagnostics_for_current_release()
 }
 
 #[test]
+fn w4_external_noisy_wall_requires_facet_ablation_and_no_render_growth() {
+    let locomo = attach_w41_diagnostics(external_summary_with_stage_and_index(
+        "locomo", 10, 1986, 1982, 685, 553, 85, 57, 1914, 1874, 685, 553, 1986, 1986, 0, 1_111_121,
+        0,
+    ));
+    let oracle = attach_w41_diagnostics(external_summary_with_stage_and_index(
+        "longmemeval_oracle",
+        500,
+        500,
+        500,
+        494,
+        491,
+        494,
+        491,
+        494,
+        491,
+        494,
+        491,
+        500,
+        494,
+        0,
+        772,
+        0,
+    ));
+    let s_cleaned = attach_w41_diagnostics(external_summary_with_stage_and_index(
+        "longmemeval_s_cleaned",
+        500,
+        500,
+        500,
+        475,
+        405,
+        246,
+        95,
+        475,
+        405,
+        475,
+        405,
+        500,
+        500,
+        0,
+        17_632,
+        0,
+    ));
+    let m_cleaned = attach_w41_diagnostics(external_summary_with_stage_and_index(
+        "longmemeval_m_cleaned",
+        500,
+        500,
+        500,
+        201,
+        107,
+        20,
+        7,
+        319,
+        191,
+        201,
+        107,
+        500,
+        500,
+        0,
+        79_298,
+        0,
+    ));
+
+    let missing = evaluate_w4_external_noisy_wall(&[
+        locomo.clone(),
+        oracle.clone(),
+        s_cleaned.clone(),
+        m_cleaned.clone(),
+    ]);
+    assert!(!missing.facet_ablation_attached);
+    assert!(!missing.release_gate_passed);
+    assert!(missing
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_facet_ablation_missing".to_string()));
+
+    let growth = evaluate_w4_external_noisy_wall(&[
+        attach_facet_ablation(locomo.clone(), 0),
+        attach_facet_ablation(oracle.clone(), 0),
+        attach_facet_ablation(s_cleaned.clone(), 0),
+        attach_facet_ablation(m_cleaned.clone(), 1),
+    ]);
+    assert!(growth.facet_ablation_attached);
+    assert!(!growth.facet_ablation_no_render_growth);
+    assert!(growth
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_render_growth_detected".to_string()));
+
+    let mut partial_ablation_m_cleaned = attach_facet_ablation(m_cleaned.clone(), 0);
+    partial_ablation_m_cleaned
+        .facet_ablation
+        .as_mut()
+        .expect("facet ablation")
+        .report_available_slice_counts
+        .insert("facet_off".to_string(), 499);
+    let partial_ablation = evaluate_w4_external_noisy_wall(&[
+        attach_facet_ablation(locomo.clone(), 0),
+        attach_facet_ablation(oracle.clone(), 0),
+        attach_facet_ablation(s_cleaned.clone(), 0),
+        partial_ablation_m_cleaned,
+    ]);
+    assert!(!partial_ablation.facet_ablation_attached);
+    assert!(partial_ablation
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_facet_ablation_missing".to_string()));
+
+    let mut synthetic_ablation_m_cleaned = attach_facet_ablation(m_cleaned.clone(), 0);
+    synthetic_ablation_m_cleaned
+        .facet_ablation
+        .as_mut()
+        .expect("facet ablation")
+        .method_counts
+        .clear();
+    let synthetic_ablation = evaluate_w4_external_noisy_wall(&[
+        attach_facet_ablation(locomo.clone(), 0),
+        attach_facet_ablation(oracle.clone(), 0),
+        attach_facet_ablation(s_cleaned.clone(), 0),
+        synthetic_ablation_m_cleaned,
+    ]);
+    assert!(!synthetic_ablation.facet_ablation_attached);
+    assert!(synthetic_ablation
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_facet_ablation_missing".to_string()));
+
+    let mut blocked_ablation_m_cleaned = attach_facet_ablation(m_cleaned.clone(), 0);
+    blocked_ablation_m_cleaned
+        .facet_ablation
+        .as_mut()
+        .expect("facet ablation")
+        .blocked_reason_counts
+        .insert("memory_facet_index_not_used".to_string(), 1);
+    let blocked_ablation = evaluate_w4_external_noisy_wall(&[
+        attach_facet_ablation(locomo.clone(), 0),
+        attach_facet_ablation(oracle.clone(), 0),
+        attach_facet_ablation(s_cleaned.clone(), 0),
+        blocked_ablation_m_cleaned,
+    ]);
+    assert!(blocked_ablation.facet_ablation_attached);
+    assert!(!blocked_ablation.facet_ablation_effect_proven);
+    assert!(blocked_ablation
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_facet_ablation_effect_not_proven".to_string()));
+
+    let ready = evaluate_w4_external_noisy_wall(&[
+        attach_facet_ablation(locomo, 0),
+        attach_facet_ablation(oracle, 0),
+        attach_facet_ablation(s_cleaned, 0),
+        attach_facet_ablation(m_cleaned, 0),
+    ]);
+    assert!(ready.facet_ablation_attached);
+    assert!(ready.facet_ablation_effect_proven);
+    assert!(ready.facet_ablation_no_render_growth);
+    assert!(ready.release_gate_passed, "{:#?}", ready.blocked_reasons);
+}
+
+#[test]
+fn w4_external_noisy_wall_requires_every_noisy_split_to_improve_against_w43_baseline() {
+    let locomo_at_baseline = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "locomo", 10, 1986, 1982, 297, 189, 85, 57, 1914, 1874, 297, 189, 1986, 1986, 0,
+            1_111_121, 0,
+        )),
+        0,
+    );
+    let oracle = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_oracle",
+            500,
+            500,
+            500,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            500,
+            494,
+            0,
+            772,
+            0,
+        )),
+        0,
+    );
+    let s_cleaned = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_s_cleaned",
+            500,
+            500,
+            500,
+            475,
+            405,
+            246,
+            95,
+            475,
+            405,
+            475,
+            405,
+            500,
+            500,
+            0,
+            17_632,
+            0,
+        )),
+        0,
+    );
+    let m_cleaned = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_m_cleaned",
+            500,
+            500,
+            500,
+            201,
+            107,
+            20,
+            7,
+            319,
+            191,
+            201,
+            107,
+            500,
+            500,
+            0,
+            79_298,
+            0,
+        )),
+        0,
+    );
+
+    let report =
+        evaluate_w4_external_noisy_wall(&[locomo_at_baseline, oracle, s_cleaned, m_cleaned]);
+
+    assert!(!report.noisy_improvement_proven);
+    assert!(report.stage_attributed_improvement_proven);
+    assert!(report.index_effect_proven);
+    assert!(report.facet_ablation_effect_proven);
+    assert!(!report.release_gate_passed);
+    assert!(report
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_improvement_not_proven".to_string()));
+}
+
+#[test]
+fn w4_external_noisy_wall_rejects_full_scan_and_wrong_shard_total() {
+    let mut locomo_full_scan = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "locomo", 10, 1986, 1982, 685, 553, 85, 57, 1914, 1874, 685, 553, 1986, 1985, 1,
+            1_111_121, 1,
+        )),
+        0,
+    );
+    let oracle = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_oracle",
+            500,
+            500,
+            500,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            500,
+            494,
+            0,
+            772,
+            0,
+        )),
+        0,
+    );
+    let s_cleaned = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_s_cleaned",
+            500,
+            500,
+            500,
+            475,
+            405,
+            246,
+            95,
+            475,
+            405,
+            475,
+            405,
+            500,
+            500,
+            0,
+            17_632,
+            0,
+        )),
+        0,
+    );
+    let m_cleaned = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_m_cleaned",
+            500,
+            500,
+            500,
+            201,
+            107,
+            20,
+            7,
+            319,
+            191,
+            201,
+            107,
+            500,
+            500,
+            0,
+            79_298,
+            0,
+        )),
+        0,
+    );
+
+    let full_scan = evaluate_w4_external_noisy_wall(&[
+        locomo_full_scan.clone(),
+        oracle.clone(),
+        s_cleaned.clone(),
+        m_cleaned.clone(),
+    ]);
+    assert!(!full_scan.index_no_full_scan);
+    assert!(!full_scan.release_gate_passed);
+    assert!(full_scan
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_index_full_scan_detected".to_string()));
+
+    locomo_full_scan
+        .index_diagnostics
+        .as_mut()
+        .expect("index diagnostics")
+        .fallback_full_scan_questions = 0;
+    locomo_full_scan
+        .index_diagnostics
+        .as_mut()
+        .expect("index diagnostics")
+        .failure_count = 0;
+    locomo_full_scan.shards = vec!["locomo.shard-0-of-1.summary.json".to_string()];
+    let wrong_shard_total =
+        evaluate_w4_external_noisy_wall(&[locomo_full_scan, oracle, s_cleaned, m_cleaned]);
+    assert!(!wrong_shard_total.shards_valid);
+    assert!(!wrong_shard_total.release_gate_passed);
+    assert!(wrong_shard_total
+        .blocked_reasons
+        .contains(&"w4_external_noisy_wall_shards_invalid".to_string()));
+}
+
+#[test]
 fn w4_external_noisy_wall_blocks_final_improvement_without_stage_or_index_effect() {
     let locomo = external_summary_with_stage_and_index(
-        "locomo", 10, 1986, 1982, 21, 13, 21, 13, 21, 13, 21, 13, 40, 10, 30, 120, 30,
+        "locomo", 10, 1986, 1982, 685, 553, 85, 57, 1914, 1874, 685, 553, 1986, 1986, 0, 1_111_121,
+        0,
     );
     let oracle = external_summary_with_stage_and_index(
         "longmemeval_oracle",
@@ -934,44 +1340,44 @@ fn w4_external_noisy_wall_blocks_final_improvement_without_stage_or_index_effect
         491,
         494,
         491,
-        120,
-        80,
-        40,
-        240,
-        40,
+        500,
+        494,
+        0,
+        772,
+        0,
     );
     let s_cleaned = external_summary_with_stage_and_index(
         "longmemeval_s_cleaned",
         500,
         500,
         500,
-        111,
-        26,
-        111,
-        26,
-        111,
-        26,
-        111,
-        26,
-        100,
-        20,
-        80,
-        160,
-        80,
+        475,
+        405,
+        246,
+        95,
+        475,
+        405,
+        475,
+        405,
+        500,
+        500,
+        0,
+        17_632,
+        0,
     );
     let m_cleaned = external_summary_with_stage_and_index(
         "longmemeval_m_cleaned",
         500,
         500,
         500,
-        12,
-        4,
-        12,
-        4,
-        12,
-        4,
-        12,
-        4,
+        201,
+        107,
+        201,
+        107,
+        201,
+        107,
+        201,
+        107,
         0,
         0,
         500,
@@ -1000,7 +1406,18 @@ fn w4_external_noisy_operator_attaches_provenance_without_changing_baseline_stat
         r#"{
           "suite": "locomo",
           "completed": true,
-          "shards": ["locomo.shard-0-of-1.summary.json"],
+          "shards": [
+            "locomo.shard-0-of-10.summary.json",
+            "locomo.shard-1-of-10.summary.json",
+            "locomo.shard-2-of-10.summary.json",
+            "locomo.shard-3-of-10.summary.json",
+            "locomo.shard-4-of-10.summary.json",
+            "locomo.shard-5-of-10.summary.json",
+            "locomo.shard-6-of-10.summary.json",
+            "locomo.shard-7-of-10.summary.json",
+            "locomo.shard-8-of-10.summary.json",
+            "locomo.shard-9-of-10.summary.json"
+          ],
           "samples": 10,
           "questions": 1986,
           "evidence_questions": 1982,
@@ -1096,11 +1513,13 @@ fn w4_external_noisy_operator_cli_reads_only_summary_files_and_reports_current_b
         std::env::temp_dir().join(format!("bm-w4-external-noisy-wall-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("temp operator root");
+    let locomo_shards = expected_external_shards("locomo");
+    let locomo_shard_refs = locomo_shards.iter().map(String::as_str).collect::<Vec<_>>();
     let locomo = write_external_summary_file(
         &root,
         "locomo.merged.summary.json",
         "locomo",
-        &["locomo.shard-0-of-1.summary.json"],
+        &locomo_shard_refs,
         10,
         1986,
         1982,
@@ -1179,7 +1598,7 @@ fn w4_external_noisy_operator_cli_reads_only_summary_files_and_reports_current_b
 #[test]
 fn w4_external_noisy_wall_reports_shards_bps_and_missing_provenance() {
     let mut locomo = external_summary("locomo", 10, 1986, 1982, 21, 13);
-    locomo.shards = vec!["locomo.shard-0-of-1.summary.json".to_string()];
+    locomo.shards = expected_external_shards("locomo");
     let mut oracle = external_summary("longmemeval_oracle", 500, 500, 500, 494, 491);
     oracle.shards = vec!["longmemeval_oracle.shard-0-of-1.summary.json".to_string()];
     let mut s_cleaned = external_summary("longmemeval_s_cleaned", 500, 500, 500, 111, 26);
@@ -1200,6 +1619,7 @@ fn w4_external_noisy_wall_reports_shards_bps_and_missing_provenance() {
         .iter()
         .find(|suite| suite.suite == "longmemeval_m_cleaned")
         .expect("m_cleaned suite report");
+    assert!(report.shards_valid);
     assert_eq!(m_cleaned.shard_count, 8);
     assert_eq!(m_cleaned.expected_shard_count, Some(8));
     assert!(m_cleaned.shards_valid);
@@ -1251,7 +1671,7 @@ fn external_summary(
     W4ExternalNoisyBenchmarkSummary {
         suite: suite.to_string(),
         completed: true,
-        shards: vec![format!("{suite}.merged.summary.json")],
+        shards: expected_external_shards(suite),
         summary_sha256: None,
         runner_source_sha256: None,
         samples,
@@ -1264,6 +1684,7 @@ fn external_summary(
         stage_hit_counts: None,
         index_diagnostics: None,
         w4_1_diagnostics: None,
+        facet_ablation: None,
     }
 }
 
@@ -1287,13 +1708,7 @@ fn external_summary_with_stage_and_index(
     indexed_neighbor_count: usize,
     failure_count: usize,
 ) -> W4ExternalNoisyBenchmarkSummary {
-    let shards = if suite == "longmemeval_m_cleaned" {
-        (0..8)
-            .map(|index| format!("longmemeval_m_cleaned.shard-{index}-of-8.summary.json"))
-            .collect::<Vec<_>>()
-    } else {
-        vec![format!("{suite}.shard-0-of-1.summary.json")]
-    };
+    let shards = expected_external_shards(suite);
     serde_json::from_value(serde_json::json!({
         "suite": suite,
         "completed": true,
@@ -1336,6 +1751,17 @@ fn external_summary_with_stage_and_index(
     .expect("summary with stage and index diagnostics")
 }
 
+fn expected_external_shards(suite: &str) -> Vec<String> {
+    let shard_total = match suite {
+        "locomo" => 10,
+        "longmemeval_m_cleaned" => 8,
+        _ => 1,
+    };
+    (0..shard_total)
+        .map(|index| format!("{suite}.shard-{index}-of-{shard_total}.summary.json"))
+        .collect()
+}
+
 fn attach_w41_diagnostics(
     mut summary: W4ExternalNoisyBenchmarkSummary,
 ) -> W4ExternalNoisyBenchmarkSummary {
@@ -1371,6 +1797,44 @@ fn attach_w41_diagnostics(
         evidence_count_buckets: [("1".to_string(), summary.questions)].into_iter().collect(),
         source_signature_count: summary.questions.max(1),
         repeated_source_signature_questions: 0,
+    });
+    summary
+}
+
+fn attach_facet_ablation(
+    mut summary: W4ExternalNoisyBenchmarkSummary,
+    render_growth: usize,
+) -> W4ExternalNoisyBenchmarkSummary {
+    summary.facet_ablation = Some(bm_replay::W4ExternalNoisyFacetAblationDiagnostics {
+        questions_with_ablation_report: summary.questions,
+        method_counts: [("sdk_eval_recall_off_run_v1".to_string(), summary.questions)]
+            .into_iter()
+            .collect(),
+        contribution_proven_questions: summary.questions,
+        render_growth,
+        required_slice_counts: [
+            ("facet_off".to_string(), summary.questions),
+            ("rank_fusion_off".to_string(), summary.questions),
+            ("coverage_selection_off".to_string(), summary.questions),
+        ]
+        .into_iter()
+        .collect(),
+        report_available_slice_counts: [
+            ("facet_off".to_string(), summary.questions),
+            ("rank_fusion_off".to_string(), summary.questions),
+            ("coverage_selection_off".to_string(), summary.questions),
+        ]
+        .into_iter()
+        .collect(),
+        contribution_proven_slice_counts: [
+            ("facet_off".to_string(), summary.questions),
+            ("rank_fusion_off".to_string(), summary.questions),
+            ("coverage_selection_off".to_string(), summary.questions),
+        ]
+        .into_iter()
+        .collect(),
+        affected_candidate_count: summary.any_evidence_hit,
+        blocked_reason_counts: Default::default(),
     });
     summary
 }

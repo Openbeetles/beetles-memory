@@ -31,10 +31,18 @@ cargo test -p bm-sdk --test write_candidate_contract
 cargo test -p bm-sdk --test memory_space_migration_contract
 cargo test -p bm-sdk --test public_surface next_gen_builders_are_sdk_public_without_adapter_ownership
 cargo test -p bm-sdk --test runtime_budget_contract graph_expansion_budget_is_profile_owned_and_not_provider_render_owned
+cargo test -p bm-sdk --test runtime_budget_contract facet_recall_budget_is_profile_owned_and_not_graph_or_render_owned
 cargo test -p bm-sdk --test eval_recall_contract persistent_graph_recall_uses_sdk_owned_production_index_report
 cargo test -p bm-core --test memory_facet_contract
 cargo test -p bm-store --test mutation_batch_contract memory_facet_index_namespace_is_admitted_without_store_semantics
 cargo test -p bm-sdk --test eval_recall_contract eval_recall_reports_facet_stage_for_expanded_miss
+cargo test -p bm-sdk --test eval_recall_contract facet_rank_fusion_preserves_pool_provenance
+cargo test -p bm-sdk --test eval_recall_contract facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups
+cargo test -p bm-sdk --test eval_recall_contract facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan
+cargo test -p bm-sdk --test eval_recall_contract facet_recall_expands_graph_anchor_pool_without_render_growth
+cargo test -p bm-sdk --test eval_recall_contract facet_recall_respects_privacy_scope_and_profile_budget
+cargo test -p bm-sdk --test eval_recall_contract facet_recall_blocks_cross_subject_expanded_metadata_leakage
+cargo test -p bm-sdk --test long_term_memory_control_contract long_term_control_mutation_reports_affected_facet_docs_for_operator_review
 cargo test -p bm-core --test subject_registry_contract
 cargo test -p bm-core --test soul_non_regression_contract
 cargo test -p bm-core --test next_gen_contract temporal_memory_graph_rejects_raw_soul_private_material
@@ -107,7 +115,23 @@ rg -Fq "HumanFacetSuggestion" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "MemoryFacetIndexDoc" crates/core/src/memory/memory_facet.rs crates/core/tests/memory_facet_contract.rs
 rg -Fq "StructuredFacetParser" crates/core/src/memory/memory_facet.rs crates/core/tests/memory_facet_contract.rs
 rg -Fq "MemoryFacetRecallIndexReport" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "MemoryLongTermAffectedFacetDoc" crates/core/src/memory/long_term_control.rs crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "affected_facet_docs" crates/core/src/memory/long_term_control.rs crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/long_term_memory_control_contract.rs
+rg -Fq "facet_inspector" crates/entry/src/console.rs crates/entry/src/runtime.rs crates/entry/tests/workbench_contract.rs
+rg -Fq "obsidian-style-facet-audit-markdown" crates/entry/src/runtime.rs crates/entry/tests/workbench_contract.rs crates/http/tests/http_console_contract.rs
+rg -Fq "direct_mutation_allowed" crates/entry/src/console.rs crates/entry/src/runtime.rs crates/entry/tests/workbench_contract.rs
+rg -Fq "FacetRecallRuntimeBudget" crates/core/src/budget.rs crates/sdk/src/lib.rs crates/sdk/tests/runtime_budget_contract.rs
+rg -Fq "max_facet_index_docs_read" crates/core/src/budget.rs crates/sdk/src/runtime.rs crates/sdk/tests/runtime_budget_contract.rs
+rg -Fq "FacetRankFusionReport" crates/core/src/memory/memory_facet.rs crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "FacetCoverageSelectionReport" crates/core/src/memory/memory_facet.rs crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "GraphFacetPropagationContext" crates/core/src/memory/next_gen_contract.rs crates/core/src/memory/mod.rs crates/sdk/src/runtime.rs
+rg -Fq "facet_exact_score" crates/core/src/memory/next_gen_contract.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "facet_diversity_score" crates/core/src/memory/next_gen_contract.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "facet_temporal_score" crates/core/src/memory/next_gen_contract.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "rank_fusion_report" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "coverage_selection_report" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
 rg -Fq "MemoryEvalRecallAblationReport" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "sdk_eval_recall_off_run_v1" crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs crates/replay/src/bench.rs crates/replay/tests/memory_benchmark_wall.rs dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "memory_facet_indexes" crates/store/src/platform.rs crates/store/tests/mutation_batch_contract.rs
 rg -Fq "facet_index_remap_required" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "report_only_subject_visibility_not_indexed" dev-docs/governed-memory-facet-index-plan.md
@@ -129,13 +153,14 @@ rg -Fq "facet_recall_expands_graph_anchor_pool_without_render_growth" dev-docs/g
 rg -Fq "facet_recall_respects_privacy_scope_and_profile_budget" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "facet_recall_blocks_cross_subject_expanded_metadata_leakage" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "long_term_control_mutation_updates_facet_index" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "long_term_control_mutation_reports_affected_facet_docs_for_operator_review" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "transcript_mask_redacts_or_blocks_facet_source_refs" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "facet_index_rebuild_reports_orphan_and_schema_failures" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "facet_report_view_redacts_sensitive_metadata_by_default" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "human_facet_suggestion_requires_governed_proposal" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "facet_migration_remap_required_fails_closed" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "eval_recall_reports_facet_stage_for_expanded_miss" dev-docs/governed-memory-facet-index-plan.md
-rg -Fq "eval_recall_reports_facet_ablation_contribution" dev-docs/governed-memory-facet-index-plan.md
+rg -Fq "eval_recall_reports_real_off_run_facet_ablation_method" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "external_noisy_wall_reports_facet_stage_diagnostics" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "external_noisy_wall_requires_facet_ablation_and_no_render_growth" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "quality net" dev-docs/temporal-memory-graph-plan.md || rg -Fq "质量净提升" dev-docs/temporal-memory-graph-plan.md
@@ -159,8 +184,20 @@ rg -Fq "w4_external_noisy_summary_with_provenance" dev-docs/temporal-memory-grap
 rg -Fq "w4_external_noisy_wall_stage_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 rg -Fq "W4ExternalNoisyIndexDiagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/src/lib.rs
 rg -Fq "w4_external_noisy_wall_index_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
+rg -Fq "shards_valid" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs
+rg -Fq "index_no_full_scan" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
+rg -Fq "w4_external_noisy_wall_shards_invalid" dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
+rg -Fq "w4_external_noisy_wall_index_full_scan_detected" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
 rg -Fq "w4_external_noisy_wall_stage_attribution_not_proven" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 rg -Fq "w4_external_noisy_wall_index_effect_not_proven" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
+rg -Fq "W4ExternalNoisyFacetAblationDiagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/src/lib.rs
+rg -Fq "method_counts" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/tests/memory_benchmark_wall.rs
+rg -Fq "w4_external_noisy_wall_facet_ablation_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/src/bin/bm-w4-external-noisy-wall.rs
+rg -Fq "w4_external_noisy_wall_facet_ablation_effect_not_proven" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/src/bin/bm-w4-external-noisy-wall.rs
+rg -Fq "w4_external_noisy_wall_render_growth_detected" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
+rg -Fq "w4_external_noisy_wall_requires_facet_ablation_and_no_render_growth" crates/replay/tests/memory_benchmark_wall.rs
+rg -Fq "w4_external_noisy_wall_requires_every_noisy_split_to_improve_against_w43_baseline" crates/replay/tests/memory_benchmark_wall.rs
+rg -Fq "w4_external_noisy_wall_rejects_full_scan_and_wrong_shard_total" crates/replay/tests/memory_benchmark_wall.rs
 rg -Fq "w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_attribution" crates/replay/tests/memory_benchmark_wall.rs
 rg -Fq "bm-w4-external-noisy-wall" dev-docs/temporal-memory-graph-plan.md crates/replay/src/bin/bm-w4-external-noisy-wall.rs scripts/check_w4_external_noisy_wall_operator.sh
 rg -Fq "check_w4_external_noisy_wall_operator" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md scripts/check_w4_external_noisy_wall_operator.sh

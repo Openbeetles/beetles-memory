@@ -124,6 +124,15 @@ pub struct GraphExpansionRuntimeBudget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FacetRecallRuntimeBudget {
+    pub max_query_facets: usize,
+    pub max_facet_index_docs_read: usize,
+    pub max_facet_anchor_candidates: usize,
+    pub max_facet_expanded_candidates: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoreRuntimeBudget {
     pub event_log_max_items: usize,
     pub kv_max_entries: usize,
@@ -210,6 +219,7 @@ pub struct RuntimeBudgetReport {
     pub provider_model_context_limit: Option<ProviderModelContextLimit>,
     pub memory_core_budget: MemoryCoreBudget,
     pub graph_expansion_budget: GraphExpansionRuntimeBudget,
+    pub facet_recall_budget: FacetRecallRuntimeBudget,
     pub store_budget: StoreRuntimeBudget,
     pub adapter_budget: AdapterRuntimeBudget,
     pub projection_source_budget: ProjectionSourceBudget,
@@ -426,6 +436,25 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
             .default_recall_multi_hop_allowed,
         eval_recall_multi_hop_allowed: ceiling.graph_expansion_budget.eval_recall_multi_hop_allowed,
     };
+    let facet_recall_budget = FacetRecallRuntimeBudget {
+        max_query_facets: scale_usize(ceiling.facet_recall_budget.max_query_facets, source_scale)
+            .max(ceiling.p0_min_recall_items),
+        max_facet_index_docs_read: scale_usize(
+            ceiling.facet_recall_budget.max_facet_index_docs_read,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        max_facet_anchor_candidates: scale_usize(
+            ceiling.facet_recall_budget.max_facet_anchor_candidates,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        max_facet_expanded_candidates: scale_usize(
+            ceiling.facet_recall_budget.max_facet_expanded_candidates,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+    };
     let store_budget = StoreRuntimeBudget {
         event_log_max_items: scale_usize(ceiling.store_budget.event_log_max_items, store_scale)
             .max(ceiling.p0_min_events),
@@ -594,6 +623,7 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         provider_model_context_limit: input.provider_model_context_limit,
         memory_core_budget,
         graph_expansion_budget,
+        facet_recall_budget,
         store_budget,
         adapter_budget,
         projection_source_budget,
@@ -673,6 +703,7 @@ struct ProfileBudgetCeiling {
     storage_floor_bytes: u64,
     memory_core_budget: MemoryCoreBudget,
     graph_expansion_budget: GraphExpansionRuntimeBudget,
+    facet_recall_budget: FacetRecallRuntimeBudget,
     store_budget: StoreRuntimeBudget,
     adapter_budget: AdapterRuntimeBudget,
     projection_source_budget: ProjectionSourceBudget,
@@ -861,6 +892,12 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             compact_graph_edge_limit: if spec.records >= 4096 { 32 } else { 16 },
             default_recall_multi_hop_allowed: spec.graph_default_recall_multi_hop_allowed,
             eval_recall_multi_hop_allowed: spec.graph_eval_recall_multi_hop_allowed,
+        },
+        facet_recall_budget: FacetRecallRuntimeBudget {
+            max_query_facets: max_usize(spec.source_chars / 256, 4),
+            max_facet_index_docs_read: max_usize(spec.records / 8, 32),
+            max_facet_anchor_candidates: max_usize(spec.records / 128, 8),
+            max_facet_expanded_candidates: max_usize(spec.records / 256, 8),
         },
         store_budget: StoreRuntimeBudget {
             event_log_max_items: spec.events,

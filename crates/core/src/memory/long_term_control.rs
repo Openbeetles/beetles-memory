@@ -5,10 +5,10 @@ use std::hash::{Hash, Hasher};
 use crate::error::{Error, Result};
 
 use super::{
-    long_term_memory_evidence_summary, DerivedMemoryPlane, DerivedMemoryRef, LongTermMemoryDraft,
-    LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryQuery, LongTermMemorySlot,
-    LongTermMemorySourceScope, LongTermMemoryStaleHint, LongTermMemoryStore, SubjectId,
-    TranscriptEvidenceRef,
+    long_term_memory_evidence_summary, DerivedMemoryPlane, DerivedMemoryRef, FacetReportView,
+    LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryQuery,
+    LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemoryStaleHint, LongTermMemoryStore,
+    MemoryFacetOwnerPlane, SubjectId, TranscriptEvidenceRef,
 };
 
 pub const LONG_TERM_CONTROL_REVISION_NAMESPACE: &str = "long_term_control_revision";
@@ -237,12 +237,23 @@ pub struct MemoryDeferredGovernanceImpactReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermAffectedFacetDoc {
+    pub action: String,
+    pub facet_doc_id: String,
+    pub owner_record_id: String,
+    pub owner_plane: MemoryFacetOwnerPlane,
+    pub report_view: FacetReportView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryLongTermMutationReport {
     pub accepted: bool,
     pub dry_run: bool,
     pub operation: &'static str,
     pub target_report: MemoryLongTermTargetResolutionReport,
     pub affected_records: Vec<MemoryLongTermAffectedRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_facet_docs: Vec<MemoryLongTermAffectedFacetDoc>,
     pub tombstones: Vec<MemoryLongTermTombstoneRef>,
     pub evidence_refs: Vec<DerivedMemoryRef>,
     pub transcript_refs: Vec<TranscriptEvidenceRef>,
@@ -1285,6 +1296,7 @@ fn accepted_record_report(
         operation,
         target_report: resolved.report,
         affected_records,
+        affected_facet_docs: Vec::new(),
         tombstones,
         evidence_refs,
         transcript_refs,
@@ -1313,6 +1325,7 @@ fn rejected_report(
         operation,
         target_report,
         affected_records: Vec::new(),
+        affected_facet_docs: Vec::new(),
         tombstones: Vec::new(),
         evidence_refs: Vec::new(),
         transcript_refs: Vec::new(),

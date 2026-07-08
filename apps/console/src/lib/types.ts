@@ -351,10 +351,28 @@ export type ConsoleApiWorkbenchSoulHealth = {
   agentToolExperiences: number;
   agentToolStaleExperiences: number;
 };
+export type ConsoleApiWorkbenchFacetInspector = {
+  status: ConsoleApiWorkbenchStatus;
+  owner: string;
+  used: boolean;
+  reportOnly: boolean;
+  fallbackFullScan: boolean;
+  sourceCandidateCount: number;
+  matchedSourceCandidateCount: number;
+  exactFacetDocCount: number;
+  expandedFacetDocCount: number;
+  indexRevision: string | null;
+  renderGrowth: number;
+  failures: string[];
+  directMutationAllowed: boolean;
+  auditMarkdownFormat: string;
+  auditMarkdownPreview: string;
+};
 export type ConsoleApiWorkbenchReport = {
   apiMap: ConsoleApiWorkbenchApiMap;
   benchmarkWall: ConsoleApiWorkbenchBenchmarkWall;
   recallInspector: ConsoleApiWorkbenchRecallInspector;
+  facetInspector: ConsoleApiWorkbenchFacetInspector;
   projectionInspector: ConsoleApiWorkbenchProjectionInspector;
   proceduralEvolution: ConsoleApiWorkbenchProceduralEvolution;
   vaultMigration: ConsoleApiWorkbenchVaultMigration;

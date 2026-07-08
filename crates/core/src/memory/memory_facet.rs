@@ -290,6 +290,43 @@ pub struct FacetIndexRebuildReport {
     pub migration_failures: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FacetRankFusionCandidateReport {
+    pub candidate_id: String,
+    pub source_rank: Option<usize>,
+    pub exact_facet_rank: Option<usize>,
+    pub expanded_facet_rank: Option<usize>,
+    pub facet_rank: Option<usize>,
+    pub fused_rank: usize,
+    pub fused_score_bps: u32,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FacetRankFusionReport {
+    pub owner: String,
+    pub used: bool,
+    pub strategy: String,
+    pub source_pool_count: usize,
+    pub exact_facet_pool_count: usize,
+    pub expanded_facet_pool_count: usize,
+    pub candidate_reports: Vec<FacetRankFusionCandidateReport>,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FacetCoverageSelectionReport {
+    pub owner: String,
+    pub used: bool,
+    pub strategy: String,
+    pub selected_candidate_ids: Vec<String>,
+    pub covered_evidence_groups: Vec<String>,
+    pub coverage_dropped_candidate_ids: Vec<String>,
+    pub fusion_dropped_candidate_ids: Vec<String>,
+    pub budget_truncated_candidate_ids: Vec<String>,
+    pub blocked_reasons: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HumanFacetSuggestion {
     pub suggestion_id: String,
@@ -663,7 +700,7 @@ fn normalize_text_value(value: &str) -> String {
 
 fn hierarchy_segments(value: &str) -> Vec<String> {
     value
-        .split(['/', '>', ':', '|'])
+        .split(['/', '>', ':', '|', '_'])
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .map(str::to_string)

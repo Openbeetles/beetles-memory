@@ -286,10 +286,16 @@ fn console_workbench_api_map_route_exposes_entry_owned_report_apis() {
     let body: Value = serde_json::from_str(&response.body).expect("workbench json");
     assert_eq!(body["status"], "accepted");
     let surfaces = body["workbench"]["surfaces"].as_array().expect("surfaces");
-    assert_eq!(surfaces.len(), 7);
+    assert_eq!(surfaces.len(), 8);
     assert!(surfaces
         .iter()
         .any(|surface| surface["reportApi"] == "sdk.project.subject_projection"));
+    let facet_surface = surfaces
+        .iter()
+        .find(|surface| surface["surfaceId"] == "facet_inspector")
+        .expect("facet surface");
+    assert_eq!(facet_surface["reportApi"], "sdk.recall.facet_index_report");
+    assert_eq!(facet_surface["privateRawAllowed"], false);
     assert!(surfaces
         .iter()
         .all(|surface| surface["privateRawAllowed"] == false));
@@ -321,7 +327,14 @@ fn console_workbench_report_route_exposes_runtime_report_summaries() {
             .as_array()
             .expect("surfaces")
             .len(),
-        7
+        8
+    );
+    assert_eq!(report["facetInspector"]["status"]["status"], "ready");
+    assert_eq!(report["facetInspector"]["reportOnly"], true);
+    assert_eq!(report["facetInspector"]["directMutationAllowed"], false);
+    assert_eq!(
+        report["facetInspector"]["auditMarkdownFormat"],
+        "obsidian-style-facet-audit-markdown"
     );
     #[cfg(feature = "replay-harness")]
     assert_eq!(report["benchmarkWall"]["report"]["passed"], true);
