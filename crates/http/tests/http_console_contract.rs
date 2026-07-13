@@ -103,6 +103,7 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How should transparent Ollama metrics appear?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -302,9 +303,9 @@ fn console_workbench_api_map_route_exposes_entry_owned_report_apis() {
     let missing = body["workbench"]["missingReportApis"]
         .as_array()
         .expect("missing");
-    #[cfg(feature = "replay-harness")]
+    #[cfg(feature = "nonproduction-replay-harness")]
     assert!(missing.is_empty());
-    #[cfg(not(feature = "replay-harness"))]
+    #[cfg(not(feature = "nonproduction-replay-harness"))]
     assert_eq!(missing.len(), 1);
 }
 
@@ -336,9 +337,9 @@ fn console_workbench_report_route_exposes_runtime_report_summaries() {
         report["facetInspector"]["auditMarkdownFormat"],
         "obsidian-style-facet-audit-markdown"
     );
-    #[cfg(feature = "replay-harness")]
+    #[cfg(feature = "nonproduction-replay-harness")]
     assert_eq!(report["benchmarkWall"]["report"]["passed"], true);
-    #[cfg(not(feature = "replay-harness"))]
+    #[cfg(not(feature = "nonproduction-replay-harness"))]
     {
         assert!(report["benchmarkWall"]["report"].is_null());
         assert_eq!(

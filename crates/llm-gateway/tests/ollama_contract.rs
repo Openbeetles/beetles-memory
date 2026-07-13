@@ -432,6 +432,7 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what should you call me?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -528,6 +529,7 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what do you know?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -593,6 +595,7 @@ fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() 
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -602,12 +605,13 @@ fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() 
         })
         .expect("projection");
 
+    assert!(projection.context.long_term_memory_text.is_none());
     assert!(projection
-        .context
-        .long_term_memory_text
-        .as_deref()
-        .unwrap_or_default()
-        .contains("Qingchuan"));
+        .recall_delivery_report
+        .rendered_capsules
+        .iter()
+        .any(|capsule| capsule.content.contains("Qingchuan")));
+    assert!(projection.system_memory_block.contains("Qingchuan"));
 }
 
 #[test]

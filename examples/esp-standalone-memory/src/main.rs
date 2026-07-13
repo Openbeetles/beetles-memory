@@ -58,7 +58,8 @@ fn main() -> bm_sdk::Result<()> {
         AdapterCommand::Recall(MemoryRecallRequest {
             query: "compact entry".to_string(),
             limit: 2,
-                tool_registry_refs: Vec::new(),
+            structured_query_facets: Vec::new(),
+            tool_registry_refs: Vec::new(),
         }),
     )?;
     assert_eq!(recall.status.as_str(), "accepted");

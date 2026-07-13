@@ -24,6 +24,7 @@ fn accepted_fact_candidate(id: &str, body: &str) -> MemoryWriteCandidate {
             keywords: vec!["multi-subject".to_string()],
         },
         evidence_refs: vec![format!("turn:{id}")],
+        canonical_entities: Vec::new(),
         semantic_judgment: Some(MemoryCandidateSemanticJudgment {
             source: MemorySemanticJudgmentSource::LlmGovernance,
             decision: MemoryCandidateSemanticDecision::Accept,
@@ -44,7 +45,7 @@ fn subject_candidate_shared_fact_is_owned_by_memory_space_governance() {
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
         .profile(profile)
-        .store_platform(platform)
+        .store(platform)
         .build()
         .expect("runtime");
 

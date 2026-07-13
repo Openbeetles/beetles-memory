@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/core",
-    "crates/store",
+    "crates/store-contract-tests",
     "crates/sdk",
     "crates/replay",
     "crates/evolve",
@@ -24,7 +24,6 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 bm-core = { version = "0.1.0", path = "crates/core" }
-bm-store = { version = "0.1.0", path = "crates/store" }
 bm-sdk = { version = "0.1.0", path = "crates/sdk" }
 bm-replay = { version = "0.1.0", path = "crates/replay" }
 bm-adapter = { version = "0.1.0", path = "crates/adapter" }
@@ -38,3 +37,4 @@ thiserror = "1.0"
 indexmap = "2.0"
 rusqlite = { version = "0.37", features = ["bundled"] }
 log = "0.4"
+sha2 = "0.10"

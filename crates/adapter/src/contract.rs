@@ -1,7 +1,7 @@
 use bm_sdk::{
-    MemoryCapabilityCatalog, MemoryCloseReport, MemoryCloseRequest, MemoryExportReport,
-    MemoryExportRequest, MemoryGovernancePolicyMutationReport, MemoryImportReport,
-    MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
+    AgentToolHint, MemoryCapabilityCatalog, MemoryCloseReport, MemoryCloseRequest,
+    MemoryExportReport, MemoryExportRequest, MemoryGovernancePolicyMutationReport,
+    MemoryImportReport, MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
     MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
     MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
     MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
@@ -134,11 +134,76 @@ pub enum AdapterCommand {
     Import(Box<MemoryImportRequest>),
     LongTermList(MemoryLongTermListRequest),
     LongTermDetail(MemoryLongTermDetailRequest),
-    LongTermMutate(MemoryLongTermMutationRequest),
+    LongTermMutate(Box<MemoryLongTermMutationRequest>),
     LongTermPolicy(MemoryLongTermPolicyRequest),
     TranscriptAttrWrite(MemoryTranscriptAttrWriteRequest),
     Capabilities,
     Close(MemoryCloseRequest),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterProjectionAuditSummary {
+    pub projection_id: String,
+    pub source_budget_chars: usize,
+    pub render_budget_chars: usize,
+    pub injected: bool,
+    pub truncated: bool,
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
+    pub private_gate_reason: String,
+    pub evidence_ref_count: usize,
+    pub budget_decision_count: usize,
+    pub privacy_decision_count: usize,
+    pub dropped_candidate_count: usize,
+    pub faithfulness_passed: bool,
+    pub unsupported_claim_count: usize,
+    pub disclosure_integrity_passed: bool,
+    pub raw_private_violation_count: u32,
+    pub agent_tool_rejection_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterProjectionReport {
+    pub projection_block: String,
+    pub chars: usize,
+    pub agent_tool_hints: Vec<AgentToolHint>,
+    pub audit: AdapterProjectionAuditSummary,
+}
+
+impl From<MemoryProjectionReport> for AdapterProjectionReport {
+    fn from(report: MemoryProjectionReport) -> Self {
+        let audit = AdapterProjectionAuditSummary {
+            projection_id: report.audit.projection_id.clone(),
+            source_budget_chars: report.audit.source_budget_chars,
+            render_budget_chars: report.audit.render_budget_chars,
+            injected: report.audit.injected,
+            truncated: report.audit.truncated,
+            runtime_private_context_allowed: report
+                .audit
+                .private_gate
+                .runtime_private_context_allowed,
+            foreground_disclosure_allowed: report.audit.private_gate.foreground_disclosure_allowed,
+            private_gate_reason: report.audit.private_gate.reason.clone(),
+            evidence_ref_count: report.subject_projection.evidence_refs.len(),
+            budget_decision_count: report.subject_projection.budget_decisions.len(),
+            privacy_decision_count: report.subject_projection.privacy_decisions.len(),
+            dropped_candidate_count: report.subject_projection.dropped_candidates.len(),
+            faithfulness_passed: report.projection_faithfulness.passed,
+            unsupported_claim_count: report.projection_faithfulness.unsupported_claims.len(),
+            disclosure_integrity_passed: report.private_disclosure_integrity.passed,
+            raw_private_violation_count: report
+                .private_disclosure_integrity
+                .raw_private_violation_count,
+            agent_tool_rejection_count: report.audit.agent_tools.rejected.len(),
+        };
+        let projection_block = report.projection_surfaces.ui_api;
+        Self {
+            chars: projection_block.chars().count(),
+            projection_block,
+            agent_tool_hints: report.runtime_projection.agent_tool_hints,
+            audit,
+        }
+    }
 }
 
 impl std::fmt::Debug for AdapterCommand {
@@ -175,7 +240,7 @@ impl AdapterCommand {
 pub enum AdapterSdkReport {
     Write(Box<MemoryWriteReport>),
     Recall(Box<MemoryRecallReport>),
-    Project(Box<MemoryProjectionReport>),
+    Project(Box<AdapterProjectionReport>),
     Maintain(Box<MemoryMaintenanceReport>),
     Inspect(Box<MemoryInspectionReport>),
     Recover(Box<MemoryRecoverReport>),

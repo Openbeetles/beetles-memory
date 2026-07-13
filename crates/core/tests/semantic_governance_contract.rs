@@ -24,6 +24,7 @@ fn text_candidate(
             keywords: vec!["candidate".to_string()],
         },
         evidence_refs: vec![format!("turn:{id}")],
+        canonical_entities: Vec::new(),
         semantic_judgment,
     }
 }

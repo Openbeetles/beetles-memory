@@ -23,7 +23,7 @@ use super::{
     run_session_summary_refresh_with_snapshot, should_refresh_execution_state,
     ContinuityCapsuleStore, ExecutionStateRefreshContext, ExecutionStateRefreshInput,
     ExecutionStateRefreshOutcome, ExecutionStateStore, LongTermMemoryExtractionStateStore,
-    LongTermMemoryExtractionTurnInput, LongTermMemoryStore, MemoryGovernanceContext,
+    LongTermMemoryExtractionTurnInput, LongTermMemoryReadStore, MemoryGovernanceContext,
     MemoryGovernanceInput, MemoryHygieneContext, MemoryProfile, MemoryStore, PromptRecallIntent,
     SessionStore, SessionSummaryRefreshOutcome, SessionSummaryStore, TurnLedgerStore,
 };
@@ -36,7 +36,7 @@ pub struct PostReplyMemoryMaintenanceContext<'a> {
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
     pub active_work_store: &'a dyn ActiveWorkStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub continuity_capsule_store: &'a dyn ContinuityCapsuleStore,
     pub extraction_state_store: &'a dyn LongTermMemoryExtractionStateStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
@@ -541,6 +541,7 @@ mod tests {
     use crate::agent::{ActiveWorkRecord, ActiveWorkStore};
     use crate::error::Result;
     use crate::llm::{LlmModelCompat, LlmResponse, Message, StopReason, ToolChoicePolicy};
+    use crate::memory::LongTermMemoryStore;
     use crate::memory::{
         ExecutionState, ExecutionStateStore, LongTermMemoryExtractionState,
         LongTermMemoryExtractionStateStore, MemoryStore, PrivateGardenDoc, PrivateGardenDocRecord,

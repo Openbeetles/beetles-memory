@@ -230,7 +230,7 @@ pub const fn compiled_feature_report() -> CompiledFeatureReport {
         ),
         profile_server_linux_memory_gateway: cfg!(feature = "profile-server-linux-memory-gateway"),
         profile_server_linux_dev_full: cfg!(feature = "profile-server-linux-dev-full"),
-        replay_harness_compiled: cfg!(feature = "replay-harness"),
+        replay_harness_compiled: cfg!(feature = "nonproduction-replay-harness"),
         sqlite_index_compiled: sqlite_index_compiled(),
         rusqlite_dependency_compiled: sqlite_index_compiled(),
     }

@@ -7,9 +7,9 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Crate | 责任 |
 | --- | --- |
 | `bm-core` | 记忆平面、召回、投影、生命周期、feature 合同和核心错误模型。 |
-| `bm-store` | in-memory、file、sqlite、embedded 后端；schema manifest；event log；snapshot；repair report。 |
-| `bm-sdk` | `MemoryRuntime` facade、request/report 类型、capability catalog、profile snapshot、store opening re-export。 |
-| `bm-replay` | fixture runner、cross-store replay、harness gate 和 benchmark gate。 |
+| `bm-sdk` | `MemoryRuntime` facade、不透明 `MemoryStoreHandle`、request/report 类型、capability catalog、profile snapshot 和私有 persistence kernel。 |
+| `bm-store-contract-tests` | 不发布的开发合同测试，覆盖 `bm-sdk` persistence kernel。 |
+| `bm-replay` | 开发用 fixture runner、cross-store replay、harness gate 和 benchmark gate；`nonproduction-replay-harness` 不是部署能力。 |
 | `bm-evolve` | proposal-only evolution sandbox 和 SDK 写入 helper。 |
 | `bm-adapter` | 协议无关 envelope、command、policy、dispatch 和 response 合同。 |
 | `bm-entry` | 进程级 runtime opening、profile/auth/source/idempotency 归一化和 adapter response envelope。 |

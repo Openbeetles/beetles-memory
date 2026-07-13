@@ -31,8 +31,8 @@
         "body": "Host turn lifecycle uses MemoryRuntime candidate governance before migration dry-run.",
         "keywords": ["sdk", "host", "migration"]
       },
-      "evidence_refs": ["fixture:generic-rust-host:turn-1"]
-      ,
+      "evidence_refs": ["fixture:generic-rust-host:turn-1"],
+      "canonical_entities": [],
       "semantic_judgment": {
         "source": "llm_governance",
         "decision": "accept",
@@ -62,8 +62,8 @@
         "content": "- export the source memory space through the public SDK\n- preview the migration and stop if loss risk is reported\n- apply and import the snapshot into a fresh target store\n- inspect, project, and replay the target before release",
         "citations": ["fixture:generic-rust-host:release-guard"]
       },
-      "evidence_refs": ["fixture:generic-rust-host:release-guard"]
-      ,
+      "evidence_refs": ["fixture:generic-rust-host:release-guard"],
+      "canonical_entities": [],
       "semantic_judgment": {
         "source": "llm_governance",
         "decision": "accept",

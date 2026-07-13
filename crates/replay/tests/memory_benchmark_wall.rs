@@ -1,10 +1,12 @@
 use bm_replay::{
-    evaluate_w4_external_noisy_wall, load_memory_benchmark_fixture_dir, run_memory_benchmark_wall,
+    evaluate_w4_external_noisy_wall, load_memory_benchmark_fixture_dir,
+    preflight_p7_runner_release, run_memory_benchmark_wall, verify_w4_external_noisy_summary_files,
     w4_external_noisy_summary_with_provenance, MemoryBenchmarkClass, MemoryBenchmarkEvalRecall,
     MemoryBenchmarkEvalRecallAtK, MemoryBenchmarkEvalRecallDiagnostics,
     MemoryBenchmarkEvalRecallEvidenceRefIndexEntry, MemoryBenchmarkEvalRecallGoldRank,
     MemoryBenchmarkEvalRecallGraphDistanceToGold, MemoryBenchmarkEvalRecallMetrics,
     MemoryBenchmarkMode, MemoryBenchmarkSemanticDimension, W4ExternalNoisyBenchmarkSummary,
+    W4ExternalNoisyIndexDiagnostics, W4ExternalNoisyStageHitCounts,
 };
 use bm_sdk::ProfileId;
 use std::{fs, process::Command};
@@ -748,7 +750,16 @@ fn w4_external_noisy_wall_requires_index_diagnostics_for_noisy_index_effect_proo
             "filtered_node_count": 240,
             "filtered_edge_count": 220,
             "filtered_backlink_count": 240,
-            "failure_count": 1866
+            "failure_count": 1866,
+            "graph_manifest_contract_verified_questions": 120,
+            "graph_selected_dependency_chain_verified_questions": 120,
+            "graph_full_scope_closure_verified_questions": 0,
+            "graph_manifest_generation_present_questions": 120,
+            "graph_revision_present_questions": 120,
+            "graph_scope_digest_present_questions": 120,
+            "graph_maintenance_required_questions": 0,
+            "graph_incident_questions": 0,
+            "graph_read_path_mutation_delta": 0
           }
         }"#,
     )
@@ -868,7 +879,8 @@ fn w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_attri
     assert!(report.noisy_improvement_proven);
     assert!(report.stage_attributed_improvement_proven);
     assert!(report.index_effect_proven);
-    assert!(report.release_gate_passed, "{:#?}", report.blocked_reasons);
+    assert!(!report.release_gate_passed);
+    assert!(!report.p7_loss_ledger_attached);
     let m_report = report
         .suite_reports
         .iter()
@@ -1121,7 +1133,288 @@ fn w4_external_noisy_wall_requires_facet_ablation_and_no_render_growth() {
     assert!(ready.facet_ablation_attached);
     assert!(ready.facet_ablation_effect_proven);
     assert!(ready.facet_ablation_no_render_growth);
-    assert!(ready.release_gate_passed, "{:#?}", ready.blocked_reasons);
+    assert!(!ready.release_gate_passed);
+    assert!(!ready.p7_loss_ledger_attached);
+}
+
+#[test]
+fn external_noisy_wall_requires_p7_selection_render_and_production_proof() {
+    let locomo = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "locomo", 10, 1986, 1982, 931, 818, 85, 57, 1914, 1874, 931, 818, 1986, 1986, 0,
+            1_111_121, 0,
+        )),
+        0,
+    );
+    let oracle = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_oracle",
+            500,
+            500,
+            500,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            500,
+            494,
+            0,
+            772,
+            0,
+        )),
+        0,
+    );
+    let s_cleaned = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_s_cleaned",
+            500,
+            500,
+            500,
+            475,
+            405,
+            246,
+            95,
+            475,
+            405,
+            475,
+            405,
+            500,
+            500,
+            0,
+            17_632,
+            0,
+        )),
+        0,
+    );
+    let m_cleaned = attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_m_cleaned",
+            500,
+            500,
+            500,
+            225,
+            124,
+            20,
+            7,
+            319,
+            191,
+            225,
+            124,
+            500,
+            500,
+            0,
+            79_298,
+            0,
+        )),
+        0,
+    );
+
+    let report = evaluate_w4_external_noisy_wall(&[locomo, oracle, s_cleaned, m_cleaned]);
+
+    assert!(!report.p7_loss_ledger_attached);
+    assert!(!report.p7_ablation_effect_proven);
+    assert!(!report.p7_production_delivery_proven);
+    assert!(!report.p7_provenance_valid);
+    assert!(!report.release_gate_passed);
+    for reason in [
+        "p7_loss_ledger_missing",
+        "p7_ablation_effect_not_proven",
+        "p7_production_delivery_not_proven",
+        "p7_provenance_invalid",
+    ] {
+        assert!(report
+            .blocked_reasons
+            .iter()
+            .any(|blocked| blocked == reason));
+    }
+}
+
+#[test]
+fn external_noisy_wall_rejects_complete_but_unverified_p7_release_evidence() {
+    let locomo = attach_p7_release_evidence(attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "locomo", 10, 1986, 1982, 931, 818, 85, 57, 1914, 1874, 931, 818, 1986, 1986, 0,
+            1_111_121, 0,
+        )),
+        0,
+    ));
+    let oracle = attach_p7_release_evidence(attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_oracle",
+            500,
+            500,
+            500,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            494,
+            491,
+            500,
+            494,
+            0,
+            772,
+            0,
+        )),
+        0,
+    ));
+    let s_cleaned = attach_p7_release_evidence(attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_s_cleaned",
+            500,
+            500,
+            500,
+            475,
+            405,
+            246,
+            95,
+            475,
+            405,
+            475,
+            405,
+            500,
+            500,
+            0,
+            17_632,
+            0,
+        )),
+        0,
+    ));
+    let m_cleaned = attach_p7_release_evidence(attach_facet_ablation(
+        attach_w41_diagnostics(external_summary_with_stage_and_index(
+            "longmemeval_m_cleaned",
+            500,
+            500,
+            500,
+            225,
+            124,
+            20,
+            7,
+            319,
+            191,
+            225,
+            124,
+            500,
+            500,
+            0,
+            79_298,
+            0,
+        )),
+        0,
+    ));
+
+    let report = evaluate_w4_external_noisy_wall(&[locomo, oracle, s_cleaned, m_cleaned]);
+
+    assert!(report.p7_loss_ledger_attached);
+    assert!(report.p7_selection_loss_reduced);
+    assert!(report.p7_render_loss_reduced);
+    assert!(report.p7_ablation_effect_proven);
+    assert!(report.p7_no_render_growth);
+    assert!(report.p7_index_no_full_scan);
+    assert!(report.p7_no_privacy_or_soul_regression);
+    assert!(report.p7_no_p6_regression);
+    assert!(report.p7_production_delivery_proven);
+    assert!(report
+        .suite_reports
+        .iter()
+        .filter_map(|suite| suite.facet_ablation.as_ref())
+        .all(|ablation| ablation
+            .evidence_family_rotation_selected_all_hit_loss_count
+            .is_empty()));
+    assert!(!report.p7_provenance_valid);
+    assert!(!report.release_gate_passed);
+    assert!(report
+        .blocked_reasons
+        .contains(&"p7_provenance_invalid".to_string()));
+}
+
+#[test]
+fn external_noisy_wall_rejects_mixed_run_cohorts() {
+    let mut summaries = [
+        external_summary("locomo", 10, 1986, 1982, 0, 0),
+        external_summary("longmemeval_oracle", 500, 500, 500, 0, 0),
+        external_summary("longmemeval_s_cleaned", 500, 500, 500, 0, 0),
+        external_summary("longmemeval_m_cleaned", 500, 500, 500, 0, 0),
+    ];
+    for (index, summary) in summaries.iter_mut().enumerate() {
+        let run_id = if index == 3 { "run-b" } else { "run-a" };
+        summary.run_id = run_id.to_string();
+        summary.p7_provenance = Some(bm_replay::W4ExternalNoisyP7Provenance {
+            run_id: run_id.to_string(),
+            ..bm_replay::W4ExternalNoisyP7Provenance::default()
+        });
+    }
+
+    let report = evaluate_w4_external_noisy_wall(&summaries);
+
+    assert!(!report.cohort_valid);
+    assert_eq!(report.run_id, None);
+    assert!(report
+        .blocked_reasons
+        .contains(&"p7_run_cohort_invalid".to_string()));
+}
+
+#[test]
+fn p7_runner_preflight_cli_rejects_untrusted_runner_before_wall() {
+    let root = std::env::temp_dir().join(format!("bm-p7-preflight-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let runner = root.join("runner");
+    fs::create_dir_all(runner.join("src")).expect("runner src");
+    fs::create_dir_all(runner.join("target/release")).expect("runner target");
+    fs::write(runner.join("Cargo.toml"), "[package]\nname='fixture'\n").expect("manifest");
+    fs::write(runner.join("Cargo.lock"), "lock\n").expect("lock");
+    fs::write(runner.join("build.rs"), "fn main() {}\n").expect("build script");
+    fs::write(runner.join("src/main.rs"), "fn main() {}\n").expect("runner source");
+    let executable = runner.join("target/release/beetle-memory-external-bench-runner");
+    let executed_marker = root.join("identity-command-executed");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\n: > '{}'\nprintf '%s\\n' '{{\"sdk_build_fingerprint\":\"{}\",\"runner_build_fingerprint\":\"{}\",\"runner_lock_fingerprint\":\"{}\",\"build_profile\":\"release\",\"executable_sha256\":\"{}\"}}'\n",
+            executed_marker.display(),
+            "0".repeat(64),
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+        ),
+    )
+    .expect("stale runner executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&executable)
+            .expect("runner metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("runner executable permissions");
+    }
+
+    assert!(preflight_p7_runner_release(&root, "test-run").is_err());
+    assert!(
+        !executed_marker.exists(),
+        "untrusted runner must not be executed"
+    );
+
+    let operator =
+        std::env::var("CARGO_BIN_EXE_bm-w4-external-noisy-wall").expect("operator binary path");
+    let output = Command::new(operator)
+        .arg("--preflight")
+        .arg("--benchmark-root")
+        .arg(&root)
+        .output()
+        .expect("run standalone P7 preflight");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("operator stderr utf8");
+    assert!(stderr.contains("preflight"), "{stderr}");
+    assert!(!stderr.contains("unknown argument"), "{stderr}");
+
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -1311,6 +1604,67 @@ fn w4_external_noisy_wall_rejects_full_scan_and_wrong_shard_total() {
         .as_mut()
         .expect("index diagnostics")
         .failure_count = 0;
+    locomo_full_scan
+        .index_diagnostics
+        .as_mut()
+        .expect("index diagnostics")
+        .facet_posting_key_lookup_count = 0;
+    let missing_exact_posting_proof = evaluate_w4_external_noisy_wall(&[
+        locomo_full_scan.clone(),
+        oracle.clone(),
+        s_cleaned.clone(),
+        m_cleaned.clone(),
+    ]);
+    assert!(!missing_exact_posting_proof.index_no_full_scan);
+    assert!(!missing_exact_posting_proof.release_gate_passed);
+    locomo_full_scan
+        .index_diagnostics
+        .as_mut()
+        .expect("index diagnostics")
+        .facet_posting_key_lookup_count = 1986;
+
+    let mut zero_posting_question = locomo_full_scan.clone();
+    zero_posting_question
+        .index_diagnostics
+        .as_mut()
+        .expect("index diagnostics")
+        .facet_zero_posting_key_lookup_questions = 1;
+    let zero_posting_report = evaluate_w4_external_noisy_wall(&[
+        zero_posting_question,
+        oracle.clone(),
+        s_cleaned.clone(),
+        m_cleaned.clone(),
+    ]);
+    assert!(!zero_posting_report.p7_index_no_full_scan);
+
+    let mut clean_zero_hit_question = locomo_full_scan.clone();
+    clean_zero_hit_question
+        .index_diagnostics
+        .as_mut()
+        .expect("index diagnostics")
+        .facet_clean_zero_hit_questions = 1;
+    let clean_zero_hit_report = evaluate_w4_external_noisy_wall(&[
+        clean_zero_hit_question,
+        oracle.clone(),
+        s_cleaned.clone(),
+        m_cleaned.clone(),
+    ]);
+    assert!(clean_zero_hit_report.p7_index_no_full_scan);
+
+    let mut manifest_integrity_failure = locomo_full_scan.clone();
+    manifest_integrity_failure
+        .index_diagnostics
+        .as_mut()
+        .expect("index diagnostics")
+        .facet_manifest_integrity_failure_count = 1;
+    let manifest_integrity_report = evaluate_w4_external_noisy_wall(&[
+        manifest_integrity_failure,
+        oracle.clone(),
+        s_cleaned.clone(),
+        m_cleaned.clone(),
+    ]);
+    assert!(!manifest_integrity_report.p7_index_no_full_scan);
+
     locomo_full_scan.shards = vec!["locomo.shard-0-of-1.summary.json".to_string()];
     let wrong_shard_total =
         evaluate_w4_external_noisy_wall(&[locomo_full_scan, oracle, s_cleaned, m_cleaned]);
@@ -1400,8 +1754,7 @@ fn w4_external_noisy_wall_blocks_final_improvement_without_stage_or_index_effect
 }
 
 #[test]
-fn w4_external_noisy_operator_attaches_provenance_without_changing_baseline_status() {
-    let runner_hash = "167bbfd23f445e511b375410d0e9e424bc56e9b410ed2cbf47b7654b17cecd40";
+fn w4_external_noisy_operator_hashes_actual_bytes_without_blessing_old_provenance() {
     let locomo = w4_external_noisy_summary_with_provenance(
         r#"{
           "suite": "locomo",
@@ -1426,8 +1779,6 @@ fn w4_external_noisy_operator_attaches_provenance_without_changing_baseline_stat
           "write_errors": 0,
           "recall_errors": 0
         }"#,
-        "70ae9075f0bd2d0153c24d1cf20c2d8ed6573811b9157bf3f60848c96a1dc0f8",
-        runner_hash,
     )
     .expect("locomo summary with provenance");
     let oracle = w4_external_noisy_summary_with_provenance(
@@ -1443,8 +1794,6 @@ fn w4_external_noisy_operator_attaches_provenance_without_changing_baseline_stat
           "write_errors": 0,
           "recall_errors": 0
         }"#,
-        "cca1c2f5a3299dbd498b5e9586a3bfb059df3d15470c09d5a079564d8b91a08f",
-        runner_hash,
     )
     .expect("oracle summary with provenance");
     let s_cleaned = w4_external_noisy_summary_with_provenance(
@@ -1460,8 +1809,6 @@ fn w4_external_noisy_operator_attaches_provenance_without_changing_baseline_stat
           "write_errors": 0,
           "recall_errors": 0
         }"#,
-        "5b0da9f6b9b12907ba4b28b2e421c01db590ddea6b7549b477f1d74d583e4a34",
-        runner_hash,
     )
     .expect("s_cleaned summary with provenance");
     let m_cleaned = w4_external_noisy_summary_with_provenance(
@@ -1486,17 +1833,15 @@ fn w4_external_noisy_operator_attaches_provenance_without_changing_baseline_stat
           "write_errors": 0,
           "recall_errors": 0
         }"#,
-        "d3d80a25ca4a292720e3136249c6e56e425870bad576e70524855862dbe3281b",
-        runner_hash,
     )
     .expect("m_cleaned summary with provenance");
 
     let report = evaluate_w4_external_noisy_wall(&[locomo, oracle, s_cleaned, m_cleaned]);
 
-    assert!(report.provenance_attached, "{:#?}", report.blocked_reasons);
+    assert!(!report.provenance_attached);
     assert!(!report.stage_diagnostics_attached);
     assert!(!report.release_gate_passed);
-    assert!(!report
+    assert!(report
         .blocked_reasons
         .contains(&"w4_external_noisy_wall_provenance_missing".to_string()));
     assert!(report
@@ -1508,7 +1853,70 @@ fn w4_external_noisy_operator_attaches_provenance_without_changing_baseline_stat
 }
 
 #[test]
-fn w4_external_noisy_operator_cli_reads_only_summary_files_and_reports_current_baseline_blocker() {
+fn w4_external_noisy_operator_rejects_self_consistent_untrusted_fingerprints() {
+    let root = std::env::temp_dir().join(format!("bm-w4-p7-trust-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("results")).expect("temp results root");
+    let merged_path = root
+        .join("results")
+        .join("longmemeval_oracle.merged.summary.json");
+    let merged_json = serde_json::json!({
+        "suite": "longmemeval_oracle",
+        "completed": true,
+        "shards": ["longmemeval_oracle.shard-0-of-1.summary.json"],
+        "p7_provenance": {
+        "contract_version": "p7_recall_delivery_v1",
+        "sdk_report_schema_version": bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+        "sdk_build_fingerprint": "a".repeat(64),
+        "runner_build_fingerprint": "b".repeat(64),
+        "runner_lock_fingerprint": "c".repeat(64),
+        "executable_sha256": "d".repeat(64),
+        "build_profile": "release",
+        "input_sha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+        "merged_detail_sha256": "e".repeat(64),
+        "ordered_shard_digest_manifest": [{
+            "shard": "longmemeval_oracle.shard-0-of-1.summary.json",
+            "summary_sha256": "f".repeat(64),
+            "detail_sha256": "0".repeat(64),
+        }]
+    }});
+    let merged_body = serde_json::to_string(&merged_json).expect("serialize merged summary");
+    fs::write(&merged_path, &merged_body).expect("write merged summary");
+    let mut summary =
+        w4_external_noisy_summary_with_provenance(&merged_body).expect("parse merged summary");
+    assert!(verify_w4_external_noisy_summary_files(&mut summary, &merged_path).is_err());
+    assert!(!summary.operator_content_hash_verified());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn w4_external_noisy_operator_rejects_changed_dataset_hash_claim() {
+    let body = serde_json::json!({
+        "suite": "longmemeval_oracle",
+        "shards": ["longmemeval_oracle.shard-0-of-1.summary.json"],
+        "p7_provenance": {
+            "contract_version": "p7_recall_delivery_v1",
+            "sdk_report_schema_version": bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+            "sdk_build_fingerprint": "a".repeat(64),
+            "runner_build_fingerprint": "b".repeat(64),
+            "runner_lock_fingerprint": "c".repeat(64),
+            "executable_sha256": "d".repeat(64),
+            "build_profile": "release",
+            "input_sha256": "0".repeat(64),
+            "merged_detail_sha256": "e".repeat(64),
+            "ordered_shard_digest_manifest": []
+        }
+    })
+    .to_string();
+    let mut summary = w4_external_noisy_summary_with_provenance(&body).expect("parse summary");
+    let path = std::env::temp_dir().join("longmemeval_oracle.merged.summary.json");
+
+    assert!(verify_w4_external_noisy_summary_files(&mut summary, &path).is_err());
+    assert!(!summary.operator_content_hash_verified());
+}
+
+#[test]
+fn w4_external_noisy_operator_cli_requires_typed_preflight_before_reading_summaries() {
     let root =
         std::env::temp_dir().join(format!("bm-w4-external-noisy-wall-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
@@ -1567,32 +1975,186 @@ fn w4_external_noisy_operator_cli_reads_only_summary_files_and_reports_current_b
     let operator =
         std::env::var("CARGO_BIN_EXE_bm-w4-external-noisy-wall").expect("operator binary path");
     let output = Command::new(operator)
-        .arg("--runner-source-sha256")
-        .arg("167bbfd23f445e511b375410d0e9e424bc56e9b410ed2cbf47b7654b17cecd40")
         .arg("--summary")
-        .arg("70ae9075f0bd2d0153c24d1cf20c2d8ed6573811b9157bf3f60848c96a1dc0f8")
         .arg(&locomo)
         .arg("--summary")
-        .arg("cca1c2f5a3299dbd498b5e9586a3bfb059df3d15470c09d5a079564d8b91a08f")
         .arg(&oracle)
         .arg("--summary")
-        .arg("5b0da9f6b9b12907ba4b28b2e421c01db590ddea6b7549b477f1d74d583e4a34")
         .arg(&s_cleaned)
         .arg("--summary")
-        .arg("d3d80a25ca4a292720e3136249c6e56e425870bad576e70524855862dbe3281b")
         .arg(&m_cleaned)
         .output()
         .expect("run W4 external noisy operator");
 
-    assert_eq!(output.status.code(), Some(10), "{output:?}");
-    let stdout = String::from_utf8(output.stdout).expect("operator stdout utf8");
-    assert!(stdout.contains(r#""provenance_attached": true"#));
-    assert!(stdout.contains(r#""stage_diagnostics_attached": false"#));
-    assert!(stdout.contains("w4_external_noisy_wall_stage_diagnostics_missing"));
-    assert!(stdout.contains("w4_external_noisy_wall_improvement_not_proven"));
-    assert!(!stdout.contains("w4_external_noisy_wall_provenance_missing"));
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("operator stderr utf8");
+    assert!(stderr.contains("--preflight-report"), "{stderr}");
 
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn w4_external_noisy_operator_script_has_no_blocked_success_override() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let operator =
+        fs::read_to_string(repo_root.join("scripts/check_w4_external_noisy_wall_operator.sh"))
+            .expect("operator script");
+    let wall = fs::read_to_string(repo_root.join("scripts/check_memory_benchmark_wall.sh"))
+        .expect("memory wall script");
+    let operator_cli =
+        fs::read_to_string(repo_root.join("crates/replay/src/bin/bm-w4-external-noisy-wall.rs"))
+            .expect("operator CLI");
+    let preflight =
+        fs::read_to_string(repo_root.join("scripts/check_w4_external_noisy_wall_preflight.sh"))
+            .expect("preflight script");
+
+    for obsolete in [
+        "BM_W4_EXTERNAL_EXPECT_BLOCKED",
+        "baseline blocked as expected",
+        "is_expected_current_baseline_block",
+    ] {
+        assert!(
+            !operator.contains(obsolete),
+            "obsolete operator bypass: {obsolete}"
+        );
+        assert!(!wall.contains(obsolete), "obsolete wall bypass: {obsolete}");
+        assert!(
+            !operator_cli.contains(obsolete),
+            "obsolete operator CLI classification: {obsolete}"
+        );
+    }
+    assert!(operator.contains("exit \"$status\""));
+    assert!(operator.contains("--preflight-report"));
+    assert!(!operator.contains("rg "));
+    assert!(!preflight.contains("rg "));
+    assert!(!operator_cli.contains("ExitCode::from(10)"));
+}
+
+#[test]
+fn memory_write_transaction_gate_runs_durability_and_concurrency_contracts() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let gate =
+        fs::read_to_string(repo_root.join("scripts/check_memory_write_transaction_contract.sh"))
+            .expect("memory write transaction gate");
+
+    for required in [
+        "--test file_transaction_recovery_contract",
+        "--test file_primitive_concurrency_contract",
+        "--test store_concurrency_contract",
+        "--features sqlite-store --test sqlite_multiprocess_transaction_contract",
+    ] {
+        assert!(
+            gate.contains(required),
+            "missing transaction gate: {required}"
+        );
+    }
+}
+
+#[test]
+fn p7_operator_rejects_invalid_run_id_before_building_cohort_paths() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let script = repo_root.join("scripts/check_w4_external_noisy_wall_operator.sh");
+    let root = std::env::temp_dir().join(format!(
+        "bm-p7-operator-run-id-contract-{}",
+        std::process::id()
+    ));
+    let fake_bin = root.join("bin");
+    let bench_root = root.join("bench");
+    let cargo_marker = root.join("cargo-called");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    fs::create_dir_all(&bench_root).expect("create bench root");
+    let fake_cargo = fake_bin.join("cargo");
+    fs::write(
+        &fake_cargo,
+        format!("#!/usr/bin/env bash\ntouch {:?}\nexit 99\n", cargo_marker),
+    )
+    .expect("write fake cargo");
+    let mut permissions = fs::metadata(&fake_cargo)
+        .expect("fake cargo metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_cargo, permissions).expect("fake cargo permissions");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").expect("test PATH")
+    );
+
+    for run_id in [
+        ".",
+        "..",
+        "../escape",
+        "nested/run",
+        "run id",
+        "run:1",
+        "\u{8fd0}\u{884c}",
+    ] {
+        let output = Command::new("bash")
+            .arg(&script)
+            .env("BM_W4_EXTERNAL_BENCH_ROOT", &bench_root)
+            .env("BM_P7_RUN_ID", run_id)
+            .env("PATH", &path)
+            .output()
+            .expect("run operator script");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "run_id={run_id:?}: {output:?}"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("operator stderr utf8");
+        assert!(
+            stderr
+                .contains("BM_P7_RUN_ID must match ASCII [A-Za-z0-9._-]+ and must not be . or .."),
+            "run_id={run_id:?}: {stderr}"
+        );
+        assert!(!cargo_marker.exists(), "run_id={run_id:?} reached cargo");
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let operator =
+        fs::read_to_string(repo_root.join("scripts/check_w4_external_noisy_wall_operator.sh"))
+            .expect("operator script");
+    let operator_cli =
+        fs::read_to_string(repo_root.join("crates/replay/src/bin/bm-w4-external-noisy-wall.rs"))
+            .expect("operator CLI");
+    let runner_wall = fs::read_to_string(
+        repo_root
+            .parent()
+            .expect("hardware root")
+            .join(".beetle-memory-external-bench/runner/run_full_p7_wall.sh"),
+    )
+    .expect("external runner wall script");
+
+    assert!(!operator.contains("BM_W4_EXTERNAL_REPORT_PATH"));
+    assert!(operator.contains("${results_dir}/operator-report.json"));
+    assert!(operator.contains("operator-report.json.tmp-"));
+    assert!(operator.contains("mv -n"));
+    assert!(operator_cli.contains("create_new(true)"));
+    assert!(operator_cli.contains("fs::hard_link"));
+    assert!(!operator_cli.contains("fs::write(&report_path"));
+    assert!(!runner_wall.contains("--overwrite"));
+    assert!(!runner_wall.contains("BM_W4_EXTERNAL_REPORT_PATH"));
 }
 
 #[test]
@@ -1668,24 +2230,16 @@ fn external_summary(
     any_evidence_hit: usize,
     all_evidence_hit: usize,
 ) -> W4ExternalNoisyBenchmarkSummary {
-    W4ExternalNoisyBenchmarkSummary {
-        suite: suite.to_string(),
-        completed: true,
-        shards: expected_external_shards(suite),
-        summary_sha256: None,
-        runner_source_sha256: None,
-        samples,
-        questions,
-        evidence_questions,
-        any_evidence_hit,
-        all_evidence_hit,
-        write_errors: 0,
-        recall_errors: 0,
-        stage_hit_counts: None,
-        index_diagnostics: None,
-        w4_1_diagnostics: None,
-        facet_ablation: None,
-    }
+    let mut summary = W4ExternalNoisyBenchmarkSummary::default();
+    summary.suite = suite.to_string();
+    summary.completed = true;
+    summary.shards = expected_external_shards(suite);
+    summary.samples = samples;
+    summary.questions = questions;
+    summary.evidence_questions = evidence_questions;
+    summary.any_evidence_hit = any_evidence_hit;
+    summary.all_evidence_hit = all_evidence_hit;
+    summary
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1708,47 +2262,73 @@ fn external_summary_with_stage_and_index(
     indexed_neighbor_count: usize,
     failure_count: usize,
 ) -> W4ExternalNoisyBenchmarkSummary {
-    let shards = expected_external_shards(suite);
-    serde_json::from_value(serde_json::json!({
-        "suite": suite,
-        "completed": true,
-        "shards": shards,
-        "summary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "runner_source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "samples": samples,
-        "questions": questions,
-        "evidence_questions": evidence_questions,
-        "any_evidence_hit": any_evidence_hit,
-        "all_evidence_hit": all_evidence_hit,
-        "write_errors": 0,
-        "recall_errors": 0,
-        "stage_hit_counts": {
-            "source_any_evidence_hit": source_any,
-            "source_all_evidence_hit": source_all,
-            "expanded_any_evidence_hit": expanded_any,
-            "expanded_all_evidence_hit": expanded_all,
-            "reranked_any_evidence_hit": expanded_any,
-            "reranked_all_evidence_hit": expanded_all,
-            "selected_any_evidence_hit": selected_any,
-            "selected_all_evidence_hit": selected_all,
-            "rendered_any_evidence_hit": selected_any,
-            "rendered_all_evidence_hit": selected_all
-        },
-        "index_diagnostics": {
-            "questions_with_index_report": questions_with_index_report,
-            "index_used_questions": index_used_questions,
-            "fallback_full_scan_questions": fallback_full_scan_questions,
-            "source_candidate_count": questions_with_index_report,
-            "matched_source_anchor_count": index_used_questions,
-            "unmatched_source_anchor_count": fallback_full_scan_questions,
-            "indexed_neighbor_count": indexed_neighbor_count,
-            "filtered_node_count": indexed_neighbor_count,
-            "filtered_edge_count": indexed_neighbor_count,
-            "filtered_backlink_count": indexed_neighbor_count,
-            "failure_count": failure_count
-        }
-    }))
-    .expect("summary with stage and index diagnostics")
+    let mut summary = external_summary(
+        suite,
+        samples,
+        questions,
+        evidence_questions,
+        any_evidence_hit,
+        all_evidence_hit,
+    );
+    summary.summary_sha256 =
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
+    summary.runner_source_sha256 =
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string());
+    summary.stage_hit_counts = Some(W4ExternalNoisyStageHitCounts {
+        source_any_evidence_hit: source_any,
+        source_all_evidence_hit: source_all,
+        expanded_any_evidence_hit: expanded_any,
+        expanded_all_evidence_hit: expanded_all,
+        reranked_any_evidence_hit: expanded_any,
+        reranked_all_evidence_hit: expanded_all,
+        selected_any_evidence_hit: selected_any,
+        selected_all_evidence_hit: selected_all,
+        projection_selected_any_evidence_hit: selected_any,
+        projection_selected_all_evidence_hit: selected_all,
+        rendered_any_evidence_hit: selected_any,
+        rendered_all_evidence_hit: selected_all,
+    });
+    summary.index_diagnostics = Some(W4ExternalNoisyIndexDiagnostics {
+        questions_with_index_report,
+        index_used_questions,
+        fallback_full_scan_questions,
+        source_candidate_count: questions_with_index_report,
+        matched_source_anchor_count: index_used_questions,
+        unmatched_source_anchor_count: fallback_full_scan_questions,
+        indexed_neighbor_count,
+        filtered_node_count: indexed_neighbor_count,
+        filtered_edge_count: indexed_neighbor_count,
+        filtered_backlink_count: indexed_neighbor_count,
+        failure_count,
+        graph_manifest_contract_verified_questions: index_used_questions,
+        graph_selected_dependency_chain_verified_questions: index_used_questions,
+        graph_full_scope_closure_verified_questions: 0,
+        graph_manifest_generation_present_questions: index_used_questions,
+        graph_revision_present_questions: index_used_questions,
+        graph_scope_digest_present_questions: index_used_questions,
+        graph_maintenance_required_questions: 0,
+        graph_incident_questions: 0,
+        graph_read_path_mutation_delta: 0,
+        facet_questions_with_index_report: questions_with_index_report,
+        facet_index_used_questions: questions_with_index_report,
+        facet_report_only_questions: 0,
+        facet_fallback_full_scan_questions: 0,
+        facet_source_candidate_count: questions_with_index_report,
+        facet_matched_source_candidate_count: questions_with_index_report,
+        facet_posting_key_lookup_count: questions_with_index_report,
+        facet_manifest_matched_posting_count: questions_with_index_report,
+        facet_posting_doc_read_count: questions_with_index_report,
+        facet_owner_key_lookup_count: questions_with_index_report,
+        facet_owner_doc_read_count: questions_with_index_report,
+        facet_zero_posting_key_lookup_questions: 0,
+        facet_clean_zero_hit_questions: 0,
+        facet_manifest_integrity_verified_questions: questions_with_index_report,
+        facet_manifest_integrity_failure_count: 0,
+        facet_exact_match_count: questions_with_index_report,
+        facet_expanded_match_count: questions_with_index_report,
+        facet_failure_count: 0,
+    });
+    summary
 }
 
 fn expected_external_shards(suite: &str) -> Vec<String> {
@@ -1810,12 +2390,22 @@ fn attach_facet_ablation(
         method_counts: [("sdk_eval_recall_off_run_v1".to_string(), summary.questions)]
             .into_iter()
             .collect(),
-        contribution_proven_questions: summary.questions,
+        delivery_contribution_proven_questions: summary.questions,
         render_growth,
         required_slice_counts: [
             ("facet_off".to_string(), summary.questions),
             ("rank_fusion_off".to_string(), summary.questions),
             ("coverage_selection_off".to_string(), summary.questions),
+            (
+                "delivery_relevance_fusion_off".to_string(),
+                summary.questions,
+            ),
+            (
+                "evidence_family_rotation_off".to_string(),
+                summary.questions,
+            ),
+            ("render_capsule_off".to_string(), summary.questions),
+            ("capsule_dedupe_off".to_string(), summary.questions),
         ]
         .into_iter()
         .collect(),
@@ -1823,18 +2413,130 @@ fn attach_facet_ablation(
             ("facet_off".to_string(), summary.questions),
             ("rank_fusion_off".to_string(), summary.questions),
             ("coverage_selection_off".to_string(), summary.questions),
+            (
+                "delivery_relevance_fusion_off".to_string(),
+                summary.questions,
+            ),
+            (
+                "evidence_family_rotation_off".to_string(),
+                summary.questions,
+            ),
+            ("render_capsule_off".to_string(), summary.questions),
+            ("capsule_dedupe_off".to_string(), summary.questions),
         ]
         .into_iter()
         .collect(),
-        contribution_proven_slice_counts: [
+        delivery_contribution_proven_slice_counts: [
             ("facet_off".to_string(), summary.questions),
             ("rank_fusion_off".to_string(), summary.questions),
             ("coverage_selection_off".to_string(), summary.questions),
+            (
+                "delivery_relevance_fusion_off".to_string(),
+                summary.questions,
+            ),
+            (
+                "evidence_family_rotation_off".to_string(),
+                summary.questions,
+            ),
+            ("render_capsule_off".to_string(), summary.questions),
+            ("capsule_dedupe_off".to_string(), summary.questions),
         ]
         .into_iter()
         .collect(),
-        affected_candidate_count: summary.any_evidence_hit,
+        delivery_affected_candidate_occurrences: summary.any_evidence_hit,
+        selected_evidence_hit_delta: Default::default(),
+        rendered_evidence_hit_delta: Default::default(),
+        selected_all_hit_loss_count: Default::default(),
+        evidence_family_rotation_selected_all_hit_loss_count: Default::default(),
+        rendered_all_hit_loss_count: Default::default(),
+        expanded_candidate_delta: Default::default(),
+        selected_candidate_delta: Default::default(),
+        rendered_candidate_delta: Default::default(),
+        rendered_char_delta: Default::default(),
         blocked_reason_counts: Default::default(),
+    });
+    summary
+}
+
+fn attach_p7_release_evidence(
+    mut summary: W4ExternalNoisyBenchmarkSummary,
+) -> W4ExternalNoisyBenchmarkSummary {
+    summary.run_id = "test-run".to_string();
+    let questions = summary.questions;
+    let ablation = summary
+        .facet_ablation
+        .as_mut()
+        .expect("P7 release evidence requires ablation");
+    ablation
+        .selected_evidence_hit_delta
+        .insert("delivery_relevance_fusion_off".to_string(), 1);
+    ablation
+        .rendered_evidence_hit_delta
+        .insert("render_capsule_off".to_string(), 1);
+    ablation
+        .rendered_char_delta
+        .insert("render_capsule_off".to_string(), 128);
+    summary.p7_loss_ledger = Some(bm_replay::W4ExternalNoisyP7LossDiagnostics {
+        questions_with_loss_ledger: questions,
+        expanded_hit_selected_miss_questions: 0,
+        eval_selected_hit_rendered_miss_questions: 0,
+        expanded_hit_selected_miss_evidence: 0,
+        eval_selected_hit_rendered_miss_evidence: 0,
+        eval_selected_hit_projection_selected_miss_questions: 0,
+        eval_selected_hit_projection_selected_miss_evidence: 0,
+        selected_hit_final_rendered_miss_questions: 0,
+        selected_hit_final_rendered_miss_evidence: 0,
+        eval_truncated_count: 0,
+        eval_blocked_reason_counts: Default::default(),
+    });
+    summary.p7_production_delivery =
+        Some(bm_replay::W4ExternalNoisyP7ProductionDeliveryDiagnostics {
+            questions_with_delivery_report: questions,
+            eval_selected_matches_delivery_questions: questions,
+            eval_rendered_matches_delivery_questions: questions,
+            projection_selected_sources_proven_questions: questions,
+            projection_delivery_proof_questions: questions,
+            final_projection_integrity_questions: questions,
+            final_projection_integrity_passed_questions: questions,
+            final_projection_raw_private_violation_count: 0,
+            final_projection_blocked_source_count: 0,
+            final_projection_redacted_source_count: 0,
+            schema_version_counts: [(
+                bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION.to_string(),
+                questions,
+            )]
+            .into_iter()
+            .collect(),
+            render_growth: 0,
+            privacy_leak_count: 0,
+            cross_subject_leak_count: 0,
+            raw_soul_private_material_count: 0,
+            blocked_reason_counts: Default::default(),
+            delivery_drop_reason_counts: Default::default(),
+        });
+    summary.summary_sha256 = Some("a".repeat(64));
+    summary.runner_source_sha256 = Some("b".repeat(64));
+    summary.p7_provenance = Some(bm_replay::W4ExternalNoisyP7Provenance {
+        run_id: summary.run_id.clone(),
+        contract_version: "p7_recall_delivery_v1".to_string(),
+        sdk_report_schema_version: bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+        sdk_build_fingerprint: "c".repeat(64),
+        runner_build_fingerprint: "b".repeat(64),
+        runner_lock_fingerprint: "9".repeat(64),
+        executable_sha256: "8".repeat(64),
+        build_profile: "release".to_string(),
+        input_sha256: "7".repeat(64),
+        merged_detail_sha256: "d".repeat(64),
+        ordered_shard_digest_manifest: summary
+            .shards
+            .iter()
+            .map(|shard| bm_replay::W4ExternalNoisyP7ShardDigest {
+                run_id: summary.run_id.clone(),
+                shard: shard.clone(),
+                summary_sha256: "e".repeat(64),
+                detail_sha256: "f".repeat(64),
+            })
+            .collect(),
     });
     summary
 }

@@ -133,6 +133,15 @@ pub struct FacetRecallRuntimeBudget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RecallDeliveryRuntimeBudget {
+    pub max_selected_candidates: usize,
+    pub max_rendered_capsules: usize,
+    pub max_capsule_chars: usize,
+    pub max_loss_ledger_entries: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoreRuntimeBudget {
     pub event_log_max_items: usize,
     pub kv_max_entries: usize,
@@ -220,6 +229,7 @@ pub struct RuntimeBudgetReport {
     pub memory_core_budget: MemoryCoreBudget,
     pub graph_expansion_budget: GraphExpansionRuntimeBudget,
     pub facet_recall_budget: FacetRecallRuntimeBudget,
+    pub recall_delivery_budget: RecallDeliveryRuntimeBudget,
     pub store_budget: StoreRuntimeBudget,
     pub adapter_budget: AdapterRuntimeBudget,
     pub projection_source_budget: ProjectionSourceBudget,
@@ -455,6 +465,28 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         )
         .max(ceiling.p0_min_recall_items),
     };
+    let recall_delivery_budget = RecallDeliveryRuntimeBudget {
+        max_selected_candidates: scale_usize(
+            ceiling.recall_delivery_budget.max_selected_candidates,
+            source_scale,
+        )
+        .max(ceiling.p0_min_recall_items),
+        max_rendered_capsules: scale_usize(
+            ceiling.recall_delivery_budget.max_rendered_capsules,
+            source_scale,
+        )
+        .max(1),
+        max_capsule_chars: scale_usize(
+            ceiling.recall_delivery_budget.max_capsule_chars,
+            source_scale,
+        )
+        .max(128),
+        max_loss_ledger_entries: scale_usize(
+            ceiling.recall_delivery_budget.max_loss_ledger_entries,
+            source_scale,
+        )
+        .max(1),
+    };
     let store_budget = StoreRuntimeBudget {
         event_log_max_items: scale_usize(ceiling.store_budget.event_log_max_items, store_scale)
             .max(ceiling.p0_min_events),
@@ -624,6 +656,7 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         memory_core_budget,
         graph_expansion_budget,
         facet_recall_budget,
+        recall_delivery_budget,
         store_budget,
         adapter_budget,
         projection_source_budget,
@@ -704,6 +737,7 @@ struct ProfileBudgetCeiling {
     memory_core_budget: MemoryCoreBudget,
     graph_expansion_budget: GraphExpansionRuntimeBudget,
     facet_recall_budget: FacetRecallRuntimeBudget,
+    recall_delivery_budget: RecallDeliveryRuntimeBudget,
     store_budget: StoreRuntimeBudget,
     adapter_budget: AdapterRuntimeBudget,
     projection_source_budget: ProjectionSourceBudget,
@@ -898,6 +932,12 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             max_facet_index_docs_read: max_usize(spec.records / 8, 32),
             max_facet_anchor_candidates: max_usize(spec.records / 128, 8),
             max_facet_expanded_candidates: max_usize(spec.records / 256, 8),
+        },
+        recall_delivery_budget: RecallDeliveryRuntimeBudget {
+            max_selected_candidates: max_usize(spec.source_chars / 128, 8),
+            max_rendered_capsules: max_usize(spec.source_chars / 512, 2),
+            max_capsule_chars: max_usize(spec.render_chars / 3, 256),
+            max_loss_ledger_entries: max_usize(spec.source_chars / 256, 4),
         },
         store_budget: StoreRuntimeBudget {
             event_log_max_items: spec.events,

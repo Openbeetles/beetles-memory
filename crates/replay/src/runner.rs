@@ -10,8 +10,8 @@ use bm_sdk::{
     MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryImportRequest,
     MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyPolicy,
     MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest, MemoryRuntime, MemoryScope,
-    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
-    RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
+    MemoryStoreHandle, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
+    RuntimeSkillReuseOutcome, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 use crate::{ReplayFailure, ReplayFixture, ReplayOperation, ReplayRunReport};
@@ -62,13 +62,13 @@ pub fn run_replay_fixture(
         });
     }
 
-    let platform = StorePlatform::open(config.backend.clone())?;
-    platform.import_store_snapshot(&fixture.store_snapshot)?;
+    let platform = MemoryStoreHandle::open(config.backend.clone())?;
+    platform.import_replay_snapshot(&fixture.store_snapshot)?;
     let runtime = MemoryRuntime::builder()
         .identity(config.identity)
         .scope(config.scope)
         .profile(fixture.profile)
-        .store_platform(platform.clone())
+        .store(platform.clone())
         .clock(Arc::new(FixedReplayClock {
             now_secs: config.now_secs,
         }))
@@ -101,7 +101,7 @@ pub fn run_replay_fixture(
         }
     }
 
-    let snapshot = platform.export_store_snapshot()?;
+    let snapshot = platform.export_replay_snapshot()?;
     report.state_fingerprint = snapshot.state_fingerprint();
     report.event_fingerprint = snapshot.event_fingerprint();
     Ok(report.finish(&fixture.expected))
@@ -132,6 +132,7 @@ fn run_operation(
         }
         ReplayOperation::Recall { query, limit } => {
             let report = runtime.recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: query.clone(),
                 limit: *limit,
                 tool_registry_refs: Vec::new(),
@@ -157,6 +158,7 @@ fn run_operation(
             system_max_len,
         } => {
             let report = runtime.project(MemoryProjectionRequest {
+                structured_query_facets: Vec::new(),
                 user_query: user_query.clone(),
                 system_max_len: *system_max_len,
                 recent_messages_limit: 8,

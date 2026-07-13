@@ -38,8 +38,8 @@ assert_tree_includes() {
 cargo fmt --all -- --check
 bash scripts/check_profile_matrix.sh
 
-cargo test -p bm-core --test dependency_feature_contract --no-default-features --features profile-server-linux-dev-full,replay-harness
-cargo test -p bm-sdk --test capability_catalog --no-default-features --features replay-harness
+cargo test -p bm-core --test dependency_feature_contract --no-default-features --features profile-server-linux-dev-full,nonproduction-replay-harness
+cargo test -p bm-sdk --no-default-features --features nonproduction-replay-harness --test capability_catalog
 
 cargo test -p bm-replay --all-features
 cargo test -p bm-evolve --all-features

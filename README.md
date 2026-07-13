@@ -13,7 +13,8 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Area | Crates |
 | --- | --- |
 | SDK and memory core | `bm-sdk`, `bm-core` |
-| Storage | `bm-store` |
+| Persistence kernel | Private `bm-sdk` module behind the opaque `MemoryStoreHandle` |
+| Persistence contract tests | `bm-store-contract-tests` (development acceptance only) |
 | Replay and proposal sandbox | `bm-replay`, `bm-evolve` |
 | Protocol contract and entry runtime | `bm-adapter`, `bm-entry` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
@@ -56,19 +57,19 @@ After publishing, use the crate version instead of a path dependency.
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRuntime, MemoryScope, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
-    StorePlatform,
+    MemoryStoreHandle, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    StoreBackendConfig,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
     let profile = ProfileId::DesktopMacosEmbeddedSdk;
-    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+    let store = MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile)?)?;
 
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
-        .store_platform(store)
+        .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(
             "./skills",
             "host-project",
@@ -94,6 +95,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     let recall = runtime.recall(MemoryRecallRequest {
         query: "release artifacts".to_string(),
         limit: 4,
+        structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
     assert!(!recall.procedural_hits.is_empty());
@@ -104,6 +106,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         recent_messages_limit: 8,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
+        structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
     assert!(projection.system_memory_block.len() <= 4096);

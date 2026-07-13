@@ -54,9 +54,9 @@ fn workbench_api_map_is_entry_owned_and_private_raw_closed() {
             "vault_migration",
         ]
     );
-    #[cfg(feature = "replay-harness")]
+    #[cfg(feature = "nonproduction-replay-harness")]
     assert!(map.missing_report_apis.is_empty());
-    #[cfg(not(feature = "replay-harness"))]
+    #[cfg(not(feature = "nonproduction-replay-harness"))]
     assert_eq!(
         map.missing_report_apis,
         vec!["sdk.replay.memory_benchmark_report".to_string()]
@@ -87,12 +87,12 @@ fn workbench_report_exposes_real_runtime_reports_without_private_raw_surfaces() 
     assert_eq!(report.api_map.surfaces.len(), 8);
     assert_eq!(report.facet_inspector.status.status, "ready");
     assert!(report.facet_inspector.report_only);
-    assert_eq!(report.facet_inspector.direct_mutation_allowed, false);
+    assert!(!report.facet_inspector.direct_mutation_allowed);
     assert_eq!(
         report.facet_inspector.audit_markdown_format,
         "obsidian-style-facet-audit-markdown"
     );
-    #[cfg(feature = "replay-harness")]
+    #[cfg(feature = "nonproduction-replay-harness")]
     {
         assert!(report.benchmark_wall.report.is_some());
         let benchmark = report
@@ -104,7 +104,7 @@ fn workbench_report_exposes_real_runtime_reports_without_private_raw_surfaces() 
         assert!(benchmark.soul_kernel_judge.release_gate_passed);
         assert!(benchmark.subject_projection_judge.release_gate_passed);
     }
-    #[cfg(not(feature = "replay-harness"))]
+    #[cfg(not(feature = "nonproduction-replay-harness"))]
     {
         assert!(report.benchmark_wall.report.is_none());
         assert_eq!(report.benchmark_wall.status.status, "limited");

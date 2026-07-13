@@ -1,3 +1,6 @@
+use crate::store_internal::{
+    StoreMutationBudgetReport, StoreSnapshotExportReport, StoreSnapshotImportReport,
+};
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
     CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, DerivedMemoryRef,
@@ -11,7 +14,7 @@ use bm_core::memory::{
     MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryProjectionImpactReport,
     PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateMaterialRedactionReport,
     ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck,
-    RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
+    QueryFacetInput, RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
     SubjectProjectionReport, SubjectScopedRuntime, TranscriptAttrEnvelope,
     TranscriptAttrWriteRejection, TranscriptCommitReport, TranscriptEvidenceRef,
     TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRedactionReportItem,
@@ -20,7 +23,8 @@ use bm_core::memory::{
 use bm_core::memory::{
     CompactMemoryGraph, EvidenceBacklink, FacetCoverageSelectionReport, FacetRankFusionReport,
     GraphRecallCandidateScore, GraphRecallExpansionBudgetReport, GraphRecallRerankReport,
-    MemoryGraphEdge, MemoryGraphNode, TemporalMemoryGraphGateReport,
+    MemoryGraphEdge, MemoryGraphNode, RecallDeliverySelectionDropReason,
+    TemporalMemoryGraphGateReport,
 };
 use bm_core::skills::{
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentSkillRecallHit,
@@ -32,14 +36,13 @@ use bm_core::{
     budget::{RuntimeBudgetReport, RuntimeRetentionQuotaReport},
     feature_gate::ProfileId,
 };
-use bm_store::StoreMutationBudgetReport;
 
 use crate::{
     ContinuitySnapshot, ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome,
     IntelligenceReplayInspection, MemoryCapabilityCatalog, ParsedLongTermMemoryExtraction,
     PostReplyMemoryMaintenanceOutcome, PromptMemoryContext, RuntimeSkillHit,
     RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteOutcome, RuntimeSkillWriteSource,
-    StoreSnapshot, StoreSnapshotExportReport, StoreSnapshotImportReport, WorkingRecallInspection,
+    StoreSnapshot, WorkingRecallInspection,
 };
 use crate::{
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleModeInput, RuntimeLifecycleReport,
@@ -251,6 +254,7 @@ pub struct MemoryWriteTransactionReport {
 pub struct MemoryRecallRequest {
     pub query: String,
     pub limit: usize,
+    pub structured_query_facets: Vec<QueryFacetInput>,
     pub tool_registry_refs: Vec<AgentToolRegistryRef>,
 }
 
@@ -271,6 +275,7 @@ pub struct MemoryEvalRecallRequest {
     pub include_score_breakdown: bool,
     pub include_missing_evidence: bool,
     pub benchmark_context: Option<MemoryEvalRecallBenchmarkContext>,
+    pub structured_query_facets: Vec<QueryFacetInput>,
     pub tool_registry_refs: Vec<AgentToolRegistryRef>,
 }
 
@@ -281,6 +286,124 @@ pub struct MemoryEvalRecallCandidate {
     pub evidence_refs: Vec<String>,
     pub graph_neighbor_ids: Vec<String>,
     pub score_breakdown: GraphRecallCandidateScore,
+}
+
+pub const MEMORY_RECALL_DELIVERY_SCHEMA_VERSION: u32 = 2;
+pub const MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryEvidenceRefVisibility {
+    PublicCitation,
+    GovernedOpaque,
+    Redacted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvidenceRefView {
+    pub visibility: MemoryEvidenceRefVisibility,
+    pub reference: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub type MemoryRecallSelectionDropReason = RecallDeliverySelectionDropReason;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryRecallRenderDropReason {
+    CapsuleBudgetExhausted,
+    CitationMissing,
+    DuplicateCapsuleGroup,
+    OwnerRecordUnavailable,
+    PrivateRawRedacted,
+    RenderBudgetExhausted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryRecallSelectionDecision {
+    pub candidate_id: String,
+    pub canonical_evidence_groups: Vec<String>,
+    pub evidence_family_groups: Vec<String>,
+    pub selected: bool,
+    pub drop_reason: Option<MemoryRecallSelectionDropReason>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryRenderedEvidenceCapsule {
+    pub candidate_id: String,
+    pub content: String,
+    pub evidence_ref_views: Vec<MemoryEvidenceRefView>,
+    pub visible_evidence_refs: Vec<String>,
+    pub canonical_evidence_groups: Vec<String>,
+    pub source_locator_view: MemoryEvidenceRefView,
+    pub observed_at: u64,
+    pub valid_from: Option<u64>,
+    pub valid_until: Option<u64>,
+    pub facet_summary: String,
+    pub redaction_state: String,
+    pub shared_fact_surface_allowed: bool,
+    pub rendered_chars: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryRecallRenderDecision {
+    pub candidate_id: String,
+    pub rendered: bool,
+    pub drop_reason: Option<MemoryRecallRenderDropReason>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryRecallDeliveryReport {
+    pub schema_version: u32,
+    pub owner: String,
+    pub selection_strategy: String,
+    pub render_strategy: String,
+    pub requested_limit: usize,
+    pub profile_selected_ceiling: usize,
+    pub loss_ledger_entry_ceiling: usize,
+    pub governed_candidate_count: usize,
+    pub redacted_candidate_count: usize,
+    pub selected_candidate_ids: Vec<String>,
+    pub selection_decisions: Vec<MemoryRecallSelectionDecision>,
+    pub covered_evidence_family_groups: Vec<String>,
+    pub rendered_capsules: Vec<MemoryRenderedEvidenceCapsule>,
+    pub render_decisions: Vec<MemoryRecallRenderDecision>,
+    pub render_budget_chars: usize,
+    pub rendered_chars: usize,
+    pub render_growth: usize,
+    pub integrity_failures: Vec<String>,
+    pub delivery_drop_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvalRecallLossEntry {
+    pub evidence_ref: MemoryEvidenceRefView,
+    pub canonical_evidence_group: String,
+    pub expanded_rank: Option<usize>,
+    pub reranked_rank: Option<usize>,
+    pub selected_rank: Option<usize>,
+    pub rendered_rank: Option<usize>,
+    pub selection_drop_reason: Option<MemoryRecallSelectionDropReason>,
+    pub render_drop_reason: Option<MemoryRecallRenderDropReason>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallEvidenceGroupCoverage {
+    pub selected_groups: Vec<String>,
+    pub rendered_groups: Vec<String>,
+    pub missing_selected_groups: Vec<String>,
+    pub missing_rendered_groups: Vec<String>,
+    pub duplicate_selected_group_count: usize,
+    pub duplicate_rendered_group_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallLossLedger {
+    pub expanded_hit_selected_miss: Vec<MemoryEvalRecallLossEntry>,
+    pub selected_hit_rendered_miss: Vec<MemoryEvalRecallLossEntry>,
+    pub canonical_evidence_group_coverage: MemoryEvalRecallEvidenceGroupCoverage,
+    pub render_budget_chars: usize,
+    pub rendered_chars: usize,
+    pub truncated_count: usize,
+    pub blocked_reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -317,10 +440,18 @@ pub struct MemoryFacetRecallIndexReport {
     pub fallback_full_scan: bool,
     pub source_candidate_count: usize,
     pub matched_source_candidate_count: usize,
-    pub exact_facet_doc_count: usize,
-    pub expanded_facet_doc_count: usize,
+    pub posting_key_lookup_count: usize,
+    pub manifest_matched_posting_count: usize,
+    pub posting_doc_read_count: usize,
+    pub owner_key_lookup_count: usize,
+    pub owner_doc_read_count: usize,
+    pub exact_facet_match_count: usize,
+    pub expanded_facet_match_count: usize,
     pub exact_facet_candidate_ids: Vec<String>,
     pub expanded_facet_candidate_ids: Vec<String>,
+    pub manifest_owner_doc_count: usize,
+    pub manifest_posting_doc_count: usize,
+    pub manifest_integrity_verified: bool,
     pub index_revision: Option<String>,
     pub render_growth: usize,
     pub failures: Vec<String>,
@@ -341,12 +472,48 @@ pub struct MemoryEvalRecallFacetStageDiagnostics {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalRecallCandidateEvidenceBinding {
+    pub candidate_id: String,
+    pub canonical_evidence_groups: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryEvalRecallAblationSlice {
     pub name: String,
     pub feature_enabled: bool,
     pub report_available: bool,
-    pub contribution_proven: bool,
-    pub affected_candidate_count: usize,
+    pub delivery_contribution_proven: bool,
+    pub delivery_affected_candidate_count: usize,
+    pub selected_evidence_hit_delta: i64,
+    pub rendered_evidence_hit_delta: i64,
+    pub selected_all_hit_lost: bool,
+    pub rendered_all_hit_lost: bool,
+    pub baseline_selected_evidence_refs: Vec<String>,
+    pub off_run_selected_evidence_refs: Vec<String>,
+    pub baseline_rendered_evidence_refs: Vec<String>,
+    pub off_run_rendered_evidence_refs: Vec<String>,
+    pub baseline_selected_candidate_ids: Vec<String>,
+    pub off_run_selected_candidate_ids: Vec<String>,
+    pub baseline_rendered_candidate_ids: Vec<String>,
+    pub off_run_rendered_candidate_ids: Vec<String>,
+    pub baseline_selected_candidate_bindings: Vec<MemoryEvalRecallCandidateEvidenceBinding>,
+    pub off_run_selected_candidate_bindings: Vec<MemoryEvalRecallCandidateEvidenceBinding>,
+    pub baseline_rendered_candidate_bindings: Vec<MemoryEvalRecallCandidateEvidenceBinding>,
+    pub off_run_rendered_candidate_bindings: Vec<MemoryEvalRecallCandidateEvidenceBinding>,
+    pub baseline_expanded_candidate_count: usize,
+    pub off_run_expanded_candidate_count: usize,
+    pub baseline_selected_candidate_count: usize,
+    pub off_run_selected_candidate_count: usize,
+    pub baseline_rendered_candidate_count: usize,
+    pub off_run_rendered_candidate_count: usize,
+    pub baseline_rendered_chars: usize,
+    pub off_run_rendered_chars: usize,
+    pub baseline_render_growth: usize,
+    pub off_run_render_growth: usize,
+    pub expanded_candidate_delta: i64,
+    pub selected_candidate_delta: i64,
+    pub rendered_candidate_delta: i64,
+    pub rendered_char_delta: i64,
     pub render_growth: usize,
     pub blocked_reasons: Vec<String>,
 }
@@ -356,7 +523,7 @@ pub struct MemoryEvalRecallAblationReport {
     pub method: String,
     pub required_slices: Vec<String>,
     pub slices: Vec<MemoryEvalRecallAblationSlice>,
-    pub contribution_proven: bool,
+    pub delivery_contribution_proven: bool,
     pub render_growth: usize,
     pub blocked_reasons: Vec<String>,
 }
@@ -387,6 +554,7 @@ pub struct MemoryEvalRecallStageDiagnostics {
     pub selected_candidate_ids: Vec<String>,
     pub rendered_candidate_ids: Vec<String>,
     pub rendered_evidence_refs: Vec<String>,
+    pub loss_ledger: MemoryEvalRecallLossLedger,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -426,6 +594,15 @@ pub struct MemoryGraphRecallIndexReport {
     pub owner: String,
     pub used: bool,
     pub fallback_full_scan: bool,
+    pub manifest_contract_verified: bool,
+    pub selected_dependency_chain_verified: bool,
+    pub full_scope_closure_verified: bool,
+    pub manifest_generation: Option<u64>,
+    pub graph_revision: Option<String>,
+    pub scope_digest: String,
+    pub maintenance_required: bool,
+    pub incident_token: Option<String>,
+    pub read_path_mutation_delta: usize,
     pub source_candidate_count: usize,
     pub matched_source_anchor_count: usize,
     pub source_anchor_ids: Vec<String>,
@@ -433,7 +610,6 @@ pub struct MemoryGraphRecallIndexReport {
     pub expanded_node_ids: Vec<String>,
     pub indexed_neighbor_count: usize,
     pub index_doc_count: usize,
-    pub index_revision: Option<String>,
     pub filtered_node_count: usize,
     pub filtered_edge_count: usize,
     pub filtered_backlink_count: usize,
@@ -453,6 +629,7 @@ pub struct MemoryEvalRecallReport {
     pub selected_candidates: Vec<MemoryEvalRecallCandidate>,
     pub rendered_candidates: Vec<MemoryEvalRecallCandidate>,
     pub rendered_block_preview: String,
+    pub delivery_report: MemoryRecallDeliveryReport,
     pub evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,
     pub stage_diagnostics: MemoryEvalRecallStageDiagnostics,
     pub metrics: MemoryEvalRecallMetrics,
@@ -487,8 +664,37 @@ pub struct TemporalMemoryGraphMutationReport {
     pub backlink_count: usize,
     pub revision_count: usize,
     pub index_count: usize,
-    pub index_revision: Option<String>,
+    pub manifest_generation: Option<u64>,
+    pub graph_revision: Option<String>,
+    pub scope_digest: String,
     pub gate_failures: Vec<String>,
+    pub transaction: Option<MemoryWriteTransactionReport>,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryGraphIntegrityMaintenanceRequest {
+    pub expected_manifest_generation: u64,
+    pub incident_token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryGraphIntegrityMaintenanceReport {
+    pub accepted: bool,
+    pub committed: bool,
+    pub manifest_integrity_verified: bool,
+    pub expected_manifest_generation: u64,
+    pub observed_manifest_generation: Option<u64>,
+    pub manifest_generation: Option<u64>,
+    pub graph_revision: Option<String>,
+    pub scope_digest: String,
+    pub maintenance_required: bool,
+    pub incident_token: Option<String>,
+    pub removed_node_count: usize,
+    pub removed_edge_count: usize,
+    pub removed_backlink_count: usize,
+    pub retained_shared_backlink_count: usize,
+    pub failures: Vec<String>,
     pub transaction: Option<MemoryWriteTransactionReport>,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
@@ -511,6 +717,8 @@ pub struct MemoryRecallReport {
     pub graph_gate: TemporalMemoryGraphGateReport,
     pub graph_candidate_evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,
     pub compact_graph: CompactMemoryGraph,
+    pub delivery_report: MemoryRecallDeliveryReport,
+    pub store_snapshot_consistent: bool,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -521,6 +729,7 @@ pub struct MemoryProjectionRequest {
     pub recent_messages_limit: usize,
     pub pressure: crate::PressureLevel,
     pub mode_input: RuntimeLifecycleModeInput,
+    pub structured_query_facets: Vec<QueryFacetInput>,
     pub tool_registry_refs: Vec<AgentToolRegistryRef>,
 }
 
@@ -540,6 +749,24 @@ pub struct LLMRuntimeProjectionEnvelope {
     pub operator_audit_excluded_source_ids: Vec<String>,
     pub section_names: Vec<String>,
     pub rendered_block: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryProjectionSurfaceSet {
+    pub prompt: String,
+    pub ui_api: String,
+    pub operator_raw: String,
+    pub gateway_raw_audit: String,
+    pub shared_fact_surface: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrivateDisclosureSurfaceReport {
+    pub surface: String,
+    pub protected_exact_echo_count: u32,
+    pub forbidden_marker_count: u32,
+    pub violation_count: u32,
+    pub passed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -571,6 +798,32 @@ pub struct RuntimeProjectionSourceBlock {
     pub content: String,
     pub evidence_refs: Vec<String>,
     pub protected: bool,
+    pub shared_fact_surface_allowed: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryProjectionDeliveryDigestContentEntry {
+    pub candidate_id: String,
+    pub content_sha256: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryProjectionDeliveryDigestEntry {
+    pub candidate_id: String,
+    pub source_block_sha256: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryProjectionDeliveryDigestManifest {
+    pub schema_version: u32,
+    pub system_memory_block_sha256: String,
+    pub capsule_entries: Vec<MemoryProjectionDeliveryDigestContentEntry>,
+    pub governed_block_entries: Vec<MemoryProjectionDeliveryDigestContentEntry>,
+    pub prompt_visible_entries: Vec<MemoryProjectionDeliveryDigestContentEntry>,
+    pub deterministic_envelope_sha256: String,
+    pub exact_render_match: bool,
+    pub candidate_receipts: Vec<MemoryProjectionDeliveryDigestEntry>,
+    pub integrity_failures: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -585,6 +838,7 @@ pub struct WorkIntegrityReport {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrivateDisclosureIntegrityReport {
     pub checked_surfaces: Vec<String>,
+    pub surface_reports: Vec<PrivateDisclosureSurfaceReport>,
     pub blocked_source_ids: Vec<String>,
     pub redacted_source_ids: Vec<String>,
     pub raw_private_violation_count: u32,
@@ -596,11 +850,15 @@ pub struct MemoryProjectionReport {
     pub context: PromptMemoryContext,
     pub audit: MemoryProjectionAuditReport,
     pub runtime_projection: LLMRuntimeProjectionEnvelope,
+    pub projection_surfaces: MemoryProjectionSurfaceSet,
     pub life_projection: SoulLifeProjectionReport,
     pub work_integrity: WorkIntegrityReport,
     pub subject_projection: SubjectProjectionReport,
     pub projection_faithfulness: ProjectionFaithfulnessCheck,
+    pub delivery_digest_manifest: MemoryProjectionDeliveryDigestManifest,
     pub private_disclosure_integrity: PrivateDisclosureIntegrityReport,
+    pub recall_delivery_report: MemoryRecallDeliveryReport,
+    pub graph_index_report: MemoryGraphRecallIndexReport,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -672,6 +930,7 @@ pub struct MemoryMaintenanceRequest {
 pub struct MemoryMaintenanceReport {
     pub report: Option<PostReplyMemoryMaintenanceOutcome>,
     pub long_term_refresh_enqueued: bool,
+    pub transaction: Option<MemoryWriteTransactionReport>,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -728,6 +987,7 @@ pub struct MemoryRetentionCompactionReport {
     pub destructive_deletes_performed: bool,
     pub host_direct_deletion_allowed: Option<bool>,
     pub fail_closed_repair: bool,
+    pub transaction: Option<MemoryWriteTransactionReport>,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -883,6 +1143,7 @@ pub struct MemoryImportRequest {
 #[derive(Clone, Debug)]
 pub struct MemoryImportReport {
     pub outcome: ContinuitySnapshotImportOutcome,
+    pub transaction: Option<MemoryWriteTransactionReport>,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -895,15 +1156,52 @@ pub struct MemorySpaceExportRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceExportReport {
     pub memory_space_id: String,
-    pub snapshot: StoreSnapshot,
+    pub archive: MemorySpaceArchive,
     pub export_report: StoreSnapshotExportReport,
     pub privacy_redactions: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct MemorySpaceArchive {
+    snapshot: StoreSnapshot,
+}
+
+impl MemorySpaceArchive {
+    pub(crate) fn from_snapshot(snapshot: StoreSnapshot) -> Self {
+        Self { snapshot }
+    }
+
+    pub(crate) fn snapshot(&self) -> &StoreSnapshot {
+        &self.snapshot
+    }
+
+    pub(crate) fn into_snapshot(self) -> StoreSnapshot {
+        self.snapshot
+    }
+
+    pub fn contains_json_namespace(&self, namespace: &str) -> bool {
+        self.snapshot
+            .json_docs
+            .iter()
+            .any(|doc| doc.namespace == namespace)
+    }
+
+    pub fn json_doc_count(&self) -> usize {
+        self.snapshot.json_docs.len()
+    }
+
+    pub fn contains_event_plane(&self, plane: &str) -> bool {
+        self.snapshot
+            .events
+            .iter()
+            .any(|event| event.plane == plane)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceImportRequest {
     pub memory_space_id: String,
-    pub snapshot: StoreSnapshot,
+    pub archive: MemorySpaceArchive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -918,7 +1216,7 @@ pub struct MemorySpaceMigratePreviewRequest {
     pub target_memory_space_id: String,
     pub source_profile: ProfileId,
     pub target_profile: ProfileId,
-    pub snapshot: StoreSnapshot,
+    pub archive: MemorySpaceArchive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -953,7 +1251,7 @@ pub struct MemorySpaceMigrationManifest {
     pub conflict_risk: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceMigratePreviewReport {
     pub source_memory_space_id: String,
     pub target_memory_space_id: String,
@@ -969,13 +1267,19 @@ pub struct MemorySpaceMigratePreviewReport {
     pub vault_manifest: VaultManifest,
     pub vault_redaction: PrivateMaterialRedactionReport,
     pub vault_preflight: VaultMigrationPreflight,
+    pub plan: MemorySpaceMigrationPlan,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySpaceMigrationPlan {
+    pub(crate) target_memory_space_id: String,
+    pub(crate) snapshot: StoreSnapshot,
+    pub(crate) preflight: VaultMigrationPreflight,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceMigrateApplyRequest {
-    pub target_memory_space_id: String,
-    pub snapshot: StoreSnapshot,
-    pub preflight: VaultMigrationPreflight,
+    pub plan: MemorySpaceMigrationPlan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -997,6 +1301,7 @@ pub struct MemoryRecoverRequest {
 
 pub struct MemoryRecoverReport {
     pub report: crate::SoulKernelRecoveryReport,
+    pub transaction: Option<MemoryWriteTransactionReport>,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 

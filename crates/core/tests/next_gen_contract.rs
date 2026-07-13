@@ -496,7 +496,7 @@ fn temporal_memory_graph_builder_creates_nodes_edges_and_graph_rerank_report() {
     );
 
     assert_eq!(
-        rerank.selected_ids.first().map(String::as_str),
+        rerank.reranked_candidate_ids.first().map(String::as_str),
         Some("fact:device-target:new")
     );
     assert_eq!(rerank.stale_false_positive_count, 1);
@@ -607,7 +607,7 @@ fn temporal_memory_graph_expansion_budget_blocks_second_hop_until_profile_allows
 }
 
 #[test]
-fn temporal_memory_graph_recall_index_carries_two_hop_neighbors_and_evidence() {
+fn temporal_memory_graph_recall_index_carries_two_hop_membership_dependencies() {
     let graph = bm_core::memory::build_temporal_memory_graph_from_parts(
         vec![
             graph_node("fact:seed", MemoryGraphNodeKind::MemoryRecord, "Seed fact"),
@@ -643,39 +643,39 @@ fn temporal_memory_graph_recall_index_carries_two_hop_neighbors_and_evidence() {
         ],
     );
 
-    let indexes = bm_core::memory::build_memory_graph_recall_index_docs(
-        "bm-core-test",
-        "revision:test",
+    let persistence = bm_core::memory::build_memory_graph_persistence_plan(
         "memory-space:test",
         "subject:test",
-        &graph.nodes,
-        &graph.edges,
-        &graph.backlinks,
+        1,
+        graph.nodes.clone(),
+        graph.edges.clone(),
+        graph.backlinks.clone(),
+        graph
+            .nodes
+            .iter()
+            .map(|node| bm_core::memory::MemoryGraphOwnerBinding {
+                owner_record_id: node.node_id.clone(),
+                owner_revision: 1,
+                visible: true,
+            })
+            .collect(),
     );
+    assert!(persistence.accepted, "{:?}", persistence.failures);
 
-    let seed_index = indexes
+    let seed_index = persistence
+        .recall_indexes
         .iter()
         .find(|index| index.source_anchor_id == "fact:seed")
         .expect("seed index");
-    assert!(seed_index
-        .neighbor_node_ids
-        .iter()
-        .any(|node_id| node_id == "fact:first-hop"));
-    assert!(seed_index
-        .neighbor_node_ids
-        .iter()
-        .any(|node_id| node_id == "fact:second-hop"));
-    assert!(seed_index
-        .edge_ids
-        .iter()
-        .any(|edge_id| edge_id == "edge:first:second"));
-    assert!(seed_index
-        .evidence_refs
-        .iter()
-        .any(|evidence_ref| evidence_ref == "turn:second-hop"));
-    assert!(seed_index.evidence_backlink_keys.iter().any(|key| {
-        key == &bm_core::memory::memory_graph_backlink_key("turn_ledger", "turn:second-hop")
-    }));
+    assert_eq!(seed_index.node_count, 3);
+    assert_eq!(seed_index.edge_count, 2);
+    assert_eq!(seed_index.backlink_count, 3);
+    assert_eq!(seed_index.node_memberships.len(), 3);
+    assert_eq!(seed_index.edge_memberships.len(), 2);
+    assert_eq!(seed_index.backlink_memberships.len(), 3);
+    assert!(!serde_json::to_string(seed_index)
+        .expect("index json")
+        .contains("turn:second-hop"));
 }
 
 #[test]
@@ -1081,7 +1081,7 @@ fn temporal_memory_graph_rerank_penalizes_valid_until_and_superseded_by_without_
     assert!(old_score.stale_superseded_penalty > 0);
     assert_eq!(new_score.stale_superseded_penalty, 0);
     assert_eq!(
-        report.selected_ids.first().map(String::as_str),
+        report.reranked_candidate_ids.first().map(String::as_str),
         Some("fact:new-target")
     );
 }

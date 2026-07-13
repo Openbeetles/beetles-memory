@@ -257,96 +257,6 @@ fn platform_profiles() -> &'static [bm_sdk::ProfileId] {
     ]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    struct EnvRestore {
-        key: &'static str,
-        old: Option<std::ffi::OsString>,
-    }
-
-    impl EnvRestore {
-        fn new(key: &'static str) -> Self {
-            Self {
-                key,
-                old: std::env::var_os(key),
-            }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            if let Some(value) = self.old.as_ref() {
-                std::env::set_var(self.key, value);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
-    fn clear_store_env() -> Vec<EnvRestore> {
-        let guards = vec![
-            EnvRestore::new("BM_MEMORY_STORE_FILE"),
-            EnvRestore::new("BM_MEMORY_STORE_SQLITE"),
-            EnvRestore::new("BM_MEMORY_STORE_MEMORY"),
-        ];
-        std::env::remove_var("BM_MEMORY_STORE_FILE");
-        std::env::remove_var("BM_MEMORY_STORE_SQLITE");
-        std::env::remove_var("BM_MEMORY_STORE_MEMORY");
-        guards
-    }
-
-    fn store_env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
-
-    #[test]
-    fn mcp_server_requires_explicit_store_backend() {
-        let _lock = store_env_lock();
-        let _guards = clear_store_env();
-        let error = McpServerOptions::parse(std::iter::empty(), false)
-            .expect_err("store backend must be explicit");
-        assert!(error.contains("explicit"), "{error}");
-    }
-
-    #[test]
-    fn mcp_server_rejects_relative_persistent_store_path() {
-        let _lock = store_env_lock();
-        let _guards = clear_store_env();
-        let error = McpServerOptions::parse(
-            vec!["--store-file".to_string(), "target/mcp-store".to_string()].into_iter(),
-            false,
-        )
-        .expect_err("relative file store path must fail");
-        assert!(error.contains("absolute"), "{error}");
-
-        let error = McpServerOptions::parse(
-            vec![
-                "--store-sqlite".to_string(),
-                "target/mcp.sqlite3".to_string(),
-            ]
-            .into_iter(),
-            false,
-        )
-        .expect_err("relative sqlite store path must fail");
-        assert!(error.contains("absolute"), "{error}");
-    }
-
-    #[test]
-    fn mcp_server_accepts_explicit_volatile_memory_store() {
-        let _lock = store_env_lock();
-        let _guards = clear_store_env();
-        let options =
-            McpServerOptions::parse(vec!["--store-memory".to_string()].into_iter(), false)
-                .expect("explicit memory store should be accepted");
-        assert_eq!(options.store_backend, bm_sdk::StoreBackendKind::InMemory);
-        assert_eq!(options.store_path, None);
-    }
-}
-
 #[cfg(feature = "server-stdio")]
 fn run_stdio(options: McpServerOptions) -> Result<(), String> {
     use std::io::{BufRead, Cursor};
@@ -472,5 +382,95 @@ fn store_label(backend: bm_sdk::StoreBackendKind, path: Option<&std::path::Path>
             path.map(|path| path.display().to_string())
                 .unwrap_or_else(|| "<missing>".to_string())
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                old: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = self.old.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn clear_store_env() -> Vec<EnvRestore> {
+        let guards = vec![
+            EnvRestore::new("BM_MEMORY_STORE_FILE"),
+            EnvRestore::new("BM_MEMORY_STORE_SQLITE"),
+            EnvRestore::new("BM_MEMORY_STORE_MEMORY"),
+        ];
+        std::env::remove_var("BM_MEMORY_STORE_FILE");
+        std::env::remove_var("BM_MEMORY_STORE_SQLITE");
+        std::env::remove_var("BM_MEMORY_STORE_MEMORY");
+        guards
+    }
+
+    fn store_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn mcp_server_requires_explicit_store_backend() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let error = McpServerOptions::parse(std::iter::empty(), false)
+            .expect_err("store backend must be explicit");
+        assert!(error.contains("explicit"), "{error}");
+    }
+
+    #[test]
+    fn mcp_server_rejects_relative_persistent_store_path() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let error = McpServerOptions::parse(
+            vec!["--store-file".to_string(), "target/mcp-store".to_string()].into_iter(),
+            false,
+        )
+        .expect_err("relative file store path must fail");
+        assert!(error.contains("absolute"), "{error}");
+
+        let error = McpServerOptions::parse(
+            vec![
+                "--store-sqlite".to_string(),
+                "target/mcp.sqlite3".to_string(),
+            ]
+            .into_iter(),
+            false,
+        )
+        .expect_err("relative sqlite store path must fail");
+        assert!(error.contains("absolute"), "{error}");
+    }
+
+    #[test]
+    fn mcp_server_accepts_explicit_volatile_memory_store() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let options =
+            McpServerOptions::parse(vec!["--store-memory".to_string()].into_iter(), false)
+                .expect("explicit memory store should be accepted");
+        assert_eq!(options.store_backend, bm_sdk::StoreBackendKind::InMemory);
+        assert_eq!(options.store_path, None);
     }
 }

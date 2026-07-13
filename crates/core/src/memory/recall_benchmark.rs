@@ -144,8 +144,8 @@ mod tests {
         inspect_archive_recall, inspect_runtime_skill_recall, inspect_shared_factual_recall,
         inspect_task_recall, ArchiveRecordSource, LongTermMemoryConfidence, LongTermMemoryEntry,
         LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-        LongTermMemorySourceType, MemoryProfile, MemoryStore, SessionMessage, SessionStore,
-        TurnLedger, TurnLedgerStatus, TurnLedgerStore,
+        LongTermMemorySourceType, MemoryPrivacyClass, MemoryProfile, MemoryStore, SessionMessage,
+        SessionStore, TurnLedger, TurnLedgerStatus, TurnLedgerStore,
     };
     use crate::platform::SkillStorage;
     use crate::skills::{
@@ -573,6 +573,7 @@ mod tests {
             .push(LongTermMemoryEntry {
                 id: "fact:network_setup".to_string(),
                 kind: LongTermMemoryKind::Fact,
+                privacy: MemoryPrivacyClass::SharedWithSubject,
                 topic: "network setup".to_string(),
                 content: "The user's network setup issue is usually a stale DHCP lease."
                     .to_string(),
@@ -584,12 +585,14 @@ mod tests {
                 freshness: LongTermMemoryFreshness::Dynamic,
                 stale_hint: crate::memory::LongTermMemoryStaleHint::ReviewBeforeUse,
                 supporting_citations: vec!["daily_note:2026-04-06.md".to_string()],
+                canonical_entities: Vec::new(),
                 evidence_count: 2,
                 created_at: 100,
                 updated_at: 120,
                 observed_at: 120,
                 last_confirmed_at: 120,
-                source_revision: 1,
+                source_revision: Some(1),
+                owner_revision: 1,
                 last_used_at: 0,
             });
 

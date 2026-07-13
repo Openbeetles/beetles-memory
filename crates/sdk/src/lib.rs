@@ -1,43 +1,73 @@
 //! Public SDK facade for Beetle Memory.
+//!
+//! Raw persistence capabilities are deliberately absent from the host API.
+//!
+//! ```compile_fail
+//! use bm_store::StoreMutationBatch;
+//!
+//! fn main() {
+//!     let _: Option<StoreMutationBatch> = None;
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use bm_sdk::{Platform, StorePlatform, StoreSnapshot};
+//!
+//! fn main() {
+//!     let _: Option<(StorePlatform, StoreSnapshot)> = None;
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use bm_sdk::MemorySpaceMigrateApplyRequest;
+//!
+//! fn main() {
+//!     let MemorySpaceMigrateApplyRequest { snapshot, .. } = todo!();
+//!     let _ = snapshot;
+//! }
+//! ```
+
+#[cfg(all(
+    feature = "nonproduction-replay-harness",
+    any(
+        feature = "profile-esp-standalone-memory",
+        feature = "profile-esp-embedded-sdk",
+        feature = "profile-linux-device-standalone-memory",
+        feature = "profile-desktop-macos-standalone-memory",
+        feature = "profile-desktop-macos-embedded-sdk",
+        feature = "profile-desktop-windows-embedded-sdk",
+        feature = "profile-server-linux-memory-gateway"
+    )
+))]
+compile_error!("nonproduction-replay-harness cannot be combined with a production SDK profile");
 
 mod capability;
 mod capability_snapshot;
 mod ops;
 mod runtime;
+mod store;
+mod store_internal;
+
+pub(crate) use store_internal::*;
 
 use std::collections::BTreeMap;
 
 use bm_core::memory::MEMORY_FACET_INDEX_NAMESPACE;
+use bm_core::platform::Platform as _;
+use store_internal::{StorePlatform, StoreSnapshot};
 
 pub use bm_core::agent::{ActiveWorkKind, ActiveWorkRecord, ForegroundWorkStatus};
 pub use bm_core::budget::{
     compile_runtime_budget, AdapterRuntimeBudget, FacetRecallRuntimeBudget,
     GraphExpansionRuntimeBudget, LlmGatewayBudget, MaintenanceBudget, MemoryCoreBudget,
-    ProjectionRenderBudget, ProjectionSourceBudget, ProviderModelContextLimit, RuntimeBudgetInput,
-    RuntimeBudgetReport, RuntimeDeploymentRole, RuntimeJobBudget, StaticPlatformManifest,
-    StoreRuntimeBudget, TranscriptGovernanceBudget,
+    ProjectionRenderBudget, ProjectionSourceBudget, ProviderModelContextLimit,
+    RecallDeliveryRuntimeBudget, RuntimeBudgetInput, RuntimeBudgetReport, RuntimeDeploymentRole,
+    RuntimeJobBudget, StaticPlatformManifest, StoreRuntimeBudget, TranscriptGovernanceBudget,
 };
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, StopReason, ToolChoicePolicy,
     ToolSpec,
-};
-pub use bm_core::memory::{
-    apply_long_term_memory_extraction, build_long_term_memory_extraction_input,
-    inspect_archive_recall, inspect_continuity_capsule_recall, inspect_memory_hygiene,
-    inspect_personality_governance, inspect_runtime_skill_recall, inspect_shared_factual_recall,
-    inspect_task_recall, inspect_working_recall, load_prompt_memory_context,
-    recall_long_term_memory_block, run_post_reply_memory_maintenance,
-    search_archive_records_detailed, ContinuityCapsuleMaintenanceOutcome, ContinuitySnapshot,
-    ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome, ContinuitySnapshotMode,
-    IngressKind, IntelligenceReplayInspection, LongTermMemoryDraft, LongTermMemoryEntry,
-    LongTermMemoryKind, LongTermMemoryQuery, LongTermMemorySourceScope, MemoryHygieneInspection,
-    MemoryProfile, MemorySystemKind as MemoryRuntimeSystemKind, ParsedLongTermMemoryExtraction,
-    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostReplyMemoryMaintenanceOutcome, ProjectionSourceAuthority, PromptMemoryContext,
-    PromptMemoryContextParams, PromptParticipationPlan, PromptProjectionSource,
-    PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate, RecallPlane, RecallQuery,
-    RecallSelectionReport, WorkingRecallInspection,
 };
 pub use bm_core::memory::{
     board_subject_scope_id, default_agent_subject_id, default_memory_space_id,
@@ -72,7 +102,7 @@ pub use bm_core::memory::{
     TranscriptTurnPage, TranscriptTurnRecord,
 };
 pub use bm_core::memory::{
-    build_core_revision_diff_from_record, build_memory_graph_recall_index_docs,
+    build_core_revision_diff_from_record, build_memory_graph_persistence_plan,
     build_relationship_boundary_audit_from_constitution_audit, build_soul_compact_digest,
     build_soul_feedback_report_from_turn_ledger,
     build_soul_growth_proposal_from_core_revision_record,
@@ -84,33 +114,52 @@ pub use bm_core::memory::{
     CompactMemoryGraph, DroppedProjectionCandidate, EvidenceBacklink, FacetCoverageSelectionReport,
     FacetRankFusionCandidateReport, FacetRankFusionReport, GraphFacetPropagationContext,
     GraphRecallCandidateScore, GraphRecallExpansionBudget, GraphRecallExpansionBudgetReport,
-    GraphRecallRerankReport, MemoryAutopilotInput, MemoryGraphEdge, MemoryGraphEdgeKind,
-    MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphRecallIndexDoc,
+    GraphRecallRerankReport, MemoryAutopilotInput, MemoryGraphBacklinkMembership,
+    MemoryGraphDependencyRef, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEdgeMembership,
+    MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphNodeMembership,
+    MemoryGraphOwnerBinding, MemoryGraphPersistencePlan, MemoryGraphReadChainValidation,
+    MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
     PrivateDisclosureIntegrityGuard, PrivateMaterialRedactionReport,
     ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
     ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
-    ProjectionPrivacyDecision, RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest,
-    SoulFeedbackReport, SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport,
-    SoulRegressionSuite, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
-    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, TemporalMemoryGraphBuildReport,
-    TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest, VaultMigrationPreflight,
-    WorkbenchApiMap, WorkbenchSurface,
+    ProjectionPrivacyDecision, QueryFacetInput, RelationshipBoundaryAudit, SkillEvolutionReport,
+    SoulCompactDigest, SoulFeedbackReport, SoulGrowthDecision, SoulGrowthProposal,
+    SoulKernel2GateReport, SoulRegressionSuite, SubjectProjectionBoundaryProtocolReport,
+    SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
+    TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest,
+    VaultMigrationPreflight, WorkbenchApiMap, WorkbenchSurface, MEMORY_GRAPH_SCHEMA_VERSION,
+};
+pub use bm_core::memory::{
+    build_long_term_memory_extraction_input, inspect_archive_recall,
+    inspect_continuity_capsule_recall, inspect_memory_hygiene, inspect_personality_governance,
+    inspect_runtime_skill_recall, inspect_shared_factual_recall, inspect_task_recall,
+    inspect_working_recall, load_prompt_memory_context, recall_long_term_memory_block,
+    run_post_reply_memory_maintenance, search_archive_records_detailed,
+    ContinuityCapsuleMaintenanceOutcome, ContinuitySnapshot, ContinuitySnapshotImportMode,
+    ContinuitySnapshotImportOutcome, ContinuitySnapshotMode, IngressKind,
+    IntelligenceReplayInspection, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind,
+    LongTermMemoryQuery, LongTermMemorySourceScope, MemoryHygieneInspection, MemoryProfile,
+    MemorySystemKind as MemoryRuntimeSystemKind, ParsedLongTermMemoryExtraction,
+    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostReplyMemoryMaintenanceOutcome, ProjectionSourceAuthority, PromptMemoryContext,
+    PromptMemoryContextParams, PromptParticipationPlan, PromptProjectionSource,
+    PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate, RecallPlane, RecallQuery,
+    RecallSelectionReport, WorkingRecallInspection,
 };
 pub use bm_core::memory::{FacetReportView, MemoryFacetOwnerPlane, MemoryLongTermAffectedFacetDoc};
 pub use bm_core::orchestrator::PressureLevel;
 pub use bm_core::platform::build_memory_operator_surface as build_operator_surface;
-pub use bm_core::platform::{MemoryOperatorSurfaceSummary, Platform, ResponseBody};
+pub use bm_core::platform::{MemoryOperatorSurfaceSummary, ResponseBody};
 pub use bm_core::resource::{
     probe_host_runtime_resource, HostRuntimeResourceProbe, RuntimeResourceProbe,
     RuntimeResourceProbeSource, RuntimeResourceSnapshot, RuntimeResourceSnapshotCache,
     RuntimeResourceUnavailableReason, StaticRuntimeResourceProbe, UnavailableRuntimeResourceProbe,
 };
 pub use bm_core::runtime::{
-    ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, RuntimeForegroundSource,
-    RuntimeLifecycleAdmission, RuntimeLifecycleDiagnosisReport, RuntimeLifecycleDisposition,
-    RuntimeLifecycleModeInput, RuntimeLifecycleOperation, RuntimeLifecycleReport,
-    RuntimeLifecycleTrigger, RuntimeModeSnapshot, RuntimeObservation, SoulKernelRecoveryReport,
-    SoulKernelStatus,
+    RuntimeForegroundSource, RuntimeLifecycleAdmission, RuntimeLifecycleDiagnosisReport,
+    RuntimeLifecycleDisposition, RuntimeLifecycleModeInput, RuntimeLifecycleOperation,
+    RuntimeLifecycleReport, RuntimeLifecycleTrigger, RuntimeModeSnapshot, RuntimeObservation,
+    SoulKernelRecoveryReport, SoulKernelStatus,
 };
 pub use bm_core::skills::{
     fingerprint_agent_tool_registry, AgentSkillAccess, AgentSkillDirConfig,
@@ -133,12 +182,6 @@ pub use bm_core::skills::{
 };
 pub use bm_core::task::{TaskItem, TaskPriority, TaskQuery, TaskStatus};
 pub use bm_core::{Error, Result};
-pub use bm_store::{
-    profile_memory_system_kind, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
-    StoreBackendKind, StoreCapacityBudget, StoreEventLog, StoreEventScope, StoreOpenReport,
-    StorePathBudget, StorePlatform, StoreRepairPolicy, StoreRepairReport, StoreSnapshot,
-    StoreSnapshotExportReport, StoreSnapshotImportReport,
-};
 pub use capability::{
     resolve_memory_capabilities, AdapterTransportVisibility, MemoryAdapterCapabilityCatalog,
     MemoryAdapterCapabilityPolicy, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
@@ -157,24 +200,32 @@ pub use ops::{
     MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest,
     MemoryEvalRecallAblationReport, MemoryEvalRecallAblationSlice, MemoryEvalRecallAtK,
     MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
+    MemoryEvalRecallCandidateEvidenceBinding, MemoryEvalRecallEvidenceGroupCoverage,
     MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallFacetStageDiagnostics,
-    MemoryEvalRecallGoldRank, MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallMetrics,
-    MemoryEvalRecallPrivacyReport, MemoryEvalRecallReport, MemoryEvalRecallRequest,
-    MemoryEvalRecallStageDiagnostics, MemoryEvalRecallStageEvidenceRefs, MemoryExportReport,
-    MemoryExportRequest, MemoryFacetRecallIndexReport, MemoryGovernancePolicyMutationReport,
-    MemoryGraphRecallIndexReport, MemoryImportReport, MemoryImportRequest, MemoryInspectionReport,
-    MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
-    MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
-    MemoryMaintenanceRequest, MemoryProceduralWriteReport, MemoryProjectionAuditReport,
-    MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
-    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallReport,
-    MemoryRecallRequest, MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport,
+    MemoryEvalRecallGoldRank, MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallLossEntry,
+    MemoryEvalRecallLossLedger, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
+    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryEvalRecallStageDiagnostics,
+    MemoryEvalRecallStageEvidenceRefs, MemoryEvidenceRefView, MemoryEvidenceRefVisibility,
+    MemoryExportReport, MemoryExportRequest, MemoryFacetRecallIndexReport,
+    MemoryGovernancePolicyMutationReport, MemoryGraphIntegrityMaintenanceReport,
+    MemoryGraphIntegrityMaintenanceRequest, MemoryGraphRecallIndexReport, MemoryImportReport,
+    MemoryImportRequest, MemoryInspectionReport, MemoryInspectionRequest,
+    MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
+    MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
+    MemoryProceduralWriteReport, MemoryProjectionAuditReport,
+    MemoryProjectionDeliveryDigestContentEntry, MemoryProjectionDeliveryDigestEntry,
+    MemoryProjectionDeliveryDigestManifest, MemoryProjectionPrivateGateAudit,
+    MemoryProjectionReport, MemoryProjectionRequest, MemoryProjectionSectionAudit,
+    MemoryProjectionSourceAudit, MemoryProjectionSurfaceSet, MemoryRecallDeliveryReport,
+    MemoryRecallRenderDecision, MemoryRecallRenderDropReason, MemoryRecallReport,
+    MemoryRecallRequest, MemoryRecallSelectionDecision, MemoryRecallSelectionDropReason,
+    MemoryRecoverReport, MemoryRecoverRequest, MemoryRenderedEvidenceCapsule, MemoryReplayReport,
     MemoryReplayRequest, MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest,
-    MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
+    MemorySpaceArchive, MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
     MemorySpaceImportRequest, MemorySpaceMigrateApplyReport, MemorySpaceMigrateApplyRequest,
     MemorySpaceMigratePreviewReport, MemorySpaceMigratePreviewRequest,
-    MemorySpaceMigrationManifest, MemorySpaceMigrationPlaneReport,
+    MemorySpaceMigrationManifest, MemorySpaceMigrationPlan, MemorySpaceMigrationPlaneReport,
     MemorySpaceMigrationPrivacyReport, MemorySpaceSubjectRemapReport,
     MemoryTranscriptAttrWriteReport, MemoryTranscriptAttrWriteRequest,
     MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest, MemoryTranscriptExportReport,
@@ -182,35 +233,53 @@ pub use ops::{
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
     MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport,
-    PrivateDisclosureIntegrityReport, RuntimeDisclosureProtocolReport, RuntimeOperatorAction,
-    RuntimeOperatorActionReport, RuntimeProjectionSourceBlock, RuntimeSkillDeleteRequest,
-    RuntimeSkillDetailReport, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
-    RuntimeSkillListReport, RuntimeSkillListRequest, RuntimeSkillMutationReport,
-    RuntimeSkillSetEnabledRequest, RuntimeSkillSummary, SoulLifeProjectionReport,
-    TemporalMemoryGraphMutationReport, TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
+    PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport,
+    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    RuntimeProjectionSourceBlock, RuntimeSkillDeleteRequest, RuntimeSkillDetailReport,
+    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListReport,
+    RuntimeSkillListRequest, RuntimeSkillMutationReport, RuntimeSkillSetEnabledRequest,
+    RuntimeSkillSummary, SoulLifeProjectionReport, TemporalMemoryGraphMutationReport,
+    TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
+    MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION, MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
 };
 pub use runtime::{
     MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,
     MemoryRuntimeBuilder, MemoryRuntimeConfig, MemoryScope, NoopMemoryAuditSink, SystemMemoryClock,
 };
+pub use store::{
+    profile_memory_system_kind, MemoryStoreHandle, MemoryStoreTelemetryReport, StoreBackendConfig,
+    StoreBackendKind, StoreCapacityBudget, StoreOpenReport, StorePathBudget, StoreRepairPolicy,
+    StoreRepairReport,
+};
 
-pub fn write_procedural_memory(
-    platform: &StorePlatform,
-    writes: &[RuntimeSkillWrite],
-    source: RuntimeSkillWriteSource,
-) -> Result<RuntimeSkillWriteOutcome> {
-    let storage = platform.skill_storage();
-    bm_core::skills::write_governed_runtime_skills(storage.as_ref(), writes, source)
+#[cfg(feature = "nonproduction-replay-harness")]
+pub mod nonproduction_replay_harness {
+    pub use crate::store::ReplayStoreHarness;
+    #[cfg(feature = "sqlite-store")]
+    pub use crate::store_internal::SqliteStoreEngine;
+    pub use crate::store_internal::{
+        EmbeddedStoreEngine, FileStoreEngine, GovernedRecallSnapshot, InMemoryStoreEngine,
+        MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind,
+        StoreBlobAddress, StoreCapacityBudget, StoreConsistentBlobRead, StoreConsistentJsonRead,
+        StoreConsistentNamespaceReadRequest, StoreConsistentNamespaceReadResult,
+        StoreConsistentReadRequest, StoreConsistentReadResult, StoreEngine, StoreEngineMutation,
+        StoreEventLog, StoreEventScope, StoreJsonAddress, StoreJsonPrecondition, StoreMutation,
+        StoreMutationBatch, StoreMutationBatchReport, StoreMutationBudgetReport, StoreOpenReport,
+        StorePathBudget, StorePlatform, StoreReadReceipt, StoreRepairPolicy, StoreRepairReport,
+        StoreSchemaManifest, StoreSnapshot, StoreSnapshotBlob, StoreSnapshotExportReport,
+        StoreSnapshotImportReport, StoreSnapshotJsonDoc, StoreSnapshotReplaceReport,
+        StoreTransactionReport, StoreTransactionRequest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
+    };
 }
 
 pub fn recall_procedural_memory(
-    platform: &StorePlatform,
+    handle: &MemoryStoreHandle,
     query: &str,
     source_chat_id: Option<&str>,
     now_secs: u64,
     limit: usize,
 ) -> Vec<RuntimeSkillHit> {
-    let storage = platform.skill_storage();
+    let storage = handle.platform().skill_storage();
     bm_core::skills::retrieve_runtime_skill_hits(
         storage.as_ref(),
         query,
@@ -220,15 +289,14 @@ pub fn recall_procedural_memory(
     )
 }
 
-pub fn govern_procedural_memory(
-    platform: &StorePlatform,
-    now_secs: u64,
-) -> Result<RuntimeSkillGovernanceOutcome> {
-    let storage = platform.skill_storage();
-    bm_core::skills::govern_runtime_skills(storage.as_ref(), now_secs)
+pub fn export_memory_space(
+    handle: &MemoryStoreHandle,
+    request: MemorySpaceExportRequest,
+) -> Result<MemorySpaceExportReport> {
+    export_memory_space_from_platform(handle.platform(), request)
 }
 
-pub fn export_memory_space(
+pub(crate) fn export_memory_space_from_platform(
     platform: &StorePlatform,
     request: MemorySpaceExportRequest,
 ) -> Result<MemorySpaceExportReport> {
@@ -241,18 +309,25 @@ pub fn export_memory_space(
     let export_report = snapshot.export_report();
     Ok(MemorySpaceExportReport {
         memory_space_id: request.memory_space_id,
-        snapshot,
+        archive: MemorySpaceArchive::from_snapshot(snapshot),
         export_report,
         privacy_redactions,
     })
 }
 
 pub fn import_memory_space(
+    handle: &MemoryStoreHandle,
+    request: MemorySpaceImportRequest,
+) -> Result<MemorySpaceImportReport> {
+    import_memory_space_from_platform(handle.platform(), request)
+}
+
+pub(crate) fn import_memory_space_from_platform(
     platform: &StorePlatform,
     request: MemorySpaceImportRequest,
 ) -> Result<MemorySpaceImportReport> {
-    ensure_memory_space_import_has_no_unremapped_facet_index(&request.snapshot)?;
-    let import_report = platform.import_store_snapshot_with_report(&request.snapshot)?;
+    ensure_memory_space_import_has_no_unremapped_facet_index(request.archive.snapshot())?;
+    let import_report = platform.import_store_snapshot_with_report(request.archive.snapshot())?;
     Ok(MemorySpaceImportReport {
         memory_space_id: request.memory_space_id,
         import_report,
@@ -262,9 +337,10 @@ pub fn import_memory_space(
 pub fn preview_memory_space_migration(
     request: MemorySpaceMigratePreviewRequest,
 ) -> MemorySpaceMigratePreviewReport {
-    let privacy_redactions = count_private_snapshot_entries(&request.snapshot);
-    let loss_risk = request.snapshot.schema_id != bm_store::STORE_SCHEMA_ID;
-    let report = request.snapshot.export_report();
+    let snapshot = request.archive.snapshot();
+    let privacy_redactions = count_private_snapshot_entries(snapshot);
+    let loss_risk = snapshot.schema_id != crate::store_internal::STORE_SCHEMA_ID;
+    let report = snapshot.export_report();
     let vault_manifest = VaultManifest {
         identity_id: request.source_memory_space_id.clone(),
         profile: request.source_profile,
@@ -273,23 +349,28 @@ pub fn preview_memory_space_migration(
         event_fingerprint: report.event_fingerprint.clone(),
         privacy_policy_fingerprint: privacy_policy_fingerprint(privacy_redactions, loss_risk),
     };
-    let vault_redaction = build_vault_redaction_report(&request.snapshot);
+    let vault_redaction = build_vault_redaction_report(snapshot);
     let mut vault_preflight = build_vault_migration_preflight(
         vault_manifest.clone(),
         request.target_profile,
         vault_redaction.clone(),
-        &request.snapshot.schema_id,
-        bm_store::STORE_SCHEMA_ID,
+        &snapshot.schema_id,
+        crate::store_internal::STORE_SCHEMA_ID,
     );
-    if snapshot_requires_facet_index_remap(&request.snapshot) {
+    if snapshot_requires_facet_index_remap(snapshot) {
         vault_preflight.passed = false;
     }
     let manifest = build_memory_space_migration_manifest(
         &request.source_memory_space_id,
         &request.target_memory_space_id,
-        &request.snapshot,
+        snapshot,
         loss_risk,
     );
+    let plan = MemorySpaceMigrationPlan {
+        target_memory_space_id: request.target_memory_space_id.clone(),
+        snapshot: request.archive.into_snapshot(),
+        preflight: vault_preflight.clone(),
+    };
     MemorySpaceMigratePreviewReport {
         source_memory_space_id: request.source_memory_space_id,
         target_memory_space_id: request.target_memory_space_id,
@@ -305,34 +386,43 @@ pub fn preview_memory_space_migration(
         vault_manifest,
         vault_redaction,
         vault_preflight,
+        plan,
     }
 }
 
 pub fn apply_memory_space_migration(
+    handle: &MemoryStoreHandle,
+    request: MemorySpaceMigrateApplyRequest,
+) -> Result<MemorySpaceMigrateApplyReport> {
+    apply_memory_space_migration_from_platform(handle.platform(), request)
+}
+
+pub(crate) fn apply_memory_space_migration_from_platform(
     platform: &StorePlatform,
     request: MemorySpaceMigrateApplyRequest,
 ) -> Result<MemorySpaceMigrateApplyReport> {
-    if !request.preflight.passed {
+    let plan = request.plan;
+    if !plan.preflight.passed {
         return Err(Error::config(
             "memory_space_migration",
             "vault migration preflight failed",
         ));
     }
     let expected_preflight = vault_preflight_for_snapshot(
-        &request.snapshot,
-        request.preflight.source_profile,
-        request.preflight.target_profile,
+        &plan.snapshot,
+        plan.preflight.source_profile,
+        plan.preflight.target_profile,
     );
-    if request.preflight != expected_preflight {
+    if plan.preflight != expected_preflight {
         return Err(Error::config(
             "memory_space_migration",
             "vault migration preflight does not match snapshot",
         ));
     }
-    ensure_memory_space_import_has_no_unremapped_facet_index(&request.snapshot)?;
-    let import_report = platform.import_store_snapshot_with_report(&request.snapshot)?;
+    ensure_memory_space_import_has_no_unremapped_facet_index(&plan.snapshot)?;
+    let import_report = platform.import_store_snapshot_with_report(&plan.snapshot)?;
     Ok(MemorySpaceMigrateApplyReport {
-        target_memory_space_id: request.target_memory_space_id,
+        target_memory_space_id: plan.target_memory_space_id,
         import_report,
     })
 }
@@ -437,7 +527,7 @@ fn vault_preflight_for_snapshot(
 ) -> VaultMigrationPreflight {
     let report = snapshot.export_report();
     let privacy_redactions = count_private_snapshot_entries(snapshot);
-    let loss_risk = snapshot.schema_id != bm_store::STORE_SCHEMA_ID;
+    let loss_risk = snapshot.schema_id != crate::store_internal::STORE_SCHEMA_ID;
     let mut preflight = build_vault_migration_preflight(
         VaultManifest {
             identity_id: "memory-space-preview".to_string(),
@@ -450,7 +540,7 @@ fn vault_preflight_for_snapshot(
         target_profile,
         build_vault_redaction_report(snapshot),
         &snapshot.schema_id,
-        bm_store::STORE_SCHEMA_ID,
+        crate::store_internal::STORE_SCHEMA_ID,
     );
     if snapshot_requires_facet_index_remap(snapshot) {
         preflight.passed = false;

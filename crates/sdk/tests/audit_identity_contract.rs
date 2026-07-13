@@ -37,7 +37,7 @@ fn sdk_audit_events_bind_operation_to_memory_identity_and_scope() {
         .identity(MemoryIdentity::new("agent-a", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
         .profile(profile)
-        .store_platform(platform)
+        .store(platform)
         .audit_sink(audit.clone())
         .build()
         .expect("runtime");
@@ -59,6 +59,7 @@ fn sdk_audit_events_bind_operation_to_memory_identity_and_scope() {
         .expect("write");
     runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "audit identity".to_string(),
             system_max_len: 1024,
             recent_messages_limit: 4,

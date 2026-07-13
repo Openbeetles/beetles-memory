@@ -68,7 +68,7 @@ SDK transcript replay/export requests support bounded cursor pages through `curs
 
 Transcript attrs replay with their target turn/message. `TranscriptAttrEnvelope` is for lightweight metadata such as model usage, latency, retry status, attachment summaries, and provenance tags; it is not a replacement for host-owned tasks, capability calls, artifacts, human gates, file workspaces, or governance command/report bodies. `HostUi` sees only HostUi-visible attrs, `ModelContext` sees only model-context attrs, and `Export` sees only export-visible attrs with `export_allowed=true`. Profile budget may clip visible attrs per turn/message and records `AttrValueBudget` with `attr_id` / `attr_key` in `TranscriptRedactionReportItem`; the replay audit also records `ProfileBudget` when profile ceilings caused the clipping.
 
-`HostUi` transcript replay is controlled by the SDK `transcript_replay` capability. Desktop and embedded SDK hosts can commit a transcript turn and read that same conversation back for UI display without enabling `MemoryRuntime::replay`, replay harnesses, raw owner replay, or deep inspection.
+`HostUi` transcript replay is controlled by the SDK `transcript_replay` capability. Desktop and embedded SDK hosts can commit a transcript turn and read that same conversation back for UI display without enabling `MemoryRuntime::replay`, the development-only `nonproduction-replay-harness`, raw owner replay, or deep inspection.
 
 `TranscriptLifecycleReport.derived_memory_refs` can be used as the target source for the next long-term memory control action. For example, after raw transcript content is masked or deleted, the report lists affected `DerivedMemoryRef` values; a host or operator that wants to revoke the corresponding accepted long-term memory should pass the ref through `MemoryLongTermTarget::TranscriptDerivedRef` and call `MemoryRuntime::mutate_long_term_memory`. Transcript lifecycle never automatically cascades deletion into accepted long-term memory, shared facts, procedural skills, private garden material, or soul handoffs.
 
@@ -119,6 +119,7 @@ Compact profiles may return fewer transcript turns, host refs, attrs, redaction 
 ## Harness And Proposal Sandbox
 
 - `bm-replay` provides fixture runner, cross-store replay, memory harness gate, and benchmark gate.
+- `nonproduction-replay-harness` is a development acceptance feature for fixture and contract validation. It is not a deployment capability, protocol surface, or host runtime dependency.
 - `bm-evolve` provides a proposal-only sandbox. A proposal still needs the SDK write path before it changes memory state.
 - ESP profiles expose compact validation. `profile-server-linux-dev-full` exposes the full replay and benchmark surface.
 - `fixtures/sdk-host-readiness/generic-rust-host/` and `fixtures/sdk-host-readiness/beetle-derived/` are covered by `scripts/check_sdk_host_integration_readiness.sh`.

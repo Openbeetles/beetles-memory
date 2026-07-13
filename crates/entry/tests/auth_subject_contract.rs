@@ -99,6 +99,7 @@ fn auth_required_runtime_rejects_arbitrary_authenticated_bool_and_loopback() {
                 "http-client",
             )),
             AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
                 tool_registry_refs: Vec::new(),
@@ -119,6 +120,7 @@ fn auth_required_runtime_rejects_arbitrary_authenticated_bool_and_loopback() {
         .handle(
             context(EntryAuthDecision::loopback("http-client")),
             AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
                 tool_registry_refs: Vec::new(),

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::bus::IngressKind;
 
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 mod archive_benchmark;
@@ -21,8 +21,9 @@ mod continuity_snapshot;
 mod core_revision_ledger;
 mod execution_state;
 mod felt_significance;
+mod governed_post_image;
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 mod harness;
@@ -38,17 +39,18 @@ mod long_term_extraction;
 mod maintenance;
 mod memory_facet;
 mod memory_governance;
+mod memory_privacy;
 mod mental_privacy;
 mod next_gen_contract;
 mod outer_voice;
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 mod persona_governance_benchmark;
 mod persona_priority;
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 mod persona_regression;
@@ -63,11 +65,12 @@ mod prompt_context_stages;
 mod prompt_sanitizer;
 mod recall_anchor;
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 mod recall_benchmark;
 mod recall_contract;
+mod recall_delivery;
 mod recall_inspection;
 mod recall_rerank;
 mod recall_router;
@@ -98,7 +101,7 @@ mod write_candidate;
 mod write_coordination;
 
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 pub use archive_benchmark::{
@@ -141,13 +144,17 @@ pub use continuity_capsule::{
     ContinuityCapsuleStatus, ContinuityCapsuleStore, ContinuityCapsuleWriteOutcome,
     MAX_CONTINUITY_CAPSULES, MAX_CONTINUITY_CAPSULES_PER_SCOPE, REL_PATH_CONTINUITY_CAPSULES,
 };
+#[cfg(test)]
+pub(crate) use continuity_snapshot::import_continuity_snapshot;
 pub(crate) use continuity_snapshot::select_active_continuity_snapshot_chat_ids;
 pub use continuity_snapshot::{
-    export_continuity_snapshot, import_continuity_snapshot, render_continuity_snapshot_markdown,
+    coalesce_continuity_snapshot_import_plans, export_continuity_snapshot,
+    plan_continuity_snapshot_import, render_continuity_snapshot_markdown,
     select_personality_governance_targets, ContinuitySnapshot, ContinuitySnapshotExportContext,
     ContinuitySnapshotImportContext, ContinuitySnapshotImportDecision,
-    ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome, ContinuitySnapshotKindCount,
-    ContinuitySnapshotManifest, ContinuitySnapshotMode,
+    ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome, ContinuitySnapshotImportPlan,
+    ContinuitySnapshotImportWriteSet, ContinuitySnapshotKindCount, ContinuitySnapshotManifest,
+    ContinuitySnapshotMode, ContinuitySnapshotPlannedWrite, ContinuitySnapshotSummaryWrite,
 };
 pub(crate) use core_revision_ledger::compact_core_revision_ledger_for_profile;
 pub use core_revision_ledger::{
@@ -177,6 +184,7 @@ pub use felt_significance::{
     render_felt_significance_block, FeltSignificance, FeltSignificanceRefreshOutcome,
     FELT_SIGNIFICANCE_SYSTEM_CONTRACT, FELT_SIGNIFICANCE_TOTAL_CHAR_LIMIT,
 };
+pub use governed_post_image::{GovernedDocumentImage, GovernedPostImageValidation};
 pub(crate) use hygiene::run_memory_hygiene_jobs;
 pub use hygiene::{
     inspect_memory_hygiene, render_memory_hygiene_inspection_markdown,
@@ -206,6 +214,23 @@ pub use intelligence_replay::{
 pub(crate) use internal_memory_topology::{
     render_internal_memory_topology_block, InternalMemoryLayerFocus,
 };
+pub use long_term::{
+    canonical_evidence_ref_from_source, long_term_memory_evidence_summary,
+    lookup_long_term_memory_slot, parse_explicit_long_term_slot_query,
+    plan_long_term_memory_owner_mutation, plan_long_term_memory_upsert,
+    recall_long_term_memory_block, render_exact_long_term_memory_block,
+    render_long_term_memory_block, scoped_long_term_control_storage_key,
+    scoped_long_term_control_storage_prefix, scoped_long_term_memory_storage_key,
+    scoped_long_term_memory_storage_prefix, CanonicalEntityKey, CanonicalEntityKind,
+    CanonicalEntityRef, CanonicalEvidenceRef, LongTermMemoryConfidence, LongTermMemoryDraft,
+    LongTermMemoryEntry, LongTermMemoryEntryPlan, LongTermMemoryEntryRejection,
+    LongTermMemoryEvidenceState, LongTermMemoryEvidenceSummary, LongTermMemoryFreshness,
+    LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryQuery, LongTermMemoryReadStore,
+    LongTermMemorySlot, LongTermMemorySlotLookup, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, LongTermMemoryStore,
+    MAX_LONG_TERM_MEMORY_BLOCK_LEN, MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS,
+    MAX_LONG_TERM_MEMORY_KEYWORDS, MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
+};
 pub(crate) use long_term::{
     canonicalize_long_term_memory_entry, compare_long_term_memory_query_results,
     govern_long_term_memory_entries, inspect_long_term_memory_merge_guard,
@@ -214,23 +239,16 @@ pub(crate) use long_term::{
     recall_long_term_memory_entries, score_long_term_memory_recall_breakdown,
     select_long_term_recall_entries, LongTermMemoryMergeGuardDecision,
 };
-pub use long_term::{
-    long_term_memory_evidence_summary, lookup_long_term_memory_slot,
-    parse_explicit_long_term_slot_query, recall_long_term_memory_block,
-    render_exact_long_term_memory_block, render_long_term_memory_block, LongTermMemoryConfidence,
-    LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryEvidenceState,
-    LongTermMemoryEvidenceSummary, LongTermMemoryFreshness, LongTermMemoryKind,
-    LongTermMemoryQuery, LongTermMemorySlot, LongTermMemorySlotLookup, LongTermMemorySourceScope,
-    LongTermMemorySourceType, LongTermMemoryStaleHint, LongTermMemoryStore,
-    MAX_LONG_TERM_MEMORY_BLOCK_LEN, MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS,
-    MAX_LONG_TERM_MEMORY_KEYWORDS, MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
-};
 pub use long_term_control::{
-    apply_long_term_memory_control_mutation, apply_long_term_memory_governance_policy_mutation,
     get_long_term_memory_control_detail, list_long_term_memory_control_page,
-    LongTermMemoryControlAuditEvent, LongTermMemoryControlDetailRequest,
-    LongTermMemoryControlListRequest, LongTermMemoryControlMutationRequest,
-    LongTermMemoryControlRevision, LongTermMemoryControlStore, LongTermMemoryTombstone,
+    plan_long_term_memory_control_mutation, plan_long_term_memory_governance_policy_mutation,
+    validate_long_term_control_post_image, ControlEffectRef, LongTermControlOperation,
+    LongTermControlPostImageClosure, LongTermMemoryControlAuditEvent,
+    LongTermMemoryControlDetailRequest, LongTermMemoryControlListRequest,
+    LongTermMemoryControlMutationPlan, LongTermMemoryControlMutationRequest,
+    LongTermMemoryControlReadStore, LongTermMemoryControlRecordVersion,
+    LongTermMemoryControlRevision, LongTermMemoryControlWrite,
+    LongTermMemoryGovernancePolicyMutationPlan, LongTermMemoryOwnerWrite, LongTermMemoryTombstone,
     MemoryDeferredGovernanceImpactReport, MemoryGovernancePolicyMutation,
     MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryLongTermAffectedFacetDoc,
@@ -240,20 +258,25 @@ pub use long_term_control::{
     MemoryLongTermSelector, MemoryLongTermTarget, MemoryLongTermTargetResolutionReport,
     MemoryLongTermTombstoneRef, MemoryProjectionImpactReport, MemorySubjectVisibilityPolicy,
     LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+};
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+pub(crate) use long_term_extraction::{
+    apply_long_term_memory_extraction, apply_long_term_memory_extraction_with_report,
 };
 pub use long_term_extraction::{
-    apply_long_term_memory_extraction, apply_long_term_memory_extraction_with_report,
     build_long_term_memory_extraction_input, evaluate_long_term_memory_extraction_turn,
     mark_long_term_memory_extraction_deferred, mark_long_term_memory_extraction_processed,
     mark_long_term_memory_extraction_requested, parse_long_term_memory_extraction_response,
-    persist_long_term_memory_extraction_state, run_long_term_memory_refresh,
-    LongTermMemoryDraftAdmissionPolicy, LongTermMemoryExtractionApplyReport,
-    LongTermMemoryExtractionState, LongTermMemoryExtractionStateStore,
-    LongTermMemoryExtractionTurnDecision, LongTermMemoryExtractionTurnInput,
-    LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome, ParsedLongTermMemoryExtraction,
-    LONG_TERM_MEMORY_EXTRACTION_BATCH, LONG_TERM_MEMORY_EXTRACTION_RECENT_N,
-    LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT, REL_PATH_LONG_TERM_EXTRACTION_STATES,
+    persist_long_term_memory_extraction_state, plan_long_term_memory_extraction_with_report,
+    run_long_term_memory_refresh, LongTermMemoryDraftAdmissionPolicy,
+    LongTermMemoryExtractionApplyReport, LongTermMemoryExtractionState,
+    LongTermMemoryExtractionStateStore, LongTermMemoryExtractionTurnDecision,
+    LongTermMemoryExtractionTurnInput, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    ParsedLongTermMemoryExtraction, LONG_TERM_MEMORY_EXTRACTION_BATCH,
+    LONG_TERM_MEMORY_EXTRACTION_RECENT_N, LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT,
+    REL_PATH_LONG_TERM_EXTRACTION_STATES,
 };
 pub use maintenance::{
     run_post_reply_memory_maintenance, ContinuityCapsuleMaintenanceOutcome,
@@ -261,18 +284,24 @@ pub use maintenance::{
     PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome,
 };
 pub use memory_facet::{
-    build_long_term_memory_facet_index_doc, CanonicalEntityRef, CanonicalEvidenceRef,
-    FacetCoverageSelectionReport, FacetIndexRebuildReport, FacetRankFusionCandidateReport,
-    FacetRankFusionReport, FacetReportAudience, FacetReportView, HumanFacetSuggestion, MemoryFacet,
-    MemoryFacetContractValidation, MemoryFacetIndexDoc, MemoryFacetNamespace,
-    MemoryFacetOwnerPlane, MemoryFacetStatus, MemoryFacetValue, StructuredFacetParseOutcome,
+    build_long_term_memory_facet_index_doc, memory_facet_manifest_key, memory_facet_posting_key,
+    scoped_memory_facet_owner_storage_key, validate_memory_facet_manifest,
+    validate_memory_facet_post_image, validate_memory_facet_posting,
+    validate_memory_facet_read_chain, FacetCoverageSelectionReport, FacetIndexRebuildReport,
+    FacetRankFusionCandidateReport, FacetRankFusionReport, FacetReportAudience, FacetReportView,
+    HumanFacetSuggestion, MemoryFacet, MemoryFacetContractValidation, MemoryFacetIndexDoc,
+    MemoryFacetIndexManifest, MemoryFacetNamespace, MemoryFacetOwnerPlane, MemoryFacetOwnerVersion,
+    MemoryFacetPostImageClosure, MemoryFacetPostingDoc, MemoryFacetPostingRevision,
+    MemoryFacetStatus, MemoryFacetValidationError, MemoryFacetValue, QueryFacet, QueryFacetInput,
+    QueryFacetMatchKind, QueryFacetParseOutcome, QueryFacetParser, StructuredFacetParseOutcome,
     StructuredFacetParser, TemporalAnchor, TemporalAnchorKind, TemporalAnchorPrecision,
-    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
+    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
 };
 pub(crate) use memory_governance::run_memory_governance_kernel;
 pub use memory_governance::{
     MemoryGovernanceContext, MemoryGovernanceInput, MemoryGovernanceOutcome,
 };
+pub use memory_privacy::MemoryPrivacyClass;
 pub(crate) use mental_privacy::{
     collect_private_targets, render_mental_privacy_boundary_block,
     render_mental_privacy_disclosure_adjudication_block,
@@ -295,7 +324,7 @@ pub use mental_privacy::{
 };
 pub use next_gen_contract::{
     build_core_revision_diff_from_record, build_edge_memory_appliance_gate_report,
-    build_memory_autopilot_gate_report, build_memory_graph_recall_index_docs,
+    build_memory_autopilot_gate_report, build_memory_graph_persistence_plan,
     build_next_gen_contract_matrix, build_privacy_vault_gate_report,
     build_procedural_evolution_gate_report,
     build_relationship_boundary_audit_from_constitution_audit, build_soul_compact_digest,
@@ -306,28 +335,41 @@ pub use next_gen_contract::{
     build_temporal_memory_graph_from_parts, build_temporal_memory_graph_gate_report,
     build_vault_migration_preflight, build_workbench_gate_report,
     compile_edge_memory_budget_report, memory_graph_backlink_key,
-    plan_memory_autopilot_for_profile, plan_temporal_memory_graph_write,
-    promote_task_experience_to_procedure, redact_private_soul_graph_material,
-    rerank_recall_with_temporal_graph, rerank_recall_with_temporal_graph_and_facets,
-    AutopilotAuditReport, CompactGraphIndex, CompactMemoryGraph, CompactSoulProfile,
-    ConsolidationProposal, CoreRevisionDiff, DeviceSyncProposal, DeviceTrustRecord,
-    DroppedProjectionCandidate, EdgeMemoryApplianceGateReport, EdgeMemoryBudgetReport,
-    EdgeRecoveryFixture, EncryptedSnapshotEnvelope, EvidenceBacklink, GraphFacetPropagationContext,
+    memory_graph_integrity_incident_token, memory_graph_recall_index_key,
+    memory_graph_scope_digest, memory_graph_scope_manifest_key, plan_memory_autopilot_for_profile,
+    plan_temporal_memory_graph_write, promote_task_experience_to_procedure,
+    redact_private_soul_graph_material, rerank_recall_with_temporal_graph,
+    rerank_recall_with_temporal_graph_and_facets, scoped_memory_graph_storage_key,
+    validate_memory_graph_post_image, validate_memory_graph_read_chain,
+    validate_memory_graph_revision_doc, validate_memory_graph_scope_manifest, AutopilotAuditReport,
+    CompactGraphIndex, CompactMemoryGraph, CompactSoulProfile, ConsolidationProposal,
+    CoreRevisionDiff, DeviceSyncProposal, DeviceTrustRecord, DroppedProjectionCandidate,
+    EdgeMemoryApplianceGateReport, EdgeMemoryBudgetReport, EdgeRecoveryFixture,
+    EncryptedSnapshotEnvelope, EvidenceBacklink, GraphFacetPropagationContext,
     GraphRecallCandidateScore, GraphRecallExpansionBudget, GraphRecallExpansionBudgetReport,
     GraphRecallRerankReport, ImportanceDecayModel, MemoryAutopilotGateReport, MemoryAutopilotInput,
-    MemoryAutopilotPlan, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence,
-    MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphRecallIndexDoc, MemoryGraphWritePlan,
-    MemoryHygieneDiff, MemoryOperationSkill, NextGenCapabilityContract, NextGenContractValidation,
-    NextGenPhase, PrivacyVaultGateReport, PrivateDisclosureIntegrityGuard,
-    PrivateMaterialRedactionReport, ProceduralEvolutionGateReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProceduralMemoryRecordV2,
-    ProcedureGenome, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
-    ProjectionPrivacyDecision, RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest,
-    SoulFeedbackReport, SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport,
-    SoulRegressionSuite, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
-    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, TaskExperienceToProcedure,
+    MemoryAutopilotPlan, MemoryGraphBacklinkMembership, MemoryGraphDependencyRef, MemoryGraphEdge,
+    MemoryGraphEdgeKind, MemoryGraphEdgeMembership, MemoryGraphEvidence, MemoryGraphNode,
+    MemoryGraphNodeKind, MemoryGraphNodeMembership, MemoryGraphOwnerBinding,
+    MemoryGraphPersistencePlan, MemoryGraphPostImageClosure, MemoryGraphReadChainValidation,
+    MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
+    MemoryGraphWritePlan, MemoryHygieneDiff, MemoryOperationSkill, NextGenCapabilityContract,
+    NextGenContractValidation, NextGenPhase, PrivacyVaultGateReport,
+    PrivateDisclosureIntegrityGuard, PrivateMaterialRedactionReport, ProceduralEvolutionGateReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
+    ProceduralMemoryPromotionReport, ProceduralMemoryRecordV2, ProcedureGenome,
+    ProjectionBudgetDecision, ProjectionFaithfulnessCheck, ProjectionPrivacyDecision,
+    RelationshipBoundaryAudit, SkillEvolutionReport, SoulCompactDigest, SoulFeedbackReport,
+    SoulGrowthDecision, SoulGrowthProposal, SoulKernel2GateReport, SoulRegressionSuite,
+    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
+    SubjectProjectionWorkIntegrityReport, TaskExperienceToProcedure,
     TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, TemporalValidity, VaultManifest,
     VaultMigrationPreflight, WorkbenchApiMap, WorkbenchGateReport, WorkbenchSurface,
+    MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_BACKLINK_NAMESPACE,
+    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_EDGE_NAMESPACE,
+    MEMORY_GRAPH_INDEX_NAMESPACE, MEMORY_GRAPH_MANIFEST_NAMESPACE,
+    MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_NODE_NAMESPACE,
+    MEMORY_GRAPH_REVISION_NAMESPACE, MEMORY_GRAPH_SCHEMA_VERSION,
 };
 pub(crate) use outer_voice::run_outer_voice_refresh_with_state;
 pub use outer_voice::{
@@ -335,7 +377,7 @@ pub use outer_voice::{
     OuterVoiceRefreshOutcome, OUTER_VOICE_SYSTEM_PROMPT, OUTER_VOICE_TOTAL_CHAR_LIMIT,
 };
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 pub use persona_governance_benchmark::{
@@ -350,7 +392,7 @@ pub use persona_priority::{
     PERSONA_PRIORITY_SYSTEM_PROMPT,
 };
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 pub use persona_regression::{
@@ -417,8 +459,12 @@ pub use prompt_context::{
     WorkIntegrityCovenant,
 };
 pub(crate) use prompt_sanitizer::{scrub_memory_prompt_block, scrub_private_source_echoes};
+pub use recall_anchor::{
+    canonical_recall_evidence_group, recall_evidence_family_group,
+    CanonicalRecallEvidenceFamilyGroup, CanonicalRecallEvidenceGroup, RecallEvidenceFamilyInput,
+};
 #[cfg(all(
-    any(test, feature = "replay-harness"),
+    any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
 ))]
 pub use recall_benchmark::{
@@ -429,6 +475,11 @@ pub use recall_contract::{
     inspect_archive_recall, inspect_runtime_skill_recall, inspect_shared_factual_recall,
     inspect_task_recall, RecallCandidate, RecallPlane, RecallQuery, RecallScoreBreakdown,
     RecallSelectionReport,
+};
+pub use recall_delivery::{
+    allocate_recall_delivery_candidates, score_recall_delivery_texts, RecallDeliveryCandidate,
+    RecallDeliveryLexicalScore, RecallDeliveryOrderingPolicy, RecallDeliverySelectionDecision,
+    RecallDeliverySelectionDropReason, RecallDeliverySelectionReport, RecallDeliveryText,
 };
 pub use recall_inspection::{
     inspect_working_recall, render_working_recall_inspection_markdown, WorkingRecallInspection,
@@ -524,10 +575,13 @@ pub(crate) use shared_factual_plane::{
 };
 pub use shared_memory_governance::{
     plan_governed_shared_memory, plan_governed_shared_memory_in_space,
-    write_governed_shared_memory, write_governed_shared_memory_in_space,
     SharedFactWriteGovernanceContext, SharedMemoryWriteAction, SharedMemoryWriteItemReport,
     SharedMemoryWriteOutcome, SharedMemoryWritePlan, SharedMemoryWriteReason,
     SharedMemoryWriteSource,
+};
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+pub(crate) use shared_memory_governance::{
+    write_governed_shared_memory, write_governed_shared_memory_in_space,
 };
 pub(crate) use skill_routing::{route_long_term_draft, MemoryPlane};
 pub(crate) use subject_shell::{compile_subject_shell, SubjectShell, SubjectShellCompileInput};
@@ -604,8 +658,8 @@ pub(crate) use world_sense::{
 };
 pub use write_candidate::{
     govern_write_candidates, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryPrivacyClass,
-    MemorySemanticJudgmentSource, MemoryWriteCandidate,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemorySemanticJudgmentSource,
+    MemoryWriteCandidate,
 };
 pub(crate) use write_coordination::whole_record_lease_advanced;
 

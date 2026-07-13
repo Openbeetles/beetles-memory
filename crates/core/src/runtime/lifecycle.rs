@@ -54,6 +54,8 @@ impl RuntimeLifecycleOperation {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeLifecycleTrigger {
     SdkCall,
+    ProjectionDependency,
+    Evaluation,
     BootRecovery,
     PostReply,
     DeferredDue,
@@ -66,6 +68,8 @@ impl RuntimeLifecycleTrigger {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SdkCall => "sdk_call",
+            Self::ProjectionDependency => "projection_dependency",
+            Self::Evaluation => "evaluation",
             Self::BootRecovery => "boot_recovery",
             Self::PostReply => "post_reply",
             Self::DeferredDue => "deferred_due",

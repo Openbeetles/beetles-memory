@@ -166,57 +166,18 @@ struct ProjectionRedaction {
 }
 
 fn redacted_projection_block(projection: &MemoryProjectionReport) -> ProjectionRedaction {
-    let mut block = projection.system_memory_block.clone();
-    let mut redacted = false;
     let mut redacted_source_ids = projection
         .private_disclosure_integrity
         .redacted_source_ids
         .clone();
-    for source in &projection
-        .runtime_projection
-        .protected_private_runtime_context
-    {
-        if source.source_id.trim().is_empty() {
-            continue;
-        }
-        redacted_source_ids.push(source.source_id.clone());
-        let content = source.content.trim();
-        if content.is_empty() {
-            continue;
-        }
-        let replacement = format!("[redacted:protected_runtime_context:{}]", source.source_id);
-        if block.contains(content) {
-            block = block.replace(content, &replacement);
-            redacted = true;
-        }
-    }
-    let scrubbed_lines = block
-        .lines()
-        .map(|line| {
-            if contains_private_raw_marker(line) {
-                redacted = true;
-                "[redacted:private_raw_marker]".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>();
-    block = scrubbed_lines.join("\n");
     redacted_source_ids.sort();
     redacted_source_ids.dedup();
+    let block = projection.projection_surfaces.gateway_raw_audit.clone();
     ProjectionRedaction {
+        redacted: block != projection.system_memory_block || !redacted_source_ids.is_empty(),
         block,
-        redacted: redacted || !redacted_source_ids.is_empty(),
         redacted_source_ids,
     }
-}
-
-fn contains_private_raw_marker(line: &str) -> bool {
-    let lowered = line.to_ascii_lowercase();
-    lowered.contains("private_raw:")
-        || lowered.contains("private-garden-raw:")
-        || lowered.contains("private garden raw:")
-        || lowered.contains("<private_raw>")
 }
 
 fn projection_diagnostic_path(dir: &Path, audit_id: &str, projection_id: &str) -> PathBuf {

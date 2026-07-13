@@ -9,13 +9,26 @@ fail() {
 }
 
 cargo test -p bm-core --features sqlite-index --test sqlite_index_state_dir_contract
-cargo test -p bm-store --test runtime_store_budget_contract
-cargo test -p bm-store --test file_store_contract
-cargo test -p bm-store --features sqlite-store --test sqlite_store_contract
+cargo test -p bm-store-contract-tests --test runtime_store_budget_contract
+cargo test -p bm-store-contract-tests --test file_store_contract
+cargo test -p bm-store-contract-tests --features sqlite-store --test sqlite_store_contract
 cargo test -p bm-entry --test runtime_contract entry_runtime
 cargo test -p bm-mcp --features server-stdio --bin bm-mcp-server mcp_server
 cargo test -p bm-http --features server-std --bin bm-http-console http_console
 cargo test -p bm-llm-gateway --no-default-features --features server-async,client-reqwest --bin bm-llm-gateway llm_gateway
+
+if cargo check -p bm-sdk --no-default-features \
+  --features profile-server-linux-memory-gateway,nonproduction-replay-harness \
+  >/dev/null 2>&1; then
+  fail "nonproduction replay harness compiled with a production SDK profile"
+fi
+
+for package in bm-desktop bm-cli bm-llm-gateway bm-http bm-wss bm-mcp bm-a2a; do
+  if cargo tree -p "$package" -e normal,build,features \
+    | rg -q 'nonproduction-replay-harness|bm-replay'; then
+    fail "production dependency graph contains replay tooling: $package"
+  fi
+done
 
 bash -n scripts/check_release_surface.sh
 

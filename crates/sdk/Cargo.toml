@@ -12,52 +12,53 @@ path = "src/lib.rs"
 
 [features]
 default = []
-replay-harness = ["bm-core/replay-harness"]
+nonproduction-replay-harness = ["bm-core/nonproduction-replay-harness"]
 sqlite-index = ["bm-core/sqlite-index"]
-sqlite-store = ["bm-store/sqlite-store"]
-embedded-store = ["bm-store/embedded-store"]
+sqlite-store = ["dep:rusqlite"]
+embedded-store = []
 profile-esp-standalone-memory = [
     "bm-core/profile-esp-standalone-memory",
-    "bm-store/embedded-store",
+    "embedded-store",
 ]
 profile-esp-embedded-sdk = [
     "bm-core/profile-esp-embedded-sdk",
-    "bm-store/embedded-store",
+    "embedded-store",
 ]
 profile-linux-device-standalone-memory = [
     "bm-core/profile-linux-device-standalone-memory",
     "bm-core/sqlite-index",
-    "bm-store/sqlite-store",
+    "sqlite-store",
 ]
 profile-desktop-macos-standalone-memory = [
     "bm-core/profile-desktop-macos-standalone-memory",
     "bm-core/sqlite-index",
-    "bm-store/sqlite-store",
+    "sqlite-store",
 ]
 profile-desktop-macos-embedded-sdk = [
     "bm-core/profile-desktop-macos-embedded-sdk",
     "bm-core/sqlite-index",
-    "bm-store/sqlite-store",
+    "sqlite-store",
 ]
 profile-desktop-windows-embedded-sdk = [
     "bm-core/profile-desktop-windows-embedded-sdk",
     "bm-core/sqlite-index",
-    "bm-store/sqlite-store",
+    "sqlite-store",
 ]
 profile-server-linux-memory-gateway = [
     "bm-core/profile-server-linux-memory-gateway",
     "bm-core/sqlite-index",
-    "bm-store/sqlite-store",
+    "sqlite-store",
 ]
 profile-server-linux-dev-full = [
     "bm-core/profile-server-linux-dev-full",
-    "bm-core/replay-harness",
+    "bm-core/nonproduction-replay-harness",
     "bm-core/sqlite-index",
-    "bm-store/sqlite-store",
+    "sqlite-store",
 ]
 
 [dependencies]
 bm-core.workspace = true
-bm-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+rusqlite = { workspace = true, optional = true }

@@ -56,8 +56,9 @@ require_fixed "mutate_memory_governance_policy" crates/sdk/src/runtime.rs docs/e
 require_fixed "MemoryGovernancePolicyMutation" crates/core/src/memory/long_term_control.rs crates/sdk/src/ops.rs crates/sdk/tests/long_term_memory_control_contract.rs
 require_fixed "long_term_control_mutation" crates/sdk/src/capability.rs fixtures/platform/capabilities
 require_fixed "long_term_control_bulk_forget" crates/sdk/src/capability.rs fixtures/platform/capabilities docs/en/profiles.md docs/zh-CN/profiles.md
-require_fixed "LongTermMemoryControlStore" crates/core/src/memory/long_term_control.rs crates/store/src/platform.rs crates/store/tests/long_term_memory_control_store_contract.rs
-require_fixed "tombstone" crates/core/src/memory/long_term_control.rs crates/store/src/platform.rs crates/sdk/tests/long_term_memory_control_contract.rs docs/en/api.md docs/zh-CN/api.md
+require_fixed "LongTermMemoryControlReadStore" crates/core/src/memory/long_term_control.rs crates/sdk/src/store_internal/platform.rs crates/store-contract-tests/tests/long_term_memory_control_store_contract.rs crates/sdk/src/runtime.rs
+require_fixed "LongTermMemoryControlStore" crates/core/src/memory/long_term_control.rs crates/core/tests/long_term_memory_control_contract.rs crates/sdk/src/runtime.rs
+require_fixed "tombstone" crates/core/src/memory/long_term_control.rs crates/sdk/src/store_internal/platform.rs crates/sdk/tests/long_term_memory_control_contract.rs docs/en/api.md docs/zh-CN/api.md
 require_fixed "forget_by_query" crates/core/src/memory/long_term_control.rs crates/core/tests/long_term_memory_control_contract.rs crates/sdk/tests/long_term_memory_control_contract.rs docs/en/api.md docs/zh-CN/api.md
 require_fixed "suppression policy" docs/en/api.md docs/zh-CN/api.md dev-docs/long-term-memory-control-surface-plan.md
 require_fixed "TranscriptDerivedRef" crates/core/src/memory/long_term_control.rs crates/sdk/tests/long_term_memory_control_contract.rs
@@ -73,23 +74,29 @@ require_regex "Transcript lifecycle.*not automatically|Transcript lifecycle.*不
 
 host_product_forbidden_pattern="RoleKey|TaskRoomProjection|ClarificationRequest|HumanGate|Task\\.status|TaskRecord|CEO|BOSS|财务总监|仓库管理员"
 
-if rg -n "$host_product_forbidden_pattern" crates/core/src crates/sdk/src crates/store/src; then
+if rg -n "$host_product_forbidden_pattern" crates/core/src crates/sdk/src; then
   echo "core/sdk/store contain host product semantics in long-term memory control surface" >&2
   exit 1
 fi
 
-if rg -n "local SQLite memory|fake memory|Agent SQLite|host-owned shadow memory editor" crates/core/src crates/sdk/src crates/store/src; then
+if rg -n "local SQLite memory|fake memory|Agent SQLite|host-owned shadow memory editor" crates/core/src crates/sdk/src; then
   echo "core/sdk/store appear to expose host-owned shadow memory wording" >&2
   exit 1
 fi
 
+forbidden_control_mutation_surface="fn long_term_memory_control_store\\(|impl LongTermMemoryControlStore for StorePlatform|pub struct ScopedLongTermMemoryControlStore|pub fn scoped_long_term_memory_control_store\\("
+if rg -n "$forbidden_control_mutation_surface" crates/core/src/platform crates/sdk/src/store_internal; then
+  echo "host/store expose direct long-term control mutation capability" >&2
+  exit 1
+fi
+
 cargo test -p bm-core --test long_term_memory_control_contract
-cargo test -p bm-store --test long_term_memory_control_store_contract
-cargo test -p bm-sdk --test public_surface
-cargo test -p bm-sdk --test capability_catalog
-cargo test -p bm-sdk --test platform_capability_snapshot_shape
-cargo test -p bm-sdk --test platform_capability_snapshots
-cargo test -p bm-sdk --test long_term_memory_control_contract
+cargo test -p bm-store-contract-tests --test long_term_memory_control_store_contract
+cargo test -p bm-sdk --features nonproduction-replay-harness --test public_surface
+cargo test -p bm-sdk --features nonproduction-replay-harness --test capability_catalog
+cargo test -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshot_shape
+cargo test -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshots
+cargo test -p bm-sdk --features nonproduction-replay-harness --test long_term_memory_control_contract
 cargo test -p bm-adapter --test contract
 cargo test -p bm-http --test http_contract
 cargo test -p bm-mcp --test mcp_contract

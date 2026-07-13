@@ -8,10 +8,12 @@ mod policy;
 
 pub use contract::{
     AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterEvent, AdapterOperation,
-    AdapterResponse, AdapterSdkReport, AdapterSource, TransportKind, TransportMode,
+    AdapterProjectionAuditSummary, AdapterProjectionReport, AdapterResponse, AdapterSdkReport,
+    AdapterSource, TransportKind, TransportMode,
 };
 pub use dispatch::{
-    dispatch_adapter_command, dispatch_adapter_command_with_services, AdapterRuntimeServices,
+    dispatch_adapter_command, dispatch_adapter_command_with_services, project_adapter_report,
+    AdapterRuntimeServices,
 };
 pub use error::{AdapterError, AdapterErrorKey};
 pub use payload::{decode_json_adapter_command, AdapterJsonCommandOptions};

@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_core::platform::Platform as _;
@@ -98,8 +100,22 @@ fn finalize_turn_rejects_canonical_turn_scope_mismatch() {
     };
 
     assert!(err.to_string().contains("chat_id"));
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 0);
-    assert_eq!(platform.session_store().message_count("chat-b").unwrap(), 0);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-b")
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -127,7 +143,14 @@ fn finalize_turn_commits_before_maintenance() {
     assert!(report.session_commit.committed);
     assert_eq!(report.session_commit.after_count, 2);
     assert!(report.maintenance.is_some());
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
 }
 
 #[test]
@@ -153,7 +176,14 @@ fn finalize_turn_commits_transcript_and_reports_semantic_governance_boundary() {
         .expect("finalize turn");
 
     assert!(report.session_commit.committed);
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
     assert!(report.semantic_governance.attempted);
     assert!(report.semantic_governance.executed);
     assert_eq!(report.semantic_governance.accepted_count, 0);
@@ -185,7 +215,14 @@ fn finalize_turn_commits_transcript_when_maintenance_services_are_unavailable() 
 
     assert!(report.session_commit.committed);
     assert!(report.maintenance.is_none());
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
     assert_eq!(
         report.semantic_governance.skipped_reason.as_deref(),
         Some("maintenance_http_unavailable")
@@ -216,7 +253,14 @@ fn finalize_turn_commits_transcript_when_profile_hides_maintenance() {
 
     assert!(report.session_commit.committed);
     assert!(report.maintenance.is_none());
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
     assert_eq!(
         report.semantic_governance.skipped_reason.as_deref(),
         Some("maintenance_not_visible")
@@ -303,6 +347,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -312,12 +357,13 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
         })
         .expect("projection");
 
+    assert!(projection.context.long_term_memory_text.is_none());
     assert!(projection
-        .context
-        .long_term_memory_text
-        .as_deref()
-        .unwrap_or_default()
-        .contains("Qingchuan"));
+        .recall_delivery_report
+        .rendered_capsules
+        .iter()
+        .any(|capsule| capsule.content.contains("Qingchuan")));
+    assert!(projection.system_memory_block.contains("Qingchuan"));
 }
 
 #[test]
@@ -365,6 +411,7 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "你是谁？".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -374,12 +421,8 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
         })
         .expect("projection");
 
-    assert!(!projection
-        .context
-        .long_term_memory_text
-        .as_deref()
-        .unwrap_or_default()
-        .contains("memory helper"));
+    assert!(projection.context.long_term_memory_text.is_none());
+    assert!(!projection.system_memory_block.contains("memory helper"));
 }
 
 #[test]
@@ -430,6 +473,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "回答风格偏好是什么？".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -439,12 +483,13 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
         })
         .expect("projection");
 
+    assert!(projection.context.long_term_memory_text.is_none());
     assert!(projection
-        .context
-        .long_term_memory_text
-        .as_deref()
-        .unwrap_or_default()
-        .contains("concise Chinese"));
+        .recall_delivery_report
+        .rendered_capsules
+        .iter()
+        .any(|capsule| capsule.content.contains("concise Chinese")));
+    assert!(projection.system_memory_block.contains("concise Chinese"));
 }
 
 #[test]
@@ -492,6 +537,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "external_claim".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -552,6 +598,7 @@ fn finalize_turn_uses_canonical_delta_external_content_boundary() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "external_delta_claim".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,

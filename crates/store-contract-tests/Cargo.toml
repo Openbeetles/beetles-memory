@@ -1,0 +1,24 @@
+[package]
+name = "bm-store-contract-tests"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Internal persistence contract tests for Beetle Memory."
+
+[lib]
+name = "bm_store_contract_tests"
+path = "src/lib.rs"
+
+[features]
+default = []
+embedded-store = ["bm-sdk/embedded-store"]
+sqlite-store = ["bm-sdk/sqlite-store", "dep:rusqlite"]
+
+[dependencies]
+bm-core.workspace = true
+bm-sdk = { workspace = true, features = ["nonproduction-replay-harness"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rusqlite = { workspace = true, optional = true }

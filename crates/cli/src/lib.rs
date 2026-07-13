@@ -631,7 +631,7 @@ impl CliOptions {
                     view: MemoryLongTermControlView::HostUi,
                 },
             )),
-            "long-term-delete" => Ok(AdapterCommand::LongTermMutate(
+            "long-term-delete" => Ok(AdapterCommand::LongTermMutate(Box::new(
                 MemoryLongTermMutationRequest {
                     operation: MemoryLongTermMutation::Delete {
                         target: MemoryLongTermTarget::RecordId(
@@ -642,7 +642,7 @@ impl CliOptions {
                     dry_run: false,
                     mode_input: RuntimeLifecycleModeInput::default(),
                 },
-            )),
+            ))),
             "long-term-policy-suppress" => Ok(AdapterCommand::LongTermPolicy(
                 MemoryLongTermPolicyRequest {
                     operation: MemoryGovernancePolicyMutation::Suppress {
@@ -684,11 +684,13 @@ impl CliOptions {
                 ))
             }
             "recall" => Ok(AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: self.query.clone(),
                 limit: self.limit,
                 tool_registry_refs: Vec::new(),
             })),
             "project" => Ok(AdapterCommand::Project(MemoryProjectionRequest {
+                structured_query_facets: Vec::new(),
                 user_query: self.query.clone(),
                 system_max_len: self.max_len,
                 recent_messages_limit: self.limit,
@@ -823,8 +825,11 @@ fn render_sdk_report(
         }),
         AdapterSdkReport::Project(report) => json!({
             "status": "accepted",
-            "system_memory_block": report.system_memory_block,
-            "lifecycle": report.lifecycle_report.result_summary,
+            "projection_surface": "ui_api",
+            "projection_block": report.projection_block,
+            "chars": report.chars,
+            "agent_tool_hints": report.agent_tool_hints,
+            "audit": report.audit,
         }),
         AdapterSdkReport::Maintain(report) => json!({
             "status": "accepted",

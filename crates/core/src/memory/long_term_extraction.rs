@@ -8,9 +8,11 @@ use crate::error::Result;
 use crate::llm::{LlmClient, LlmHttpClient, Message, ToolChoicePolicy};
 use crate::orchestrator::PressureLevel;
 use crate::platform::SkillStorage;
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+use crate::skills::write_governed_runtime_skills;
 use crate::skills::{
-    write_governed_runtime_skills, RuntimeSkillWrite, RuntimeSkillWriteAction,
-    RuntimeSkillWriteSource,
+    plan_governed_runtime_skills, RuntimeSkillStorageMutation, RuntimeSkillWrite,
+    RuntimeSkillWriteAction, RuntimeSkillWriteSource,
 };
 use crate::util::{scrub_credentials, truncate_content_to_max};
 use serde::{Deserialize, Serialize};
@@ -19,16 +21,18 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use super::{
-    build_archive_evidence_block, memory_policy, render_long_term_memory_block,
-    run_memory_governance_kernel, search_archive_records, write_governed_shared_memory,
+    build_archive_evidence_block, memory_policy, plan_governed_shared_memory,
+    render_long_term_memory_block, run_memory_governance_kernel, search_archive_records,
     ArchiveRecordSource, ArchiveSearchHit, ArchiveSearchQuery, LongTermExtractionPolicy,
     LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, LongTermMemoryStore, MemoryEvidenceAuthority, MemoryGovernanceContext,
-    MemoryGovernanceInput, MemoryProfile, MemoryStore, SessionMessage, SessionStore,
-    SessionSummaryStore, SharedMemoryWriteAction, SharedMemoryWriteSource, TurnLedgerStore,
-    MAX_LONG_TERM_MEMORY_ITEMS,
+    LongTermMemoryKind, LongTermMemoryReadStore, LongTermMemorySlot, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryEvidenceAuthority,
+    MemoryGovernanceContext, MemoryGovernanceInput, MemoryProfile, MemoryStore, SessionMessage,
+    SessionStore, SessionSummaryStore, SharedMemoryWriteAction, SharedMemoryWriteSource,
+    TurnLedgerStore, MAX_LONG_TERM_MEMORY_ITEMS,
 };
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+use super::{write_governed_shared_memory, LongTermMemoryStore};
 
 /// 长期记忆提取状态存储路径（相对状态根）。
 pub const REL_PATH_LONG_TERM_EXTRACTION_STATES: &str = "memory/long_term_extraction_states.json";
@@ -166,8 +170,11 @@ pub struct ParsedLongTermMemoryExtraction {
 pub struct LongTermMemoryExtractionApplyReport {
     pub changed: usize,
     pub deleted_slots: Vec<LongTermMemorySlot>,
+    pub deleted_entry_ids: Vec<String>,
     pub accepted_upserts: Vec<LongTermMemoryDraft>,
+    pub accepted_entries: Vec<LongTermMemoryEntry>,
     pub accepted_skill_writes: Vec<RuntimeSkillWrite>,
+    pub planned_skill_mutations: Vec<RuntimeSkillStorageMutation>,
 }
 
 #[derive(Deserialize)]
@@ -212,7 +219,7 @@ fn default_long_term_memory_extraction_op() -> String {
 }
 
 pub fn build_long_term_memory_extraction_input(
-    store: &dyn LongTermMemoryStore,
+    store: &dyn LongTermMemoryReadStore,
     chat_id: &str,
     recent: &[SessionMessage],
     session_summary: Option<&str>,
@@ -415,6 +422,7 @@ pub fn parse_long_term_memory_extraction_response(
                     topic: parsed_item.topic,
                     content: parsed_item.content,
                     keywords: parsed_item.keywords,
+                    privacy: super::MemoryPrivacyClass::SharedWithSubject,
                     source_chat_id: parsed_item.source_chat_id,
                     source_type: parsed_item
                         .source_type
@@ -424,6 +432,7 @@ pub fn parse_long_term_memory_extraction_response(
                     freshness: parsed_item.freshness,
                     stale_hint: parsed_item.stale_hint,
                     supporting_citations: Vec::new(),
+                    canonical_entities: Vec::new(),
                     evidence_count: None,
                     observed_at: None,
                     last_confirmed_at: None,
@@ -720,7 +729,8 @@ fn lower_draft_confidence(draft: &mut LongTermMemoryDraft, target: LongTermMemor
     draft.confidence = Some(next);
 }
 
-pub fn apply_long_term_memory_extraction(
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+pub(crate) fn apply_long_term_memory_extraction(
     store: &dyn LongTermMemoryStore,
     skill_storage: &dyn SkillStorage,
     extraction: &ParsedLongTermMemoryExtraction,
@@ -732,7 +742,8 @@ pub fn apply_long_term_memory_extraction(
     )
 }
 
-pub fn apply_long_term_memory_extraction_with_report(
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+pub(crate) fn apply_long_term_memory_extraction_with_report(
     store: &dyn LongTermMemoryStore,
     skill_storage: &dyn SkillStorage,
     extraction: &ParsedLongTermMemoryExtraction,
@@ -796,11 +807,63 @@ pub fn apply_long_term_memory_extraction_with_report(
         deleted_slots,
         accepted_upserts,
         accepted_skill_writes,
+        ..LongTermMemoryExtractionApplyReport::default()
     })
 }
 
+pub fn plan_long_term_memory_extraction_with_report(
+    store: &dyn LongTermMemoryReadStore,
+    skill_storage: &dyn SkillStorage,
+    extraction: &ParsedLongTermMemoryExtraction,
+    now_secs: u64,
+) -> Result<LongTermMemoryExtractionApplyReport> {
+    let mut report = LongTermMemoryExtractionApplyReport::default();
+    for slot in &extraction.deletes {
+        let Some(entry) = store.get_slot(slot)? else {
+            continue;
+        };
+        report.deleted_slots.push(slot.clone());
+        report.deleted_entry_ids.push(entry.id);
+        report.changed = report.changed.saturating_add(1);
+    }
+    if !extraction.upserts.is_empty() {
+        let plan = plan_governed_shared_memory(
+            store,
+            &extraction.upserts,
+            now_secs,
+            SharedMemoryWriteSource::Extraction,
+        )?;
+        report.changed = report.changed.saturating_add(plan.outcome.changed);
+        report.accepted_upserts = plan.accepted_drafts;
+        report.accepted_entries = plan.accepted_entries;
+    }
+    if !extraction.skill_writes.is_empty() {
+        let plan = plan_governed_runtime_skills(
+            skill_storage,
+            &extraction.skill_writes,
+            RuntimeSkillWriteSource::Extraction,
+        )?;
+        report.changed = report.changed.saturating_add(plan.outcome.changed);
+        let accepted_topics = plan
+            .outcome
+            .reports
+            .iter()
+            .filter(|item| item.action == RuntimeSkillWriteAction::Accepted)
+            .map(|item| item.topic.trim().to_string())
+            .collect::<HashSet<_>>();
+        report.accepted_skill_writes = extraction
+            .skill_writes
+            .iter()
+            .filter(|write| accepted_topics.contains(write.topic.trim()))
+            .cloned()
+            .collect();
+        report.planned_skill_mutations = plan.mutations;
+    }
+    Ok(report)
+}
+
 pub fn prepare_long_term_memory_extraction(
-    store: &dyn LongTermMemoryStore,
+    store: &dyn LongTermMemoryReadStore,
     extraction: &ParsedLongTermMemoryExtraction,
     chat_id: &str,
 ) -> ParsedLongTermMemoryExtraction {
@@ -1291,7 +1354,7 @@ pub struct LongTermMemoryRefreshContext<'a> {
     pub memory_store: &'a dyn MemoryStore,
     pub session_store: &'a dyn SessionStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub extraction_state_store: &'a dyn LongTermMemoryExtractionStateStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
     pub skill_storage: &'a dyn SkillStorage,
@@ -1512,7 +1575,7 @@ fn extract_long_term_memory(
     {
         return Ok(LongTermMemoryExtractionApplyReport::default());
     }
-    apply_long_term_memory_extraction_with_report(
+    plan_long_term_memory_extraction_with_report(
         ctx.long_term_memory_store,
         ctx.skill_storage,
         &extraction,
@@ -1546,7 +1609,8 @@ mod tests {
     use crate::error::Result;
     use crate::llm::{LlmModelCompat, LlmResponse};
     use crate::memory::{
-        LongTermMemoryEntry, MemoryStore, TurnLedger, TurnLedgerStatus, TurnLedgerStore,
+        LongTermMemoryEntry, MemoryPrivacyClass, MemoryStore, TurnLedger, TurnLedgerStatus,
+        TurnLedgerStore,
     };
     use crate::platform::SkillStorage;
     use std::sync::Mutex;
@@ -1831,6 +1895,7 @@ mod tests {
     ) -> LongTermMemoryDraft {
         LongTermMemoryDraft {
             kind,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: topic.to_string(),
             content: content.to_string(),
             keywords: keywords.into_iter().map(str::to_string).collect(),
@@ -1841,6 +1906,7 @@ mod tests {
             freshness: None,
             stale_hint: None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: None,
             last_confirmed_at: None,
@@ -1861,6 +1927,7 @@ mod tests {
         crate::memory::canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             id: id.to_string(),
             kind,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: topic.to_string(),
             content: content.to_string(),
             keywords: keywords.into_iter().map(str::to_string).collect(),
@@ -1871,12 +1938,14 @@ mod tests {
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: 0,
             created_at,
             updated_at,
             observed_at: updated_at.max(created_at),
             last_confirmed_at: updated_at.max(created_at),
-            source_revision: 0,
+            source_revision: None,
+            owner_revision: 1,
             last_used_at: 0,
         })
         .unwrap()
@@ -2230,6 +2299,28 @@ mod tests {
         assert_eq!(parsed.deletes.len(), 0);
         assert_eq!(parsed.upserts[0].topic, "response_style");
         assert_eq!(parsed.upserts[1].topic, "current_focus");
+    }
+
+    #[test]
+    fn llm_extraction_never_infers_canonical_entities_from_text_or_unknown_fields() {
+        let raw = r#"
+        [
+          {
+            "op":"upsert",
+            "kind":"project",
+            "topic":"agent_memory",
+            "content":"Alice maintains the Agent Memory repository.",
+            "keywords":["Alice","repository"],
+            "canonical_entities":[{"kind":"person","canonical_id":"alice"}],
+            "source_authority":"user_asserted"
+          }
+        ]
+        "#;
+
+        let parsed = parse_long_term_memory_extraction_response(raw, "chat-1");
+
+        assert_eq!(parsed.upserts.len(), 1);
+        assert!(parsed.upserts[0].canonical_entities.is_empty());
     }
 
     #[test]

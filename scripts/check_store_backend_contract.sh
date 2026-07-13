@@ -7,9 +7,9 @@ assert_store_tree_excludes() {
   local feature_set="$1"
   local needle="$2"
   local tree
-  tree="$(cargo tree -p bm-store --no-default-features --features "$feature_set")"
+  tree="$(cargo tree -p bm-sdk --no-default-features --features "$feature_set")"
   if grep -q "$needle" <<<"$tree"; then
-    echo "bm-store feature set unexpectedly includes $needle: $feature_set" >&2
+    echo "bm-sdk persistence feature set unexpectedly includes $needle: $feature_set" >&2
     exit 1
   fi
 }
@@ -18,25 +18,25 @@ assert_store_tree_includes() {
   local feature_set="$1"
   local needle="$2"
   local tree
-  tree="$(cargo tree -p bm-store --no-default-features --features "$feature_set")"
+  tree="$(cargo tree -p bm-sdk --no-default-features --features "$feature_set")"
   if ! grep -q "$needle" <<<"$tree"; then
-    echo "bm-store feature set should include $needle: $feature_set" >&2
+    echo "bm-sdk persistence feature set should include $needle: $feature_set" >&2
     exit 1
   fi
 }
 
 cargo fmt --all -- --check
 cargo check --workspace
-cargo test -p bm-store --test file_store_contract file_store_maps_long_logical_keys_to_profile_bounded_physical_paths
-cargo test -p bm-store --test conversation_transcript_store_contract file_snapshot_export_import_preserves_long_transcript_keys_and_attrs
-cargo test -p bm-store
-cargo test -p bm-store --all-features
-cargo test -p bm-store --features sqlite-store
+cargo test -p bm-store-contract-tests --test file_store_contract file_store_maps_long_logical_keys_to_profile_bounded_physical_paths
+cargo test -p bm-store-contract-tests --test conversation_transcript_store_contract file_snapshot_export_import_preserves_long_transcript_keys_and_attrs
+cargo test -p bm-store-contract-tests
+cargo test -p bm-store-contract-tests --all-features
+cargo test -p bm-store-contract-tests --features sqlite-store
 cargo test -p bm-sdk
 cargo check -p bm-sdk --features profile-esp-standalone-memory
 cargo check -p bm-sdk --features profile-esp-embedded-sdk
 cargo check -p bm-sdk --features profile-server-linux-dev-full
-cargo test -p bm-sdk --test sdk_runtime_flow --features profile-server-linux-dev-full
+cargo test -p bm-sdk --features nonproduction-replay-harness,profile-server-linux-dev-full --test sdk_runtime_flow
 assert_store_tree_excludes "embedded-store" "rusqlite"
 assert_store_tree_includes "sqlite-store" "rusqlite"
 bash scripts/check_profile_matrix.sh

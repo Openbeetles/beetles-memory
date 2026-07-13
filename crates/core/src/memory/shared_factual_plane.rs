@@ -10,7 +10,7 @@ use super::{
     recall_long_term_memory_entries, render_exact_long_term_memory_block,
     render_long_term_memory_block, search_archive_records, ArchiveRecordSource, ArchiveSearchHit,
     ArchiveSearchQuery, LongTermMemoryConfidence, LongTermMemoryEntry, LongTermMemoryEvidenceState,
-    LongTermMemoryStore, MemoryProfile, MemoryStore, SessionMessage, TurnLedgerStore,
+    LongTermMemoryReadStore, MemoryProfile, MemoryStore, SessionMessage, TurnLedgerStore,
 };
 
 const SHARED_FACTUAL_HEADER_LEN: usize = 128;
@@ -186,6 +186,7 @@ fn observation_to_metadata_draft(
         topic: entry.topic.clone(),
         content: entry.content.clone(),
         keywords: entry.keywords.clone(),
+        privacy: entry.privacy,
         source_chat_id: entry.source_chat_id.clone(),
         source_type: Some(entry.source_type),
         source_scope: Some(entry.source_scope),
@@ -193,6 +194,7 @@ fn observation_to_metadata_draft(
         freshness: Some(entry.freshness),
         stale_hint: Some(stale_hint),
         supporting_citations: observation.top_citations.clone(),
+        canonical_entities: entry.canonical_entities.clone(),
         evidence_count: Some(
             observation
                 .support_count
@@ -333,14 +335,17 @@ fn lookup_archive_hits_for_entry(
     .unwrap_or_default()
 }
 
-fn load_shared_factual_entries(
-    long_term_store: &dyn LongTermMemoryStore,
+fn load_shared_factual_entries<S>(
+    long_term_store: &S,
     chat_id: &str,
     query_hint: &str,
     summary_text: Option<&str>,
     recent: &[SessionMessage],
     profile: MemoryProfile,
-) -> Vec<LongTermMemoryEntry> {
+) -> Vec<LongTermMemoryEntry>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let capability = memory_capability_profile(profile);
     if capability.prompt_exact_lookup_enabled {
         if let Some(slot) = parse_explicit_long_term_slot_query(query_hint) {
@@ -600,15 +605,18 @@ fn runtime_authoritative_reconcile_override(
     }
 }
 
-pub(crate) fn build_archive_reconcile_drafts(
+pub(crate) fn build_archive_reconcile_drafts<S>(
     session_store: &dyn super::SessionStore,
-    long_term_store: &dyn LongTermMemoryStore,
+    long_term_store: &S,
     memory_store: &dyn MemoryStore,
     turn_ledger_store: &dyn TurnLedgerStore,
     current_chat_id: &str,
     profile: MemoryProfile,
     limit: usize,
-) -> Vec<super::LongTermMemoryDraft> {
+) -> Vec<super::LongTermMemoryDraft>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let entries = long_term_store.list(limit.clamp(1, 24)).unwrap_or_default();
     if entries.is_empty() {
         return Vec::new();
@@ -646,9 +654,9 @@ pub(crate) fn build_archive_reconcile_drafts(
     drafts
 }
 
-pub(crate) fn build_shared_factual_plane_snapshot(
+pub(crate) fn build_shared_factual_plane_snapshot<S>(
     session_store: &dyn super::SessionStore,
-    long_term_store: &dyn LongTermMemoryStore,
+    long_term_store: &S,
     memory_store: &dyn MemoryStore,
     turn_ledger_store: &dyn TurnLedgerStore,
     chat_id: &str,
@@ -657,7 +665,10 @@ pub(crate) fn build_shared_factual_plane_snapshot(
     recent: &[SessionMessage],
     max_len: usize,
     profile: MemoryProfile,
-) -> SharedFactualPlaneSnapshot {
+) -> SharedFactualPlaneSnapshot
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     if max_len < 96 {
         return SharedFactualPlaneSnapshot::default();
     }
@@ -731,7 +742,7 @@ pub(crate) fn build_shared_factual_plane_snapshot(
 }
 
 pub(crate) fn render_shared_factual_plane_block(
-    store: &dyn LongTermMemoryStore,
+    store: &dyn LongTermMemoryReadStore,
     chat_id: &str,
     summary_text: Option<&str>,
     recent: &[SessionMessage],
@@ -854,6 +865,7 @@ mod tests {
             entries: vec![LongTermMemoryEntry {
                 id: "ltm-1".to_string(),
                 kind: crate::memory::LongTermMemoryKind::Fact,
+                privacy: crate::memory::MemoryPrivacyClass::SharedWithSubject,
                 topic: "primary_llm".to_string(),
                 content: "当前主模型是 OpenAI。".to_string(),
                 keywords: vec!["openai".to_string()],
@@ -864,12 +876,14 @@ mod tests {
                 freshness: crate::memory::LongTermMemoryFreshness::Dynamic,
                 stale_hint: crate::memory::LongTermMemoryStaleHint::ReviewBeforeUse,
                 supporting_citations: vec!["transcript:chat-1#message=1".to_string()],
+                canonical_entities: Vec::new(),
                 evidence_count: 1,
                 created_at: 1,
                 updated_at: 1,
                 observed_at: 1,
                 last_confirmed_at: 1,
-                source_revision: 0,
+                source_revision: None,
+                owner_revision: 1,
                 last_used_at: 0,
             }],
         };
@@ -929,6 +943,7 @@ mod tests {
         let entry = LongTermMemoryEntry {
             id: "ltm-audio".to_string(),
             kind: crate::memory::LongTermMemoryKind::Fact,
+            privacy: crate::memory::MemoryPrivacyClass::SharedWithSubject,
             topic: "audio_profile_status".to_string(),
             content: "audio input and output are available".to_string(),
             keywords: vec!["audio".to_string(), "duplex".to_string()],
@@ -939,12 +954,14 @@ mod tests {
             freshness: crate::memory::LongTermMemoryFreshness::Dynamic,
             stale_hint: crate::memory::LongTermMemoryStaleHint::ReviewBeforeUse,
             supporting_citations: vec!["transcript:chat-1#message=1".to_string()],
+            canonical_entities: Vec::new(),
             evidence_count: 1,
             created_at: 1,
             updated_at: 1,
             observed_at: 1,
             last_confirmed_at: 1,
-            source_revision: 0,
+            source_revision: None,
+            owner_revision: 1,
             last_used_at: 0,
         };
 

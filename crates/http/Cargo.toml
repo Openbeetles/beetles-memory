@@ -18,7 +18,7 @@ required-features = ["server-std"]
 [features]
 default = []
 server-std = ["dep:bm-entry", "dep:bm-ollama-transparent"]
-replay-harness = ["bm-entry?/replay-harness"]
+nonproduction-replay-harness = ["bm-entry?/nonproduction-replay-harness"]
 profile-esp-standalone-memory = [
     "bm-adapter/profile-esp-standalone-memory",
     "bm-entry?/profile-esp-standalone-memory",

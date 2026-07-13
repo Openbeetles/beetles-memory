@@ -193,6 +193,7 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what did I ask?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -275,6 +276,7 @@ fn missing_maintenance_services_skip_without_polluting_successful_response() {
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what did I ask?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -340,6 +342,7 @@ fn maintenance_hidden_records_skipped_without_blocking_turn_commit() {
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what did I ask?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -454,6 +457,7 @@ fn streaming_response_without_done_does_not_commit_partial_assistant() {
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what was streamed?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,

@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_core::memory::{
@@ -18,6 +20,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
     let profile = ProfileId::ServerLinuxDevFull;
     let platform = seeded_store_platform(profile);
     platform
+        .replay_harness()
         .self_authored_core_store()
         .set(
             board_subject_scope_id(),
@@ -32,6 +35,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
         )
         .expect("seed self-authored core");
     platform
+        .replay_harness()
         .self_continuity_store()
         .set(
             board_subject_scope_id(),
@@ -45,6 +49,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
         .expect("seed self continuity");
     let relationship_id = relationship_scope_id("sdk.direct", "chat-a");
     platform
+        .replay_harness()
         .relationship_constitution_store()
         .set(
             &relationship_id,
@@ -61,6 +66,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
         )
         .expect("seed relationship constitution");
     assert!(platform
+        .replay_harness()
         .self_authored_core_store()
         .get(board_subject_scope_id())
         .expect("read seeded core")
@@ -69,6 +75,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How should release safety work?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -193,7 +200,8 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
         .subject_projection
         .evidence_refs
         .iter()
-        .any(|evidence| evidence.contains("long_term_memory")));
+        .any(|evidence| evidence.contains("shared_factual")
+            || evidence.starts_with("opaque:evidence:")));
     assert!(report
         .subject_projection
         .budget_decisions
@@ -237,6 +245,7 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "Prepare the release checklist without drifting into roleplay.".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -309,7 +318,7 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
             .subject_projection
             .evidence_refs
             .iter()
-            .any(|evidence| evidence == "subject_mount:compiled"),
+            .any(|evidence| evidence == "subject_mount:degraded"),
         "{:?}",
         report.subject_projection
     );
@@ -336,6 +345,7 @@ fn projection_report_exposes_disclosure_integrity_for_runtime_surfaces() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "Prepare the release checklist.".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -387,6 +397,7 @@ fn empty_store_projection_degrades_subject_mount_without_inventing_personality()
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "Summarize what you know before answering.".to_string(),
             system_max_len: 2048,
             recent_messages_limit: 8,
@@ -441,6 +452,7 @@ fn empty_store_greeting_projection_does_not_leak_identity_meta_terms() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "你好".to_string(),
             system_max_len: 2048,
             recent_messages_limit: 8,

@@ -16,7 +16,7 @@
       ],
       "required_tree_needles": [
         "bm-core",
-        "bm-store"
+        "bm-sdk"
       ],
       "store_backend": "embedded-store",
       "sqlite_allowed": false,
@@ -37,7 +37,7 @@
       ],
       "required_tree_needles": [
         "bm-core",
-        "bm-store"
+        "bm-sdk"
       ],
       "store_backend": "embedded-store",
       "sqlite_allowed": false,
@@ -54,7 +54,7 @@
       ],
       "required_tree_needles": [
         "bm-core",
-        "bm-store",
+        "bm-sdk",
         "rusqlite"
       ],
       "store_backend": "sqlite-store",
@@ -72,7 +72,7 @@
       ],
       "required_tree_needles": [
         "bm-core",
-        "bm-store",
+        "bm-sdk",
         "rusqlite"
       ],
       "store_backend": "sqlite-store",
@@ -90,7 +90,7 @@
       ],
       "required_tree_needles": [
         "bm-core",
-        "bm-store",
+        "bm-sdk",
         "rusqlite"
       ],
       "store_backend": "sqlite-store",
@@ -108,7 +108,7 @@
       ],
       "required_tree_needles": [
         "bm-core",
-        "bm-store",
+        "bm-sdk",
         "rusqlite"
       ],
       "store_backend": "sqlite-store",
@@ -126,7 +126,7 @@
       ],
       "required_tree_needles": [
         "bm-core",
-        "bm-store",
+        "bm-sdk",
         "rusqlite"
       ],
       "store_backend": "sqlite-store",

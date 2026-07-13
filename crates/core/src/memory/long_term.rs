@@ -1,21 +1,22 @@
 //! 结构化长期记忆抽象与轻量召回辅助。
 //! Structured long-term memory abstractions and lightweight recall helpers.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::util::{
     collect_retrieval_terms, is_cjk, normalize_retrieval_text, trigram_overlap_score,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
-use super::recall_anchor::recall_source_authority_score;
+use super::recall_anchor::{canonical_recall_evidence_group, recall_source_authority_score};
 use super::{
-    memory_policy, shared_long_term_governance_policy, LongTermRecallPolicy, MemoryProfile,
-    SessionMessage,
+    memory_policy, shared_long_term_governance_policy, LongTermRecallPolicy, MemoryPrivacyClass,
+    MemoryProfile, SessionMessage,
 };
 
 /// 结构化长期记忆存储路径（相对状态根）。
@@ -32,6 +33,90 @@ pub const MAX_LONG_TERM_MEMORY_KEYWORD_LEN: usize = 24;
 pub const MAX_LONG_TERM_MEMORY_TOPIC_LEN: usize = 40;
 /// 单条记忆保留的支持性引用上限。
 pub const MAX_LONG_TERM_MEMORY_SUPPORTING_CITATIONS: usize = 6;
+
+/// Physical owner key for the MemorySpace-owned shared factual plane.
+pub fn scoped_long_term_memory_storage_key(
+    memory_space_id: &str,
+    logical_owner_id: &str,
+) -> Result<String> {
+    let memory_space_id = memory_space_id.trim();
+    let logical_owner_id = logical_owner_id.trim();
+    if memory_space_id.is_empty() || logical_owner_id.is_empty() {
+        return Err(Error::config(
+            "long_term_storage_scope",
+            "memory_space_id and logical_owner_id must not be empty",
+        ));
+    }
+    let scope = long_term_memory_space_storage_digest(memory_space_id)?;
+    let owner = domain_separated_sha256("long_term_logical_owner_v1", &[logical_owner_id]);
+    Ok(format!("scope:{scope}:owner:{owner}"))
+}
+
+pub fn scoped_long_term_memory_storage_prefix(memory_space_id: &str) -> Result<String> {
+    Ok(format!(
+        "scope:{}:owner:",
+        long_term_memory_space_storage_digest(memory_space_id)?
+    ))
+}
+
+pub fn scoped_long_term_control_storage_key(
+    memory_space_id: &str,
+    namespace: &str,
+    logical_key: &str,
+) -> Result<String> {
+    let namespace = namespace.trim();
+    let logical_key = logical_key.trim();
+    if namespace.is_empty() || logical_key.is_empty() {
+        return Err(Error::config(
+            "long_term_control_storage_scope",
+            "namespace and logical_key must not be empty",
+        ));
+    }
+    let prefix = scoped_long_term_control_storage_prefix(memory_space_id, namespace)?;
+    let document = domain_separated_sha256("long_term_control_document_v1", &[logical_key]);
+    Ok(format!("{prefix}{document}"))
+}
+
+pub fn scoped_long_term_control_storage_prefix(
+    memory_space_id: &str,
+    namespace: &str,
+) -> Result<String> {
+    let namespace = namespace.trim();
+    if namespace.is_empty() {
+        return Err(Error::config(
+            "long_term_control_storage_scope",
+            "namespace must not be empty",
+        ));
+    }
+    let scope = long_term_memory_space_storage_digest(memory_space_id)?;
+    let namespace = domain_separated_sha256("long_term_control_namespace_v1", &[namespace]);
+    Ok(format!("scope:{scope}:control:{namespace}:doc:"))
+}
+
+fn long_term_memory_space_storage_digest(memory_space_id: &str) -> Result<String> {
+    let memory_space_id = memory_space_id.trim();
+    if memory_space_id.is_empty() {
+        return Err(Error::config(
+            "long_term_storage_scope",
+            "memory_space_id must not be empty",
+        ));
+    }
+    Ok(domain_separated_sha256(
+        "long_term_memory_space_scope_v1",
+        &[memory_space_id],
+    ))
+}
+
+fn domain_separated_sha256(domain: &str, fields: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((domain.len() as u64).to_be_bytes());
+    hasher.update(domain.as_bytes());
+    for field in fields {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
 /// 单条支持性引用字节上限。
 pub const MAX_LONG_TERM_MEMORY_CITATION_LEN: usize = 96;
 /// 注入 prompt 的长期记忆块上限。
@@ -40,6 +125,67 @@ pub const MAX_LONG_TERM_MEMORY_BLOCK_LEN: usize = 1024;
 const LONG_TERM_MEMORY_TASK_TTL_SECS: u64 = 45 * 86_400;
 /// 长期记忆治理：项目超时后视为陈旧。
 const LONG_TERM_MEMORY_PROJECT_TTL_SECS: u64 = 180 * 86_400;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalEntityKind {
+    Person,
+    Agent,
+    Organization,
+    Project,
+    Product,
+    Place,
+    Service,
+    System,
+    Repository,
+    Document,
+    Event,
+    Concept,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CanonicalEntityKey {
+    pub kind: CanonicalEntityKind,
+    pub canonical_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CanonicalEvidenceRef {
+    pub source_ref: String,
+    pub canonical_evidence_group: String,
+    pub source_kind: String,
+    pub source_authority_score: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CanonicalEntityRef {
+    pub key: CanonicalEntityKey,
+    pub display_label: Option<String>,
+    pub aliases: Vec<String>,
+    pub evidence_refs: Vec<CanonicalEvidenceRef>,
+}
+
+pub fn canonical_evidence_ref_from_source(raw: &str) -> Option<CanonicalEvidenceRef> {
+    let source_ref = raw.trim();
+    if source_ref.is_empty() {
+        return None;
+    }
+    let canonical_evidence_group = canonical_recall_evidence_group(source_ref);
+    if canonical_evidence_group.is_empty() {
+        return None;
+    }
+    Some(CanonicalEvidenceRef {
+        source_ref: source_ref.to_string(),
+        canonical_evidence_group,
+        source_kind: source_ref
+            .split([':', '#', '/', '|'])
+            .next()
+            .unwrap_or("unstructured")
+            .trim()
+            .to_ascii_lowercase(),
+        source_authority_score: recall_source_authority_score(source_ref),
+    })
+}
 
 impl LongTermRecallPolicy {
     fn recall_block_max_len(self, system_max_len: usize) -> usize {
@@ -442,6 +588,7 @@ pub struct LongTermMemoryEntry {
     pub topic: String,
     pub content: String,
     pub keywords: Vec<String>,
+    pub privacy: MemoryPrivacyClass,
     pub source_chat_id: Option<String>,
     #[serde(default)]
     pub source_type: LongTermMemorySourceType,
@@ -455,6 +602,7 @@ pub struct LongTermMemoryEntry {
     pub stale_hint: LongTermMemoryStaleHint,
     #[serde(default)]
     pub supporting_citations: Vec<String>,
+    pub canonical_entities: Vec<CanonicalEntityRef>,
     #[serde(default)]
     pub evidence_count: u32,
     pub created_at: u64,
@@ -464,8 +612,8 @@ pub struct LongTermMemoryEntry {
     pub observed_at: u64,
     #[serde(default)]
     pub last_confirmed_at: u64,
-    #[serde(default)]
-    pub source_revision: u64,
+    pub source_revision: Option<u64>,
+    pub owner_revision: u64,
     #[serde(default)]
     pub last_used_at: u64,
 }
@@ -478,6 +626,7 @@ pub struct LongTermMemoryDraft {
     pub content: String,
     #[serde(default)]
     pub keywords: Vec<String>,
+    pub privacy: MemoryPrivacyClass,
     #[serde(default)]
     pub source_chat_id: Option<String>,
     #[serde(default)]
@@ -492,6 +641,7 @@ pub struct LongTermMemoryDraft {
     pub stale_hint: Option<LongTermMemoryStaleHint>,
     #[serde(default)]
     pub supporting_citations: Vec<String>,
+    pub canonical_entities: Vec<CanonicalEntityRef>,
     #[serde(default)]
     pub evidence_count: Option<u32>,
     #[serde(default)]
@@ -539,13 +689,17 @@ pub struct LongTermMemorySlotLookup {
 impl LongTermMemoryDraft {
     /// 规范化草稿：裁剪长度、去重关键词、忽略空内容。
     pub fn normalized(&self) -> Option<Self> {
+        self.normalized_with_rejection().ok()
+    }
+
+    fn normalized_with_rejection(&self) -> std::result::Result<Self, LongTermMemoryEntryRejection> {
         let topic = normalize_topic(self.topic.trim());
         if topic.is_empty() {
-            return None;
+            return Err(LongTermMemoryEntryRejection::InvalidDraft);
         }
         let content = truncate_utf8_bytes(self.content.trim(), MAX_LONG_TERM_MEMORY_CONTENT_LEN);
         if content.is_empty() {
-            return None;
+            return Err(LongTermMemoryEntryRejection::InvalidDraft);
         }
         let mut keywords =
             Vec::with_capacity(self.keywords.len().min(MAX_LONG_TERM_MEMORY_KEYWORDS));
@@ -562,11 +716,15 @@ impl LongTermMemoryDraft {
                 break;
             }
         }
-        Some(Self {
+        let supporting_citations = normalize_supporting_citations(&self.supporting_citations);
+        let canonical_entities =
+            normalize_canonical_entities(&self.canonical_entities, &supporting_citations)?;
+        Ok(Self {
             kind: self.kind.clone(),
             topic,
             content,
             keywords,
+            privacy: self.privacy,
             source_chat_id: self
                 .source_chat_id
                 .as_deref()
@@ -578,7 +736,8 @@ impl LongTermMemoryDraft {
             confidence: self.confidence,
             freshness: self.freshness,
             stale_hint: self.stale_hint,
-            supporting_citations: normalize_supporting_citations(&self.supporting_citations),
+            supporting_citations,
+            canonical_entities,
             evidence_count: self.evidence_count.filter(|value| *value > 0),
             observed_at: self.observed_at.filter(|value| *value > 0),
             last_confirmed_at: self.last_confirmed_at.filter(|value| *value > 0),
@@ -631,6 +790,20 @@ impl LongTermMemoryQuery {
             limit: self.limit.clamp(1, MAX_LONG_TERM_MEMORY_ITEMS),
         }
     }
+
+    pub fn filter_sort_entries(
+        &self,
+        mut entries: Vec<LongTermMemoryEntry>,
+        now_secs: u64,
+    ) -> Vec<LongTermMemoryEntry> {
+        let normalized = self.normalized();
+        entries.retain(|entry| long_term_memory_matches_query(entry, &normalized, now_secs));
+        entries.sort_by(|left, right| {
+            compare_long_term_memory_query_results(left, right, &normalized)
+        });
+        entries.truncate(normalized.limit);
+        entries
+    }
 }
 
 fn stable_id_for_kind_topic(kind: &LongTermMemoryKind, topic: &str) -> Option<String> {
@@ -661,6 +834,117 @@ fn normalize_supporting_citations(values: &[String]) -> Vec<String> {
         }
     }
     citations
+}
+
+fn normalize_entity_display(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_entity_id(value: &str) -> String {
+    normalize_entity_display(value).to_lowercase()
+}
+
+fn normalize_canonical_entities(
+    values: &[CanonicalEntityRef],
+    supporting_citations: &[String],
+) -> std::result::Result<Vec<CanonicalEntityRef>, LongTermMemoryEntryRejection> {
+    let citation_groups = supporting_citations
+        .iter()
+        .filter_map(|citation| canonical_evidence_ref_from_source(citation))
+        .map(|evidence| evidence.canonical_evidence_group)
+        .collect::<HashSet<_>>();
+    let mut entities: Vec<CanonicalEntityRef> = Vec::new();
+    for raw in values {
+        let canonical_id = normalize_entity_id(&raw.key.canonical_id);
+        let display_label = raw
+            .display_label
+            .as_deref()
+            .map(normalize_entity_display)
+            .filter(|label| !label.is_empty());
+        if canonical_id.is_empty() {
+            return Err(LongTermMemoryEntryRejection::InvalidCanonicalEntity);
+        }
+        let mut aliases = Vec::new();
+        let display_key = display_label.as_deref().map(str::to_lowercase);
+        for alias in &raw.aliases {
+            let alias = normalize_entity_display(alias);
+            let alias_key = alias.to_lowercase();
+            if alias.is_empty()
+                || display_key.as_deref() == Some(alias_key.as_str())
+                || alias_key == canonical_id
+                || aliases
+                    .iter()
+                    .any(|existing: &String| existing.to_lowercase() == alias_key)
+            {
+                continue;
+            }
+            aliases.push(alias);
+        }
+        let mut evidence_refs = Vec::new();
+        for supplied in &raw.evidence_refs {
+            let Some(recomputed) = canonical_evidence_ref_from_source(&supplied.source_ref) else {
+                return Err(LongTermMemoryEntryRejection::InvalidCanonicalEntity);
+            };
+            if supplied != &recomputed
+                || !citation_groups.contains(&recomputed.canonical_evidence_group)
+            {
+                return Err(LongTermMemoryEntryRejection::InvalidCanonicalEntity);
+            }
+            if !evidence_refs
+                .iter()
+                .any(|existing: &CanonicalEvidenceRef| existing == &recomputed)
+            {
+                evidence_refs.push(recomputed);
+            }
+        }
+        if evidence_refs.is_empty() {
+            return Err(LongTermMemoryEntryRejection::InvalidCanonicalEntity);
+        }
+        let key = CanonicalEntityKey {
+            kind: raw.key.kind,
+            canonical_id,
+        };
+        if let Some(existing) = entities.iter_mut().find(|entity| entity.key == key) {
+            match (&existing.display_label, &display_label) {
+                (Some(current), Some(incoming)) if !current.eq_ignore_ascii_case(incoming) => {
+                    return Err(LongTermMemoryEntryRejection::EntityLabelConflict)
+                }
+                (None, Some(_)) => existing.display_label = display_label,
+                _ => {}
+            }
+            merge_entity_aliases_and_evidence(existing, &aliases, &evidence_refs);
+            continue;
+        }
+        entities.push(CanonicalEntityRef {
+            key,
+            display_label,
+            aliases,
+            evidence_refs,
+        });
+    }
+    entities.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(entities)
+}
+
+fn merge_entity_aliases_and_evidence(
+    existing: &mut CanonicalEntityRef,
+    aliases: &[String],
+    evidence_refs: &[CanonicalEvidenceRef],
+) {
+    for alias in aliases {
+        if !existing
+            .aliases
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(alias))
+        {
+            existing.aliases.push(alias.clone());
+        }
+    }
+    for evidence in evidence_refs {
+        if !existing.evidence_refs.iter().any(|value| value == evidence) {
+            existing.evidence_refs.push(evidence.clone());
+        }
+    }
 }
 
 fn effective_evidence_count(citation_count: usize, evidence_count: u32) -> u32 {
@@ -798,15 +1082,73 @@ fn resolve_long_term_memory_meta(draft: &LongTermMemoryDraft) -> LongTermMemoryR
     }
 }
 
-pub(crate) fn long_term_memory_entry_from_draft(
+fn resolve_long_term_memory_meta_for_existing(
     draft: &LongTermMemoryDraft,
+    existing: &LongTermMemoryEntry,
+) -> LongTermMemoryResolvedMeta {
+    let source_type = draft.source_type.unwrap_or(existing.source_type);
+    let source_scope = draft.source_scope.unwrap_or(existing.source_scope);
+    let freshness = infer_long_term_memory_freshness(&draft.kind, draft.freshness);
+    LongTermMemoryResolvedMeta {
+        source_type,
+        source_scope,
+        confidence: infer_long_term_memory_confidence(&draft.kind, source_type, draft.confidence),
+        freshness,
+        stale_hint: infer_long_term_memory_stale_hint(freshness, draft.stale_hint),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LongTermMemoryEntryRejection {
+    InvalidDraft,
+    InvalidCanonicalEntity,
+    EntityLabelConflict,
+    SlotMismatch,
+    PrivacyTransitionRequiresControl,
+    OlderSourceRevision,
+    SourceRevisionConflict,
+    OlderObservation,
+    LowerConfidenceContent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LongTermMemoryEntryPlan {
+    Created(LongTermMemoryEntry),
+    Updated(LongTermMemoryEntry),
+    Noop,
+    Rejected(LongTermMemoryEntryRejection),
+}
+
+impl LongTermMemoryEntryPlan {
+    pub fn changed_entry(&self) -> Option<&LongTermMemoryEntry> {
+        match self {
+            Self::Created(entry) | Self::Updated(entry) => Some(entry),
+            Self::Noop | Self::Rejected(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LongTermMemoryOwnerMutation {
+    Correct(LongTermMemoryDraft),
+    MarkStale(LongTermMemoryStaleHint),
+    ChangeScope(LongTermMemorySourceScope),
+    ChangePrivacy(MemoryPrivacyClass),
+    CompactEvidenceMetadata {
+        supporting_citations: Vec<String>,
+        evidence_count: u32,
+        last_confirmed_at: u64,
+    },
+}
+
+fn long_term_memory_entry_from_normalized_draft(
+    normalized: LongTermMemoryDraft,
     id: String,
     now_secs: u64,
-) -> Option<LongTermMemoryEntry> {
-    let normalized = draft.normalized()?;
+) -> LongTermMemoryEntry {
     let meta = resolve_long_term_memory_meta(&normalized);
     let observed_at = normalized.observed_at.unwrap_or(now_secs);
-    let supporting_citations = normalize_supporting_citations(&normalized.supporting_citations);
+    let supporting_citations = normalized.supporting_citations;
     let evidence_count = effective_evidence_count(
         supporting_citations.len(),
         normalized.evidence_count.unwrap_or(0),
@@ -815,12 +1157,13 @@ pub(crate) fn long_term_memory_entry_from_draft(
         .last_confirmed_at
         .unwrap_or(observed_at)
         .max(observed_at);
-    Some(LongTermMemoryEntry {
+    LongTermMemoryEntry {
         id,
         kind: normalized.kind,
         topic: normalized.topic,
         content: normalized.content,
         keywords: normalized.keywords,
+        privacy: normalized.privacy,
         source_chat_id: normalized.source_chat_id,
         source_type: meta.source_type,
         source_scope: meta.source_scope,
@@ -828,19 +1171,371 @@ pub(crate) fn long_term_memory_entry_from_draft(
         freshness: meta.freshness,
         stale_hint: meta.stale_hint,
         supporting_citations,
+        canonical_entities: normalized.canonical_entities,
         evidence_count,
         created_at: now_secs,
         updated_at: now_secs,
         observed_at,
         last_confirmed_at,
-        source_revision: draft.source_revision.unwrap_or(0),
+        source_revision: normalized.source_revision,
+        owner_revision: 1,
         last_used_at: 0,
-    })
+    }
+}
+
+fn source_lineage_matches(
+    existing: &LongTermMemoryEntry,
+    effective_source_chat_id: &Option<String>,
+    meta: LongTermMemoryResolvedMeta,
+) -> bool {
+    existing.source_chat_id == *effective_source_chat_id
+        && existing.source_type == meta.source_type
+        && existing.source_scope == meta.source_scope
+}
+
+fn source_payload_matches(
+    existing: &LongTermMemoryEntry,
+    normalized: &LongTermMemoryDraft,
+    effective_source_chat_id: &Option<String>,
+    meta: LongTermMemoryResolvedMeta,
+    now_secs: u64,
+) -> bool {
+    let observed_at = normalized.observed_at.unwrap_or(now_secs);
+    let last_confirmed_at = normalized
+        .last_confirmed_at
+        .unwrap_or(observed_at)
+        .max(observed_at);
+    let evidence_count = effective_evidence_count(
+        normalized.supporting_citations.len(),
+        normalized.evidence_count.unwrap_or(0),
+    );
+    existing.kind == normalized.kind
+        && existing.topic == normalized.topic
+        && existing.content == normalized.content
+        && existing.keywords == normalized.keywords
+        && existing.privacy == normalized.privacy
+        && existing.source_chat_id == *effective_source_chat_id
+        && existing.source_type == meta.source_type
+        && existing.source_scope == meta.source_scope
+        && existing.confidence == meta.confidence
+        && existing.freshness == meta.freshness
+        && existing.stale_hint == meta.stale_hint
+        && existing.supporting_citations == normalized.supporting_citations
+        && existing.canonical_entities == normalized.canonical_entities
+        && existing.evidence_count == evidence_count
+        && existing.observed_at == observed_at
+        && existing.last_confirmed_at == last_confirmed_at
+        && existing.source_revision == normalized.source_revision
+}
+
+fn merge_same_content_entities(
+    existing: &mut Vec<CanonicalEntityRef>,
+    incoming: &[CanonicalEntityRef],
+) -> std::result::Result<(), LongTermMemoryEntryRejection> {
+    for entity in incoming {
+        if let Some(current) = existing.iter_mut().find(|value| value.key == entity.key) {
+            match (&current.display_label, &entity.display_label) {
+                (Some(current), Some(incoming)) if !current.eq_ignore_ascii_case(incoming) => {
+                    return Err(LongTermMemoryEntryRejection::EntityLabelConflict)
+                }
+                (None, Some(_)) => current.display_label = entity.display_label.clone(),
+                _ => {}
+            }
+            merge_entity_aliases_and_evidence(current, &entity.aliases, &entity.evidence_refs);
+        } else {
+            existing.push(entity.clone());
+        }
+    }
+    existing.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(())
+}
+
+pub fn plan_long_term_memory_upsert(
+    existing: Option<&LongTermMemoryEntry>,
+    draft: &LongTermMemoryDraft,
+    now_secs: u64,
+) -> LongTermMemoryEntryPlan {
+    let normalized = match draft.normalized_with_rejection() {
+        Ok(normalized) => normalized,
+        Err(reason) => return LongTermMemoryEntryPlan::Rejected(reason),
+    };
+    let Some(id) = normalized.stable_id() else {
+        return LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::InvalidDraft);
+    };
+    let Some(existing) = existing else {
+        return LongTermMemoryEntryPlan::Created(long_term_memory_entry_from_normalized_draft(
+            normalized, id, now_secs,
+        ));
+    };
+    if existing.kind != normalized.kind || existing.topic != normalized.topic {
+        return LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::SlotMismatch);
+    }
+    if existing.privacy != normalized.privacy {
+        return LongTermMemoryEntryPlan::Rejected(
+            LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl,
+        );
+    }
+    let meta = resolve_long_term_memory_meta_for_existing(&normalized, existing);
+    let effective_source_chat_id = normalized
+        .source_chat_id
+        .clone()
+        .or_else(|| existing.source_chat_id.clone());
+    let same_lineage = source_lineage_matches(existing, &effective_source_chat_id, meta);
+    if same_lineage {
+        if let (Some(current), Some(incoming)) =
+            (existing.source_revision, normalized.source_revision)
+        {
+            if incoming < current {
+                return LongTermMemoryEntryPlan::Rejected(
+                    LongTermMemoryEntryRejection::OlderSourceRevision,
+                );
+            }
+            if incoming == current {
+                return if source_payload_matches(
+                    existing,
+                    &normalized,
+                    &effective_source_chat_id,
+                    meta,
+                    now_secs,
+                ) {
+                    LongTermMemoryEntryPlan::Noop
+                } else {
+                    LongTermMemoryEntryPlan::Rejected(
+                        LongTermMemoryEntryRejection::SourceRevisionConflict,
+                    )
+                };
+            }
+        }
+    }
+
+    let incoming_observed_at = normalized.observed_at.unwrap_or(now_secs);
+    let incoming_last_confirmed_at = normalized
+        .last_confirmed_at
+        .unwrap_or(incoming_observed_at)
+        .max(incoming_observed_at);
+    let incoming_is_older = same_lineage
+        && normalized.source_revision.is_none()
+        && incoming_observed_at > 0
+        && existing.observed_at > incoming_observed_at;
+    let content_changed = existing.content != normalized.content;
+    if content_changed && incoming_is_older {
+        return LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::OlderObservation);
+    }
+    if content_changed && confidence_rank(meta.confidence) < confidence_rank(existing.confidence) {
+        return LongTermMemoryEntryPlan::Rejected(
+            LongTermMemoryEntryRejection::LowerConfidenceContent,
+        );
+    }
+
+    let incoming_evidence_count = effective_evidence_count(
+        normalized.supporting_citations.len(),
+        normalized.evidence_count.unwrap_or(0),
+    );
+    let mut next = existing.clone();
+    if content_changed {
+        next.content = normalized.content.clone();
+        next.keywords = normalized.keywords.clone();
+        next.supporting_citations = normalized.supporting_citations.clone();
+        next.canonical_entities = normalized.canonical_entities.clone();
+        next.evidence_count = incoming_evidence_count;
+        next.last_confirmed_at = incoming_last_confirmed_at;
+    } else {
+        for keyword in &normalized.keywords {
+            if !next.keywords.iter().any(|value| value == keyword) {
+                next.keywords.push(keyword.clone());
+            }
+        }
+        next.keywords.truncate(MAX_LONG_TERM_MEMORY_KEYWORDS);
+        let previous_citation_count = next.supporting_citations.len();
+        for citation in &normalized.supporting_citations {
+            if !next
+                .supporting_citations
+                .iter()
+                .any(|value| value == citation)
+            {
+                next.supporting_citations.push(citation.clone());
+            }
+        }
+        next.supporting_citations
+            .truncate(MAX_LONG_TERM_MEMORY_SUPPORTING_CITATIONS);
+        let added_citations = next
+            .supporting_citations
+            .len()
+            .saturating_sub(previous_citation_count) as u32;
+        next.evidence_count = next
+            .evidence_count
+            .saturating_add(added_citations)
+            .max(incoming_evidence_count);
+        next.last_confirmed_at = next.last_confirmed_at.max(incoming_last_confirmed_at);
+        if let Err(reason) = merge_same_content_entities(
+            &mut next.canonical_entities,
+            &normalized.canonical_entities,
+        ) {
+            return LongTermMemoryEntryPlan::Rejected(reason);
+        }
+    }
+    if !incoming_is_older {
+        next.source_chat_id = effective_source_chat_id;
+        next.source_type = meta.source_type;
+        next.source_scope = meta.source_scope;
+        next.confidence = meta.confidence;
+        next.freshness = meta.freshness;
+        next.stale_hint = meta.stale_hint;
+        next.observed_at = incoming_observed_at;
+    }
+    next.source_revision = if same_lineage && normalized.source_revision.is_none() {
+        existing.source_revision
+    } else {
+        normalized.source_revision
+    };
+    if next == *existing {
+        return LongTermMemoryEntryPlan::Noop;
+    }
+    next.updated_at = now_secs;
+    next.owner_revision = existing.owner_revision.saturating_add(1).max(1);
+    LongTermMemoryEntryPlan::Updated(next)
+}
+
+pub fn plan_long_term_memory_owner_mutation(
+    existing: &LongTermMemoryEntry,
+    mutation: &LongTermMemoryOwnerMutation,
+    now_secs: u64,
+) -> LongTermMemoryEntryPlan {
+    let mut next = existing.clone();
+    match mutation {
+        LongTermMemoryOwnerMutation::Correct(replacement) => {
+            let normalized = match replacement.normalized_with_rejection() {
+                Ok(normalized) => normalized,
+                Err(reason) => return LongTermMemoryEntryPlan::Rejected(reason),
+            };
+            if normalized.stable_id().as_deref() != Some(existing.id.as_str()) {
+                return LongTermMemoryEntryPlan::Rejected(
+                    LongTermMemoryEntryRejection::SlotMismatch,
+                );
+            }
+            if normalized.privacy != existing.privacy {
+                return LongTermMemoryEntryPlan::Rejected(
+                    LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl,
+                );
+            }
+            let meta = resolve_long_term_memory_meta_for_existing(&normalized, existing);
+            let content_changed = next.content != normalized.content;
+            next.content = normalized.content;
+            next.keywords = normalized.keywords;
+            next.confidence = meta.confidence;
+            next.freshness = meta.freshness;
+            next.stale_hint = meta.stale_hint;
+            next.observed_at = normalized.observed_at.unwrap_or(next.observed_at);
+            next.last_confirmed_at = normalized
+                .last_confirmed_at
+                .unwrap_or(next.last_confirmed_at)
+                .max(next.observed_at);
+            if content_changed {
+                next.supporting_citations = normalized.supporting_citations;
+                next.canonical_entities = normalized.canonical_entities;
+                next.evidence_count = effective_evidence_count(
+                    next.supporting_citations.len(),
+                    normalized.evidence_count.unwrap_or(0),
+                );
+            } else {
+                for citation in normalized.supporting_citations {
+                    if !next
+                        .supporting_citations
+                        .iter()
+                        .any(|value| value == &citation)
+                    {
+                        next.supporting_citations.push(citation);
+                    }
+                }
+                next.supporting_citations
+                    .truncate(MAX_LONG_TERM_MEMORY_SUPPORTING_CITATIONS);
+                if let Err(reason) = merge_same_content_entities(
+                    &mut next.canonical_entities,
+                    &normalized.canonical_entities,
+                ) {
+                    return LongTermMemoryEntryPlan::Rejected(reason);
+                }
+                next.evidence_count = effective_evidence_count(
+                    next.supporting_citations.len(),
+                    next.evidence_count
+                        .max(normalized.evidence_count.unwrap_or(0)),
+                );
+            }
+        }
+        LongTermMemoryOwnerMutation::MarkStale(stale_hint) => next.stale_hint = *stale_hint,
+        LongTermMemoryOwnerMutation::ChangeScope(source_scope) => next.source_scope = *source_scope,
+        LongTermMemoryOwnerMutation::ChangePrivacy(privacy) => next.privacy = *privacy,
+        LongTermMemoryOwnerMutation::CompactEvidenceMetadata {
+            supporting_citations,
+            evidence_count,
+            last_confirmed_at,
+        } => {
+            next.supporting_citations = normalize_supporting_citations(supporting_citations);
+            next.evidence_count =
+                effective_evidence_count(next.supporting_citations.len(), *evidence_count);
+            next.last_confirmed_at = (*last_confirmed_at)
+                .max(next.observed_at)
+                .max(existing.last_confirmed_at);
+        }
+    }
+    next.source_revision = existing.source_revision;
+    if next == *existing {
+        return LongTermMemoryEntryPlan::Noop;
+    }
+    next.updated_at = now_secs;
+    next.owner_revision = existing.owner_revision.saturating_add(1).max(1);
+    LongTermMemoryEntryPlan::Updated(next)
+}
+
+pub(crate) fn long_term_memory_entry_from_draft(
+    draft: &LongTermMemoryDraft,
+    id: String,
+    now_secs: u64,
+) -> Option<LongTermMemoryEntry> {
+    let normalized = draft.normalized_with_rejection().ok()?;
+    Some(long_term_memory_entry_from_normalized_draft(
+        normalized, id, now_secs,
+    ))
 }
 
 /// 结构化长期记忆存储接口。实现负责持久化、去重与轻量召回。
 pub trait LongTermMemoryStore: Send + Sync {
     fn upsert_many(&self, drafts: &[LongTermMemoryDraft], now_secs: u64) -> Result<usize>;
+    fn recall(
+        &self,
+        query: &str,
+        source_chat_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryEntry>>;
+    fn get(&self, id: &str) -> Result<Option<LongTermMemoryEntry>>;
+    fn mutate_owner(
+        &self,
+        _id: &str,
+        _mutation: &LongTermMemoryOwnerMutation,
+        _now_secs: u64,
+    ) -> Result<LongTermMemoryEntryPlan> {
+        Err(Error::config(
+            "long_term_owner_mutation_unsupported",
+            "long-term store does not support owner mutation",
+        ))
+    }
+    fn get_slot(&self, slot: &LongTermMemorySlot) -> Result<Option<LongTermMemoryEntry>> {
+        let Some(id) = slot.stable_id() else {
+            return Ok(None);
+        };
+        self.get(&id)
+    }
+    fn query(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
+        Ok(query.filter_sort_entries(self.list(usize::MAX)?, crate::util::current_unix_secs()))
+    }
+    fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>>;
+    fn delete(&self, id: &str) -> Result<bool>;
+    fn delete_slot(&self, slot: &LongTermMemorySlot) -> Result<bool>;
+    fn count(&self) -> Result<usize>;
+}
+
+/// Production-facing long-term owner access. This capability cannot mutate owner state.
+pub trait LongTermMemoryReadStore: Send + Sync {
     fn recall(
         &self,
         query: &str,
@@ -855,20 +1550,44 @@ pub trait LongTermMemoryStore: Send + Sync {
         self.get(&id)
     }
     fn query(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
-        let normalized = query.normalized();
-        let now_secs = crate::util::current_unix_secs();
-        let mut entries = self.list(MAX_LONG_TERM_MEMORY_ITEMS)?;
-        entries.retain(|entry| long_term_memory_matches_query(entry, &normalized, now_secs));
-        entries.sort_by(|left, right| {
-            compare_long_term_memory_query_results(left, right, &normalized)
-        });
-        entries.truncate(normalized.limit);
-        Ok(entries)
+        Ok(query.filter_sort_entries(self.list(usize::MAX)?, crate::util::current_unix_secs()))
     }
     fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>>;
-    fn delete(&self, id: &str) -> Result<bool>;
-    fn delete_slot(&self, slot: &LongTermMemorySlot) -> Result<bool>;
     fn count(&self) -> Result<usize>;
+}
+
+impl<T> LongTermMemoryReadStore for T
+where
+    T: LongTermMemoryStore + ?Sized,
+{
+    fn recall(
+        &self,
+        query: &str,
+        source_chat_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryEntry>> {
+        LongTermMemoryStore::recall(self, query, source_chat_id, limit)
+    }
+
+    fn get(&self, id: &str) -> Result<Option<LongTermMemoryEntry>> {
+        LongTermMemoryStore::get(self, id)
+    }
+
+    fn get_slot(&self, slot: &LongTermMemorySlot) -> Result<Option<LongTermMemoryEntry>> {
+        LongTermMemoryStore::get_slot(self, slot)
+    }
+
+    fn query(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
+        LongTermMemoryStore::query(self, query)
+    }
+
+    fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
+        LongTermMemoryStore::list(self, limit)
+    }
+
+    fn count(&self) -> Result<usize> {
+        LongTermMemoryStore::count(self)
+    }
 }
 
 pub fn canonicalize_long_term_memory_entry(
@@ -915,6 +1634,12 @@ pub fn canonicalize_long_term_memory_entry(
     }
     entry.keywords = keywords;
     entry.supporting_citations = normalize_supporting_citations(&entry.supporting_citations);
+    entry.canonical_entities =
+        normalize_canonical_entities(&entry.canonical_entities, &entry.supporting_citations)
+            .ok()?;
+    if entry.owner_revision == 0 || entry.source_revision == Some(0) {
+        return None;
+    }
     entry.evidence_count =
         effective_evidence_count(entry.supporting_citations.len(), entry.evidence_count);
     if entry.updated_at == 0 {
@@ -1178,169 +1903,26 @@ fn query_exactness_priority(entry: &LongTermMemoryEntry, query: &LongTermMemoryQ
     score
 }
 
-fn draft_is_older_than_existing(
-    existing: &LongTermMemoryEntry,
-    incoming_observed_at: u64,
-    incoming_source_revision: u64,
-) -> bool {
-    if incoming_source_revision > 0
-        && existing.source_revision > 0
-        && incoming_source_revision < existing.source_revision
-    {
-        return true;
-    }
-    incoming_observed_at > 0
-        && existing.observed_at > 0
-        && incoming_observed_at < existing.observed_at
-}
-
 pub fn merge_long_term_memory_entry(
     existing: &mut LongTermMemoryEntry,
     draft: &LongTermMemoryDraft,
     now_secs: u64,
 ) -> bool {
-    let Some(normalized) = draft.normalized() else {
-        return false;
-    };
-    let meta = resolve_long_term_memory_meta(&normalized);
-    let mut changed = false;
-    let incoming_observed_at = normalized.observed_at.unwrap_or(now_secs);
-    let incoming_last_confirmed_at = normalized
-        .last_confirmed_at
-        .unwrap_or(incoming_observed_at)
-        .max(incoming_observed_at);
-    let incoming_source_revision = normalized.source_revision.unwrap_or(0);
-    let incoming_citations = normalize_supporting_citations(&normalized.supporting_citations);
-    let incoming_evidence_count = effective_evidence_count(
-        incoming_citations.len(),
-        normalized.evidence_count.unwrap_or(0),
-    );
-    let incoming_is_older =
-        draft_is_older_than_existing(existing, incoming_observed_at, incoming_source_revision);
-    let content_changed = existing.content != normalized.content;
-    let can_replace_content = !incoming_is_older
-        && confidence_rank(meta.confidence) >= confidence_rank(existing.confidence);
-    if content_changed && incoming_is_older {
-        return false;
-    }
-    if content_changed && !can_replace_content {
-        let next_hint = strictest_stale_hint(
-            existing.stale_hint,
-            LongTermMemoryStaleHint::VerifyAgainstCurrentState,
-        );
-        if existing.stale_hint != next_hint {
-            existing.stale_hint = next_hint;
-            changed = true;
+    match plan_long_term_memory_upsert(Some(existing), draft, now_secs) {
+        LongTermMemoryEntryPlan::Updated(entry) => {
+            *existing = entry;
+            true
         }
-        if changed && existing.updated_at != now_secs {
-            existing.updated_at = now_secs;
-        }
-        return changed;
+        LongTermMemoryEntryPlan::Created(_)
+        | LongTermMemoryEntryPlan::Noop
+        | LongTermMemoryEntryPlan::Rejected(_) => false,
     }
-    if content_changed && can_replace_content {
-        existing.content = normalized.content;
-        existing.supporting_citations = incoming_citations.clone();
-        existing.evidence_count = incoming_evidence_count;
-        existing.last_confirmed_at = incoming_last_confirmed_at;
-        changed = true;
-    }
-
-    let merged_keywords = if content_changed && can_replace_content {
-        normalized.keywords.clone()
-    } else {
-        let mut merged_keywords = existing.keywords.clone();
-        for keyword in &normalized.keywords {
-            if merged_keywords.iter().any(|item| item == keyword) {
-                continue;
-            }
-            merged_keywords.push(keyword.clone());
-        }
-        merged_keywords.truncate(MAX_LONG_TERM_MEMORY_KEYWORDS);
-        merged_keywords
-    };
-    if existing.keywords != merged_keywords {
-        existing.keywords = merged_keywords;
-        changed = true;
-    }
-    if !content_changed {
-        let base_evidence_count =
-            effective_evidence_count(existing.supporting_citations.len(), existing.evidence_count);
-        let mut merged_citations = existing.supporting_citations.clone();
-        let mut new_citation_count = 0u32;
-        for citation in &incoming_citations {
-            if merged_citations.iter().any(|item| item == citation) {
-                continue;
-            }
-            merged_citations.push(citation.clone());
-            new_citation_count = new_citation_count.saturating_add(1);
-            if merged_citations.len() >= MAX_LONG_TERM_MEMORY_SUPPORTING_CITATIONS {
-                break;
-            }
-        }
-        if existing.supporting_citations != merged_citations {
-            existing.supporting_citations = merged_citations;
-            changed = true;
-        }
-        let newer_confirmation = incoming_last_confirmed_at > existing.last_confirmed_at;
-        let confirmation_bump =
-            u32::from(new_citation_count == 0 && incoming_evidence_count > 0 && newer_confirmation);
-        let merged_evidence_count = base_evidence_count
-            .saturating_add(new_citation_count)
-            .max(incoming_evidence_count)
-            .saturating_add(confirmation_bump);
-        if existing.evidence_count != merged_evidence_count {
-            existing.evidence_count = merged_evidence_count;
-            changed = true;
-        }
-        if existing.last_confirmed_at < incoming_last_confirmed_at {
-            existing.last_confirmed_at = incoming_last_confirmed_at;
-            changed = true;
-        }
-    }
-    if let Some(source_chat_id) = normalized.source_chat_id.filter(|_| !incoming_is_older) {
-        if existing.source_chat_id.as_deref() != Some(source_chat_id.as_str()) {
-            existing.source_chat_id = Some(source_chat_id);
-            changed = true;
-        }
-    }
-    if !incoming_is_older && existing.source_type != meta.source_type {
-        existing.source_type = meta.source_type;
-        changed = true;
-    }
-    if !incoming_is_older && existing.source_scope != meta.source_scope {
-        existing.source_scope = meta.source_scope;
-        changed = true;
-    }
-    if !incoming_is_older && existing.confidence != meta.confidence {
-        existing.confidence = meta.confidence;
-        changed = true;
-    }
-    if !incoming_is_older && existing.freshness != meta.freshness {
-        existing.freshness = meta.freshness;
-        changed = true;
-    }
-    if !incoming_is_older && existing.stale_hint != meta.stale_hint {
-        existing.stale_hint = meta.stale_hint;
-        changed = true;
-    }
-    if !incoming_is_older && existing.observed_at != incoming_observed_at {
-        existing.observed_at = incoming_observed_at;
-        changed = true;
-    }
-    if !incoming_is_older && existing.source_revision != incoming_source_revision {
-        existing.source_revision = incoming_source_revision;
-        changed = true;
-    }
-    if changed && existing.updated_at != now_secs {
-        existing.updated_at = now_secs;
-        changed = true;
-    }
-    changed
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LongTermMemoryMergeGuardDecision {
     Allow,
+    RejectPrivacyClassTransition,
     RejectOlderObservation,
     RejectLowerConfidenceContent,
 }
@@ -1350,25 +1932,20 @@ pub(crate) fn inspect_long_term_memory_merge_guard(
     draft: &LongTermMemoryDraft,
     now_secs: u64,
 ) -> LongTermMemoryMergeGuardDecision {
-    let Some(normalized) = draft.normalized() else {
-        return LongTermMemoryMergeGuardDecision::Allow;
-    };
-    let meta = resolve_long_term_memory_meta(&normalized);
-    let incoming_observed_at = normalized.observed_at.unwrap_or(now_secs);
-    let incoming_source_revision = normalized.source_revision.unwrap_or(0);
-    let incoming_is_older =
-        draft_is_older_than_existing(existing, incoming_observed_at, incoming_source_revision);
-    let content_changed = existing.content != normalized.content;
-    if !content_changed {
-        return LongTermMemoryMergeGuardDecision::Allow;
+    match plan_long_term_memory_upsert(Some(existing), draft, now_secs) {
+        LongTermMemoryEntryPlan::Rejected(
+            LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl,
+        ) => LongTermMemoryMergeGuardDecision::RejectPrivacyClassTransition,
+        LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::LowerConfidenceContent) => {
+            LongTermMemoryMergeGuardDecision::RejectLowerConfidenceContent
+        }
+        LongTermMemoryEntryPlan::Rejected(_) => {
+            LongTermMemoryMergeGuardDecision::RejectOlderObservation
+        }
+        LongTermMemoryEntryPlan::Created(_)
+        | LongTermMemoryEntryPlan::Updated(_)
+        | LongTermMemoryEntryPlan::Noop => LongTermMemoryMergeGuardDecision::Allow,
     }
-    if incoming_is_older {
-        return LongTermMemoryMergeGuardDecision::RejectOlderObservation;
-    }
-    if confidence_rank(meta.confidence) < confidence_rank(existing.confidence) {
-        return LongTermMemoryMergeGuardDecision::RejectLowerConfidenceContent;
-    }
-    LongTermMemoryMergeGuardDecision::Allow
 }
 
 pub(crate) fn govern_long_term_memory_entries(
@@ -1419,14 +1996,17 @@ pub(crate) fn govern_long_term_memory_entries(
     changed
 }
 
-pub(crate) fn select_long_term_recall_entries(
-    store: &dyn LongTermMemoryStore,
+pub(crate) fn select_long_term_recall_entries<S>(
+    store: &S,
     chat_id: &str,
     user_query: &str,
     summary_text: Option<&str>,
     recent_messages: &[SessionMessage],
     profile: MemoryProfile,
-) -> LongTermRecallSelection {
+) -> LongTermRecallSelection
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let policy = memory_policy(profile).long_term_recall;
     let desired = policy.desired_entry_count(policy.block_max_len_cap);
     let recall_query = policy.build_recall_query(user_query, summary_text, recent_messages);
@@ -1468,14 +2048,17 @@ pub(crate) fn select_long_term_recall_entries(
     }
 }
 
-pub(crate) fn recall_long_term_memory_entries(
-    store: &dyn LongTermMemoryStore,
+pub(crate) fn recall_long_term_memory_entries<S>(
+    store: &S,
     chat_id: &str,
     user_query: &str,
     summary_text: Option<&str>,
     recent_messages: &[SessionMessage],
     profile: MemoryProfile,
-) -> Vec<LongTermMemoryEntry> {
+) -> Vec<LongTermMemoryEntry>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     select_long_term_recall_entries(
         store,
         chat_id,
@@ -1487,15 +2070,18 @@ pub(crate) fn recall_long_term_memory_entries(
     .selected
 }
 
-pub fn recall_long_term_memory_block(
-    store: &dyn LongTermMemoryStore,
+pub fn recall_long_term_memory_block<S>(
+    store: &S,
     chat_id: &str,
     user_query: &str,
     summary_text: Option<&str>,
     recent_messages: &[SessionMessage],
     system_max_len: usize,
     profile: MemoryProfile,
-) -> Option<String> {
+) -> Option<String>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let now_secs = crate::util::current_unix_secs();
     let policy = memory_policy(profile).long_term_recall;
     let block_max_len = policy.recall_block_max_len(system_max_len);
@@ -1510,11 +2096,14 @@ pub fn recall_long_term_memory_block(
     render_long_term_memory_block_with_now(&selected, block_max_len, now_secs)
 }
 
-pub fn render_exact_long_term_memory_block(
-    store: &dyn LongTermMemoryStore,
+pub fn render_exact_long_term_memory_block<S>(
+    store: &S,
     slot: &LongTermMemorySlot,
     max_len: usize,
-) -> Option<String> {
+) -> Option<String>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     render_exact_long_term_memory_block_with_now(
         store,
         slot,
@@ -1523,12 +2112,15 @@ pub fn render_exact_long_term_memory_block(
     )
 }
 
-fn render_exact_long_term_memory_block_with_now(
-    store: &dyn LongTermMemoryStore,
+fn render_exact_long_term_memory_block_with_now<S>(
+    store: &S,
     slot: &LongTermMemorySlot,
     max_len: usize,
     now_secs: u64,
-) -> Option<String> {
+) -> Option<String>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     if max_len < 32 {
         return None;
     }
@@ -1561,9 +2153,10 @@ fn render_exact_long_term_memory_body(
     if let Some(source_chat_id) = entry.source_chat_id.as_deref() {
         let _ = write!(out, " chat={}", source_chat_id);
     }
-    if entry.source_revision > 0 {
-        let _ = write!(out, " revision={}", entry.source_revision);
+    if let Some(source_revision) = entry.source_revision {
+        let _ = write!(out, " source_revision={source_revision}");
     }
+    let _ = write!(out, " owner_revision={}", entry.owner_revision);
     out.push('\n');
     if !entry.supporting_citations.is_empty() {
         let _ = writeln!(out, "Citations: {}", entry.supporting_citations.join(", "));
@@ -2159,11 +2752,14 @@ pub fn parse_explicit_long_term_slot_query(query: &str) -> Option<LongTermMemory
     None
 }
 
-pub fn lookup_long_term_memory_slot(
-    store: &dyn LongTermMemoryStore,
+pub fn lookup_long_term_memory_slot<S>(
+    store: &S,
     slot: &LongTermMemorySlot,
     nearby_limit: usize,
-) -> Result<LongTermMemorySlotLookup> {
+) -> Result<LongTermMemorySlotLookup>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let Some(normalized_slot) = slot.normalized() else {
         return Ok(LongTermMemorySlotLookup {
             slot: slot.clone(),
@@ -2184,11 +2780,14 @@ pub fn lookup_long_term_memory_slot(
     })
 }
 
-fn find_nearby_long_term_memory_slot_candidates(
-    store: &dyn LongTermMemoryStore,
+fn find_nearby_long_term_memory_slot_candidates<S>(
+    store: &S,
     slot: &LongTermMemorySlot,
     limit: usize,
-) -> Result<Vec<LongTermMemoryEntry>> {
+) -> Result<Vec<LongTermMemoryEntry>>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let now_secs = crate::util::current_unix_secs();
     let normalized_topic = normalize_for_match(&slot.topic);
     let query_terms = collect_match_terms(&slot.topic);
@@ -2379,6 +2978,7 @@ mod tests {
     ) -> LongTermMemoryDraft {
         LongTermMemoryDraft {
             kind,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: topic.to_string(),
             content: content.to_string(),
             keywords: keywords.into_iter().map(str::to_string).collect(),
@@ -2389,6 +2989,7 @@ mod tests {
             freshness: None,
             stale_hint: None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: None,
             last_confirmed_at: None,
@@ -2410,6 +3011,7 @@ mod tests {
         canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             id: id.to_string(),
             kind,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: topic.to_string(),
             content: content.to_string(),
             keywords: keywords.into_iter().map(str::to_string).collect(),
@@ -2420,12 +3022,14 @@ mod tests {
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: 0,
             created_at,
             updated_at,
             observed_at: updated_at.max(created_at),
             last_confirmed_at: updated_at.max(created_at),
-            source_revision: 0,
+            source_revision: None,
+            owner_revision: 1,
             last_used_at: 0,
         })
         .unwrap()
@@ -2528,8 +3132,9 @@ mod tests {
             list_entries: vec![fact, project.clone()],
         };
 
-        let items = store
-            .query(&LongTermMemoryQuery {
+        let items = LongTermMemoryStore::query(
+            &store,
+            &LongTermMemoryQuery {
                 kind: Some(LongTermMemoryKind::Project),
                 topic: Some("current_project".to_string()),
                 source_scope: Some(LongTermMemorySourceScope::Chat),
@@ -2537,10 +3142,50 @@ mod tests {
                 freshness: Some(LongTermMemoryFreshness::Dynamic),
                 include_stale: false,
                 limit: 4,
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert_eq!(items, vec![project]);
+    }
+
+    #[test]
+    fn structured_query_filters_before_applying_the_result_limit() {
+        let now_secs = crate::util::current_unix_secs();
+        let mut entries = (0..120)
+            .map(|index| {
+                test_entry(
+                    &format!("hidden-{index}"),
+                    LongTermMemoryKind::Fact,
+                    &format!("hidden_topic_{index}"),
+                    "A non-matching record occupies the front of the source scan.",
+                    Vec::new(),
+                    None,
+                    now_secs.saturating_sub(index),
+                    now_secs.saturating_sub(index),
+                )
+            })
+            .collect::<Vec<_>>();
+        let visible = test_entry(
+            "visible-after-source-ceiling",
+            LongTermMemoryKind::Project,
+            "visible_after_source_ceiling",
+            "The matching record must survive source scans larger than 96.",
+            Vec::new(),
+            None,
+            now_secs.saturating_sub(500),
+            now_secs.saturating_sub(500),
+        );
+        entries.push(visible.clone());
+
+        let result = LongTermMemoryQuery {
+            kind: Some(LongTermMemoryKind::Project),
+            limit: 1,
+            ..LongTermMemoryQuery::default()
+        }
+        .filter_sort_entries(entries, now_secs);
+
+        assert_eq!(result, vec![visible]);
     }
 
     #[test]
@@ -2585,6 +3230,7 @@ mod tests {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             id: "ltm-1".to_string(),
             kind: LongTermMemoryKind::Profile,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: " user name ".to_string(),
             content: "甲壳虫".to_string(),
             keywords: vec!["名字".to_string()],
@@ -2595,12 +3241,14 @@ mod tests {
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: 0,
             created_at: 42,
             updated_at: 0,
             observed_at: 0,
             last_confirmed_at: 0,
-            source_revision: 0,
+            source_revision: None,
+            owner_revision: 1,
             last_used_at: 0,
         })
         .unwrap();
@@ -2614,6 +3262,7 @@ mod tests {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             id: "ltm-1".to_string(),
             kind: LongTermMemoryKind::Fact,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: String::new(),
             content: "User lives in Shenzhen".to_string(),
             keywords: vec!["location".to_string()],
@@ -2624,12 +3273,14 @@ mod tests {
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: 0,
             created_at: 1,
             updated_at: 0,
             observed_at: 0,
             last_confirmed_at: 0,
-            source_revision: 0,
+            source_revision: None,
+            owner_revision: 1,
             last_used_at: 0,
         })
         .unwrap();
@@ -2782,7 +3433,7 @@ mod tests {
             10,
         );
         entry.confidence = LongTermMemoryConfidence::High;
-        entry.source_revision = 8;
+        entry.source_revision = Some(8);
         entry.observed_at = 10;
         let mut draft = test_draft(
             LongTermMemoryKind::Fact,
@@ -2795,14 +3446,11 @@ mod tests {
         draft.observed_at = Some(20);
         draft.source_revision = Some(9);
 
-        assert!(merge_long_term_memory_entry(&mut entry, &draft, 20));
+        assert!(!merge_long_term_memory_entry(&mut entry, &draft, 20));
         assert_eq!(entry.content, "User timezone is Asia/Shanghai.");
         assert_eq!(entry.confidence, LongTermMemoryConfidence::High);
-        assert_eq!(entry.source_revision, 8);
-        assert_eq!(
-            entry.stale_hint,
-            LongTermMemoryStaleHint::VerifyAgainstCurrentState
-        );
+        assert_eq!(entry.source_revision, Some(8));
+        assert_eq!(entry.stale_hint, LongTermMemoryStaleHint::None);
     }
 
     #[test]
@@ -2817,7 +3465,7 @@ mod tests {
             10,
             10,
         );
-        entry.source_revision = 12;
+        entry.source_revision = Some(12);
         entry.observed_at = 30;
         let mut draft = test_draft(
             LongTermMemoryKind::Project,
@@ -2832,7 +3480,7 @@ mod tests {
 
         assert!(!merge_long_term_memory_entry(&mut entry, &draft, 40));
         assert_eq!(entry.content, "Current project is Beetle runtime.");
-        assert_eq!(entry.source_revision, 12);
+        assert_eq!(entry.source_revision, Some(12));
         assert_eq!(entry.observed_at, 30);
     }
 
@@ -2878,7 +3526,7 @@ mod tests {
             2,
         );
         entry.source_scope = LongTermMemorySourceScope::World;
-        entry.source_revision = 3;
+        entry.source_revision = Some(3);
         entry.supporting_citations = vec!["transcript:chat-a#message=1".to_string()];
         let store = StubLongTermMemoryStore {
             recall_entries: vec![entry.clone()],
@@ -2943,6 +3591,7 @@ mod tests {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             id: "ltm-1".to_string(),
             kind: LongTermMemoryKind::Fact,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: "release_phase".to_string(),
             content: "Current phase is memory coordination.".to_string(),
             keywords: vec![],
@@ -2956,12 +3605,14 @@ mod tests {
                 " transcript:chat-a#message=3 ".to_string(),
                 "transcript:chat-a#message=3".to_string(),
             ],
+            canonical_entities: Vec::new(),
             evidence_count: 0,
             created_at: 10,
             updated_at: 10,
             observed_at: 12,
             last_confirmed_at: 0,
-            source_revision: 0,
+            source_revision: None,
+            owner_revision: 1,
             last_used_at: 0,
         })
         .unwrap();

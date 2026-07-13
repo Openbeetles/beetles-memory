@@ -82,6 +82,26 @@ fn mcp_tool_server_decodes_declared_memory_tools() {
 }
 
 #[test]
+fn mcp_project_tool_exposes_only_the_adapter_projection_surface() {
+    let runtime = runtime();
+    let server = McpToolServer::new("mcp-project-boundary");
+    let result = server
+        .call(
+            &runtime,
+            McpToolCall::json("memory_project", r#"{"query":"release","max_len":1024}"#),
+        )
+        .expect("project tool call");
+    let content: Value = serde_json::from_str(&result.content).expect("project tool json");
+
+    assert_eq!(content["projection_surface"], "ui_api");
+    assert!(content.get("projection_block").is_some());
+    assert!(content.get("chars").is_some());
+    assert!(content.get("system_memory_block").is_none());
+    assert!(!result.content.contains("runtime_projection"));
+    assert!(!result.content.contains("delivery_digest_manifest"));
+}
+
+#[test]
 fn mcp_resource_read_uses_entry_runtime_safe_reports_without_private_raw() {
     let runtime = runtime();
     let server = McpToolServer::new("mcp-resource");
@@ -100,6 +120,7 @@ fn mcp_resource_read_uses_entry_runtime_safe_reports_without_private_raw() {
         assert!(!resource.content.contains("\"private_raw\":true"), "{uri}");
         assert!(!resource.content.contains("raw_content"), "{uri}");
         assert!(!resource.content.contains("store_schema"), "{uri}");
+        assert!(!resource.content.contains("system_memory_block"), "{uri}");
     }
 }
 

@@ -39,16 +39,16 @@ Use exactly one profile feature for a build.
 For tests and short-lived sessions:
 
 ```rust
-use bm_sdk::{ProfileId, StoreBackendConfig, StorePlatform};
+use bm_sdk::{MemoryStoreHandle, ProfileId, StoreBackendConfig};
 
 let profile = ProfileId::DesktopMacosEmbeddedSdk;
-let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+let store = MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile)?)?;
 ```
 
 For durable desktop or server storage:
 
 ```rust
-let store = StorePlatform::open(StoreBackendConfig::file(
+let store = MemoryStoreHandle::open(StoreBackendConfig::file(
     "/var/lib/beetle-memory",
     ProfileId::ServerLinuxMemoryGateway,
 )?)?;
@@ -57,7 +57,7 @@ let store = StorePlatform::open(StoreBackendConfig::file(
 For sqlite-backed storage:
 
 ```rust
-let store = StorePlatform::open(StoreBackendConfig::sqlite(
+let store = MemoryStoreHandle::open(StoreBackendConfig::sqlite(
     "/var/lib/beetle-memory/memory.sqlite3",
     ProfileId::ServerLinuxMemoryGateway,
 )?)?;
@@ -74,7 +74,7 @@ let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
     .scope(MemoryScope::new("local", "chat-1")?)
     .profile(ProfileId::DesktopMacosEmbeddedSdk)
-    .store_platform(store)
+    .store(store)
     .add_agent_skill_dir(AgentSkillDirConfig::read_only("./skills", "host-project"))
     .build()?;
 ```
@@ -119,6 +119,7 @@ use bm_sdk::{
 let recall = runtime.recall(MemoryRecallRequest {
     query: "release artifacts".to_string(),
     limit: 4,
+    structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
 
@@ -128,6 +129,7 @@ let projection = runtime.project(MemoryProjectionRequest {
     recent_messages_limit: 8,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
+    structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
 
@@ -175,6 +177,8 @@ runtime.write(MemoryWriteRequest::Candidates {
             keywords: vec!["name".to_string()],
         },
         evidence_refs: vec!["chat-1:turn-1".to_string()],
+        canonical_entities: Vec::new(),
+        semantic_judgment: None,
     }],
 })?;
 ```
@@ -243,7 +247,7 @@ Transcript lifecycle raw delete/mask only affects conversation evidence. It repo
 
 A complete SDK host turn uses one public path:
 
-1. Open a `StorePlatform` or inject `Arc<dyn Platform>` into `MemoryRuntime`.
+1. Open a `MemoryStoreHandle` and pass it through `MemoryRuntime::builder().store(...)`; persistence engines, raw transactions, and writable store traits are not public runtime paths.
 2. Build `MemoryIdentity` and `MemoryScope` from stable host owner, agent, channel, and conversation ids.
 3. Submit `MemoryWriteRequest::Candidates` for facts, preferences, procedures, diagnostics, subject hints, and soul candidates.
 4. Finalize the turn through canonical turn semantics when transcript governance is required.
@@ -279,7 +283,7 @@ let replay = runtime.replay(MemoryReplayRequest {
 })?;
 
 let space = export_memory_space(
-    &store_platform,
+    &store,
     MemorySpaceExportRequest {
         memory_space_id: "space-main".to_string(),
         include_private: true,
@@ -292,7 +296,7 @@ let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
 });
 if !preview.loss_risk {
     apply_memory_space_migration(
-        &target_store_platform,
+        &target_store,
         MemorySpaceMigrateApplyRequest {
             target_memory_space_id: "space-copy".to_string(),
             snapshot: space.snapshot,
@@ -358,13 +362,12 @@ Do not expose a protocol or operation just because the crate compiles. The capab
 
 Add a smoke test in the integrating project that:
 
-1. Opens the selected store backend.
-2. Builds `MemoryRuntime`.
-3. Injects `Arc<dyn Platform>` into `MemoryRuntime`.
-4. Writes one `MemoryWriteCandidate` and checks the governance report.
-5. Finalizes one turn with maintenance unavailable and verifies a deferred job.
-6. Checks `deferred_governance_report()` and `inspect.deferred_governance`.
-7. Recalls or projects the candidate-backed memory from a different chat and checks `MemoryProjectionReport.audit`.
-8. Calls `run_retention_compaction()` and verifies that host deletion of accepted memory is not allowed.
-9. Runs migration dry-run and apply/import through the public memory-space migrator and checks `preview.manifest`.
-10. Runs operator inspect and replay against the migrated store.
+1. Opens the selected backend through `MemoryStoreHandle`.
+2. Builds `MemoryRuntime` through `MemoryRuntime::builder().store(handle)`.
+3. Writes one `MemoryWriteCandidate` and checks the governance report.
+4. Finalizes one turn with maintenance unavailable and verifies a deferred job.
+5. Checks `deferred_governance_report()` and `inspect.deferred_governance`.
+6. Recalls or projects the candidate-backed memory from a different chat and checks `MemoryProjectionReport.audit`.
+7. Calls `run_retention_compaction()` and verifies that host deletion of accepted memory is not allowed.
+8. Runs migration dry-run and apply/import through the public memory-space migrator and checks `preview.manifest`.
+9. Runs operator inspect and replay against the migrated store.

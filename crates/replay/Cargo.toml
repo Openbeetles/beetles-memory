@@ -12,11 +12,14 @@ path = "src/lib.rs"
 
 [features]
 default = []
-sqlite-store = ["bm-store/sqlite-store"]
+sqlite-store = ["bm-sdk/sqlite-store"]
 
 [dependencies]
-bm-core = { workspace = true, features = ["replay-harness"] }
-bm-sdk.workspace = true
-bm-store.workspace = true
+bm-core = { workspace = true, features = ["nonproduction-replay-harness"] }
+bm-sdk = { workspace = true, features = ["nonproduction-replay-harness"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+sha2.workspace = true

@@ -1,6 +1,6 @@
 # 存储后端
 
-`bm-store` 拥有记忆持久化。集成方选择 backend 和容量姿态；不定义 memory table、event lineage、snapshot envelope 或 repair 语义。
+私有 `bm-sdk` persistence kernel 拥有记忆持久化。集成方通过 `MemoryStoreHandle` 选择 backend 和容量姿态；不定义 memory table、event lineage、snapshot envelope 或 repair 语义。
 
 ## Backends
 
@@ -14,10 +14,10 @@
 ## 打开 Store
 
 ```rust
-use bm_sdk::{ProfileId, StoreBackendConfig, StorePlatform};
+use bm_sdk::{MemoryStoreHandle, ProfileId, StoreBackendConfig};
 
 let profile = ProfileId::ServerLinuxMemoryGateway;
-let store = StorePlatform::open(StoreBackendConfig::sqlite(
+let store = MemoryStoreHandle::open(StoreBackendConfig::sqlite(
     "/var/lib/beetle-memory/memory.sqlite3",
     profile,
 )?)?;
@@ -42,7 +42,7 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
 
 logical store key 不是 filesystem path。file backend 会按 profile 的 `StorePathBudget` 把 logical key 映射到受限 physical address：短 digest 文件名加 sidecar key index。`list_*_keys`、snapshot export/import、replay 和 delete 仍然只暴露 logical key。
 
-不要把 transcript ID、conversation ID、attr ID 或 host ref 直接编码进文件名。平台差异化的 filename / relative-path budget 属于 `bm-store`，不属于 adapter crate。
+不要把 transcript ID、conversation ID、attr ID 或 host ref 直接编码进文件名。平台差异化的 filename / relative-path budget 属于私有 `bm-sdk` persistence kernel，不属于 adapter crate。
 
 ## Capacity And Key Budget
 

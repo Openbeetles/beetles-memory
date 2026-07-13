@@ -1,9 +1,9 @@
 use bm_sdk::{
     apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
     MemoryIdentity, MemoryProjectionRequest, MemoryScope, MemorySpaceExportRequest,
-    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest, MemoryWriteCandidate,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, StoreBackendConfig,
-    StorePlatform,
+    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest, MemoryStoreHandle,
+    MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    StoreBackendConfig,
 };
 use serde::Deserialize;
 
@@ -56,13 +56,13 @@ fn migrate_then_expect_facet_remap_preflight(
 ) -> MigrationFailClosedReport {
     let profile = ProfileId::ServerLinuxDevFull;
     let source =
-        StorePlatform::open(StoreBackendConfig::in_memory(profile).expect("source config"))
+        MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile).expect("source config"))
             .expect("source platform");
     let source_runtime = bm_sdk::MemoryRuntime::builder()
         .identity(MemoryIdentity::new("sdk-host-agent", "sdk-host-owner").expect("identity"))
         .scope(MemoryScope::new(&fixture.channel, &fixture.chat_id).expect("scope"))
         .profile(profile)
-        .store_platform(source.clone())
+        .store(source.clone())
         .build()
         .expect("runtime");
 
@@ -73,6 +73,7 @@ fn migrate_then_expect_facet_remap_preflight(
         .expect("write fixture candidates");
     let projection = source_runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: fixture.projection_query.clone(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -92,34 +93,28 @@ fn migrate_then_expect_facet_remap_preflight(
     )
     .expect("export memory space");
     let facet_index_present = exported
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "memory_facet_indexes");
+        .archive
+        .contains_json_namespace("memory_facet_indexes");
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: fixture.source_memory_space_id.clone(),
         target_memory_space_id: fixture.target_memory_space_id.clone(),
         source_profile: profile,
         target_profile: ProfileId::DesktopMacosEmbeddedSdk,
-        snapshot: exported.snapshot.clone(),
+        archive: exported.archive.clone(),
     });
     assert!(!preview.loss_risk);
     let preflight_passed = preview.vault_preflight.passed;
 
     let migrated =
-        StorePlatform::open(StoreBackendConfig::in_memory(profile).expect("target config"))
+        MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile).expect("target config"))
             .expect("target platform");
-    let before = migrated.export_store_snapshot().expect("before");
+    let before = migrated.export_replay_snapshot().expect("before");
     let apply_error = apply_memory_space_migration(
         &migrated,
-        MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: fixture.target_memory_space_id.clone(),
-            snapshot: exported.snapshot,
-            preflight: preview.vault_preflight,
-        },
+        MemorySpaceMigrateApplyRequest { plan: preview.plan },
     )
     .expect_err("facet index remap preflight must fail closed");
-    let after = migrated.export_store_snapshot().expect("after");
+    let after = migrated.export_replay_snapshot().expect("after");
 
     MigrationFailClosedReport {
         facet_index_present,

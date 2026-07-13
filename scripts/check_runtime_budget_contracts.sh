@@ -18,7 +18,7 @@ if [[ ! -f crates/core/src/resource.rs || ! -f crates/core/src/budget.rs ]]; the
   fail "runtime resource and budget owners must live in bm-core"
 fi
 
-if rg -n 'JSON_BODY_MAX_BYTES' crates/http crates/wss crates/llm-gateway crates/sdk crates/store crates/core; then
+if rg -n 'JSON_BODY_MAX_BYTES' crates/http crates/wss crates/llm-gateway crates/sdk crates/core; then
   fail "HTTP must consume RuntimeBudgetReport.adapter_budget instead of JSON_BODY_MAX_BYTES"
 fi
 
@@ -65,7 +65,7 @@ for file in crates/core/src/budget.rs crates/sdk/src/runtime.rs; do
   fi
 done
 
-if rg -n 'profile.*transcript_page|transcript_page_size|host_refs_per_turn|max_attrs_per_turn|max_attrs_per_message|derived_refs_per_report|repair_issues_per_report' crates/store/src; then
+if rg -n 'profile.*transcript_page|transcript_page_size|host_refs_per_turn|max_attrs_per_turn|max_attrs_per_message|derived_refs_per_report|repair_issues_per_report' crates/sdk/src/store_internal; then
   fail "StorePlatform must not own transcript governance profile budgets"
 fi
 

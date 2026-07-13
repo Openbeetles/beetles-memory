@@ -1,6 +1,6 @@
 # Store Backends
 
-`bm-store` owns memory persistence. Integrators select a backend and capacity posture; they do not define memory tables, event lineage, snapshot envelopes, or repair semantics.
+The private `bm-sdk` persistence kernel owns memory persistence. Integrators select a backend and capacity posture through `MemoryStoreHandle`; they do not define memory tables, event lineage, snapshot envelopes, or repair semantics.
 
 ## Backends
 
@@ -14,10 +14,10 @@
 ## Opening A Store
 
 ```rust
-use bm_sdk::{ProfileId, StoreBackendConfig, StorePlatform};
+use bm_sdk::{MemoryStoreHandle, ProfileId, StoreBackendConfig};
 
 let profile = ProfileId::ServerLinuxMemoryGateway;
-let store = StorePlatform::open(StoreBackendConfig::sqlite(
+let store = MemoryStoreHandle::open(StoreBackendConfig::sqlite(
     "/var/lib/beetle-memory/memory.sqlite3",
     profile,
 )?)?;
@@ -42,7 +42,7 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
 
 Logical store keys are not filesystem paths. The file backend maps each logical key to a bounded physical address using the profile's `StorePathBudget`, with short digest file names plus a sidecar key index. `list_*_keys`, snapshot export/import, replay, and delete still operate on logical keys.
 
-Do not encode transcript IDs, conversation IDs, attr IDs, or host refs directly into file names. Platform-specific filename and relative-path budgets belong to `bm-store`, not adapter crates.
+Do not encode transcript IDs, conversation IDs, attr IDs, or host refs directly into file names. Platform-specific filename and relative-path budgets belong to the private `bm-sdk` persistence kernel, not adapter crates.
 
 ## Capacity And Key Budget
 

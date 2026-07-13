@@ -31,8 +31,8 @@
         "body": "The subject prefers to be called Qingchuan during coaching sessions.",
         "keywords": ["qingchuan", "name", "coaching"]
       },
-      "evidence_refs": ["fixture:beetle-derived:turn-1"]
-      ,
+      "evidence_refs": ["fixture:beetle-derived:turn-1"],
+      "canonical_entities": [],
       "semantic_judgment": {
         "source": "llm_governance",
         "decision": "accept",
@@ -62,8 +62,8 @@
         "content": "- when voice realtime foreground is active, defer background governance\n- keep the durable governance job instead of dropping the candidate\n- inspect the deferred job before replay or migration acceptance\n- resume governance only after the foreground window is safe",
         "citations": ["fixture:beetle-derived:voice-foreground"]
       },
-      "evidence_refs": ["fixture:beetle-derived:voice-foreground"]
-      ,
+      "evidence_refs": ["fixture:beetle-derived:voice-foreground"],
+      "canonical_entities": [],
       "semantic_judgment": {
         "source": "llm_governance",
         "decision": "accept",
@@ -90,8 +90,8 @@
         "body": "Operator inspect selected id and plane parity must survive migration dry-run.",
         "keywords": ["operator", "inspect", "migration"]
       },
-      "evidence_refs": ["fixture:beetle-derived:operator-inspect"]
-      ,
+      "evidence_refs": ["fixture:beetle-derived:operator-inspect"],
+      "canonical_entities": [],
       "semantic_judgment": {
         "source": "llm_governance",
         "decision": "accept",
@@ -117,8 +117,8 @@
         "body": "Teacher identity candidate is handed off to Soul Governance and never written directly into soul core.",
         "keywords": ["soul", "teacher", "handoff"]
       },
-      "evidence_refs": ["fixture:beetle-derived:soul-handoff"]
-      ,
+      "evidence_refs": ["fixture:beetle-derived:soul-handoff"],
+      "canonical_entities": [],
       "semantic_judgment": {
         "source": "llm_governance",
         "decision": "handoff_to_soul_governance",
@@ -143,7 +143,8 @@
         "body": "Private freeform note stays behind private garden governance and is not projected by default.",
         "keywords": ["private", "garden"]
       },
-      "evidence_refs": ["fixture:beetle-derived:private-garden"]
+      "evidence_refs": ["fixture:beetle-derived:private-garden"],
+      "canonical_entities": []
     }
   ]
 }

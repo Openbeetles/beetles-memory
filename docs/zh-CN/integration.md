@@ -39,16 +39,16 @@ bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] 
 测试和短生命周期 session：
 
 ```rust
-use bm_sdk::{ProfileId, StoreBackendConfig, StorePlatform};
+use bm_sdk::{MemoryStoreHandle, ProfileId, StoreBackendConfig};
 
 let profile = ProfileId::DesktopMacosEmbeddedSdk;
-let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+let store = MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile)?)?;
 ```
 
 持久化 desktop 或 server storage：
 
 ```rust
-let store = StorePlatform::open(StoreBackendConfig::file(
+let store = MemoryStoreHandle::open(StoreBackendConfig::file(
     "/var/lib/beetle-memory",
     ProfileId::ServerLinuxMemoryGateway,
 )?)?;
@@ -57,7 +57,7 @@ let store = StorePlatform::open(StoreBackendConfig::file(
 SQLite storage：
 
 ```rust
-let store = StorePlatform::open(StoreBackendConfig::sqlite(
+let store = MemoryStoreHandle::open(StoreBackendConfig::sqlite(
     "/var/lib/beetle-memory/memory.sqlite3",
     ProfileId::ServerLinuxMemoryGateway,
 )?)?;
@@ -74,7 +74,7 @@ let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
     .scope(MemoryScope::new("local", "chat-1")?)
     .profile(ProfileId::DesktopMacosEmbeddedSdk)
-    .store_platform(store)
+    .store(store)
     .add_agent_skill_dir(AgentSkillDirConfig::read_only("./skills", "host-project"))
     .build()?;
 ```
@@ -119,6 +119,7 @@ use bm_sdk::{
 let recall = runtime.recall(MemoryRecallRequest {
     query: "release artifacts".to_string(),
     limit: 4,
+    structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
 
@@ -128,6 +129,7 @@ let projection = runtime.project(MemoryProjectionRequest {
     recent_messages_limit: 8,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
+    structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
 
@@ -174,6 +176,8 @@ runtime.write(MemoryWriteRequest::Candidates {
             keywords: vec!["name".to_string()],
         },
         evidence_refs: vec!["chat-1:turn-1".to_string()],
+        canonical_entities: Vec::new(),
+        semantic_judgment: None,
     }],
 })?;
 ```
@@ -235,7 +239,7 @@ Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它�
 
 完整 SDK 宿主回合只走一条 public path：
 
-1. 打开 `StorePlatform`，或把 `Arc<dyn Platform>` 注入 `MemoryRuntime`。
+1. 打开 `MemoryStoreHandle`，并通过 `MemoryRuntime::builder().store(...)` 注入；persistence engine、raw transaction 和 writable store trait 不是公开 runtime path。
 2. 用稳定的 owner、agent、channel、conversation id 构建 `MemoryIdentity` 和 `MemoryScope`。
 3. 用 `MemoryWriteRequest::Candidates` 提交事实、偏好、流程、诊断、subject hint 和 soul candidate。
 4. 需要 transcript governance 时，通过 canonical turn 语义 finalize 当前回合。
@@ -271,7 +275,7 @@ let replay = runtime.replay(MemoryReplayRequest {
 })?;
 
 let space = export_memory_space(
-    &store_platform,
+    &store,
     MemorySpaceExportRequest {
         memory_space_id: "space-main".to_string(),
         include_private: true,
@@ -284,7 +288,7 @@ let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
 });
 if !preview.loss_risk {
     apply_memory_space_migration(
-        &target_store_platform,
+        &target_store,
         MemorySpaceMigrateApplyRequest {
             target_memory_space_id: "space-copy".to_string(),
             snapshot: space.snapshot,
@@ -346,13 +350,12 @@ if catalog.adapter.http.visible {
 
 集成项目至少增加一个 smoke test：
 
-1. 打开选定 store backend。
-2. 构建 `MemoryRuntime`。
-3. 把 `Arc<dyn Platform>` 注入 `MemoryRuntime`。
-4. 写入一条 `MemoryWriteCandidate`，检查 governance report。
-5. 在维护不可用时 finalize 一轮 turn，验证 deferred job。
-6. 检查 `deferred_governance_report()` 和 `inspect.deferred_governance`。
-7. 从另一个 chat 召回或投影 candidate 写入的记忆，并检查 `MemoryProjectionReport.audit`。
-8. 调用 `run_retention_compaction()`，确认不授权宿主删除已接受记忆。
-9. 通过 public memory-space migrator 跑 migration dry-run 和 apply/import，并检查 `preview.manifest`。
-10. 对迁移后的 store 运行 operator inspect 和 replay。
+1. 通过 `MemoryStoreHandle` 打开选定 backend。
+2. 通过 `MemoryRuntime::builder().store(handle)` 构建 `MemoryRuntime`。
+3. 写入一条 `MemoryWriteCandidate`，检查 governance report。
+4. 在维护不可用时 finalize 一轮 turn，验证 deferred job。
+5. 检查 `deferred_governance_report()` 和 `inspect.deferred_governance`。
+6. 从另一个 chat 召回或投影 candidate 写入的记忆，并检查 `MemoryProjectionReport.audit`。
+7. 调用 `run_retention_compaction()`，确认不授权宿主删除已接受记忆。
+8. 通过 public memory-space migrator 跑 migration dry-run 和 apply/import，并检查 `preview.manifest`。
+9. 对迁移后的 store 运行 operator inspect 和 replay。

@@ -60,7 +60,7 @@ require_fixed "DerivedMemoryRef" docs/en/api.md docs/zh-CN/api.md crates/core/sr
 require_fixed "TranscriptTurnPage" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/api.md docs/zh-CN/api.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "TranscriptRepairReport" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "HostRefLabel" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/core/src/memory/transcript.rs crates/core/tests/conversation_transcript_contract.rs
-require_fixed "MissingSourceMessage" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/core/src/memory/transcript.rs crates/store/tests/conversation_transcript_store_contract.rs
+require_fixed "MissingSourceMessage" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/core/src/memory/transcript.rs crates/store-contract-tests/tests/conversation_transcript_store_contract.rs
 require_fixed "next_cursor" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "has_more" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "lifecycle_request_without_affected_turns_reports_noop" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
@@ -68,7 +68,7 @@ require_fixed "host_ref_label_is_redacted_for_non_owner_views" dev-docs/conversa
 require_fixed "transcript_replay_export_page_requests_are_public" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/public_surface.rs
 require_fixed "desktop_profiles_can_read_host_ui_transcript_without_debug_replay" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "transcript_replay" dev-docs/sdk-profile-contract-plan.md crates/sdk/src/capability.rs crates/sdk/src/runtime.rs crates/sdk/tests/capability_catalog.rs
-require_fixed "conversation_transcript_derived_ref" crates/store/src/platform.rs crates/store/tests/conversation_transcript_store_contract.rs
+require_fixed "conversation_transcript_derived_ref" crates/sdk/src/store_internal/platform.rs crates/store-contract-tests/tests/conversation_transcript_store_contract.rs
 require_fixed "TranscriptBackedSessionStore" crates/sdk/src/runtime.rs dev-docs/conversation-transcript-governance-hardening-plan.md
 require_fixed "with_conversation_id" crates/sdk/src/runtime.rs docs/en/api.md docs/zh-CN/api.md
 require_fixed "SoulCandidateHandoff" crates/core/src/memory/transcript.rs crates/sdk/src/runtime.rs crates/sdk/tests/conversation_transcript_runtime_contract.rs
@@ -108,7 +108,7 @@ require_fixed "fresh_runtime_does_not_fallback_to_session_shadow_after_transcrip
 require_fixed "fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_raw_delete" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "fresh_runtime_fails_closed_when_transcript_alias_is_corrupt" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "conversation_transcript_key_unavailable" crates/sdk/src/runtime.rs
-require_fixed "conversation_transcript_alias" docs/en/api.md docs/zh-CN/api.md crates/store/src/platform.rs crates/store/tests/conversation_transcript_store_contract.rs crates/sdk/src/lib.rs
+require_fixed "conversation_transcript_alias" docs/en/api.md docs/zh-CN/api.md crates/sdk/src/store_internal/platform.rs crates/store-contract-tests/tests/conversation_transcript_store_contract.rs crates/sdk/src/lib.rs
 require_fixed "conversation_transcript_derived_ref" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/sdk/src/lib.rs crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "transcript_governance_budget_is_profile_owned" dev-docs/conversation-transcript-governance-hardening-plan.md
 require_fixed "TranscriptGovernanceBudget" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/core/src/budget.rs crates/sdk/src/lib.rs
@@ -132,7 +132,7 @@ if rg -n "$host_product_forbidden_pattern" \
 fi
 
 if rg -n "$host_product_forbidden_pattern" \
-  crates/core/src crates/sdk/src crates/store/src; then
+  crates/core/src crates/sdk/src; then
   echo "core/sdk/store appear to expose host/product task semantics" >&2
   exit 1
 fi

@@ -68,7 +68,10 @@ pub fn build_runtime_metrics_report(
             counters.write_changed_count =
                 counters.write_changed_count.saturating_add(changed_count);
         }
-        if operation == "recall" && result_summary == "recall_completed" {
+        if operation == "recall"
+            && result_summary == "recall_completed"
+            && payload_str(&event.payload, "trigger") == "sdk_call"
+        {
             counters.recall_requests = counters.recall_requests.saturating_add(1);
             if payload_bool(&event.payload, "memory_hit")
                 || payload_u64(&event.payload, "hit_count").unwrap_or(0) > 0

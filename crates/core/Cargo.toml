@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-replay-harness = []
+nonproduction-replay-harness = []
 sqlite-index = ["dep:rusqlite"]
 thread_panic_catch = []
 target-esp = []
@@ -39,4 +39,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 indexmap.workspace = true
 log.workspace = true
+sha2.workspace = true
 rusqlite = { workspace = true, optional = true }

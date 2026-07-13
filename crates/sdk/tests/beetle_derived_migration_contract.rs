@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_sdk::{
@@ -100,17 +102,15 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
     )
     .expect("export memory space");
     let facet_index_present = exported
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "memory_facet_indexes");
+        .archive
+        .contains_json_namespace("memory_facet_indexes");
 
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: fixture.source_memory_space_id.clone(),
         target_memory_space_id: fixture.target_memory_space_id.clone(),
         source_profile: profile,
         target_profile: ProfileId::DesktopMacosEmbeddedSdk,
-        snapshot: exported.snapshot.clone(),
+        archive: exported.archive.clone(),
     });
     assert!(
         !preview.loss_risk,
@@ -123,14 +123,15 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
     );
 
     let target = empty_store_platform(profile);
-    let before = target.export_store_snapshot().expect("before");
+    let before = target
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("before");
     let preflight_passed = preview.vault_preflight.passed;
     let apply_error = apply_memory_space_migration(
         &target,
         MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: fixture.target_memory_space_id.clone(),
-            snapshot: exported.snapshot.clone(),
-            preflight: preview.vault_preflight.clone(),
+            plan: preview.plan.clone(),
         },
     )
     .expect_err("facet index remap preflight must fail closed");
@@ -139,11 +140,14 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         &target,
         MemorySpaceImportRequest {
             memory_space_id: fixture.target_memory_space_id.clone(),
-            snapshot: exported.snapshot,
+            archive: exported.archive,
         },
     )
     .expect_err("direct import must fail closed");
-    let after = target.export_store_snapshot().expect("after");
+    let after = target
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("after");
 
     FixtureExerciseReport {
         helper_path: "public-sdk-write-export-preview-facet-remap-preflight",

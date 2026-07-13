@@ -1,13 +1,13 @@
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
-    system_governor_subject_id, MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId,
-    StoreBackendConfig, StorePlatform, SubjectDescriptor, SubjectKind, SubjectRegistry,
+    system_governor_subject_id, MemoryIdentity, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    ProfileId, StoreBackendConfig, SubjectDescriptor, SubjectKind, SubjectRegistry,
     SubjectScopedRuntime,
 };
 
 #[test]
 fn runtime_builder_mounts_single_agent_default_registry() {
-    let store = StorePlatform::open_in_memory(
+    let store = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("store config"),
     )
     .expect("store");
@@ -16,7 +16,7 @@ fn runtime_builder_mounts_single_agent_default_registry() {
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
         .profile(ProfileId::ServerLinuxDevFull)
-        .store_platform(store)
+        .store(store)
         .build()
         .expect("runtime");
 
@@ -62,7 +62,7 @@ fn runtime_builder_mounts_single_agent_default_registry() {
 
 #[test]
 fn default_relationship_graph_uses_mounted_subject_when_registry_has_multiple_agents() {
-    let store = StorePlatform::open_in_memory(
+    let store = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("store config"),
     )
     .expect("store");
@@ -79,7 +79,7 @@ fn default_relationship_graph_uses_mounted_subject_when_registry_has_multiple_ag
         .identity(MemoryIdentity::new("agent-b", "owner-custom").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
         .profile(ProfileId::ServerLinuxDevFull)
-        .store_platform(store)
+        .store(store)
         .subject_registry(registry)
         .build()
         .expect("runtime");
@@ -98,7 +98,7 @@ fn default_relationship_graph_uses_mounted_subject_when_registry_has_multiple_ag
 
 #[test]
 fn custom_scoped_runtime_drives_default_relationship_graph() {
-    let store = StorePlatform::open_in_memory(
+    let store = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("store config"),
     )
     .expect("store");
@@ -117,7 +117,7 @@ fn custom_scoped_runtime_drives_default_relationship_graph() {
         .identity(MemoryIdentity::new("agent-a", "owner-custom").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
         .profile(ProfileId::ServerLinuxDevFull)
-        .store_platform(store)
+        .store(store)
         .subject_registry(registry)
         .scoped_runtime(SubjectScopedRuntime {
             memory_space_id: default_memory_space_id("owner-custom"),

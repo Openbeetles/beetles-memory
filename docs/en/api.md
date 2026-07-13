@@ -7,9 +7,9 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Crate | Responsibility |
 | --- | --- |
 | `bm-core` | Memory planes, recall, projection, lifecycle, feature contracts, and core error model. |
-| `bm-store` | In-memory, file, sqlite, and embedded backends; schema manifest; event log; snapshots; repair reports. |
-| `bm-sdk` | `MemoryRuntime` facade, request/report types, capability catalog, profile snapshots, and store opening re-exports. |
-| `bm-replay` | Fixture runner, cross-store replay, harness gate, and benchmark gate. |
+| `bm-sdk` | `MemoryRuntime` facade, opaque `MemoryStoreHandle`, request/report types, capability catalog, profile snapshots, and its private persistence kernel. |
+| `bm-store-contract-tests` | Non-published development contract tests for the `bm-sdk` persistence kernel. |
+| `bm-replay` | Development fixture runner, cross-store replay, harness gate, and benchmark gate; `nonproduction-replay-harness` is not a deployment capability. |
 | `bm-evolve` | Proposal-only evolution sandbox and SDK write helper. |
 | `bm-adapter` | Protocol-independent envelope, command, policy, dispatch, and response contracts. |
 | `bm-entry` | Process-level runtime opening, profile/auth/source/idempotency normalization, and adapter response envelope. |

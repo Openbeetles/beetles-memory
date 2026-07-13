@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_core::memory::{
@@ -46,6 +48,7 @@ fn text_candidate(
             keywords: vec!["semantic".to_string()],
         },
         evidence_refs: vec![format!("turn:{id}")],
+        canonical_entities: Vec::new(),
         semantic_judgment,
     }
 }
@@ -78,6 +81,7 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
                     "turn:candidate-release-routine".to_string(),
                     "candidate-release-routine".to_string(),
                 ],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(llm_judgment(
                     MemoryCandidateSemanticDecision::Accept,
                     MemoryCandidateTarget::ProceduralMemory {
@@ -100,7 +104,7 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
     assert_eq!(plane.decision, GovernedWriteDecision::Accepted);
 
     assert_eq!(report.changed, 1);
-    let storage = platform.skill_storage();
+    let storage = platform.replay_harness().skill_storage();
     let records = list_runtime_skill_records(storage.as_ref());
     assert!(records
         .iter()
@@ -138,6 +142,7 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
     let runtime_b = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-b");
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -170,6 +175,7 @@ fn sdk_candidate_write_reports_soul_handoff_without_long_term_or_procedural_muta
                     keywords: vec!["relationship".to_string()],
                 },
                 evidence_refs: vec!["turn:candidate-soul".to_string()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(llm_judgment(
                     MemoryCandidateSemanticDecision::HandoffToSoulGovernance,
                     MemoryCandidateTarget::Soul {
@@ -215,6 +221,7 @@ fn sdk_candidate_write_keeps_private_garden_out_of_common_candidate_mutation() {
                     keywords: Vec::new(),
                 },
                 evidence_refs: vec!["turn:candidate-private".to_string()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(llm_judgment(
                     MemoryCandidateSemanticDecision::Accept,
                     MemoryCandidateTarget::LongTermMemory {

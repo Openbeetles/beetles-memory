@@ -1,6 +1,8 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
-use bm_core::platform::Platform as _;
+use bm_core::{memory::MemoryStore as _, platform::Platform as _};
 use bm_sdk::{
     compile_runtime_budget, CanonicalTurnDelta, ConversationKey, ConversationScope,
     DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility,
@@ -106,6 +108,7 @@ fn projection_render_limit_does_not_cut_source_recall() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "release artifact safety".to_string(),
             system_max_len: 64,
             recent_messages_limit: 1,
@@ -116,15 +119,15 @@ fn projection_render_limit_does_not_cut_source_recall() {
         .expect("projection");
 
     assert!(projection.system_memory_block.len() <= 64);
-    assert!(
-        projection
-            .context
-            .long_term_memory_text
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Verify release artifacts before publishing."),
-        "source assembly must still recall memory when render budget is tiny"
-    );
+    assert!(projection.context.long_term_memory_text.is_none());
+    assert!(!projection
+        .recall_delivery_report
+        .selected_candidate_ids
+        .is_empty());
+    assert!(projection
+        .recall_delivery_report
+        .rendered_capsules
+        .is_empty());
 }
 
 #[test]
@@ -234,6 +237,45 @@ fn facet_recall_budget_is_profile_owned_and_not_graph_or_render_owned() {
 }
 
 #[test]
+fn recall_delivery_budget_is_profile_owned_and_not_provider_or_graph_owned() {
+    let compact = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
+        .recall_delivery_budget;
+    let device =
+        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::LinuxDeviceStandaloneMemory)
+            .recall_delivery_budget;
+    let full = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
+        .recall_delivery_budget;
+    let full_graph = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
+        .graph_expansion_budget;
+
+    assert!(compact.max_selected_candidates > 0);
+    assert!(compact.max_rendered_capsules > 0);
+    assert!(compact.max_capsule_chars > 0);
+    assert!(compact.max_loss_ledger_entries > 0);
+    assert!(compact.max_selected_candidates < full.max_selected_candidates);
+    assert!(device.max_rendered_capsules < full.max_rendered_capsules);
+    assert_ne!(full.max_selected_candidates, full_graph.max_seed_candidates);
+
+    let mut provider_limited_input =
+        RuntimeBudgetInput::static_for_profile(ProfileId::ServerLinuxDevFull);
+    provider_limited_input.provider_model_context_limit = Some(ProviderModelContextLimit {
+        provider: Some("local".to_string()),
+        model: Some("tiny-render".to_string()),
+        max_context_tokens: None,
+        max_prompt_chars: Some(512),
+    });
+    let provider_limited = compile_runtime_budget(provider_limited_input);
+
+    assert_eq!(provider_limited.recall_delivery_budget, full);
+    assert_eq!(
+        provider_limited
+            .projection_render_budget
+            .system_block_max_chars,
+        512
+    );
+}
+
+#[test]
 fn transcript_governance_budget_is_profile_owned_and_runtime_enforced() {
     let compact_budget = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
         .transcript_governance_budget;
@@ -323,7 +365,7 @@ fn transcript_report_budgets_limit_derived_refs_and_repair_issues() {
         "budget-conversation".to_string(),
     )
     .expect("conversation key");
-    let store = platform.conversation_transcript_store();
+    let store = platform.replay_harness().conversation_transcript_store();
     for index in 0..2 {
         store
             .append_derived_memory_ref(
@@ -547,7 +589,7 @@ fn transcript_attr_budget_limits_visible_message_attrs_and_reports_redaction() {
 fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
     let platform = seeded_store_platform(ProfileId::ServerLinuxDevFull);
     platform
-        .memory_store()
+        .replay_harness()
         .write_daily_note(
             "2026-05-23.md",
             "Archive note: release artifact safety passed after checklist verification.",
@@ -557,6 +599,7 @@ fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "release artifact safety".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 4,

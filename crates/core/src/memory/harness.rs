@@ -8,13 +8,16 @@ use crate::llm::{
 use crate::orchestrator::PressureLevel;
 use crate::platform::{ResponseBody, SkillStorage};
 use crate::runtime::mode::{snapshot_from_source, RuntimeModeSource};
-use crate::skills::{RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource};
+use crate::skills::{
+    RuntimeSkillReuseOutcome, RuntimeSkillStorageMutation, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
+};
 use crate::task::{TaskItem, TaskQuery, TaskStore};
 use crate::task_execution::{
     TaskArtifactRecord, TaskArtifactStore, TaskLearningRecord, TaskLearningStore, TaskRunRecord,
     TaskRunStore,
 };
-use crate::tools::{MemoryManageTool, SessionManageTool, Tool, ToolContext};
+use crate::tools::{SessionManageTool, Tool, ToolContext};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -1014,7 +1017,30 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
         MemoryProfile::Standard,
     );
     let refresh_changed_count = match &refresh {
-        LongTermMemoryRefreshOutcome::Processed { changed_count, .. } => *changed_count,
+        LongTermMemoryRefreshOutcome::Processed {
+            changed_count,
+            apply_report,
+            ..
+        } => {
+            for entry_id in &apply_report.deleted_entry_ids {
+                stores.long_term.delete(entry_id).unwrap();
+            }
+            stores
+                .long_term
+                .upsert_many(&apply_report.accepted_upserts, NOW_SECS)
+                .unwrap();
+            for mutation in &apply_report.planned_skill_mutations {
+                match mutation {
+                    RuntimeSkillStorageMutation::Upsert { name, content } => {
+                        stores.skills.write(name, content).unwrap();
+                    }
+                    RuntimeSkillStorageMutation::Delete { name } => {
+                        stores.skills.remove(name).unwrap();
+                    }
+                }
+            }
+            *changed_count
+        }
         LongTermMemoryRefreshOutcome::Deferred { .. } => {
             panic!("expected production replay refresh to process")
         }
@@ -1035,6 +1061,7 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
         summary_text: None,
         recent: &after_prompt.recent_messages,
         system_max_len: 1024,
+        now_secs: NOW_SECS,
         profile: MemoryProfile::Standard,
         current_channel: Some(CHANNEL),
         session_store: stores.session.as_ref(),
@@ -1076,14 +1103,15 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
             .runtime_skill_report
             .selected_ids
             .clone(),
-        stored_factual_content_after_refresh: stores
-            .long_term
-            .list(8)
-            .unwrap()
-            .into_iter()
-            .find(|entry| entry.topic == "preferred_engineering_language")
-            .map(|entry| entry.content)
-            .unwrap_or_default(),
+        stored_factual_content_after_refresh: LongTermMemoryStore::list(
+            stores.long_term.as_ref(),
+            8,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.topic == "preferred_engineering_language")
+        .map(|entry| entry.content)
+        .unwrap_or_default(),
         inspection_runtime_skill_text_after_refresh: inspection
             .runtime_skill_text
             .unwrap_or_default(),
@@ -1105,6 +1133,7 @@ fn factual_draft(
             .split('_')
             .map(str::to_string)
             .collect::<Vec<String>>(),
+        privacy: MemoryPrivacyClass::SharedWithSubject,
         source_chat_id: Some(CHAT_ID.to_string()),
         source_type: Some(LongTermMemorySourceType::Conversation),
         source_scope: Some(LongTermMemorySourceScope::User),
@@ -1112,6 +1141,7 @@ fn factual_draft(
         freshness: Some(LongTermMemoryFreshness::Stable),
         stale_hint: Some(LongTermMemoryStaleHint::None),
         supporting_citations: Vec::new(),
+        canonical_entities: Vec::new(),
         evidence_count: None,
         observed_at: Some(observed_at),
         last_confirmed_at: Some(observed_at),
@@ -1209,7 +1239,7 @@ fn memory_harness_write_governance() {
         outcome.reports[0].reason,
         SharedMemoryWriteReason::DurableFact
     );
-    assert_eq!(store.count().unwrap(), 1);
+    assert_eq!(LongTermMemoryStore::count(&store).unwrap(), 1);
 
     let raw = LongTermMemoryDraft {
         content: "{\"request\":{\"api_key\":\"secret\",\"headers\":{\"x\":1}},\"response\":{\"body\":{\"nested\":true}}}".to_string(),
@@ -1368,31 +1398,6 @@ fn memory_harness_profile_contract() {
 #[test]
 fn memory_harness_cross_entry_write_contract() {
     let stores = HarnessStores::default();
-    let mut ctx = NullToolContext;
-    let tool = MemoryManageTool::new(
-        stores.memory.clone(),
-        stores.long_term.clone(),
-        stores.skills.clone(),
-    );
-
-    let manual_result = tool
-        .execute(
-            &json!({
-                "op": "upsert_long_term",
-                "kind": "preference",
-                "topic": "preferred_engineering_language",
-                "content": "User prefers Chinese for engineering review conversations.",
-                "confidence": "high",
-                "source_scope": "user"
-            })
-            .to_string(),
-            &mut ctx,
-        )
-        .unwrap();
-    let manual_json: serde_json::Value = serde_json::from_str(&manual_result).unwrap();
-    assert_eq!(manual_json["plane"], "factual");
-    assert_eq!(stores.long_term.count().unwrap(), 1);
-
     let extraction = ParsedLongTermMemoryExtraction {
         upserts: vec![factual_draft(
             LongTermMemoryKind::Preference,
@@ -1421,7 +1426,10 @@ fn memory_harness_cross_entry_write_contract() {
     )
     .unwrap();
     assert!(changed >= 1);
-    assert_eq!(stores.long_term.count().unwrap(), 1);
+    assert_eq!(
+        LongTermMemoryStore::count(stores.long_term.as_ref()).unwrap(),
+        1
+    );
     assert!(stores
         .skills
         .names()
@@ -1514,6 +1522,7 @@ fn memory_harness_prompt_inspection_parity() {
         summary_text: None,
         recent: &prompt.recent_messages,
         system_max_len: 1024,
+        now_secs: NOW_SECS,
         profile: MemoryProfile::Standard,
         current_channel: Some(CHANNEL),
         session_store: stores.session.as_ref(),
@@ -1609,26 +1618,22 @@ fn memory_harness_forget_scope_contract() {
         )
         .unwrap();
     assert!(stores.session.load_recent(CHAT_ID, 10).unwrap().is_empty());
-    assert_eq!(stores.long_term.count().unwrap(), 1);
+    assert_eq!(
+        LongTermMemoryStore::count(stores.long_term.as_ref()).unwrap(),
+        1
+    );
     assert!(stores
         .skills
         .names()
         .iter()
         .any(|name| name == "runtime_skill__release_checklist"));
 
-    let memory_tool = MemoryManageTool::new(
-        stores.memory.clone(),
-        stores.long_term.clone(),
-        stores.skills.clone(),
-    );
     let fact_id = fact.stable_id().unwrap();
-    memory_tool
-        .execute(
-            &json!({"op": "delete_long_term", "id": fact_id}).to_string(),
-            &mut ctx,
-        )
-        .unwrap();
-    assert_eq!(stores.long_term.count().unwrap(), 0);
+    stores.long_term.delete(&fact_id).unwrap();
+    assert_eq!(
+        LongTermMemoryStore::count(stores.long_term.as_ref()).unwrap(),
+        0
+    );
     assert!(stores
         .skills
         .names()

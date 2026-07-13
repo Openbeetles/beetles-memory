@@ -5,7 +5,7 @@ use crate::memory::{
     derive_personality_runtime_governance_gate_from_inspection, inspect_personality_governance,
     select_active_continuity_snapshot_chat_ids, select_personality_governance_targets,
     ContinuitySnapshotManifest, CrossPlaneRerankResult, FeltSignificance, InnerConflict,
-    IntelligenceReplayInspection, PersonalityGovernanceInspection,
+    IntelligenceReplayInspection, LongTermMemoryReadStore, PersonalityGovernanceInspection,
     PersonalityGovernanceInspectionInput, PersonalityRuntimeGovernanceGate, PromptRecallIntent,
     RecallSelectionReport, SubjectShellCompileInput, TemperamentContinuity,
 };
@@ -209,11 +209,13 @@ type MemoryOperatorPolicyViewBundle = (
 
 pub fn build_memory_operator_surface(
     platform: &dyn Platform,
+    long_term_store: &dyn LongTermMemoryReadStore,
     tool_registry: Option<&ToolRegistry>,
     trace_input: Option<&MemoryOperatorTraceInput>,
 ) -> crate::error::Result<MemoryOperatorSurfaceSummary> {
     build_memory_operator_surface_with_capabilities(
         platform,
+        long_term_store,
         tool_registry.is_some_and(|registry| registry.get("continuity_snapshot").is_some()),
         trace_input,
     )
@@ -221,6 +223,7 @@ pub fn build_memory_operator_surface(
 
 pub fn build_memory_operator_surface_with_capabilities(
     platform: &dyn Platform,
+    long_term_store: &dyn LongTermMemoryReadStore,
     continuity_snapshot_supported: bool,
     trace_input: Option<&MemoryOperatorTraceInput>,
 ) -> crate::error::Result<MemoryOperatorSurfaceSummary> {
@@ -237,10 +240,7 @@ pub fn build_memory_operator_surface_with_capabilities(
                 .count()
         })
         .unwrap_or_default();
-    let long_term_count = platform
-        .long_term_memory_store()
-        .count()
-        .unwrap_or_default();
+    let long_term_count = long_term_store.count().unwrap_or_default();
     let continuity_capsule_count = platform
         .continuity_capsule_store()
         .count()

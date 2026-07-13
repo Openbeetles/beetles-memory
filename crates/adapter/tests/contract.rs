@@ -10,11 +10,12 @@ use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, HostRefVisibility, LlmClient,
     LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
     MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest, MemoryPrivacyPolicy,
-    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryTranscriptAttrWriteRequest,
-    MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, Message, NoopMemoryAuditSink,
-    ProfileId, ResponseBody, StopReason, StoreBackendConfig, StorePlatform, ToolChoicePolicy,
-    ToolSpec, TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, Message,
+    NoopMemoryAuditSink, PressureLevel, ProfileId, QueryFacetInput, ResponseBody,
+    RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, ToolChoicePolicy, ToolSpec,
+    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
     TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
     TranscriptInputMessage, TranscriptReplayView,
@@ -30,7 +31,7 @@ impl MemoryClock for FixedClock {
 }
 
 fn runtime() -> MemoryRuntime {
-    let store = StorePlatform::open_in_memory(
+    let store = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("config"),
     )
     .expect("store");
@@ -38,7 +39,7 @@ fn runtime() -> MemoryRuntime {
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
         .profile(ProfileId::ServerLinuxDevFull)
-        .store_platform(store)
+        .store(store)
         .clock(Arc::new(FixedClock))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
@@ -80,6 +81,7 @@ fn recall_command_dispatches_through_memory_runtime() {
         envelope(
             AdapterOperation::Recall,
             AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
                 tool_registry_refs: Vec::new(),
@@ -103,6 +105,40 @@ fn recall_command_dispatches_through_memory_runtime() {
 }
 
 #[test]
+fn project_command_returns_only_the_adapter_projection_contract() {
+    let runtime = runtime();
+    let response = dispatch_adapter_command(
+        &runtime,
+        envelope(
+            AdapterOperation::Project,
+            AdapterCommand::Project(MemoryProjectionRequest {
+                structured_query_facets: Vec::new(),
+                user_query: "release".to_string(),
+                system_max_len: 1024,
+                recent_messages_limit: 2,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+                tool_registry_refs: Vec::new(),
+            }),
+        ),
+    )
+    .expect("dispatch project");
+
+    match response {
+        AdapterResponse::Accepted {
+            report: AdapterSdkReport::Project(report),
+            ..
+        } => {
+            assert_eq!(report.chars, report.projection_block.chars().count());
+            assert!(!report.audit.projection_id.is_empty());
+            assert!(report.audit.disclosure_integrity_passed);
+            assert_eq!(report.audit.raw_private_violation_count, 0);
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
 fn operation_mismatch_is_rejected_before_runtime_call() {
     let runtime = runtime();
     let response = dispatch_adapter_command(
@@ -110,6 +146,7 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
         envelope(
             AdapterOperation::Write,
             AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
                 tool_registry_refs: Vec::new(),
@@ -124,6 +161,48 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
         }
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+#[test]
+fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
+    let options = AdapterJsonCommandOptions::new("adapter-test");
+    let recall = decode_json_adapter_command(
+        AdapterOperation::Recall,
+        r#"{
+            "query":"typed entity",
+            "structured_query_facets":[
+                {"kind":"unresolved_entity","value":"Alice"}
+            ]
+        }"#,
+        &options,
+    )
+    .expect("decode typed recall");
+    let AdapterCommand::Recall(recall) = recall else {
+        panic!("expected recall command");
+    };
+    assert_eq!(
+        recall.structured_query_facets,
+        vec![QueryFacetInput::UnresolvedEntity("Alice".to_string())]
+    );
+
+    let project = decode_json_adapter_command(
+        AdapterOperation::Project,
+        r#"{
+            "user_query":"typed temporal",
+            "structured_query_facets":[
+                {"kind":"unresolved_temporal","value":"last week"}
+            ]
+        }"#,
+        &options,
+    )
+    .expect("decode typed projection");
+    let AdapterCommand::Project(project) = project else {
+        panic!("expected project command");
+    };
+    assert_eq!(
+        project.structured_query_facets,
+        vec![QueryFacetInput::UnresolvedTemporal("last week".to_string())]
+    );
 }
 
 #[test]

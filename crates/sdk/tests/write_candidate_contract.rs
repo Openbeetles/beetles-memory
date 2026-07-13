@@ -44,6 +44,7 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
                     keywords: vec!["name".to_string(), "qingchuan".to_string()],
                 },
                 evidence_refs: vec!["chat-a:turn-1".to_string()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(llm_accept(MemoryCandidateTarget::LongTermMemory {
                     kind: LongTermMemoryKind::Profile,
                     topic: "preferred_name".to_string(),
@@ -63,6 +64,7 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
     let runtime_b = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-b");
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -104,6 +106,7 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
                     citations: vec!["fixture:generic-rust-host".to_string()],
                 },
                 evidence_refs: vec!["chat-a:turn-2".to_string()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(llm_accept(MemoryCandidateTarget::ProceduralMemory {
                     name: String::new(),
                     topic: "release_checklist".to_string(),
@@ -116,6 +119,7 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
     assert_eq!(report.changed, 1);
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "release checklist evidence".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
@@ -231,6 +235,7 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "release checklist".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
@@ -271,6 +276,7 @@ fn direct_runtime_learned_procedural_write_is_rejected_without_promotion_gate() 
         .contains("runtime_learned_procedural_write_requires_promotion"));
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "unsafe runtime learned".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),

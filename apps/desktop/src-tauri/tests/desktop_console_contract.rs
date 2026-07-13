@@ -215,6 +215,7 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How should Desktop overview count transparent Ollama?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,

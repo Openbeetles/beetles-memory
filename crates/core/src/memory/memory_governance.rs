@@ -8,7 +8,7 @@ use super::{
 
 pub struct MemoryGovernanceContext<'a> {
     pub session_store: &'a dyn SessionStore,
-    pub long_term_memory_store: &'a dyn super::LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn super::LongTermMemoryReadStore,
     pub memory_store: &'a dyn MemoryStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
 }

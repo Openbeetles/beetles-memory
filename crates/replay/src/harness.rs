@@ -1,5 +1,6 @@
 use bm_sdk::{
-    MemoryIdentity, MemoryScope, ProfileId, RuntimeSkillWrite, StoreBackendConfig, StorePlatform,
+    MemoryIdentity, MemoryScope, MemoryStoreHandle, ProfileId, RuntimeSkillWrite,
+    StoreBackendConfig,
 };
 
 use crate::{
@@ -14,8 +15,8 @@ pub struct MemoryHarnessReport {
 }
 
 pub fn build_sdk_memory_harness_fixture(profile: ProfileId) -> bm_core::Result<ReplayFixture> {
-    let platform = StorePlatform::open_in_memory(StoreBackendConfig::in_memory(profile)?)?;
-    let snapshot = platform.export_store_snapshot()?;
+    let platform = MemoryStoreHandle::open_in_memory(StoreBackendConfig::in_memory(profile)?)?;
+    let snapshot = platform.export_replay_snapshot()?;
     Ok(ReplayFixture {
         fixture_id: "sdk-memory-harness".to_string(),
         profile,

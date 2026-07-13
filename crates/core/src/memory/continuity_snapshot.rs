@@ -3,20 +3,21 @@
 
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 use super::{
-    board_subject_scope_id, select_relationship_portfolio_targets,
-    select_relationship_topology_targets, write_governed_shared_memory, CoreRevisionLedger,
-    CoreRevisionLedgerStore, ExecutionState, ExecutionStateStore, LongTermMemoryDraft,
-    LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryStore, RelationshipConstitution,
-    RelationshipConstitutionStore, RelationshipPortfolio, RelationshipPortfolioSelectorInput,
-    RelationshipPortfolioStore, RelationshipSelectionTarget, RelationshipSelectorInput,
-    RelationshipTopology, RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore,
-    SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore, SessionStore,
-    SessionSummaryStore, SharedMemoryWriteOutcome, SharedMemoryWriteSource,
+    board_subject_scope_id, plan_governed_shared_memory_in_space,
+    select_relationship_portfolio_targets, select_relationship_topology_targets,
+    CoreRevisionLedger, CoreRevisionLedgerStore, ExecutionState, ExecutionStateStore,
+    LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryReadStore,
+    LongTermMemoryStore, RelationshipConstitution, RelationshipConstitutionStore,
+    RelationshipPortfolio, RelationshipPortfolioSelectorInput, RelationshipPortfolioStore,
+    RelationshipSelectionTarget, RelationshipSelectorInput, RelationshipTopology,
+    RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore, SelfContinuity,
+    SelfContinuityStore, SelfModel, SelfModelStore, SessionStore, SessionSummaryStore,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SharedMemoryWriteSource,
 };
 
 const CONTINUITY_SNAPSHOT_VERSION: u32 = 5;
@@ -105,7 +106,7 @@ pub struct ContinuitySnapshot {
 }
 
 pub struct ContinuitySnapshotExportContext<'a> {
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
     pub self_model_store: &'a dyn SelfModelStore,
@@ -118,7 +119,7 @@ pub struct ContinuitySnapshotExportContext<'a> {
 }
 
 pub struct ContinuitySnapshotImportContext<'a> {
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
     pub self_model_store: &'a dyn SelfModelStore,
@@ -153,6 +154,140 @@ pub struct ContinuitySnapshotImportDecision {
     pub layer: String,
     pub action: String,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContinuitySnapshotPlannedWrite<T> {
+    pub key: String,
+    pub observed: Option<T>,
+    pub next: T,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContinuitySnapshotSummaryWrite {
+    pub chat_id: String,
+    pub observed: Option<(String, usize)>,
+    pub summary: String,
+    pub message_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContinuitySnapshotImportWriteSet {
+    pub summary: Option<ContinuitySnapshotSummaryWrite>,
+    pub self_model: Option<ContinuitySnapshotPlannedWrite<SelfModel>>,
+    pub self_authored_core: Option<ContinuitySnapshotPlannedWrite<SelfAuthoredCore>>,
+    pub core_revision_ledger: Option<ContinuitySnapshotPlannedWrite<CoreRevisionLedger>>,
+    pub self_continuity: Option<ContinuitySnapshotPlannedWrite<SelfContinuity>>,
+    pub relationship_constitution: Option<ContinuitySnapshotPlannedWrite<RelationshipConstitution>>,
+    pub relationship_portfolio: Option<ContinuitySnapshotPlannedWrite<RelationshipPortfolio>>,
+    pub execution_state: Option<ContinuitySnapshotPlannedWrite<ExecutionState>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContinuitySnapshotImportPlan {
+    pub outcome: ContinuitySnapshotImportOutcome,
+    pub accepted_long_term_drafts: Vec<LongTermMemoryDraft>,
+    pub accepted_long_term_entries: Vec<LongTermMemoryEntry>,
+    pub writes: ContinuitySnapshotImportWriteSet,
+}
+
+pub fn coalesce_continuity_snapshot_import_plans(plans: &mut [ContinuitySnapshotImportPlan]) {
+    macro_rules! retain_newest {
+        ($field:ident, $outcome_field:ident, $rank:expr) => {{
+            let mut winners = BTreeMap::<String, (u64, usize)>::new();
+            for (index, plan) in plans.iter().enumerate() {
+                if let Some(write) = plan.writes.$field.as_ref() {
+                    let rank = $rank(write);
+                    if winners
+                        .get(&write.key)
+                        .is_none_or(|(winner_rank, _)| rank >= *winner_rank)
+                    {
+                        winners.insert(write.key.clone(), (rank, index));
+                    }
+                }
+            }
+            for (index, plan) in plans.iter_mut().enumerate() {
+                let should_remove = plan.writes.$field.as_ref().is_some_and(|write| {
+                    winners
+                        .get(&write.key)
+                        .is_some_and(|(_, winner_index)| *winner_index != index)
+                });
+                if should_remove {
+                    plan.writes.$field = None;
+                    plan.outcome.$outcome_field = false;
+                    plan.outcome.decisions.push(import_decision(
+                        stringify!($field),
+                        "superseded",
+                        "a newer snapshot in the same recovery bundle owns this layer key",
+                    ));
+                }
+            }
+        }};
+    }
+
+    let mut summary_winners = BTreeMap::<String, (usize, usize)>::new();
+    for (index, plan) in plans.iter().enumerate() {
+        if let Some(write) = plan.writes.summary.as_ref() {
+            if summary_winners
+                .get(&write.chat_id)
+                .is_none_or(|(winner_count, _)| write.message_count >= *winner_count)
+            {
+                summary_winners.insert(write.chat_id.clone(), (write.message_count, index));
+            }
+        }
+    }
+    for (index, plan) in plans.iter_mut().enumerate() {
+        let should_remove = plan.writes.summary.as_ref().is_some_and(|write| {
+            summary_winners
+                .get(&write.chat_id)
+                .is_some_and(|(_, winner_index)| *winner_index != index)
+        });
+        if should_remove {
+            plan.writes.summary = None;
+            plan.outcome.summary_restored = false;
+            plan.outcome.decisions.push(import_decision(
+                "session_summary",
+                "superseded",
+                "a summary with at least as much evidence owns this chat in the recovery bundle",
+            ));
+        }
+    }
+
+    retain_newest!(
+        self_model,
+        self_model_restored,
+        |write: &ContinuitySnapshotPlannedWrite<SelfModel>| write.next.updated_at
+    );
+    retain_newest!(
+        self_authored_core,
+        self_authored_core_restored,
+        |write: &ContinuitySnapshotPlannedWrite<SelfAuthoredCore>| write.next.updated_at
+    );
+    retain_newest!(
+        core_revision_ledger,
+        core_revision_ledger_restored,
+        |write: &ContinuitySnapshotPlannedWrite<CoreRevisionLedger>| write.next.updated_at
+    );
+    retain_newest!(
+        self_continuity,
+        self_continuity_restored,
+        |write: &ContinuitySnapshotPlannedWrite<SelfContinuity>| write.next.updated_at
+    );
+    retain_newest!(
+        relationship_constitution,
+        relationship_constitution_restored,
+        |write: &ContinuitySnapshotPlannedWrite<RelationshipConstitution>| write.next.updated_at
+    );
+    retain_newest!(
+        relationship_portfolio,
+        relationship_portfolio_restored,
+        |write: &ContinuitySnapshotPlannedWrite<RelationshipPortfolio>| write.next.updated_at
+    );
+    retain_newest!(
+        execution_state,
+        execution_state_restored,
+        |write: &ContinuitySnapshotPlannedWrite<ExecutionState>| write.next.updated_at
+    );
 }
 
 pub fn export_continuity_snapshot(
@@ -217,12 +352,13 @@ pub fn export_continuity_snapshot(
     Ok(snapshot)
 }
 
-pub fn import_continuity_snapshot(
+pub fn plan_continuity_snapshot_import(
     ctx: ContinuitySnapshotImportContext<'_>,
     target_chat_id: &str,
     snapshot: &ContinuitySnapshot,
     mode: ContinuitySnapshotImportMode,
-) -> Result<ContinuitySnapshotImportOutcome> {
+    governance_context: SharedFactWriteGovernanceContext,
+) -> Result<ContinuitySnapshotImportPlan> {
     let manifest = snapshot_manifest(snapshot);
     let target_subject_id = if snapshot.subject_id.trim().is_empty() {
         board_subject_scope_id()
@@ -234,19 +370,31 @@ pub fn import_continuity_snapshot(
         .iter()
         .map(long_term_entry_to_draft)
         .collect::<Vec<_>>();
-    let long_term_write_outcome = if drafts.is_empty() {
-        SharedMemoryWriteOutcome {
-            source: SharedMemoryWriteSource::SnapshotImport,
-            ..SharedMemoryWriteOutcome::default()
+    let mut long_term_plan = if drafts.is_empty() {
+        super::SharedMemoryWritePlan {
+            outcome: SharedMemoryWriteOutcome {
+                memory_space_id: governance_context.memory_space_id.clone(),
+                owner_layer: "memory_space".to_string(),
+                origin_subject_id: Some(governance_context.origin_subject_id.clone()),
+                actor_subject_id: Some(governance_context.actor_subject_id.clone()),
+                target_subject_id: governance_context.target_subject_id.clone(),
+                relationship_id: governance_context.relationship_id.clone(),
+                requested_visibility: governance_context.requested_visibility.clone(),
+                source: SharedMemoryWriteSource::SnapshotImport,
+                ..SharedMemoryWriteOutcome::default()
+            },
+            ..super::SharedMemoryWritePlan::default()
         }
     } else {
-        write_governed_shared_memory(
+        plan_governed_shared_memory_in_space(
             ctx.long_term_memory_store,
             &drafts,
             snapshot.exported_at,
-            SharedMemoryWriteSource::SnapshotImport,
+            governance_context,
         )?
     };
+    long_term_plan.outcome.changed = long_term_plan.accepted_entries.len();
+    let long_term_write_outcome = long_term_plan.outcome.clone();
 
     let mut outcome = ContinuitySnapshotImportOutcome {
         long_term_imported: long_term_write_outcome.changed,
@@ -254,6 +402,7 @@ pub fn import_continuity_snapshot(
         long_term_write_outcome,
         ..ContinuitySnapshotImportOutcome::default()
     };
+    let mut writes = ContinuitySnapshotImportWriteSet::default();
     if outcome.long_term_write_outcome.submitted > 0 {
         outcome.decisions.push(ContinuitySnapshotImportDecision {
             layer: "long_term_memory".to_string(),
@@ -285,11 +434,12 @@ pub fn import_continuity_snapshot(
             (None, Some(_)) => false,
         };
         if should_restore {
-            ctx.session_summary_store.set_with_count(
-                target_chat_id,
-                summary_text,
-                snapshot.summary_message_count.unwrap_or(0),
-            )?;
+            writes.summary = Some(ContinuitySnapshotSummaryWrite {
+                chat_id: target_chat_id.to_string(),
+                observed: local_summary,
+                summary: summary_text.to_string(),
+                message_count: snapshot.summary_message_count.unwrap_or(0),
+            });
             outcome.summary_restored = true;
             outcome.decisions.push(import_decision(
                 "session_summary",
@@ -311,12 +461,16 @@ pub fn import_continuity_snapshot(
         ));
     }
     if let Some(self_model) = snapshot.self_model.as_ref() {
-        let should_restore = ctx
-            .self_model_store
-            .get(target_subject_id)?
+        let observed = ctx.self_model_store.get(target_subject_id)?;
+        let should_restore = observed
+            .as_ref()
             .is_none_or(|existing| existing.updated_at <= self_model.updated_at);
         if should_restore {
-            ctx.self_model_store.set(target_subject_id, self_model)?;
+            writes.self_model = Some(ContinuitySnapshotPlannedWrite {
+                key: target_subject_id.to_string(),
+                observed,
+                next: self_model.clone(),
+            });
             outcome.self_model_restored = true;
             outcome.decisions.push(import_decision(
                 "self_model",
@@ -338,13 +492,16 @@ pub fn import_continuity_snapshot(
         ));
     }
     if let Some(self_authored_core) = snapshot.self_authored_core.as_ref() {
-        let should_restore = ctx
-            .self_authored_core_store
-            .get(target_subject_id)?
+        let observed = ctx.self_authored_core_store.get(target_subject_id)?;
+        let should_restore = observed
+            .as_ref()
             .is_none_or(|existing| existing.updated_at <= self_authored_core.updated_at);
         if should_restore {
-            ctx.self_authored_core_store
-                .set(target_subject_id, self_authored_core)?;
+            writes.self_authored_core = Some(ContinuitySnapshotPlannedWrite {
+                key: target_subject_id.to_string(),
+                observed,
+                next: self_authored_core.clone(),
+            });
             outcome.self_authored_core_restored = true;
             outcome.decisions.push(import_decision(
                 "self_authored_core",
@@ -366,13 +523,16 @@ pub fn import_continuity_snapshot(
         ));
     }
     if let Some(core_revision_ledger) = snapshot.core_revision_ledger.as_ref() {
-        let should_restore = ctx
-            .core_revision_ledger_store
-            .get(target_subject_id)?
+        let observed = ctx.core_revision_ledger_store.get(target_subject_id)?;
+        let should_restore = observed
+            .as_ref()
             .is_none_or(|existing| existing.updated_at <= core_revision_ledger.updated_at);
         if should_restore {
-            ctx.core_revision_ledger_store
-                .set(target_subject_id, core_revision_ledger)?;
+            writes.core_revision_ledger = Some(ContinuitySnapshotPlannedWrite {
+                key: target_subject_id.to_string(),
+                observed,
+                next: core_revision_ledger.clone(),
+            });
             outcome.core_revision_ledger_restored = true;
             outcome.decisions.push(import_decision(
                 "core_revision_ledger",
@@ -394,13 +554,16 @@ pub fn import_continuity_snapshot(
         ));
     }
     if let Some(self_continuity) = snapshot.self_continuity.as_ref() {
-        let should_restore = ctx
-            .self_continuity_store
-            .get(target_subject_id)?
+        let observed = ctx.self_continuity_store.get(target_subject_id)?;
+        let should_restore = observed
+            .as_ref()
             .is_none_or(|existing| existing.updated_at <= self_continuity.updated_at);
         if should_restore {
-            ctx.self_continuity_store
-                .set(target_subject_id, self_continuity)?;
+            writes.self_continuity = Some(ContinuitySnapshotPlannedWrite {
+                key: target_subject_id.to_string(),
+                observed,
+                next: self_continuity.clone(),
+            });
             outcome.self_continuity_restored = true;
             outcome.decisions.push(import_decision(
                 "self_continuity",
@@ -422,15 +585,18 @@ pub fn import_continuity_snapshot(
         ));
     }
     if let Some(relationship_constitution) = snapshot.relationship_constitution.as_ref() {
-        let should_restore = ctx
+        let observed = ctx
             .relationship_constitution_store
-            .get(relationship_constitution.scope_id.as_str())?
+            .get(relationship_constitution.scope_id.as_str())?;
+        let should_restore = observed
+            .as_ref()
             .is_none_or(|existing| existing.updated_at <= relationship_constitution.updated_at);
         if should_restore {
-            ctx.relationship_constitution_store.set(
-                relationship_constitution.scope_id.as_str(),
-                relationship_constitution,
-            )?;
+            writes.relationship_constitution = Some(ContinuitySnapshotPlannedWrite {
+                key: relationship_constitution.scope_id.clone(),
+                observed,
+                next: relationship_constitution.clone(),
+            });
             outcome.relationship_constitution_restored = true;
             outcome.decisions.push(import_decision(
                 "relationship_constitution",
@@ -452,13 +618,16 @@ pub fn import_continuity_snapshot(
         ));
     }
     if let Some(relationship_portfolio) = snapshot.relationship_portfolio.as_ref() {
-        let should_restore = ctx
-            .relationship_portfolio_store
-            .get(target_subject_id)?
+        let observed = ctx.relationship_portfolio_store.get(target_subject_id)?;
+        let should_restore = observed
+            .as_ref()
             .is_none_or(|existing| existing.updated_at <= relationship_portfolio.updated_at);
         if should_restore {
-            ctx.relationship_portfolio_store
-                .set(target_subject_id, relationship_portfolio)?;
+            writes.relationship_portfolio = Some(ContinuitySnapshotPlannedWrite {
+                key: target_subject_id.to_string(),
+                observed,
+                next: relationship_portfolio.clone(),
+            });
             outcome.relationship_portfolio_restored = true;
             outcome.decisions.push(import_decision(
                 "relationship_portfolio",
@@ -481,13 +650,16 @@ pub fn import_continuity_snapshot(
     }
     if matches!(mode, ContinuitySnapshotImportMode::FullRestore) {
         if let Some(execution_state) = snapshot.execution_state.as_ref() {
-            let should_restore = ctx
-                .execution_state_store
-                .get(target_chat_id)?
+            let observed = ctx.execution_state_store.get(target_chat_id)?;
+            let should_restore = observed
+                .as_ref()
                 .is_none_or(|existing| existing.updated_at <= execution_state.updated_at);
             if should_restore {
-                ctx.execution_state_store
-                    .set(target_chat_id, execution_state)?;
+                writes.execution_state = Some(ContinuitySnapshotPlannedWrite {
+                    key: target_chat_id.to_string(),
+                    observed,
+                    next: execution_state.clone(),
+                });
                 outcome.execution_state_restored = true;
                 outcome.decisions.push(import_decision(
                     "execution_state",
@@ -515,7 +687,78 @@ pub fn import_continuity_snapshot(
             "bootstrap_import does not restore execution_state",
         ));
     }
-    Ok(outcome)
+    Ok(ContinuitySnapshotImportPlan {
+        outcome,
+        accepted_long_term_drafts: long_term_plan.accepted_drafts,
+        accepted_long_term_entries: long_term_plan.accepted_entries,
+        writes,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn import_continuity_snapshot(
+    ctx: ContinuitySnapshotImportContext<'_>,
+    long_term_memory_write_store: &dyn LongTermMemoryStore,
+    target_chat_id: &str,
+    snapshot: &ContinuitySnapshot,
+    mode: ContinuitySnapshotImportMode,
+) -> Result<ContinuitySnapshotImportOutcome> {
+    let subject_id = if snapshot.subject_id.trim().is_empty() {
+        board_subject_scope_id()
+    } else {
+        snapshot.subject_id.trim()
+    };
+    let plan = plan_continuity_snapshot_import(
+        ContinuitySnapshotImportContext {
+            long_term_memory_store: ctx.long_term_memory_store,
+            session_summary_store: ctx.session_summary_store,
+            execution_state_store: ctx.execution_state_store,
+            self_model_store: ctx.self_model_store,
+            self_authored_core_store: ctx.self_authored_core_store,
+            core_revision_ledger_store: ctx.core_revision_ledger_store,
+            self_continuity_store: ctx.self_continuity_store,
+            relationship_constitution_store: ctx.relationship_constitution_store,
+            relationship_portfolio_store: ctx.relationship_portfolio_store,
+        },
+        target_chat_id,
+        snapshot,
+        mode,
+        SharedFactWriteGovernanceContext::new(
+            "test-memory-space",
+            subject_id,
+            subject_id,
+            SharedMemoryWriteSource::SnapshotImport,
+        ),
+    )?;
+    if !plan.accepted_long_term_drafts.is_empty() {
+        long_term_memory_write_store
+            .upsert_many(&plan.accepted_long_term_drafts, snapshot.exported_at)?;
+    }
+    if let Some(write) = plan.writes.summary.as_ref() {
+        ctx.session_summary_store.set_with_count(
+            &write.chat_id,
+            &write.summary,
+            write.message_count,
+        )?;
+    }
+    macro_rules! apply_write {
+        ($field:ident, $store:expr) => {
+            if let Some(write) = plan.writes.$field.as_ref() {
+                $store.set(&write.key, &write.next)?;
+            }
+        };
+    }
+    apply_write!(self_model, ctx.self_model_store);
+    apply_write!(self_authored_core, ctx.self_authored_core_store);
+    apply_write!(core_revision_ledger, ctx.core_revision_ledger_store);
+    apply_write!(self_continuity, ctx.self_continuity_store);
+    apply_write!(
+        relationship_constitution,
+        ctx.relationship_constitution_store
+    );
+    apply_write!(relationship_portfolio, ctx.relationship_portfolio_store);
+    apply_write!(execution_state, ctx.execution_state_store);
+    Ok(plan.outcome)
 }
 
 fn import_decision(layer: &str, action: &str, reason: &str) -> ContinuitySnapshotImportDecision {
@@ -1176,6 +1419,7 @@ fn long_term_entry_to_draft(entry: &LongTermMemoryEntry) -> LongTermMemoryDraft 
         topic: entry.topic.clone(),
         content: entry.content.clone(),
         keywords: entry.keywords.clone(),
+        privacy: entry.privacy,
         source_chat_id: entry.source_chat_id.clone(),
         source_type: Some(entry.source_type),
         source_scope: Some(entry.source_scope),
@@ -1183,10 +1427,11 @@ fn long_term_entry_to_draft(entry: &LongTermMemoryEntry) -> LongTermMemoryDraft 
         freshness: Some(entry.freshness),
         stale_hint: Some(entry.stale_hint),
         supporting_citations: entry.supporting_citations.clone(),
+        canonical_entities: entry.canonical_entities.clone(),
         evidence_count: Some(entry.evidence_count),
         observed_at: Some(entry.observed_at),
         last_confirmed_at: Some(entry.last_confirmed_at),
-        source_revision: Some(entry.source_revision),
+        source_revision: entry.source_revision,
     }
 }
 
@@ -1209,7 +1454,7 @@ mod tests {
         CoreRevisionActionKind, CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange,
         ExecutionStatus, LongTermMemoryConfidence, LongTermMemoryFreshness,
         LongTermMemorySourceScope, LongTermMemorySourceType, LongTermMemoryStaleHint,
-        SessionMessage,
+        MemoryPrivacyClass, SessionMessage,
     };
     use std::sync::Mutex;
 
@@ -1217,6 +1462,7 @@ mod tests {
         LongTermMemoryEntry {
             id: format!("{}:{}", kind.label(), topic),
             kind,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: topic.to_string(),
             content: format!("content for {}", topic),
             keywords: vec![topic.to_string()],
@@ -1227,12 +1473,14 @@ mod tests {
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
             supporting_citations: vec!["transcript:chat-1#message=1".to_string()],
+            canonical_entities: Vec::new(),
             evidence_count: 1,
             created_at: 1,
             updated_at: 2,
             observed_at: 2,
             last_confirmed_at: 2,
-            source_revision: 1,
+            source_revision: Some(1),
+            owner_revision: 1,
             last_used_at: 0,
         }
     }
@@ -1692,6 +1940,7 @@ mod tests {
                 relationship_constitution_store: &relationship_constitution_store,
                 relationship_portfolio_store: &relationship_portfolio_store,
             },
+            &store,
             "chat-new",
             &snapshot,
             ContinuitySnapshotImportMode::FullRestore,
@@ -1714,9 +1963,10 @@ mod tests {
     #[test]
     fn full_restore_import_restores_summary_text() {
         let summary_store = StubSummaryStore::default();
+        let long_term_store = StubLongTermMemoryStore::default();
         let outcome = import_continuity_snapshot(
             ContinuitySnapshotImportContext {
-                long_term_memory_store: &StubLongTermMemoryStore::default(),
+                long_term_memory_store: &long_term_store,
                 session_summary_store: &summary_store,
                 execution_state_store: &StubExecutionStateStore::default(),
                 self_model_store: &StubSelfModelStore::default(),
@@ -1726,6 +1976,7 @@ mod tests {
                 relationship_constitution_store: &StubRelationshipConstitutionStore::default(),
                 relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
             },
+            &long_term_store,
             "chat-new",
             &ContinuitySnapshot {
                 version: CONTINUITY_SNAPSHOT_VERSION,
@@ -1758,12 +2009,13 @@ mod tests {
     #[test]
     fn full_restore_import_does_not_override_newer_local_summary() {
         let summary_store = StubSummaryStore::default();
+        let long_term_store = StubLongTermMemoryStore::default();
         summary_store
             .set_with_count("chat-new", "newer local summary", 18)
             .unwrap();
         let outcome = import_continuity_snapshot(
             ContinuitySnapshotImportContext {
-                long_term_memory_store: &StubLongTermMemoryStore::default(),
+                long_term_memory_store: &long_term_store,
                 session_summary_store: &summary_store,
                 execution_state_store: &StubExecutionStateStore::default(),
                 self_model_store: &StubSelfModelStore::default(),
@@ -1773,6 +2025,7 @@ mod tests {
                 relationship_constitution_store: &StubRelationshipConstitutionStore::default(),
                 relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
             },
+            &long_term_store,
             "chat-new",
             &ContinuitySnapshot {
                 version: CONTINUITY_SNAPSHOT_VERSION,

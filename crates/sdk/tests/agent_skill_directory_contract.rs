@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    StoreBackendConfig, StorePlatform,
+    MemoryRuntime, MemoryScope, MemoryStoreHandle, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -23,13 +23,14 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 
 fn runtime_with_agent_skill_dir(root: PathBuf) -> MemoryRuntime {
     let profile = ProfileId::ServerLinuxDevFull;
-    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile).expect("store config"))
-        .expect("store");
+    let store =
+        MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile).expect("store config"))
+            .expect("store");
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-skill-test", "owner-default").expect("identity"))
         .scope(MemoryScope::new("console", "chat-1").expect("scope"))
         .profile(profile)
-        .store_platform(store)
+        .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(root, "host"))
         .build()
         .expect("runtime")
@@ -66,6 +67,7 @@ Use this when a release needs artifact verification and changelog inspection.
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "release artifact checksums".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
@@ -75,6 +77,7 @@ Use this when a release needs artifact verification and changelog inspection.
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "prepare release artifact checks".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,

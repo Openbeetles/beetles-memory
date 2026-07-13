@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_core::memory::{
@@ -29,6 +31,7 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
     let profile = ProfileId::ServerLinuxDevFull;
     let source = empty_store_platform(profile);
     source
+        .replay_harness()
         .session_store()
         .append("chat-a", "user", "sdk migration contract")
         .expect("seed session");
@@ -49,7 +52,7 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
         target_memory_space_id: "space-copy".to_string(),
         source_profile: profile,
         target_profile: ProfileId::DesktopMacosEmbeddedSdk,
-        snapshot: exported.snapshot.clone(),
+        archive: exported.archive.clone(),
     });
     assert!(!preview.loss_risk);
     assert_eq!(preview.manifest.source_memory_space_id, "space-main");
@@ -72,9 +75,7 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
     let apply_report = apply_memory_space_migration(
         &target,
         MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: "space-copy".to_string(),
-            snapshot: exported.snapshot.clone(),
-            preflight: preview.vault_preflight.clone(),
+            plan: preview.plan.clone(),
         },
     )
     .expect("apply");
@@ -88,7 +89,7 @@ fn memory_space_export_preview_apply_and_import_use_public_sdk_contract() {
         &target,
         MemorySpaceImportRequest {
             memory_space_id: "space-copy".to_string(),
-            snapshot: exported.snapshot,
+            archive: exported.archive,
         },
     )
     .expect("import");
@@ -116,6 +117,7 @@ fn memory_space_migration_fails_closed_when_snapshot_contains_facet_index() {
                     keywords: vec!["sdk".to_string(), "readiness".to_string()],
                 },
                 evidence_refs: vec!["fixture:generic-rust-host".to_string()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(llm_accept(MemoryCandidateTarget::LongTermMemory {
                     kind: LongTermMemoryKind::Project,
                     topic: "sdk_readiness".to_string(),
@@ -133,17 +135,15 @@ fn memory_space_migration_fails_closed_when_snapshot_contains_facet_index() {
     )
     .expect("export");
     assert!(exported
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "memory_facet_indexes"));
+        .archive
+        .contains_json_namespace("memory_facet_indexes"));
 
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
         source_memory_space_id: "space-main".to_string(),
         target_memory_space_id: "space-copy".to_string(),
         source_profile: profile,
         target_profile: ProfileId::DesktopMacosEmbeddedSdk,
-        snapshot: exported.snapshot.clone(),
+        archive: exported.archive.clone(),
     });
     assert!(!preview.vault_preflight.passed);
     assert!(preview
@@ -153,14 +153,13 @@ fn memory_space_migration_fails_closed_when_snapshot_contains_facet_index() {
         .any(|plane| plane.plane == "memory_facet_indexes" && plane.records > 0));
 
     let target = empty_store_platform(profile);
-    let before = target.export_store_snapshot().expect("before");
+    let before = target
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("before");
     let apply = apply_memory_space_migration(
         &target,
-        MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: "space-copy".to_string(),
-            snapshot: exported.snapshot.clone(),
-            preflight: preview.vault_preflight,
-        },
+        MemorySpaceMigrateApplyRequest { plan: preview.plan },
     )
     .expect_err("facet index remap preflight must fail closed");
     assert_eq!(apply.stage(), "memory_space_migration");
@@ -168,12 +167,15 @@ fn memory_space_migration_fails_closed_when_snapshot_contains_facet_index() {
         &target,
         MemorySpaceImportRequest {
             memory_space_id: "space-copy".to_string(),
-            snapshot: exported.snapshot,
+            archive: exported.archive,
         },
     )
     .expect_err("direct import must fail closed");
     assert_eq!(import.stage(), "memory_space_import");
-    let after = target.export_store_snapshot().expect("after");
+    let after = target
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("after");
     assert_eq!(before.state_fingerprint(), after.state_fingerprint());
     assert_eq!(before.event_fingerprint(), after.event_fingerprint());
 }
@@ -183,6 +185,7 @@ fn memory_space_apply_fails_closed_when_target_capability_preflight_fails() {
     let profile = ProfileId::ServerLinuxDevFull;
     let source = empty_store_platform(profile);
     source
+        .replay_harness()
         .private_garden_store()
         .write(
             "chat-a",
@@ -204,7 +207,7 @@ fn memory_space_apply_fails_closed_when_target_capability_preflight_fails() {
         target_memory_space_id: "space-esp".to_string(),
         source_profile: profile,
         target_profile: ProfileId::EspEmbeddedSdk,
-        snapshot: exported.snapshot.clone(),
+        archive: exported.archive.clone(),
     });
     assert!(!preview.vault_preflight.passed);
     assert!(!preview.vault_preflight.capability_allowed);
@@ -213,26 +216,29 @@ fn memory_space_apply_fails_closed_when_target_capability_preflight_fails() {
     assert_eq!(preview.vault_redaction.raw_private_leak_count, 0);
 
     let target = empty_store_platform(ProfileId::EspEmbeddedSdk);
-    let before = target.export_store_snapshot().expect("before");
+    let before = target
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("before");
     let apply = apply_memory_space_migration(
         &target,
-        MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: "space-esp".to_string(),
-            snapshot: exported.snapshot,
-            preflight: preview.vault_preflight,
-        },
+        MemorySpaceMigrateApplyRequest { plan: preview.plan },
     );
     assert!(apply.is_err());
-    let after = target.export_store_snapshot().expect("after");
+    let after = target
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("after");
     assert_eq!(before.state_fingerprint(), after.state_fingerprint());
     assert_eq!(before.event_fingerprint(), after.event_fingerprint());
 }
 
 #[test]
-fn memory_space_apply_rejects_stale_or_mismatched_vault_preflight() {
+fn memory_space_plan_remains_bound_to_the_previewed_archive() {
     let profile = ProfileId::ServerLinuxDevFull;
     let source = empty_store_platform(profile);
     source
+        .replay_harness()
         .session_store()
         .append("chat-a", "user", "first snapshot")
         .expect("seed first");
@@ -249,11 +255,12 @@ fn memory_space_apply_rejects_stale_or_mismatched_vault_preflight() {
         target_memory_space_id: "space-b".to_string(),
         source_profile: profile,
         target_profile: ProfileId::DesktopMacosStandaloneMemory,
-        snapshot: first.snapshot,
+        archive: first.archive,
     });
     assert!(first_preview.vault_preflight.passed);
 
     source
+        .replay_harness()
         .session_store()
         .append("chat-a", "assistant", "second snapshot")
         .expect("seed second");
@@ -274,12 +281,14 @@ fn memory_space_apply_rejects_stale_or_mismatched_vault_preflight() {
     let apply = apply_memory_space_migration(
         &target,
         MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: "space-b".to_string(),
-            snapshot: second.snapshot,
-            preflight: first_preview.vault_preflight,
+            plan: first_preview.plan,
         },
+    )
+    .expect("apply immutable preview plan");
+    assert_eq!(
+        apply.import_report.state_fingerprint,
+        first_preview.state_fingerprint
     );
-    assert!(apply.is_err());
 }
 
 #[test]
@@ -287,6 +296,7 @@ fn memory_runtime_exposes_vault_migration_preview_and_apply_methods() {
     let profile = ProfileId::ServerLinuxDevFull;
     let source = empty_store_platform(profile);
     source
+        .replay_harness()
         .session_store()
         .append("chat-a", "user", "runtime migration export")
         .expect("seed session");
@@ -303,7 +313,7 @@ fn memory_runtime_exposes_vault_migration_preview_and_apply_methods() {
             target_memory_space_id: "space-runtime-copy".to_string(),
             source_profile: profile,
             target_profile: ProfileId::DesktopMacosStandaloneMemory,
-            snapshot: exported.snapshot.clone(),
+            archive: exported.archive.clone(),
         })
         .expect("runtime preview");
     assert!(preview.vault_preflight.passed);
@@ -315,11 +325,7 @@ fn memory_runtime_exposes_vault_migration_preview_and_apply_methods() {
         "chat-a",
     );
     let applied = target_runtime
-        .apply_memory_space_migration(MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: "space-runtime-copy".to_string(),
-            snapshot: exported.snapshot,
-            preflight: preview.vault_preflight,
-        })
+        .apply_memory_space_migration(MemorySpaceMigrateApplyRequest { plan: preview.plan })
         .expect("runtime apply");
     assert_eq!(applied.target_memory_space_id, "space-runtime-copy");
 }
@@ -329,6 +335,7 @@ fn memory_space_export_without_private_redacts_private_layers() {
     let profile = ProfileId::ServerLinuxDevFull;
     let source = empty_store_platform(profile);
     source
+        .replay_harness()
         .private_garden_store()
         .write("chat-a", "journal/note.md", "private note", 1_800_000_000)
         .expect("private garden write");
@@ -348,7 +355,7 @@ fn memory_space_export_without_private_redacts_private_layers() {
         target_memory_space_id: "space-public".to_string(),
         source_profile: profile,
         target_profile: ProfileId::DesktopMacosEmbeddedSdk,
-        snapshot: exported.snapshot.clone(),
+        archive: exported.archive.clone(),
     });
     assert_eq!(preview.privacy_redactions, 0);
     assert!(preview.vault_preflight.passed);
@@ -357,18 +364,10 @@ fn memory_space_export_without_private_redacts_private_layers() {
         .privacy
         .iter()
         .all(|entry| entry.privacy_class != "private"));
-    assert!(exported
-        .snapshot
-        .json_docs
-        .iter()
-        .all(|doc| doc.namespace != "private_garden"));
-    assert!(exported
-        .snapshot
-        .events
-        .iter()
-        .all(|event| event.plane != "private_garden"));
+    assert!(!exported.archive.contains_json_namespace("private_garden"));
+    assert!(!exported.archive.contains_event_plane("private_garden"));
     assert_eq!(
         exported.export_report.json_docs,
-        exported.snapshot.json_docs.len()
+        exported.archive.json_doc_count()
     );
 }

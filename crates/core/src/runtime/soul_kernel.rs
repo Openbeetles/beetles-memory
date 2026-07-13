@@ -2,14 +2,18 @@
 //! 板级主体内核的连续性体检与恢复合同。
 
 use crate::memory::{
-    board_subject_scope_id, import_continuity_snapshot, select_active_continuity_snapshot_chat_ids,
-    ContinuitySnapshotImportContext, ContinuitySnapshotImportMode, CoreRevisionLedger,
-    CoreRevisionLedgerStore, ExecutionStateStore, LongTermMemoryEntry, LongTermMemoryKind,
-    LongTermMemoryStore, RelationshipConstitutionStore, RelationshipPortfolioStore,
-    RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore, SelfContinuity,
-    SelfContinuityStore, SelfModel, SelfModelStore, SessionStore, SessionSummaryStore,
+    board_subject_scope_id, select_active_continuity_snapshot_chat_ids, CoreRevisionLedger,
+    CoreRevisionLedgerStore, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryReadStore,
+    LongTermMemoryStore, RelationshipPortfolioStore, RelationshipTopologyStore, SelfAuthoredCore,
+    SelfAuthoredCoreStore, SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore,
+    SessionStore,
 };
-use crate::platform::{Platform, StateFs};
+#[cfg(test)]
+use crate::memory::{
+    import_continuity_snapshot, ContinuitySnapshotImportContext, ContinuitySnapshotImportMode,
+    ExecutionStateStore, RelationshipConstitutionStore, SessionSummaryStore,
+};
+use crate::platform::StateFs;
 use crate::runtime::continuity_flush::{
     ContinuitySnapshotBundle, REL_PATH_REBOOT_CONTINUITY_BUNDLE,
 };
@@ -165,10 +169,17 @@ pub struct SoulKernelRecoveryReport {
     pub status_after: SoulKernelStatus,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SoulKernelRecoveryPlan {
+    pub report: SoulKernelRecoveryReport,
+    pub ordered_snapshots: Vec<crate::memory::ContinuitySnapshot>,
+    pub primary_chat_id: Option<String>,
+}
+
 pub struct SoulKernelInspectContext<'a> {
     pub state_fs: &'a dyn StateFs,
     pub session_store: &'a dyn SessionStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub self_model_store: &'a dyn SelfModelStore,
     pub self_authored_core_store: &'a dyn SelfAuthoredCoreStore,
     pub core_revision_ledger_store: &'a dyn CoreRevisionLedgerStore,
@@ -177,71 +188,83 @@ pub struct SoulKernelInspectContext<'a> {
     pub relationship_topology_store: &'a dyn RelationshipTopologyStore,
 }
 
+#[cfg(test)]
 pub struct SoulKernelRecoveryContext<'a> {
     pub inspect: SoulKernelInspectContext<'a>,
+    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
     pub relationship_constitution_store: &'a dyn RelationshipConstitutionStore,
 }
 
-pub fn inspect_platform_soul_kernel(platform: &dyn Platform, now_secs: u64) -> SoulKernelStatus {
-    #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
-    if let Some(status) = cached_platform_soul_kernel_status() {
-        return status;
+pub fn plan_soul_kernel_recovery(
+    inspect: SoulKernelInspectContext<'_>,
+    now_secs: u64,
+) -> SoulKernelRecoveryPlan {
+    let runtime_bundle_load = load_runtime_bundle(inspect.state_fs);
+    let runtime_bundle_status = runtime_bundle_status_from_load_result(&runtime_bundle_load);
+    let status_before =
+        inspect_soul_kernel_with_runtime_bundle_status(inspect, now_secs, runtime_bundle_status);
+
+    if status_before.expected_bootstrap_empty
+        || (status_before.minimum_viable && !status_before.degraded)
+    {
+        return SoulKernelRecoveryPlan {
+            report: SoulKernelRecoveryReport {
+                action: SoulKernelRecoveryAction::NotNeeded,
+                restore_attempted: false,
+                restored_snapshots: 0,
+                restored_layers: Vec::new(),
+                errors: Vec::new(),
+                status_after: status_before.clone(),
+                status_before,
+            },
+            ..SoulKernelRecoveryPlan::default()
+        };
     }
 
-    let status = inspect_soul_kernel(
-        SoulKernelInspectContext {
-            state_fs: platform.state_fs().as_ref(),
-            session_store: platform.session_store().as_ref(),
-            long_term_memory_store: platform.long_term_memory_store().as_ref(),
-            self_model_store: platform.self_model_store().as_ref(),
-            self_authored_core_store: platform.self_authored_core_store().as_ref(),
-            core_revision_ledger_store: platform.core_revision_ledger_store().as_ref(),
-            self_continuity_store: platform.self_continuity_store().as_ref(),
-            relationship_portfolio_store: platform.relationship_portfolio_store().as_ref(),
-            relationship_topology_store: platform.relationship_topology_store().as_ref(),
-        },
-        now_secs,
-    );
-
-    #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
-    update_platform_soul_kernel_status_cache(&status);
-
-    status
-}
-
-pub fn ensure_platform_soul_kernel_recovery(
-    platform: &dyn Platform,
-    now_secs: u64,
-) -> SoulKernelRecoveryReport {
-    #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
-    invalidate_platform_soul_kernel_status_cache();
-
-    let report = ensure_soul_kernel_recovery(
-        SoulKernelRecoveryContext {
-            inspect: SoulKernelInspectContext {
-                state_fs: platform.state_fs().as_ref(),
-                session_store: platform.session_store().as_ref(),
-                long_term_memory_store: platform.long_term_memory_store().as_ref(),
-                self_model_store: platform.self_model_store().as_ref(),
-                self_authored_core_store: platform.self_authored_core_store().as_ref(),
-                core_revision_ledger_store: platform.core_revision_ledger_store().as_ref(),
-                self_continuity_store: platform.self_continuity_store().as_ref(),
-                relationship_portfolio_store: platform.relationship_portfolio_store().as_ref(),
-                relationship_topology_store: platform.relationship_topology_store().as_ref(),
+    match runtime_bundle_load {
+        Ok(Some(bundle)) => SoulKernelRecoveryPlan {
+            report: SoulKernelRecoveryReport {
+                action: SoulKernelRecoveryAction::RestoreAttemptedNoChange,
+                restore_attempted: true,
+                restored_snapshots: 0,
+                restored_layers: Vec::new(),
+                errors: Vec::new(),
+                status_after: status_before.clone(),
+                status_before,
             },
-            session_summary_store: platform.session_summary_store().as_ref(),
-            execution_state_store: platform.execution_state_store().as_ref(),
-            relationship_constitution_store: platform.relationship_constitution_store().as_ref(),
+            ordered_snapshots: ordered_bundle_snapshots(&bundle)
+                .into_iter()
+                .cloned()
+                .collect(),
+            primary_chat_id: bundle.primary_chat_id,
         },
-        now_secs,
-    );
-
-    #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
-    update_platform_soul_kernel_status_cache(&report.status_after);
-
-    report
+        Ok(None) => SoulKernelRecoveryPlan {
+            report: SoulKernelRecoveryReport {
+                action: SoulKernelRecoveryAction::NoBundleAvailable,
+                restore_attempted: false,
+                restored_snapshots: 0,
+                restored_layers: Vec::new(),
+                errors: Vec::new(),
+                status_after: status_before.clone(),
+                status_before,
+            },
+            ..SoulKernelRecoveryPlan::default()
+        },
+        Err(error) => SoulKernelRecoveryPlan {
+            report: SoulKernelRecoveryReport {
+                action: SoulKernelRecoveryAction::BundleUnreadable,
+                restore_attempted: false,
+                restored_snapshots: 0,
+                restored_layers: Vec::new(),
+                errors: vec![error],
+                status_after: status_before.clone(),
+                status_before,
+            },
+            ..SoulKernelRecoveryPlan::default()
+        },
+    }
 }
 
 pub fn inspect_soul_kernel(ctx: SoulKernelInspectContext<'_>, now_secs: u64) -> SoulKernelStatus {
@@ -372,6 +395,7 @@ fn inspect_soul_kernel_with_runtime_bundle_status(
     }
 }
 
+#[cfg(test)]
 pub fn ensure_soul_kernel_recovery(
     ctx: SoulKernelRecoveryContext<'_>,
     now_secs: u64,
@@ -488,6 +512,7 @@ pub fn ensure_soul_kernel_recovery(
                 relationship_constitution_store: import_ctx.relationship_constitution_store,
                 relationship_portfolio_store: import_ctx.relationship_portfolio_store,
             },
+            ctx.long_term_memory_store,
             target_chat_id,
             snapshot,
             ContinuitySnapshotImportMode::FullRestore,
@@ -618,7 +643,7 @@ fn load_layer_status<T>(
 }
 
 fn count_key_memory(
-    store: &dyn LongTermMemoryStore,
+    store: &dyn LongTermMemoryReadStore,
     active_chat_ids: &[String],
 ) -> (bool, usize, Option<String>) {
     match store.list(SOUL_KERNEL_KEY_MEMORY_SCAN_LIMIT) {
@@ -808,10 +833,10 @@ mod tests {
     use crate::memory::{
         board_subject_scope_id, CoreRevisionLedger, ExecutionState, ExecutionStateStore,
         LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemorySlot,
-        RelationshipConstitution, RelationshipConstitutionStore, RelationshipPortfolio,
-        RelationshipPortfolioStore, RelationshipTopology, RelationshipTopologyStore,
-        SelfAuthoredCore, SelfAuthoredCoreStore, SelfContinuity, SelfContinuityStore, SelfModel,
-        SelfModelStore, SessionMessage, SessionSummaryStore,
+        MemoryPrivacyClass, RelationshipConstitution, RelationshipConstitutionStore,
+        RelationshipPortfolio, RelationshipPortfolioStore, RelationshipTopology,
+        RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore, SelfContinuity,
+        SelfContinuityStore, SelfModel, SelfModelStore, SessionMessage, SessionSummaryStore,
     };
     use crate::platform::StateFs;
     use crate::runtime::workflow::{reset_workflow_audit_for_tests, workflow_audit_snapshot};
@@ -1407,6 +1432,7 @@ mod tests {
             .push(LongTermMemoryEntry {
                 id: "pref-1".to_string(),
                 kind: LongTermMemoryKind::Preference,
+                privacy: MemoryPrivacyClass::SharedWithSubject,
                 topic: "sleep".to_string(),
                 content: "prefer calm reminders".to_string(),
                 keywords: vec!["sleep".to_string()],
@@ -1417,12 +1443,14 @@ mod tests {
                 freshness: Default::default(),
                 stale_hint: Default::default(),
                 supporting_citations: Vec::new(),
+                canonical_entities: Vec::new(),
                 evidence_count: 1,
                 created_at: 10,
                 updated_at: 20,
                 observed_at: 20,
                 last_confirmed_at: 20,
-                source_revision: 1,
+                source_revision: Some(1),
+                owner_revision: 1,
                 last_used_at: 0,
             });
         let self_model_store = TestSelfModelStore::default();
@@ -1519,6 +1547,7 @@ mod tests {
                     relationship_portfolio_store: &relationship_portfolio_store,
                     relationship_topology_store: &relationship_topology_store,
                 }),
+                long_term_memory_store: &long_term_store,
                 session_summary_store: &session_summary_store,
                 execution_state_store: &execution_state_store,
                 relationship_constitution_store: &relationship_constitution_store,
@@ -1577,6 +1606,7 @@ mod tests {
                     relationship_portfolio_store: &relationship_portfolio_store,
                     relationship_topology_store: &relationship_topology_store,
                 }),
+                long_term_memory_store: &long_term_store,
                 session_summary_store: &session_summary_store,
                 execution_state_store: &execution_state_store,
                 relationship_constitution_store: &relationship_constitution_store,
@@ -1697,6 +1727,7 @@ mod tests {
                     relationship_portfolio_store: &relationship_portfolio_store,
                     relationship_topology_store: &relationship_topology_store,
                 }),
+                long_term_memory_store: &long_term_store,
                 session_summary_store: &session_summary_store,
                 execution_state_store: &execution_state_store,
                 relationship_constitution_store: &relationship_constitution_store,

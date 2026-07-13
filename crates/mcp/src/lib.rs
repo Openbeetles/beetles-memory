@@ -854,6 +854,16 @@ fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolRes
                     "profile": catalog.profile.as_str(),
                 })
                 .to_string(),
+                AdapterSdkReport::Project(report) => json!({
+                    "status": "accepted",
+                    "projection_surface": "ui_api",
+                    "projection_block": report.projection_block,
+                    "chars": report.chars,
+                    "agent_tool_hints": report.agent_tool_hints,
+                    "audit": report.audit,
+                    "private_raw_allowed": false,
+                })
+                .to_string(),
                 AdapterSdkReport::TranscriptAttrWrite(report) => json!({
                     "status": "accepted",
                     "memory_space_id": report.key.memory_space_id,
@@ -904,8 +914,10 @@ fn render_projection_preview_resource(
         AdapterResponse::Accepted { report, .. } => match report {
             AdapterSdkReport::Project(report) => Ok(json!({
                 "status": "accepted",
-                "preview": report.system_memory_block,
-                "chars": report.system_memory_block.chars().count(),
+                "preview": report.projection_block,
+                "chars": report.chars,
+                "agent_tool_hints": report.agent_tool_hints,
+                "audit": report.audit,
                 "private_raw_allowed": false,
             })),
             _ => Err(bm_sdk::Error::config(

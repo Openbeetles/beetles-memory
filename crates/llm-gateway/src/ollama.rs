@@ -542,6 +542,7 @@ fn handle_chat(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
             system_max_len: runtime_budget
                 .projection_render_chars_for_request(usize::MAX, Some(&provider_limit)),
@@ -689,6 +690,7 @@ fn handle_generate(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
             system_max_len: runtime_budget
                 .projection_render_chars_for_request(usize::MAX, Some(&provider_limit)),

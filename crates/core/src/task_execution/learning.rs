@@ -3,10 +3,12 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::error::{Error, Result};
+#[cfg(test)]
+use crate::memory::LongTermMemoryStore;
 use crate::memory::{
-    write_governed_shared_memory, LongTermMemoryConfidence, LongTermMemoryDraft,
-    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-    LongTermMemorySourceType, LongTermMemoryStore, MemoryStore, SharedMemoryWriteSource,
+    plan_governed_shared_memory, LongTermMemoryConfidence, LongTermMemoryDraft,
+    LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryReadStore,
+    LongTermMemorySourceScope, LongTermMemorySourceType, MemoryStore, SharedMemoryWriteSource,
 };
 use crate::reasoning::{
     adjudicate_skill_crystal_candidate, promote_skill_crystal_candidates,
@@ -290,6 +292,7 @@ pub struct TaskLearningMaintenanceOutcome {
     pub archived_records: usize,
     pub pruned_artifacts: usize,
     pub rejected: usize,
+    pub planned_long_term_entries: Vec<LongTermMemoryEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -342,7 +345,7 @@ pub struct TaskLearningMaintenanceContext<'a> {
     pub task_run_store: &'a dyn TaskRunStore,
     pub task_artifact_store: &'a dyn TaskArtifactStore,
     pub task_learning_store: &'a dyn TaskLearningStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub skill_storage: &'a dyn crate::platform::SkillStorage,
     pub memory_store: &'a dyn MemoryStore,
 }
@@ -563,18 +566,22 @@ pub fn run_task_learning_maintenance(
             match record.kind {
                 TaskLearningKind::DurableFact => {
                     let draft = build_task_learning_factual_draft(&record, &archive_citation);
-                    let write = write_governed_shared_memory(
+                    let plan = plan_governed_shared_memory(
                         ctx.long_term_memory_store,
                         &[draft],
                         input.now_secs,
                         SharedMemoryWriteSource::TaskLearning,
                     )?;
+                    let write = plan.outcome;
                     if write.accepted > 0 {
                         record.route = TaskLearningRoute::CanonicalFactual;
                         record.route_detail = "accepted by shared factual governance".to_string();
                         outcome.canonical_writes = outcome
                             .canonical_writes
                             .saturating_add(write.changed.max(1));
+                        outcome
+                            .planned_long_term_entries
+                            .extend(plan.accepted_entries);
                     } else {
                         record.route = TaskLearningRoute::Rejected;
                         record.route_detail = write
@@ -1703,6 +1710,7 @@ fn build_task_learning_factual_draft(
             "{} {}",
             record.topic, record.summary
         ))),
+        privacy: crate::memory::MemoryPrivacyClass::SharedWithSubject,
         source_chat_id: Some(record.source_chat_id.clone()),
         source_type: Some(LongTermMemorySourceType::SystemRuntime),
         source_scope: Some(LongTermMemorySourceScope::User),
@@ -1714,6 +1722,7 @@ fn build_task_learning_factual_draft(
         } else {
             vec![archive_citation.to_string()]
         },
+        canonical_entities: Vec::new(),
         evidence_count: Some(record.source_artifact_ids.len().max(1) as u32),
         observed_at: Some(record.observed_at),
         last_confirmed_at: Some(record.observed_at),
@@ -2746,13 +2755,16 @@ mod tests {
             .clone();
         assert_eq!(deleted, vec![("tr001".to_string(), "a09".to_string())]);
 
-        let stored_drafts = long_term_memory_store
+        assert_eq!(outcome.planned_long_term_entries.len(), 1);
+        assert_eq!(
+            outcome.planned_long_term_entries[0].topic,
+            "release_root_cause"
+        );
+        assert!(long_term_memory_store
             .drafts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        assert_eq!(stored_drafts.len(), 1);
-        assert_eq!(stored_drafts[0].topic, "release_root_cause");
+            .is_empty());
 
         let skill_names = skill_storage.list_names().expect("skill names");
         assert!(skill_names

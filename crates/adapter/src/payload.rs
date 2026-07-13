@@ -6,8 +6,9 @@ use bm_sdk::{
     MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
     MemoryLongTermTarget, MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRecoverRequest, MemoryReplayRequest, MemoryTranscriptAttrWriteRequest,
-    MemoryWriteRequest, PressureLevel, Result, RuntimeLifecycleModeInput, RuntimeLifecycleTrigger,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, TranscriptAttrEnvelope,
+    MemoryWriteRequest, PressureLevel, QueryFacetInput, Result, RuntimeLifecycleModeInput,
+    RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
 
@@ -53,6 +54,7 @@ pub fn decode_json_adapter_command(
             Ok(AdapterCommand::Recall(MemoryRecallRequest {
                 query: payload.query,
                 limit: payload.limit.unwrap_or(8),
+                structured_query_facets: payload.structured_query_facets,
                 tool_registry_refs: payload.tool_registry_refs,
             }))
         }
@@ -64,6 +66,7 @@ pub fn decode_json_adapter_command(
                 recent_messages_limit: payload.recent_messages_limit.unwrap_or(8),
                 pressure: payload.pressure,
                 mode_input: payload.mode_input,
+                structured_query_facets: payload.structured_query_facets,
                 tool_registry_refs: payload.tool_registry_refs,
             }))
         }
@@ -140,14 +143,14 @@ pub fn decode_json_adapter_command(
         }
         AdapterOperation::LongTermMutate => {
             let payload: LongTermMutationPayload = parse_json(body)?;
-            Ok(AdapterCommand::LongTermMutate(
+            Ok(AdapterCommand::LongTermMutate(Box::new(
                 MemoryLongTermMutationRequest {
                     operation: payload.operation,
                     reason: payload.reason,
                     dry_run: payload.dry_run.unwrap_or(false),
                     mode_input: payload.mode_input,
                 },
-            ))
+            )))
         }
         AdapterOperation::LongTermPolicy => {
             let payload: LongTermPolicyPayload = parse_json(body)?;
@@ -271,6 +274,8 @@ struct RecallPayload {
     #[serde(default)]
     limit: Option<usize>,
     #[serde(default)]
+    structured_query_facets: Vec<QueryFacetInput>,
+    #[serde(default)]
     tool_registry_refs: Vec<AgentToolRegistryRef>,
 }
 
@@ -286,6 +291,8 @@ struct ProjectPayload {
     pressure: PressureLevel,
     #[serde(default)]
     mode_input: RuntimeLifecycleModeInput,
+    #[serde(default)]
+    structured_query_facets: Vec<QueryFacetInput>,
     #[serde(default)]
     tool_registry_refs: Vec<AgentToolRegistryRef>,
 }

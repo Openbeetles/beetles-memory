@@ -84,6 +84,7 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How should console system metrics work?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,

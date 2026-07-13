@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_core::memory::{board_subject_scope_id, SelfAuthoredCore};
@@ -11,6 +13,7 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
     let profile = ProfileId::ServerLinuxDevFull;
     let platform = empty_store_platform(profile);
     platform
+        .replay_harness()
         .self_authored_core_store()
         .set(
             board_subject_scope_id(),
@@ -23,6 +26,7 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
         )
         .expect("seed core");
     platform
+        .replay_harness()
         .private_garden_store()
         .write(
             "chat-a",
@@ -33,14 +37,17 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
         .expect("seed private garden");
 
     let before_core = platform
+        .replay_harness()
         .self_authored_core_store()
         .get(board_subject_scope_id())
         .expect("read core");
     let before_private = platform
+        .replay_harness()
         .private_garden_store()
         .list("chat-a", 16)
         .expect("list private garden");
     let before_ledger = platform
+        .replay_harness()
         .core_revision_ledger_store()
         .get(board_subject_scope_id())
         .expect("read ledger");
@@ -48,6 +55,7 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
     let runtime = test_runtime_with_scope(platform.clone(), profile, "sdk.direct", "chat-a");
     runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "Summarize the current work context.".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -59,6 +67,7 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
 
     assert_eq!(
         platform
+            .replay_harness()
             .self_authored_core_store()
             .get(board_subject_scope_id())
             .expect("read core after"),
@@ -66,6 +75,7 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
     );
     assert_eq!(
         platform
+            .replay_harness()
             .private_garden_store()
             .list("chat-a", 16)
             .expect("list private garden after"),
@@ -73,6 +83,7 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
     );
     assert_eq!(
         platform
+            .replay_harness()
             .core_revision_ledger_store()
             .get(board_subject_scope_id())
             .expect("read ledger after"),

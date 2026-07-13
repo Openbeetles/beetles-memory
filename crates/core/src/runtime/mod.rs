@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 
 pub mod soul_kernel;
 pub use soul_kernel::{
-    ensure_platform_soul_kernel_recovery, inspect_platform_soul_kernel, SoulKernelPromptProjection,
-    SoulKernelRecoveryReport, SoulKernelStatus,
+    SoulKernelPromptProjection, SoulKernelRecoveryPlan, SoulKernelRecoveryReport, SoulKernelStatus,
 };
 
 pub mod lifecycle;

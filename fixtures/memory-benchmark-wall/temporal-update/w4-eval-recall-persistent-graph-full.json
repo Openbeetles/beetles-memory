@@ -11,7 +11,7 @@
     "evidence_refs": [
       "crates/sdk/tests/eval_recall_contract.rs",
       "crates/sdk/src/runtime.rs",
-      "crates/store/src/platform.rs"
+      "crates/sdk/src/store_internal/platform.rs"
     ],
     "expected_surfaces": [
       "MemoryEvalRecallReport",

@@ -20,9 +20,10 @@ use super::{
     select_archive_hits_for_prompt_with_report, ArchivePromptSelectionReport, ArchiveSearchHit,
     ArchiveSearchQuery, ArchiveSearchQueryReport, ContinuityCapsule,
     ContinuityCapsuleRecallInspectionInput, ContinuityCapsuleScopeKind, ContinuityCapsuleStore,
-    CrossPlaneRerankInput, CrossPlaneRerankResult, LongTermMemoryStore, MemoryProfile, MemoryStore,
-    PromptRecallIntent, RecallPlane, RecallQuery, RecallSelectionReport, SessionMessage,
-    SessionStore, SharedFactualPlaneSnapshot, TurnLedgerStore, MAX_WORK_CONTINUITY_BLOCK_LEN,
+    CrossPlaneRerankInput, CrossPlaneRerankResult, LongTermMemoryReadStore, LongTermMemoryStore,
+    MemoryProfile, MemoryStore, PromptRecallIntent, RecallPlane, RecallQuery,
+    RecallSelectionReport, SessionMessage, SessionStore, SharedFactualPlaneSnapshot,
+    TurnLedgerStore, MAX_WORK_CONTINUITY_BLOCK_LEN,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,11 +76,12 @@ pub struct WorkingRecallInspectionInput<'a> {
     pub summary_text: Option<&'a str>,
     pub recent: &'a [SessionMessage],
     pub system_max_len: usize,
+    pub now_secs: u64,
     pub profile: MemoryProfile,
     pub current_channel: Option<&'a str>,
     pub session_store: &'a dyn SessionStore,
     pub memory_store: &'a dyn MemoryStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub active_work_store: Option<&'a dyn ActiveWorkStore>,
     pub continuity_capsule_store: &'a dyn ContinuityCapsuleStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
@@ -130,7 +132,7 @@ pub fn inspect_working_recall(input: WorkingRecallInspectionInput<'_>) -> Workin
             .system_max_len
             .min(recall_policy.block_max_len_cap.saturating_add(384)),
         input.profile,
-        crate::util::current_unix_secs(),
+        input.now_secs,
     );
     let archive_result = search_archive_records_detailed(
         input.session_store,
@@ -193,7 +195,7 @@ pub fn inspect_working_recall(input: WorkingRecallInspectionInput<'_>) -> Workin
             summary_text: input.summary_text,
             recent_messages: input.recent,
             max_chars: input.system_max_len.min(480),
-            now_secs: crate::util::current_unix_secs(),
+            now_secs: input.now_secs,
         });
     let continuity_capsule_text =
         render_continuity_capsule_block(&continuity_capsules, input.system_max_len.min(480));
@@ -216,7 +218,7 @@ pub fn inspect_working_recall(input: WorkingRecallInspectionInput<'_>) -> Workin
             storage,
             input.query,
             Some(input.chat_id),
-            crate::util::current_unix_secs(),
+            input.now_secs,
             input.system_max_len.min(420),
         )
     });
@@ -242,7 +244,7 @@ pub fn inspect_working_recall(input: WorkingRecallInspectionInput<'_>) -> Workin
                 Some(input.chat_id),
                 input.summary_text,
                 input.recent,
-                crate::util::current_unix_secs(),
+                input.now_secs,
                 input.system_max_len.min(420),
             )
         },
@@ -846,6 +848,7 @@ mod tests {
             summary_text: Some("continue the memory router work"),
             recent: &session_store.recent,
             system_max_len: 1024,
+            now_secs: 100,
             profile: MemoryProfile::Standard,
             current_channel: None,
             session_store: &session_store,

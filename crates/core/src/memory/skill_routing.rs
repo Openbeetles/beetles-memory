@@ -102,6 +102,7 @@ mod tests {
     fn draft(content: &str) -> LongTermMemoryDraft {
         LongTermMemoryDraft {
             kind: LongTermMemoryKind::Fact,
+            privacy: crate::memory::MemoryPrivacyClass::SharedWithSubject,
             topic: "network_setup".to_string(),
             content: content.to_string(),
             keywords: Vec::new(),
@@ -112,6 +113,7 @@ mod tests {
             freshness: None,
             stale_hint: None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: Some(10),
             last_confirmed_at: None,
@@ -132,6 +134,7 @@ mod tests {
     fn keeps_plain_fact_in_factual_plane() {
         let routed = route_long_term_draft(&LongTermMemoryDraft {
             kind: LongTermMemoryKind::Profile,
+            privacy: crate::memory::MemoryPrivacyClass::SharedWithSubject,
             topic: "user_timezone".to_string(),
             content: "User timezone is Asia/Shanghai.".to_string(),
             keywords: vec!["timezone".to_string()],
@@ -142,6 +145,7 @@ mod tests {
             freshness: None,
             stale_hint: None,
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: Some(10),
             last_confirmed_at: None,

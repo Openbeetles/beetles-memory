@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::{
-    inspect_long_term_memory_merge_guard, route_long_term_draft, LongTermMemoryDraft,
-    LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryStore, MemoryPlane,
-    MAX_LONG_TERM_MEMORY_ITEMS,
+    plan_long_term_memory_upsert, route_long_term_draft, LongTermMemoryDraft, LongTermMemoryEntry,
+    LongTermMemoryEntryPlan, LongTermMemoryEntryRejection, LongTermMemoryKind,
+    LongTermMemoryReadStore, LongTermMemoryStore, MemoryPlane, MAX_LONG_TERM_MEMORY_ITEMS,
 };
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,7 +19,6 @@ pub enum SharedMemoryWriteSource {
     TaskLearning,
     SnapshotImport,
     HygieneReconcile,
-    HygieneCompaction,
 }
 
 impl SharedMemoryWriteSource {
@@ -30,7 +29,6 @@ impl SharedMemoryWriteSource {
             Self::TaskLearning => "task_learning",
             Self::SnapshotImport => "snapshot_import",
             Self::HygieneReconcile => "hygiene_reconcile",
-            Self::HygieneCompaction => "hygiene_compaction",
         }
     }
 }
@@ -52,7 +50,9 @@ pub enum SharedMemoryWriteReason {
     RoutedToSkill,
     StructuredMaterial,
     WeakCanonicalStatement,
+    PrivacyClassTransitionRequiresExplicitGovernance,
     OlderThanExisting,
+    SourceRevisionConflict,
     LowerConfidenceThanExisting,
 }
 
@@ -65,7 +65,11 @@ impl SharedMemoryWriteReason {
             Self::RoutedToSkill => "routed_to_skill",
             Self::StructuredMaterial => "structured_material",
             Self::WeakCanonicalStatement => "weak_canonical_statement",
+            Self::PrivacyClassTransitionRequiresExplicitGovernance => {
+                "privacy_class_transition_requires_explicit_governance"
+            }
             Self::OlderThanExisting => "older_than_existing",
+            Self::SourceRevisionConflict => "source_revision_conflict",
             Self::LowerConfidenceThanExisting => "lower_confidence_than_existing",
         }
     }
@@ -151,7 +155,8 @@ impl SharedFactWriteGovernanceContext {
     }
 }
 
-pub fn write_governed_shared_memory_in_space(
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+pub(crate) fn write_governed_shared_memory_in_space(
     store: &dyn LongTermMemoryStore,
     drafts: &[LongTermMemoryDraft],
     now_secs: u64,
@@ -164,12 +169,15 @@ pub fn write_governed_shared_memory_in_space(
     Ok(plan.outcome)
 }
 
-pub fn plan_governed_shared_memory_in_space(
-    store: &dyn LongTermMemoryStore,
+pub fn plan_governed_shared_memory_in_space<S>(
+    store: &S,
     drafts: &[LongTermMemoryDraft],
     now_secs: u64,
     context: SharedFactWriteGovernanceContext,
-) -> Result<SharedMemoryWritePlan> {
+) -> Result<SharedMemoryWritePlan>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let mut plan = plan_governed_shared_memory(store, drafts, now_secs, context.source)?;
     let outcome = &mut plan.outcome;
     outcome.memory_space_id = context.memory_space_id.clone();
@@ -187,7 +195,8 @@ pub fn plan_governed_shared_memory_in_space(
     Ok(plan)
 }
 
-pub fn write_governed_shared_memory(
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+pub(crate) fn write_governed_shared_memory(
     store: &dyn LongTermMemoryStore,
     drafts: &[LongTermMemoryDraft],
     now_secs: u64,
@@ -200,13 +209,16 @@ pub fn write_governed_shared_memory(
     Ok(plan.outcome)
 }
 
-pub fn plan_governed_shared_memory(
-    store: &dyn LongTermMemoryStore,
+pub fn plan_governed_shared_memory<S>(
+    store: &S,
     drafts: &[LongTermMemoryDraft],
     now_secs: u64,
     source: SharedMemoryWriteSource,
-) -> Result<SharedMemoryWritePlan> {
-    let existing_entries = store.list(MAX_LONG_TERM_MEMORY_ITEMS)?;
+) -> Result<SharedMemoryWritePlan>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
+    let existing_entries = store.list(usize::MAX)?;
     let existing_by_id = existing_entries
         .into_iter()
         .map(|entry| (entry.id.clone(), entry))
@@ -271,51 +283,49 @@ pub fn plan_governed_shared_memory(
             });
             continue;
         }
-        if let Some(stable_id) = factual_draft.stable_id() {
-            if let Some(existing) = existing_by_id.get(&stable_id) {
-                match inspect_long_term_memory_merge_guard(existing, &factual_draft, now_secs) {
-                    super::LongTermMemoryMergeGuardDecision::Allow => {}
-                    super::LongTermMemoryMergeGuardDecision::RejectOlderObservation => {
-                        reports.push(SharedMemoryWriteItemReport {
-                            memory_space_id: String::new(),
-                            origin_subject_id: None,
-                            actor_subject_id: None,
-                            source,
-                            action: SharedMemoryWriteAction::Rejected,
-                            reason: SharedMemoryWriteReason::OlderThanExisting,
-                            topic: factual_draft.topic.clone(),
-                            kind: factual_draft.kind.clone(),
-                            detail: format!(
-                                "incoming write is older than existing canonical slot {}",
-                                factual_draft.topic
-                            ),
-                        });
-                        continue;
-                    }
-                    super::LongTermMemoryMergeGuardDecision::RejectLowerConfidenceContent => {
-                        reports.push(SharedMemoryWriteItemReport {
-                            memory_space_id: String::new(),
-                            origin_subject_id: None,
-                            actor_subject_id: None,
-                            source,
-                            action: SharedMemoryWriteAction::Rejected,
-                            reason: SharedMemoryWriteReason::LowerConfidenceThanExisting,
-                            topic: factual_draft.topic.clone(),
-                            kind: factual_draft.kind.clone(),
-                            detail: format!(
-                                "incoming write would overwrite {} with lower confidence than the existing canonical record",
-                                factual_draft.topic
-                            ),
-                        });
-                        continue;
-                    }
-                }
+        let existing = factual_draft
+            .stable_id()
+            .and_then(|stable_id| existing_by_id.get(&stable_id));
+        match plan_long_term_memory_upsert(existing, &factual_draft, now_secs) {
+            LongTermMemoryEntryPlan::Created(entry) | LongTermMemoryEntryPlan::Updated(entry) => {
+                accepted_entries.push(entry)
             }
-        }
-        if let Some(entry) =
-            planned_long_term_entry_from_draft(&factual_draft, &existing_by_id, now_secs)
-        {
-            accepted_entries.push(entry);
+            LongTermMemoryEntryPlan::Noop => {}
+            LongTermMemoryEntryPlan::Rejected(rejection) => {
+                let reason = match rejection {
+                    LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl => {
+                        SharedMemoryWriteReason::PrivacyClassTransitionRequiresExplicitGovernance
+                    }
+                    LongTermMemoryEntryRejection::OlderSourceRevision
+                    | LongTermMemoryEntryRejection::OlderObservation => {
+                        SharedMemoryWriteReason::OlderThanExisting
+                    }
+                    LongTermMemoryEntryRejection::SourceRevisionConflict => {
+                        SharedMemoryWriteReason::SourceRevisionConflict
+                    }
+                    LongTermMemoryEntryRejection::LowerConfidenceContent => {
+                        SharedMemoryWriteReason::LowerConfidenceThanExisting
+                    }
+                    LongTermMemoryEntryRejection::InvalidDraft
+                    | LongTermMemoryEntryRejection::InvalidCanonicalEntity
+                    | LongTermMemoryEntryRejection::EntityLabelConflict
+                    | LongTermMemoryEntryRejection::SlotMismatch => {
+                        SharedMemoryWriteReason::EmptyOrInvalid
+                    }
+                };
+                reports.push(SharedMemoryWriteItemReport {
+                    memory_space_id: String::new(),
+                    origin_subject_id: None,
+                    actor_subject_id: None,
+                    source,
+                    action: SharedMemoryWriteAction::Rejected,
+                    reason,
+                    topic: factual_draft.topic.clone(),
+                    kind: factual_draft.kind.clone(),
+                    detail: format!("long-term entry planner rejected write: {rejection:?}"),
+                });
+                continue;
+            }
         }
         reports.push(SharedMemoryWriteItemReport {
             memory_space_id: String::new(),
@@ -353,42 +363,6 @@ pub fn plan_governed_shared_memory(
         },
         accepted_drafts,
         accepted_entries,
-    })
-}
-
-fn planned_long_term_entry_from_draft(
-    draft: &LongTermMemoryDraft,
-    existing_by_id: &HashMap<String, LongTermMemoryEntry>,
-    now_secs: u64,
-) -> Option<LongTermMemoryEntry> {
-    let normalized = draft.normalized()?;
-    let id = normalized.stable_id()?;
-    let prior = existing_by_id.get(&id);
-    let observed_at = normalized.observed_at.unwrap_or(now_secs);
-    let last_confirmed_at = normalized
-        .last_confirmed_at
-        .unwrap_or(observed_at)
-        .max(observed_at);
-    Some(LongTermMemoryEntry {
-        id,
-        kind: normalized.kind,
-        topic: normalized.topic,
-        content: normalized.content,
-        keywords: normalized.keywords,
-        source_chat_id: normalized.source_chat_id,
-        source_type: normalized.source_type.unwrap_or_default(),
-        source_scope: normalized.source_scope.unwrap_or_default(),
-        confidence: normalized.confidence.unwrap_or_default(),
-        freshness: normalized.freshness.unwrap_or_default(),
-        stale_hint: normalized.stale_hint.unwrap_or_default(),
-        supporting_citations: normalized.supporting_citations,
-        evidence_count: normalized.evidence_count.unwrap_or(0),
-        created_at: prior.map(|entry| entry.created_at).unwrap_or(now_secs),
-        updated_at: now_secs,
-        observed_at,
-        last_confirmed_at,
-        source_revision: normalized.source_revision.unwrap_or(0),
-        last_used_at: prior.map(|entry| entry.last_used_at).unwrap_or(0),
     })
 }
 
@@ -472,6 +446,7 @@ mod tests {
     use crate::memory::{
         LongTermMemoryConfidence, LongTermMemoryEntry, LongTermMemoryFreshness,
         LongTermMemorySourceScope, LongTermMemorySourceType, LongTermMemoryStaleHint,
+        MemoryPrivacyClass,
     };
     use std::sync::Mutex;
 
@@ -500,8 +475,10 @@ mod tests {
             Ok(None)
         }
 
-        fn list(&self, _limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
-            Ok(self.entries.lock().unwrap().clone())
+        fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
+            let mut entries = self.entries.lock().unwrap().clone();
+            entries.truncate(limit);
+            Ok(entries)
         }
 
         fn delete(&self, _id: &str) -> Result<bool> {
@@ -520,6 +497,7 @@ mod tests {
     fn draft(content: &str) -> LongTermMemoryDraft {
         LongTermMemoryDraft {
             kind: LongTermMemoryKind::Profile,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
             topic: "owner_timezone".to_string(),
             content: content.to_string(),
             keywords: vec!["timezone".to_string()],
@@ -530,6 +508,7 @@ mod tests {
             freshness: Some(LongTermMemoryFreshness::Stable),
             stale_hint: Some(LongTermMemoryStaleHint::None),
             supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: Some(20),
             last_confirmed_at: Some(20),
@@ -563,6 +542,7 @@ mod tests {
                     .stable_id()
                     .unwrap(),
                 kind: LongTermMemoryKind::Profile,
+                privacy: MemoryPrivacyClass::SharedWithSubject,
                 topic: "owner_timezone".to_string(),
                 content: "Owner timezone is Asia/Shanghai.".to_string(),
                 keywords: vec!["timezone".to_string()],
@@ -573,12 +553,14 @@ mod tests {
                 freshness: LongTermMemoryFreshness::Stable,
                 stale_hint: LongTermMemoryStaleHint::None,
                 supporting_citations: Vec::new(),
+                canonical_entities: Vec::new(),
                 evidence_count: 1,
                 created_at: 10,
                 updated_at: 20,
                 observed_at: 20,
                 last_confirmed_at: 20,
-                source_revision: 5,
+                source_revision: Some(5),
+                owner_revision: 1,
                 last_used_at: 0,
             }]),
             upserts: Mutex::new(Vec::new()),
@@ -600,6 +582,97 @@ mod tests {
         assert_eq!(
             outcome.reports[0].reason,
             SharedMemoryWriteReason::LowerConfidenceThanExisting
+        );
+        assert!(store.upserts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn planner_checks_existing_owner_beyond_public_return_limit() {
+        let target_draft = draft("Owner timezone is Asia/Shanghai.");
+        let target_id = target_draft.stable_id().expect("target id");
+        let mut entries = (0..MAX_LONG_TERM_MEMORY_ITEMS)
+            .map(|index| {
+                let mut decoy = draft(&format!("Decoy profile fact {index}."));
+                decoy.topic = format!("decoy_{index}");
+                match plan_long_term_memory_upsert(None, &decoy, 10) {
+                    LongTermMemoryEntryPlan::Created(entry) => entry,
+                    plan => panic!("unexpected decoy plan: {plan:?}"),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut existing = match plan_long_term_memory_upsert(None, &target_draft, 10) {
+            LongTermMemoryEntryPlan::Created(entry) => entry,
+            plan => panic!("unexpected target plan: {plan:?}"),
+        };
+        existing.privacy = MemoryPrivacyClass::PrivateGarden;
+        assert_eq!(existing.id, target_id);
+        entries.push(existing);
+        let store = MemoryStoreStub {
+            entries: Mutex::new(entries),
+            ..MemoryStoreStub::default()
+        };
+
+        let plan = plan_governed_shared_memory(
+            &store,
+            &[target_draft],
+            30,
+            SharedMemoryWriteSource::ManualTool,
+        )
+        .expect("governance plan");
+
+        assert_eq!(plan.outcome.accepted, 0);
+        assert_eq!(plan.outcome.rejected, 1);
+        assert!(plan.accepted_entries.is_empty());
+    }
+
+    #[test]
+    fn rejects_implicit_privacy_class_transition_for_existing_slot() {
+        let store = MemoryStoreStub {
+            entries: Mutex::new(vec![LongTermMemoryEntry {
+                id: draft("Owner timezone is private.").stable_id().unwrap(),
+                kind: LongTermMemoryKind::Profile,
+                privacy: MemoryPrivacyClass::SoulPrivate,
+                topic: "owner_timezone".to_string(),
+                content: "Owner timezone is private.".to_string(),
+                keywords: vec!["timezone".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                source_type: LongTermMemorySourceType::Conversation,
+                source_scope: LongTermMemorySourceScope::User,
+                confidence: LongTermMemoryConfidence::High,
+                freshness: LongTermMemoryFreshness::Stable,
+                stale_hint: LongTermMemoryStaleHint::None,
+                supporting_citations: Vec::new(),
+                canonical_entities: Vec::new(),
+                evidence_count: 1,
+                created_at: 10,
+                updated_at: 20,
+                observed_at: 20,
+                last_confirmed_at: 20,
+                source_revision: Some(5),
+                owner_revision: 1,
+                last_used_at: 0,
+            }]),
+            upserts: Mutex::new(Vec::new()),
+        };
+        let mut incoming = draft("Owner timezone is public now.");
+        incoming.privacy = MemoryPrivacyClass::SharedWithSubject;
+        incoming.observed_at = Some(30);
+        incoming.last_confirmed_at = Some(30);
+        incoming.source_revision = Some(6);
+
+        let outcome = write_governed_shared_memory(
+            &store,
+            &[incoming],
+            30,
+            SharedMemoryWriteSource::ManualTool,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.accepted, 0);
+        assert_eq!(outcome.rejected, 1);
+        assert_eq!(
+            outcome.reports[0].reason,
+            SharedMemoryWriteReason::PrivacyClassTransitionRequiresExplicitGovernance
         );
         assert!(store.upserts.lock().unwrap().is_empty());
     }
@@ -676,6 +749,7 @@ mod tests {
                     .stable_id()
                     .unwrap(),
                 kind: LongTermMemoryKind::Profile,
+                privacy: MemoryPrivacyClass::SharedWithSubject,
                 topic: "owner_timezone".to_string(),
                 content: "Owner timezone is Asia/Shanghai.".to_string(),
                 keywords: vec!["timezone".to_string()],
@@ -686,12 +760,14 @@ mod tests {
                 freshness: LongTermMemoryFreshness::Stable,
                 stale_hint: LongTermMemoryStaleHint::None,
                 supporting_citations: Vec::new(),
+                canonical_entities: Vec::new(),
                 evidence_count: 1,
                 created_at: 10,
                 updated_at: 20,
                 observed_at: 20,
                 last_confirmed_at: 20,
-                source_revision: 5,
+                source_revision: Some(5),
+                owner_revision: 1,
                 last_used_at: 0,
             }]),
             upserts: Mutex::new(Vec::new()),

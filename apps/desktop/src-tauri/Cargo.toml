@@ -10,8 +10,8 @@ name = "bm_desktop"
 path = "src/lib.rs"
 
 [dependencies]
-bm-entry = { workspace = true, features = ["replay-harness"] }
-bm-http = { path = "../../../crates/http", features = ["server-std", "replay-harness"] }
+bm-entry.workspace = true
+bm-http = { path = "../../../crates/http", features = ["server-std"] }
 bm-ollama-transparent.workspace = true
 bm-sdk.workspace = true
 serde.workspace = true

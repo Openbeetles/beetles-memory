@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_core::platform::Platform as _;
@@ -88,6 +90,7 @@ fn maintenance_unavailable_commits_turn_and_enqueues_deferred_governance() {
     );
 
     let raw = platform
+        .replay_harness()
         .state_fs()
         .read("memory/governance_jobs/pending.json")
         .expect("read jobs")
@@ -122,6 +125,7 @@ fn duplicate_canonical_turn_does_not_enqueue_duplicate_deferred_governance() {
     assert_eq!(second.semantic_governance.deferred_count, 0);
 
     let raw = platform
+        .replay_harness()
         .state_fs()
         .read("memory/governance_jobs/pending.json")
         .expect("read jobs")
@@ -163,6 +167,7 @@ fn deferred_governance_worker_runs_stored_turn_without_recommitting_session() {
         .expect("defer finalize");
     assert_eq!(
         platform
+            .replay_harness()
             .session_store()
             .message_count("chat-a")
             .expect("message count"),
@@ -185,6 +190,7 @@ fn deferred_governance_worker_runs_stored_turn_without_recommitting_session() {
     assert_eq!(report.remaining_pending, 0);
     assert_eq!(
         platform
+            .replay_harness()
             .session_store()
             .message_count("chat-a")
             .expect("message count after worker"),
@@ -192,6 +198,7 @@ fn deferred_governance_worker_runs_stored_turn_without_recommitting_session() {
     );
 
     let raw = platform
+        .replay_harness()
         .state_fs()
         .read("memory/governance_jobs/pending.json")
         .expect("read jobs")
@@ -291,6 +298,7 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
         )
         .expect("runtime a defer");
     let raw = platform
+        .replay_harness()
         .state_fs()
         .read("memory/governance_jobs/pending.json")
         .expect("read jobs")
@@ -308,6 +316,7 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
     }
     jobs.push(other_scope_job);
     platform
+        .replay_harness()
         .state_fs()
         .write(
             "memory/governance_jobs/pending.json",
@@ -316,6 +325,7 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
         .expect("write jobs");
 
     let raw = platform
+        .replay_harness()
         .state_fs()
         .read("memory/governance_jobs/pending.json")
         .expect("read jobs")
@@ -359,6 +369,7 @@ fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_an
         ));
 
     let raw = platform
+        .replay_harness()
         .state_fs()
         .read("memory/governance_jobs/pending.json")
         .expect("read jobs")

@@ -1,17 +1,17 @@
 use bm_sdk::{
     MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
     MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig, StorePlatform,
+    RuntimeSkillWriteSource, StoreBackendConfig, MemoryStoreHandle,
 };
 
 fn main() -> bm_sdk::Result<()> {
     let profile = ProfileId::EspEmbeddedSdk;
-    let store = StorePlatform::open(StoreBackendConfig::embedded(profile)?)?;
+    let store = MemoryStoreHandle::open(StoreBackendConfig::embedded(profile)?)?;
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("esp-host-agent", "owner-default")?)
         .scope(MemoryScope::new("device", "chat-1")?)
         .profile(profile)
-        .store_platform(store)
+        .store(store)
         .build()?;
 
     smoke(&runtime)?;
@@ -37,7 +37,8 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     let recall = runtime.recall(MemoryRecallRequest {
         query: "host sdk".to_string(),
         limit: 2,
-                tool_registry_refs: Vec::new(),
+        structured_query_facets: Vec::new(),
+        tool_registry_refs: Vec::new(),
     })?;
     assert!(!recall.procedural_hits.is_empty());
     let projection = runtime.project(MemoryProjectionRequest {
@@ -46,7 +47,8 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         recent_messages_limit: 2,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
-                tool_registry_refs: Vec::new(),
+        structured_query_facets: Vec::new(),
+        tool_registry_refs: Vec::new(),
     })?;
     assert!(projection.system_memory_block.len() <= 1024);
     Ok(())

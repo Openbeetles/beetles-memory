@@ -2,9 +2,9 @@ use bm_sdk::{
     AgentToolDescriptor, AgentToolExperienceGovernanceDecision, AgentToolObservationDigest,
     AgentToolOutcome, AgentToolRegistrySnapshot, AgentToolUsageFeedback, MemoryIdentity,
     MemoryInspectionRequest, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime,
-    MemoryScope, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    RuntimeSkillReuseOutcome, StoreBackendConfig, StorePlatform, AGENT_TOOL_NO_EXPERIENCE_REASON,
-    AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
+    MemoryScope, MemoryStoreHandle, MemoryWriteRequest, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, StoreBackendConfig,
+    AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
 };
 
 fn registry() -> AgentToolRegistrySnapshot {
@@ -16,13 +16,14 @@ fn registry() -> AgentToolRegistrySnapshot {
 
 fn runtime_with_registry(registry: AgentToolRegistrySnapshot) -> MemoryRuntime {
     let profile = ProfileId::ServerLinuxDevFull;
-    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile).expect("store config"))
-        .expect("store");
+    let store =
+        MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile).expect("store config"))
+            .expect("store");
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-tool-test", "owner-default").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-1").expect("scope"))
         .profile(profile)
-        .store_platform(store)
+        .store(store)
         .agent_tool_registry(registry)
         .build()
         .expect("runtime")
@@ -70,6 +71,7 @@ fn sdk_agent_tool_registry_never_cold_starts_from_tool_descriptions() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "extract text from this PDF".to_string(),
             limit: 5,
             tool_registry_refs: vec![registry.registry_ref()],
@@ -115,6 +117,7 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
 
     let no_hint = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "extract text from this PDF".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -141,6 +144,7 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
 
     let projected = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "extract text from this PDF".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -177,6 +181,7 @@ fn sdk_agent_tool_projection_rejects_registry_fingerprint_drift() {
     stale_ref.fingerprint = "stale-fingerprint".to_string();
     let projected = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "extract text from this PDF".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,

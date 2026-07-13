@@ -9,9 +9,10 @@ use std::fmt::Write as _;
 
 use super::{
     build_archive_reconcile_drafts, maintain_archive_search_backend, memory_capability_profile,
-    write_governed_shared_memory, LongTermMemoryDraft, LongTermMemoryStore, MemoryProfile,
-    MemoryStore, SessionMessage, SessionStore, SessionSummaryStore, SharedMemoryWriteSource,
-    TurnLedgerStore, MAX_SESSION_ENTRIES,
+    plan_governed_shared_memory, plan_long_term_memory_owner_mutation, LongTermMemoryDraft,
+    LongTermMemoryEntry, LongTermMemoryEntryPlan, LongTermMemoryOwnerMutation,
+    LongTermMemoryReadStore, MemoryProfile, MemoryStore, SessionMessage, SessionStore,
+    SessionSummaryStore, SharedMemoryWriteSource, TurnLedgerStore, MAX_SESSION_ENTRIES,
 };
 
 const DAILY_AGGREGATE_MARKER: &str = "<!-- beetle:hygiene:daily-aggregate -->";
@@ -25,7 +26,7 @@ pub struct MemoryHygieneContext<'a> {
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub memory_store: &'a dyn MemoryStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub skill_storage: &'a dyn SkillStorage,
 }
 
@@ -42,6 +43,7 @@ pub struct MemoryHygieneOutcome {
     pub transcript_rollup_chat_ids: Vec<String>,
     pub factual_reconcile_topics: Vec<String>,
     pub factual_compaction_topics: Vec<String>,
+    pub planned_long_term_entries: Vec<LongTermMemoryEntry>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,28 +109,35 @@ pub fn run_memory_hygiene_jobs(
         profile,
         6,
     );
+    let mut reconciled_entries = Vec::new();
     if !factual_drafts.is_empty() {
         let factual_topics = factual_drafts
             .iter()
             .map(|draft| draft.topic.clone())
             .collect::<Vec<_>>();
-        let write_outcome = write_governed_shared_memory(
+        let plan = plan_governed_shared_memory(
             ctx.long_term_memory_store,
             &factual_drafts,
             effective_now_secs,
             SharedMemoryWriteSource::HygieneReconcile,
         )
         .unwrap_or_default();
-        outcome.factual_metadata_updates = write_outcome.changed;
+        outcome.factual_metadata_updates = plan.outcome.changed;
+        reconciled_entries = plan.accepted_entries;
+        outcome
+            .planned_long_term_entries
+            .extend(reconciled_entries.iter().cloned());
         outcome.factual_reconcile_topics = factual_topics;
     }
-    let (compacted_count, compacted_topics) = compact_factual_evidence_metadata(
+    let (compacted_entries, compacted_topics) = compact_factual_evidence_metadata(
         ctx.long_term_memory_store,
         &factual_drafts,
+        &reconciled_entries,
         effective_now_secs,
     )
     .unwrap_or_default();
-    outcome.factual_evidence_compacted = compacted_count;
+    outcome.factual_evidence_compacted = compacted_entries.len();
+    outcome.planned_long_term_entries.extend(compacted_entries);
     outcome.factual_compaction_topics = compacted_topics;
     outcome.archive_index_maintained =
         maintain_archive_search_backend(ctx.session_store, ctx.memory_store, ctx.turn_ledger_store)
@@ -283,25 +292,54 @@ pub fn render_memory_hygiene_inspection_markdown(inspection: &MemoryHygieneInspe
 }
 
 fn compact_factual_evidence_metadata(
-    store: &dyn LongTermMemoryStore,
+    store: &dyn LongTermMemoryReadStore,
     reconcile_drafts: &[LongTermMemoryDraft],
+    reconciled_entries: &[LongTermMemoryEntry],
     now_secs: u64,
-) -> Result<(usize, Vec<String>)> {
+) -> Result<(Vec<LongTermMemoryEntry>, Vec<String>)> {
     let compacted = collect_factual_compaction_candidates(store, reconcile_drafts)?;
     if compacted.is_empty() {
-        return Ok((0, Vec::new()));
+        return Ok((Vec::new(), Vec::new()));
     }
-    let topics = compacted
-        .iter()
-        .map(|draft| draft.topic.clone())
-        .collect::<Vec<_>>();
-    let changed = write_governed_shared_memory(
-        store,
-        &compacted,
-        now_secs,
-        SharedMemoryWriteSource::HygieneCompaction,
-    )?
-    .changed;
+    let mut changed = Vec::new();
+    let mut topics = Vec::with_capacity(compacted.len());
+    for draft in compacted {
+        let Some(id) = draft.stable_id() else {
+            continue;
+        };
+        let mutation = LongTermMemoryOwnerMutation::CompactEvidenceMetadata {
+            supporting_citations: draft.supporting_citations,
+            evidence_count: draft.evidence_count.unwrap_or(0),
+            last_confirmed_at: draft.last_confirmed_at.unwrap_or(0),
+        };
+        let existing = reconciled_entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
+            .or(store.get(&id)?);
+        let Some(existing) = existing else {
+            continue;
+        };
+        match plan_long_term_memory_owner_mutation(&existing, &mutation, now_secs) {
+            LongTermMemoryEntryPlan::Updated(entry) => {
+                changed.push(entry);
+                topics.push(draft.topic);
+            }
+            LongTermMemoryEntryPlan::Noop => {}
+            LongTermMemoryEntryPlan::Created(_) => {
+                return Err(crate::error::Error::config(
+                    "factual_evidence_compaction",
+                    "owner compaction unexpectedly created a record",
+                ))
+            }
+            LongTermMemoryEntryPlan::Rejected(reason) => {
+                return Err(crate::error::Error::config(
+                    "factual_evidence_compaction",
+                    format!("owner compaction rejected: {reason:?}"),
+                ))
+            }
+        }
+    }
     Ok((changed, topics))
 }
 
@@ -425,7 +463,7 @@ fn collect_transcript_rollup_candidates(
 }
 
 fn collect_factual_compaction_candidates(
-    store: &dyn LongTermMemoryStore,
+    store: &dyn LongTermMemoryReadStore,
     reconcile_drafts: &[LongTermMemoryDraft],
 ) -> Result<Vec<LongTermMemoryDraft>> {
     let mut compacted = Vec::new();
@@ -441,6 +479,7 @@ fn collect_factual_compaction_candidates(
             topic: entry.topic.clone(),
             content: entry.content.clone(),
             keywords: entry.keywords.clone(),
+            privacy: entry.privacy,
             source_chat_id: entry.source_chat_id.clone(),
             source_type: Some(entry.source_type),
             source_scope: Some(entry.source_scope),
@@ -448,6 +487,7 @@ fn collect_factual_compaction_candidates(
             freshness: Some(entry.freshness),
             stale_hint: Some(entry.stale_hint),
             supporting_citations: citations,
+            canonical_entities: entry.canonical_entities.clone(),
             evidence_count: Some(
                 entry
                     .evidence_count
@@ -461,7 +501,7 @@ fn collect_factual_compaction_candidates(
                     .max(entry.observed_at)
                     .max(entry.updated_at),
             ),
-            source_revision: Some(entry.source_revision),
+            source_revision: entry.source_revision,
         };
         if draft.evidence_count != Some(entry.evidence_count)
             || draft.last_confirmed_at != Some(entry.last_confirmed_at)
@@ -614,7 +654,8 @@ mod tests {
     use crate::memory::{
         LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryEntry,
         LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySlot, LongTermMemorySourceScope,
-        LongTermMemorySourceType, LongTermMemoryStaleHint, SessionMessage, TurnLedger,
+        LongTermMemorySourceType, LongTermMemoryStaleHint, LongTermMemoryStore, MemoryPrivacyClass,
+        SessionMessage, TurnLedger,
     };
     use crate::platform::SkillStorage;
     use std::collections::HashMap;
@@ -876,6 +917,35 @@ mod tests {
                 .cloned())
         }
 
+        fn mutate_owner(
+            &self,
+            id: &str,
+            mutation: &LongTermMemoryOwnerMutation,
+            now_secs: u64,
+        ) -> Result<LongTermMemoryEntryPlan> {
+            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let existing = entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .cloned()
+                .ok_or_else(|| {
+                    crate::error::Error::config(
+                        "long_term_owner_mutation",
+                        "owner record not found",
+                    )
+                })?;
+            let plan =
+                crate::memory::plan_long_term_memory_owner_mutation(&existing, mutation, now_secs);
+            if let LongTermMemoryEntryPlan::Updated(updated) = &plan {
+                let entry = entries
+                    .iter_mut()
+                    .find(|entry| entry.id == id)
+                    .expect("existing owner");
+                *entry = updated.clone();
+            }
+            Ok(plan)
+        }
+
         fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
             let mut entries = self
                 .entries
@@ -931,10 +1001,17 @@ mod tests {
 
     #[test]
     fn factual_evidence_compaction_preserves_observed_at_and_deduplicates_citations() {
+        let owner_id = LongTermMemorySlot {
+            kind: LongTermMemoryKind::Fact,
+            topic: "router_position".to_string(),
+        }
+        .stable_id()
+        .expect("owner id");
         let store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
-                id: "fact:router".to_string(),
+                id: owner_id.clone(),
                 kind: LongTermMemoryKind::Fact,
+                privacy: MemoryPrivacyClass::SharedWithSubject,
                 topic: "router_position".to_string(),
                 content: "Router sits near the window.".to_string(),
                 keywords: vec!["router".to_string()],
@@ -949,26 +1026,35 @@ mod tests {
                     "transcript:chat-1#message=1".to_string(),
                     "daily_note:2026-04-02.md".to_string(),
                 ],
+                canonical_entities: Vec::new(),
                 evidence_count: 1,
                 created_at: 3,
                 updated_at: 9,
                 observed_at: 7,
                 last_confirmed_at: 5,
-                source_revision: 0,
+                source_revision: None,
+                owner_revision: 1,
                 last_used_at: 0,
             }]),
             upserts: Mutex::new(Vec::new()),
         };
 
-        let (changed, topics) = compact_factual_evidence_metadata(&store, &[], 100).unwrap();
-        assert_eq!(changed, 1);
+        let (changed, topics) = compact_factual_evidence_metadata(&store, &[], &[], 100).unwrap();
+        assert_eq!(changed.len(), 1);
         assert_eq!(topics, vec!["router_position".to_string()]);
-        let upserts = store.upserts.lock().unwrap_or_else(|e| e.into_inner());
-        let draft = &upserts[0][0];
-        assert_eq!(draft.observed_at, Some(7));
-        assert_eq!(draft.last_confirmed_at, Some(9));
-        assert_eq!(draft.supporting_citations.len(), 2);
-        assert_eq!(draft.evidence_count, Some(3));
+        let entry = &changed[0];
+        assert_eq!(entry.observed_at, 7);
+        assert_eq!(entry.last_confirmed_at, 9);
+        assert_eq!(entry.supporting_citations.len(), 2);
+        assert_eq!(entry.evidence_count, 3);
+        assert_eq!(entry.owner_revision, 2);
+        assert_eq!(
+            LongTermMemoryStore::get(&store, &owner_id)
+                .unwrap()
+                .unwrap()
+                .owner_revision,
+            1
+        );
     }
 
     #[test]

@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use super::{
     parse_explicit_long_term_slot_query, score_long_term_memory_recall_breakdown,
     search_archive_records_detailed, select_archive_hits_for_prompt_with_report,
-    select_long_term_recall_entries, ArchiveSearchQuery, LongTermMemoryEntry, LongTermMemorySlot,
-    LongTermMemoryStore, MemoryProfile, MemoryStore, SessionMessage, SessionStore, TurnLedgerStore,
+    select_long_term_recall_entries, ArchiveSearchQuery, LongTermMemoryEntry,
+    LongTermMemoryReadStore, LongTermMemorySlot, LongTermMemoryStore, MemoryProfile, MemoryStore,
+    SessionMessage, SessionStore, TurnLedgerStore,
 };
 
 const RECALL_REPORT_RECENT_GROUNDING_LIMIT: usize = 2;
@@ -280,8 +281,8 @@ fn build_shared_factual_candidate(
     }
 }
 
-pub fn inspect_shared_factual_recall(
-    store: &dyn LongTermMemoryStore,
+pub fn inspect_shared_factual_recall<S>(
+    store: &S,
     chat_id: &str,
     user_query: &str,
     summary_text: Option<&str>,
@@ -289,7 +290,10 @@ pub fn inspect_shared_factual_recall(
     max_chars: usize,
     profile: MemoryProfile,
     now_secs: u64,
-) -> RecallSelectionReport {
+) -> RecallSelectionReport
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
     let exact_lookup = parse_explicit_long_term_slot_query(user_query);
     let mut report = RecallSelectionReport {
         plane: RecallPlane::SharedFactual,

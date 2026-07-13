@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use std::sync::Arc;
@@ -57,6 +59,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "release artifact".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
@@ -74,7 +77,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
         .any(|candidate| candidate == "runtime_skill__release_guard"));
     assert!(recall
         .graph_rerank
-        .selected_ids
+        .reranked_candidate_ids
         .iter()
         .any(|candidate| candidate == "runtime_skill__release_guard"));
     assert!(!recall.graph_gate.high_confidence_projection_allowed);
@@ -92,6 +95,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How should I publish?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -109,26 +113,32 @@ fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_pl
     let profile = ProfileId::ServerLinuxDevFull;
     let platform = empty_store_platform(profile);
     platform
+        .replay_harness()
         .session_store()
         .append("chat-a", "user", "chat-a-only-user")
         .expect("seed chat-a user");
     platform
+        .replay_harness()
         .session_store()
         .append("chat-a", "assistant", "chat-a-only-assistant")
         .expect("seed chat-a assistant");
     platform
+        .replay_harness()
         .session_store()
         .append("chat-b", "user", "chat-b-only-user")
         .expect("seed chat-b user");
     platform
+        .replay_harness()
         .session_store()
         .append("chat-b", "assistant", "chat-b-only-assistant")
         .expect("seed chat-b assistant");
     platform
+        .replay_harness()
         .session_summary_store()
         .set_with_count("chat-a", "chat-a-only-summary", 2)
         .expect("seed chat-a summary");
     platform
+        .replay_harness()
         .session_summary_store()
         .set_with_count("chat-b", "chat-b-only-summary", 2)
         .expect("seed chat-b summary");
@@ -139,6 +149,7 @@ fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_pl
     let project = |runtime: &MemoryRuntime, query: &str| {
         runtime
             .project(MemoryProjectionRequest {
+                structured_query_facets: Vec::new(),
                 user_query: query.to_string(),
                 system_max_len: 4096,
                 recent_messages_limit: 8,
@@ -183,6 +194,10 @@ fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_pl
         "{}",
         projection_a.system_memory_block
     );
+    assert!(!projection_a
+        .projection_surfaces
+        .shared_fact_surface
+        .contains("chat-a-only-summary"));
 
     let projection_b = project(&runtime_b, "what happened in chat b?");
     assert!(projection_b
@@ -218,6 +233,10 @@ fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_pl
         "{}",
         projection_b.system_memory_block
     );
+    assert!(!projection_b
+        .projection_surfaces
+        .shared_fact_surface
+        .contains("chat-b-only-summary"));
 }
 
 #[test]
@@ -270,6 +289,7 @@ fn runtime_maintain_and_inspect_return_structured_reports() {
 fn runtime_projection_includes_private_planes_when_policy_allows_it() {
     let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
     platform
+        .replay_harness()
         .private_doc_store()
         .set(
             board_subject_scope_id(),
@@ -284,6 +304,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
         )
         .expect("private workspace seed");
     platform
+        .replay_harness()
         .private_garden_store()
         .write(
             private_garden_scope_id(),
@@ -293,6 +314,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
         )
         .expect("private garden seed");
     platform
+        .replay_harness()
         .self_model_store()
         .set(
             board_subject_scope_id(),
@@ -312,7 +334,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
         .profile(ProfileId::ServerLinuxDevFull)
-        .store_platform(platform)
+        .store(platform)
         .clock(Arc::new(TestClock))
         .capability_policy(bm_sdk::MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(privacy)
@@ -322,6 +344,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "release".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -424,12 +447,53 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
             projection.system_memory_block
         );
     }
+    assert_eq!(
+        projection.projection_surfaces.prompt,
+        projection.system_memory_block
+    );
+    for (surface, block) in [
+        ("ui_api", &projection.projection_surfaces.ui_api),
+        ("operator_raw", &projection.projection_surfaces.operator_raw),
+        (
+            "gateway_raw_audit",
+            &projection.projection_surfaces.gateway_raw_audit,
+        ),
+        (
+            "shared_fact_surface",
+            &projection.projection_surfaces.shared_fact_surface,
+        ),
+    ] {
+        for private_raw in [
+            "private workspace release note",
+            "private garden release note",
+            "private self model release anchor",
+        ] {
+            assert!(
+                !block.contains(private_raw),
+                "{surface} leaked exact protected content: {private_raw}"
+            );
+        }
+    }
+    assert_eq!(
+        projection
+            .private_disclosure_integrity
+            .surface_reports
+            .len(),
+        5
+    );
+    assert!(projection
+        .private_disclosure_integrity
+        .surface_reports
+        .iter()
+        .all(|surface| surface.passed && surface.violation_count == 0));
+    assert!(projection.private_disclosure_integrity.passed);
 }
 
 #[test]
 fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
     let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
     platform
+        .replay_harness()
         .self_model_store()
         .set(
             board_subject_scope_id(),
@@ -441,6 +505,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         )
         .expect("self model seed");
     platform
+        .replay_harness()
         .self_continuity_store()
         .set(
             board_subject_scope_id(),
@@ -452,6 +517,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         )
         .expect("self continuity seed");
     platform
+        .replay_harness()
         .inner_life_store()
         .set(
             board_subject_scope_id(),
@@ -463,6 +529,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         )
         .expect("inner life seed");
     platform
+        .replay_harness()
         .private_doc_store()
         .set(
             board_subject_scope_id(),
@@ -477,6 +544,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         )
         .expect("private workspace seed");
     platform
+        .replay_harness()
         .private_garden_store()
         .write(
             private_garden_scope_id(),
@@ -490,6 +558,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "release".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,

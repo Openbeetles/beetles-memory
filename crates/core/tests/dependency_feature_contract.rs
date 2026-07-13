@@ -75,7 +75,7 @@ fn compiled_feature_report_names_target_role_and_profile_features() {
     );
     assert_eq!(
         report.replay_harness_compiled,
-        cfg!(feature = "replay-harness")
+        cfg!(feature = "nonproduction-replay-harness")
     );
 }
 

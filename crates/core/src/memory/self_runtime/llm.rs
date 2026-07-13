@@ -27,7 +27,7 @@ pub(super) fn decide_self_runtime(
     http: &mut dyn LlmHttpClient,
     llm: &(dyn LlmClient + Send + Sync),
     session_store: &dyn SessionStore,
-    _long_term_memory_store: &dyn LongTermMemoryStore,
+    _long_term_memory_store: &dyn LongTermMemoryReadStore,
     memory_store: &dyn MemoryStore,
     turn_ledger_store: &dyn TurnLedgerStore,
     chat_id: &str,

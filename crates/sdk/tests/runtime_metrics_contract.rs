@@ -77,6 +77,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
         .expect("write");
     runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "runtime metrics".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
@@ -84,6 +85,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
         .expect("recall");
     runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How should metrics be reported?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -96,8 +98,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
         .finalize_turn_and_maintain(None, None, finalize_request("turn-metrics-1"))
         .expect("finalize");
 
-    let events = platform.read_events().expect("events");
-    let report = runtime.runtime_metrics_report_from_events(&events);
+    let report = runtime.runtime_metrics_report().expect("runtime metrics");
 
     assert_eq!(report.source, "core.runtime_events");
     assert_eq!(report.counters.write_count, 1);

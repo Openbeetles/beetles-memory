@@ -11,7 +11,8 @@ use bm_evolve::{
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, ProfileId, RuntimeSkillWrite, StoreBackendConfig, StorePlatform,
+    MemoryRuntime, MemoryScope, MemoryStoreHandle, ProfileId, RuntimeSkillWrite,
+    StoreBackendConfig,
 };
 
 #[test]
@@ -30,6 +31,7 @@ fn proposal_commit_uses_sdk_write_governance() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "release artifact".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
@@ -106,12 +108,12 @@ fn procedural_proposal(profile: ProfileId) -> EvolutionProposal {
 
 fn test_runtime(profile: ProfileId) -> MemoryRuntime {
     let platform =
-        StorePlatform::open_in_memory(StoreBackendConfig::in_memory(profile).unwrap()).unwrap();
+        MemoryStoreHandle::open_in_memory(StoreBackendConfig::in_memory(profile).unwrap()).unwrap();
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("evolve-agent", "evolve-owner").unwrap())
         .scope(MemoryScope::new("evolve", "evolve-chat").unwrap())
         .profile(profile)
-        .store_platform(platform)
+        .store(platform)
         .clock(Arc::new(FixedClock))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())

@@ -11,6 +11,7 @@ cleanup() {
 trap cleanup EXIT
 
 export CARGO_TARGET_DIR="$gate_tmp/cargo-target"
+export CARGO_INCREMENTAL=0
 
 ignored_before="$gate_tmp/ignored-before.txt"
 ignored_after="$gate_tmp/ignored-after.txt"
@@ -74,7 +75,10 @@ examples=(
 
 example_tmp_root="$gate_tmp/example-repo"
 mkdir -p "$example_tmp_root/examples"
+cp "$ROOT/Cargo.toml" "$example_tmp_root/Cargo.toml"
+cp "$ROOT/Cargo.lock" "$example_tmp_root/Cargo.lock"
 ln -s "$ROOT/crates" "$example_tmp_root/crates"
+ln -s "$ROOT/apps" "$example_tmp_root/apps"
 
 run_example_manifest() {
   local manifest="$1"
@@ -90,7 +94,7 @@ run_example_manifest() {
   if [[ -d "$ROOT/$example_dir/src" ]]; then
     cp -R "$ROOT/$example_dir/src" "$tmp_example/src"
   fi
-  CARGO_TARGET_DIR="$gate_tmp/example-target-$example_name" \
+  CARGO_TARGET_DIR="$gate_tmp/cargo-target" \
     cargo run -q --manifest-path "$tmp_example/Cargo.toml"
 }
 
@@ -100,7 +104,6 @@ done
 
 publishable=(
   "bm-core"
-  "bm-store"
   "bm-sdk"
   "bm-replay"
   "bm-evolve"
@@ -117,7 +120,6 @@ publishable=(
 
 cargo doc --no-deps --no-default-features \
   -p bm-core \
-  -p bm-store \
   -p bm-sdk \
   -p bm-replay \
   -p bm-evolve \
@@ -157,38 +159,29 @@ publish_dry_run() {
   case "$crate" in
     bm-core)
       ;;
-    bm-store)
-      extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
-      ;;
     bm-sdk)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
-      extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       ;;
     bm-replay)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
-      extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       ;;
     bm-evolve)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
-      extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       ;;
     bm-adapter)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
-      extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       ;;
     bm-entry)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
-      extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       extra+=(--config 'patch.crates-io.bm-replay.path="crates/replay"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
       ;;
     bm-cli|bm-llm-gateway|bm-http|bm-wss|bm-mcp|bm-a2a)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
-      extra+=(--config 'patch.crates-io.bm-store.path="crates/store"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       extra+=(--config 'patch.crates-io.bm-replay.path="crates/replay"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')

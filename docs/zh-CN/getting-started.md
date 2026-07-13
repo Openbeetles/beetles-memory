@@ -22,19 +22,19 @@ bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] 
 
 ```rust
 use bm_sdk::{
-    AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId,
-    StoreBackendConfig, StorePlatform,
+    AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    ProfileId, StoreBackendConfig,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
     let profile = ProfileId::DesktopMacosEmbeddedSdk;
-    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+    let store = MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile)?)?;
 
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
-        .store_platform(store)
+        .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(
             "./skills",
             "host-project",
@@ -75,6 +75,7 @@ assert!(write.accepted);
 let recall = runtime.recall(MemoryRecallRequest {
     query: "release artifacts".to_string(),
     limit: 4,
+    structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
 assert!(!recall.procedural_hits.is_empty());
@@ -85,6 +86,7 @@ let projection = runtime.project(MemoryProjectionRequest {
     recent_messages_limit: 8,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
+    structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
 assert!(projection.system_memory_block.len() <= 4096);

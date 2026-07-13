@@ -13,7 +13,8 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 | 领域 | Crates |
 | --- | --- |
 | SDK 与记忆核心 | `bm-sdk`, `bm-core` |
-| 存储 | `bm-store` |
+| 持久化内核 | `bm-sdk` 内的私有模块，经由不透明的 `MemoryStoreHandle` 访问 |
+| 持久化合同测试 | `bm-store-contract-tests`（仅开发验收） |
 | 回放与提案沙箱 | `bm-replay`, `bm-evolve` |
 | 协议合同与入口运行时 | `bm-adapter`, `bm-entry` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
@@ -56,19 +57,19 @@ bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRuntime, MemoryScope, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
-    StorePlatform,
+    MemoryStoreHandle, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    StoreBackendConfig,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
     let profile = ProfileId::DesktopMacosEmbeddedSdk;
-    let store = StorePlatform::open(StoreBackendConfig::in_memory(profile)?)?;
+    let store = MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile)?)?;
 
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
         .scope(MemoryScope::new("local", "chat-1")?)
         .profile(profile)
-        .store_platform(store)
+        .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(
             "./skills",
             "host-project",

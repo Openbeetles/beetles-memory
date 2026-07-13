@@ -19,9 +19,9 @@ use super::{
     render_private_memory_boundary_block, render_self_continuity_block, render_self_model_block,
     render_self_state_block, render_shared_factual_plane_block, render_world_sense_block,
     AutonomyStrategy, ExecutionState, ExecutionStateStore, InnerLife, InternalMemoryLayerFocus,
-    LongTermMemoryStore, MemoryProfile, PrivateDocStore, PrivateDocsPolicy, PrivateGardenDocRecord,
-    SelfContinuity, SelfModel, SelfModelStore, SessionMessage, SessionStore, SessionSummaryStore,
-    WorldSense,
+    LongTermMemoryReadStore, MemoryProfile, PrivateDocStore, PrivateDocsPolicy,
+    PrivateGardenDocRecord, SelfContinuity, SelfModel, SelfModelStore, SessionMessage,
+    SessionStore, SessionSummaryStore, WorldSense,
 };
 
 pub const PRIVATE_DOC_WORKSPACE_SYSTEM_PROMPT: &str = "You maintain a compact governed private document workspace for a persistent embodied AI assistant. Return JSON only: one object whose fields may include inner_journal, relationship_notes, self_reflection, private_plan. Omit unchanged fields. Use an empty string only when a document should be cleared because it is no longer helpful. These documents are private, subjective, and compact. They must not replace factual memory or copy the transcript. The canonical shared factual plane owns durable objective facts; use shared facts only as grounding. Treat current autonomy strategy, world-sense, and self-state capacity as real constraints: only write material that should stay load-bearing in the governed workspace rather than remaining in inner-life or the free private garden. Keep each field concise, concrete, and continuity-preserving. inner_journal captures the inward afterglow of recent interaction. relationship_notes captures how the relationship currently feels or is shifting. self_reflection captures how the assistant sees its own stance or change. private_plan captures inward next-step framing, not a user-facing promise list. Avoid secrets, raw tool payloads, copied logs, generic assistant boilerplate, or long quotes.";
@@ -108,7 +108,7 @@ pub struct PrivateDocWorkspaceRefreshContext<'a> {
     pub session_store: &'a dyn SessionStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub self_model_store: &'a dyn SelfModelStore,
     pub private_doc_store: &'a dyn PrivateDocStore,
 }
@@ -667,6 +667,7 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::llm::{LlmModelCompat, LlmResponse, StopReason};
+    use crate::memory::LongTermMemoryStore;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Mutex;

@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use bm_core::memory::commit_canonical_turn_delta;
@@ -163,7 +165,14 @@ fn finalize_turn_commits_conversation_transcript_in_runtime_memory_space() {
         replay.slice.turns[0].input_messages[0].content.as_deref(),
         Some("记住我是青川")
     );
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
 }
 
 #[test]
@@ -430,10 +439,15 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
             ),
         )
         .unwrap();
-    platform.session_store().clear("chat-a").unwrap();
+    platform
+        .replay_harness()
+        .session_store()
+        .clear("chat-a")
+        .unwrap();
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -443,7 +457,14 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
         })
         .unwrap();
 
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 0);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        0
+    );
     assert!(projection
         .context
         .recent_messages
@@ -491,6 +512,7 @@ fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -500,7 +522,14 @@ fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
         })
         .unwrap();
 
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
     assert!(!projection
         .context
         .recent_messages
@@ -533,10 +562,15 @@ fn transcript_backed_projection_honors_recent_message_limit() {
             finalize_request("limit second user", "limit second assistant"),
         )
         .unwrap();
-    platform.session_store().clear("chat-a").unwrap();
+    platform
+        .replay_harness()
+        .session_store()
+        .clear("chat-a")
+        .unwrap();
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "limit evidence".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 1,
@@ -546,7 +580,7 @@ fn transcript_backed_projection_honors_recent_message_limit() {
         })
         .unwrap();
 
-    assert_eq!(projection.context.recent_messages.len(), 3);
+    assert_eq!(projection.context.recent_messages.len(), 1);
     assert!(!projection
         .context
         .recent_messages
@@ -600,6 +634,7 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
     );
     let projection = fresh_runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -609,7 +644,14 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
         })
         .unwrap();
 
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
     assert!(!projection
         .context
         .recent_messages
@@ -665,7 +707,14 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_raw_delete
         })
         .unwrap();
 
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
     assert!(!format!("{:?}", inspect.working).contains("fresh runtime deleted"));
 }
 
@@ -690,9 +739,16 @@ fn fresh_runtime_fails_closed_when_transcript_alias_is_corrupt() {
             ),
         )
         .unwrap();
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
 
-    let mut snapshot = platform.export_store_snapshot().unwrap();
+    let mut snapshot = platform.replay_harness().export_store_snapshot().unwrap();
     let alias_doc = snapshot
         .json_docs
         .iter_mut()
@@ -706,9 +762,13 @@ fn fresh_runtime_fails_closed_when_transcript_alias_is_corrupt() {
         "updated_at": 1_800_000_000_u64,
     });
     let corrupt_platform = empty_store_platform(profile);
-    corrupt_platform.import_store_snapshot(&snapshot).unwrap();
+    corrupt_platform
+        .replay_harness()
+        .import_store_snapshot(&snapshot)
+        .unwrap();
     assert_eq!(
         corrupt_platform
+            .replay_harness()
             .session_store()
             .message_count("chat-a")
             .unwrap(),
@@ -724,6 +784,7 @@ fn fresh_runtime_fails_closed_when_transcript_alias_is_corrupt() {
     );
     let projection = fresh_runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -775,6 +836,7 @@ fn recall_inspect_and_maintenance_do_not_fallback_to_session_shadow_after_transc
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "evidence".to_string(),
             limit: 8,
             tool_registry_refs: Vec::new(),
@@ -816,7 +878,14 @@ fn recall_inspect_and_maintenance_do_not_fallback_to_session_shadow_after_transc
         .report
         .expect("maintenance report");
     assert_eq!(maintenance.after_count, 0);
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
 }
 
 #[test]
@@ -859,7 +928,14 @@ fn runtime_lifecycle_request_deletes_raw_transcript_without_deleting_session_sha
 
     assert_eq!(replay.slice.turns[0].input_messages[0].content, None);
     assert!(replay.slice.audit.redacted_messages > 0);
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
 }
 
 #[test]
@@ -949,6 +1025,7 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
                     keywords: vec!["concise".to_string()],
                 },
                 evidence_refs: vec![evidence_ref.display_citation()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(MemoryCandidateSemanticJudgment {
                     source: MemorySemanticJudgmentSource::LlmGovernance,
                     decision: MemoryCandidateSemanticDecision::Accept,
@@ -1035,6 +1112,7 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
                         keywords: vec!["release".to_string()],
                     },
                     evidence_refs: vec![evidence_ref.display_citation()],
+                    canonical_entities: Vec::new(),
                     semantic_judgment: Some(MemoryCandidateSemanticJudgment {
                         source: MemorySemanticJudgmentSource::LlmGovernance,
                         decision: MemoryCandidateSemanticDecision::Accept,
@@ -1060,6 +1138,7 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
                         keywords: vec!["summary".to_string()],
                     },
                     evidence_refs: vec![evidence_ref.display_citation()],
+                    canonical_entities: Vec::new(),
                     semantic_judgment: Some(MemoryCandidateSemanticJudgment {
                         source: MemorySemanticJudgmentSource::LlmGovernance,
                         decision: MemoryCandidateSemanticDecision::Accept,
@@ -1134,6 +1213,7 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Preference,
+                    privacy: bm_sdk::MemoryPrivacyClass::SharedWithSubject,
                     topic: "summary_style".to_string(),
                     content: "The user likes structured summaries.".to_string(),
                     keywords: vec!["structured".to_string()],
@@ -1144,6 +1224,7 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
                     freshness: None,
                     stale_hint: None,
                     supporting_citations: vec![evidence_ref.display_citation()],
+                    canonical_entities: Vec::new(),
                     evidence_count: None,
                     observed_at: Some(10),
                     last_confirmed_at: None,
@@ -1215,7 +1296,12 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
         .finalize_turn_and_maintain(Some(&mut http), Some(&llm), request)
         .unwrap();
     assert_eq!(report.semantic_governance.accepted_count, 1);
-    let entries = platform.long_term_memory_store().list(10).unwrap();
+    let entries = platform
+        .replay_harness()
+        .scoped_long_term_memory_read_store("space:owner-default")
+        .expect("scoped long-term read store")
+        .list(10)
+        .unwrap();
     assert!(
         entries.iter().any(|entry| entry.topic == "primary_llm"
             && entry
@@ -1224,7 +1310,7 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
                 .any(|citation| TranscriptEvidenceRef::parse_display_citation(citation).is_some())),
         "automatic extraction should persist structured transcript citations: {entries:?}"
     );
-    let transcript_store = platform.conversation_transcript_store();
+    let transcript_store = platform.replay_harness().conversation_transcript_store();
     let key = ConversationKey::new(
         runtime.memory_space_id().to_string(),
         "llm.gateway",
@@ -1312,6 +1398,7 @@ fn soul_candidate_handoff_records_transcript_derived_ref_for_lifecycle_impact() 
                     keywords: vec!["soul".to_string()],
                 },
                 evidence_refs: vec![evidence_ref.display_citation()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(MemoryCandidateSemanticJudgment {
                     source: MemorySemanticJudgmentSource::LlmGovernance,
                     decision: MemoryCandidateSemanticDecision::HandoffToSoulGovernance,
@@ -1369,6 +1456,7 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
     )
     .unwrap();
     platform
+        .replay_harness()
         .conversation_transcript_store()
         .append_derived_memory_ref(
             &key,
@@ -1429,25 +1517,17 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
         .unwrap();
     assert!(redacted.privacy_redactions > 0);
     assert!(!redacted
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript"));
+        .archive
+        .contains_json_namespace("conversation_transcript"));
     assert!(!redacted
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript_alias"));
+        .archive
+        .contains_json_namespace("conversation_transcript_alias"));
     assert!(!redacted
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript_derived_ref"));
+        .archive
+        .contains_json_namespace("conversation_transcript_derived_ref"));
     assert!(!redacted
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript_attr"));
+        .archive
+        .contains_json_namespace("conversation_transcript_attr"));
 
     let raw = runtime
         .export_memory_space(MemorySpaceExportRequest {
@@ -1456,25 +1536,17 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
         })
         .unwrap();
     assert!(raw
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript"));
+        .archive
+        .contains_json_namespace("conversation_transcript"));
     assert!(raw
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript_alias"));
+        .archive
+        .contains_json_namespace("conversation_transcript_alias"));
     assert!(raw
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript_derived_ref"));
+        .archive
+        .contains_json_namespace("conversation_transcript_derived_ref"));
     assert!(raw
-        .snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "conversation_transcript_attr"));
+        .archive
+        .contains_json_namespace("conversation_transcript_attr"));
 }
 
 #[test]
@@ -1710,7 +1782,11 @@ fn manual_transcript_commit_is_idempotent_by_transcript_turn_even_if_session_sha
             host_refs: Vec::new(),
         })
         .unwrap();
-    platform.session_store().clear("chat-a").unwrap();
+    platform
+        .replay_harness()
+        .session_store()
+        .clear("chat-a")
+        .unwrap();
 
     let second = runtime
         .commit_transcript(MemoryTranscriptCommitRequest {
@@ -1724,7 +1800,14 @@ fn manual_transcript_commit_is_idempotent_by_transcript_turn_even_if_session_sha
         second.session_commit.skipped_reason.as_deref(),
         Some("conversation_transcript_turn_already_committed")
     );
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 0);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        0
+    );
     let replay = runtime
         .replay_transcript(MemoryTranscriptReplayRequest {
             memory_space_id: runtime.memory_space_id().to_string(),
@@ -1751,7 +1834,7 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
     );
     let request = finalize_request("旧 session 已有", "回填 transcript。");
     let turn = request.turn.clone();
-    let session_store = platform.session_store();
+    let session_store = platform.replay_harness().session_store();
     let legacy_session = commit_canonical_turn_delta(session_store.as_ref(), &turn).unwrap();
     assert!(legacy_session.committed);
 
@@ -1771,7 +1854,14 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
         .transcript_commit
         .as_ref()
         .is_some_and(|report| report.committed));
-    assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 2);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
     let replay = runtime
         .replay_transcript(MemoryTranscriptReplayRequest {
             memory_space_id: runtime.memory_space_id().to_string(),
@@ -1802,7 +1892,7 @@ fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_al
     );
     let request = finalize_request("finalize 回填", "回填 transcript。");
     let turn = request.turn.clone();
-    let session_store = platform.session_store();
+    let session_store = platform.replay_harness().session_store();
     let legacy_session = commit_canonical_turn_delta(session_store.as_ref(), &turn).unwrap();
     assert!(legacy_session.committed);
 

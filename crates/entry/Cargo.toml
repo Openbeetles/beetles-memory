@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-replay-harness = ["dep:bm-replay"]
+nonproduction-replay-harness = ["dep:bm-replay"]
 profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]
@@ -22,7 +22,7 @@ profile-desktop-windows-embedded-sdk = ["bm-adapter/profile-desktop-windows-embe
 profile-server-linux-memory-gateway = ["bm-adapter/profile-server-linux-memory-gateway"]
 profile-server-linux-dev-full = [
     "bm-adapter/profile-server-linux-dev-full",
-    "replay-harness",
+    "nonproduction-replay-harness",
 ]
 
 [dependencies]

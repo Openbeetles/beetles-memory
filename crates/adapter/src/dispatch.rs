@@ -1,6 +1,9 @@
-use bm_sdk::{LlmClient, LlmHttpClient, MemoryRuntime, Result};
+use bm_sdk::{LlmClient, LlmHttpClient, MemoryProjectionRequest, MemoryRuntime, Result};
 
-use crate::{AdapterCommand, AdapterEnvelope, AdapterErrorKey, AdapterResponse, AdapterSdkReport};
+use crate::{
+    AdapterCommand, AdapterEnvelope, AdapterErrorKey, AdapterProjectionReport, AdapterResponse,
+    AdapterSdkReport,
+};
 
 pub struct AdapterRuntimeServices<'a> {
     pub http: Option<&'a mut dyn LlmHttpClient>,
@@ -21,6 +24,13 @@ pub fn dispatch_adapter_command(
     envelope: AdapterEnvelope<AdapterCommand>,
 ) -> Result<AdapterResponse<AdapterSdkReport>> {
     dispatch_adapter_command_with_services(runtime, envelope, AdapterRuntimeServices::none())
+}
+
+pub fn project_adapter_report(
+    runtime: &MemoryRuntime,
+    request: MemoryProjectionRequest,
+) -> Result<AdapterProjectionReport> {
+    runtime.project(request).map(AdapterProjectionReport::from)
 }
 
 pub fn dispatch_adapter_command_with_services(
@@ -48,7 +58,7 @@ pub fn dispatch_adapter_command_with_services(
             AdapterSdkReport::Recall(Box::new(runtime.recall(request)?))
         }
         AdapterCommand::Project(request) => {
-            AdapterSdkReport::Project(Box::new(runtime.project(request)?))
+            AdapterSdkReport::Project(Box::new(project_adapter_report(runtime, request)?))
         }
         AdapterCommand::Maintain(request) => {
             let Some(http) = http else {
@@ -91,7 +101,7 @@ pub fn dispatch_adapter_command_with_services(
             AdapterSdkReport::LongTermDetail(Box::new(runtime.get_long_term_memory(request)?))
         }
         AdapterCommand::LongTermMutate(request) => {
-            AdapterSdkReport::LongTermMutate(Box::new(runtime.mutate_long_term_memory(request)?))
+            AdapterSdkReport::LongTermMutate(Box::new(runtime.mutate_long_term_memory(*request)?))
         }
         AdapterCommand::LongTermPolicy(request) => AdapterSdkReport::LongTermPolicy(Box::new(
             runtime.mutate_memory_governance_policy(request)?,

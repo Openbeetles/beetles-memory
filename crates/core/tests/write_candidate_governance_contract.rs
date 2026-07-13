@@ -1,8 +1,10 @@
 use bm_core::memory::{
-    govern_write_candidates, GovernedWriteDecision, LongTermMemoryKind, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryPrivacyClass, MemorySemanticJudgmentSource,
-    MemoryWriteCandidate, MemoryWriteDomain, SoulCandidateDisposition,
+    canonical_evidence_ref_from_source, govern_write_candidates, CanonicalEntityKey,
+    CanonicalEntityKind, CanonicalEntityRef, GovernedWriteDecision, LongTermMemoryKind,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryPrivacyClass,
+    MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteDomain,
+    SoulCandidateDisposition,
 };
 
 fn text_candidate(
@@ -32,6 +34,7 @@ fn text_candidate(
             keywords: vec!["name".to_string()],
         },
         evidence_refs: vec![format!("turn:{id}")],
+        canonical_entities: Vec::new(),
         semantic_judgment,
     }
 }
@@ -122,4 +125,56 @@ fn candidate_authority_and_domain_route_to_expected_disposition() {
         .expect("self claim report");
     assert_eq!(self_claim.decision, GovernedWriteDecision::Rejected);
     assert!(self_claim.reason.contains("assistant_self_claim"));
+}
+
+#[test]
+fn long_term_draft_preserves_governed_privacy_class() {
+    let mut candidate = text_candidate(
+        "candidate-private-contract",
+        MemoryEvidenceAuthority::UserAsserted,
+        MemoryCandidateTarget::LongTermMemory {
+            kind: LongTermMemoryKind::Profile,
+            topic: "private-profile".to_string(),
+        },
+        "A governed subject-visible profile fact.",
+    );
+    candidate.privacy = MemoryPrivacyClass::SharedWithSubject;
+
+    let draft = candidate
+        .to_long_term_draft("privacy-contract-chat", 1_800_000_000)
+        .expect("long-term draft");
+
+    assert_eq!(draft.privacy, MemoryPrivacyClass::SharedWithSubject);
+}
+
+#[test]
+fn candidate_canonical_entities_flow_into_long_term_draft_without_text_inference() {
+    let mut candidate = text_candidate(
+        "candidate-entity",
+        MemoryEvidenceAuthority::UserAsserted,
+        MemoryCandidateTarget::LongTermMemory {
+            kind: LongTermMemoryKind::Project,
+            topic: "agent_memory".to_string(),
+        },
+        "Alice maintains the Agent Memory repository.",
+    );
+    let source_ref = candidate.evidence_refs[0].clone();
+    candidate.canonical_entities = vec![CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Person,
+            canonical_id: "alice".to_string(),
+        },
+        display_label: Some("Alice".to_string()),
+        aliases: Vec::new(),
+        evidence_refs: vec![
+            canonical_evidence_ref_from_source(&source_ref).expect("canonical evidence")
+        ],
+    }];
+
+    let draft = candidate
+        .to_long_term_draft("chat-a", 1_900_000_000)
+        .expect("long-term draft");
+
+    assert_eq!(draft.canonical_entities, candidate.canonical_entities);
+    assert_eq!(draft.source_revision, None);
 }

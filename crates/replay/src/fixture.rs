@@ -1,8 +1,8 @@
+use bm_sdk::nonproduction_replay_harness::StoreSnapshot;
 use bm_sdk::{
     ContinuitySnapshot, ContinuitySnapshotImportMode, IngressKind, PressureLevel, ProfileId,
     RuntimeSkillWrite,
 };
-use bm_store::StoreSnapshot;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

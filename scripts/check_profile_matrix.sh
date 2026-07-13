@@ -29,9 +29,9 @@ assert_store_tree_excludes() {
   local feature_set="$1"
   local needle="$2"
   local tree
-  tree="$(cargo tree -p bm-store --no-default-features --features "$feature_set")"
+  tree="$(cargo tree -p bm-sdk --no-default-features --features "$feature_set")"
   if grep -q "$needle" <<<"$tree"; then
-    echo "store feature set unexpectedly includes $needle: $feature_set" >&2
+    echo "SDK persistence feature set unexpectedly includes $needle: $feature_set" >&2
     exit 1
   fi
 }
@@ -40,9 +40,9 @@ assert_store_tree_includes() {
   local feature_set="$1"
   local needle="$2"
   local tree
-  tree="$(cargo tree -p bm-store --no-default-features --features "$feature_set")"
+  tree="$(cargo tree -p bm-sdk --no-default-features --features "$feature_set")"
   if ! grep -q "$needle" <<<"$tree"; then
-    echo "store feature set should include $needle: $feature_set" >&2
+    echo "SDK persistence feature set should include $needle: $feature_set" >&2
     exit 1
   fi
 }

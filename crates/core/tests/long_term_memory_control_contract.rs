@@ -2,20 +2,44 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use bm_core::memory::{
-    apply_long_term_memory_control_mutation, apply_long_term_memory_governance_policy_mutation,
-    get_long_term_memory_control_detail, list_long_term_memory_control_page, DerivedMemoryPlane,
+    get_long_term_memory_control_detail, list_long_term_memory_control_page,
+    plan_long_term_memory_control_mutation, plan_long_term_memory_governance_policy_mutation,
+    plan_long_term_memory_owner_mutation, plan_long_term_memory_upsert, DerivedMemoryPlane,
     DerivedMemoryRef, LongTermMemoryControlAuditEvent, LongTermMemoryControlDetailRequest,
     LongTermMemoryControlListRequest, LongTermMemoryControlMutationRequest,
-    LongTermMemoryControlStore, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind,
-    LongTermMemoryQuery, LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemoryStore,
-    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryLongTermControlView, MemoryLongTermGovernancePolicy, MemoryLongTermMutation,
-    MemoryLongTermSelector, MemoryLongTermTarget, MemorySubjectVisibilityPolicy,
-    TranscriptEvidenceRef,
+    LongTermMemoryControlReadStore, LongTermMemoryControlWrite, LongTermMemoryDraft,
+    LongTermMemoryEntry, LongTermMemoryEntryPlan, LongTermMemoryKind, LongTermMemoryOwnerMutation,
+    LongTermMemoryOwnerWrite, LongTermMemoryQuery, LongTermMemorySlot, LongTermMemorySourceScope,
+    LongTermMemoryStaleHint, LongTermMemoryStore, MemoryGovernancePolicyMutation,
+    MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermGovernancePolicy,
+    MemoryLongTermMutation, MemoryLongTermSelector, MemoryLongTermTarget, MemoryPrivacyClass,
+    MemorySubjectVisibilityPolicy, TranscriptEvidenceRef,
 };
 use bm_core::Result;
 
 const NOW_SECS: u64 = 1_780_000_000;
+
+#[test]
+fn production_memory_api_does_not_export_writable_control_capabilities() {
+    let memory_module = include_str!("../src/memory/mod.rs");
+    let control_module = include_str!("../src/memory/long_term_control.rs");
+    let control_exports = memory_module
+        .split("pub use long_term_control::{")
+        .nth(1)
+        .and_then(|exports| exports.split("};").next())
+        .expect("long-term control export block");
+
+    assert!(!control_exports.contains("apply_long_term_memory_control_mutation"));
+    assert!(!control_exports.contains("apply_long_term_memory_governance_policy_mutation"));
+    assert!(!control_exports.contains("LongTermMemoryControlStore"));
+    assert!(!control_module.contains("pub fn apply_long_term_memory_control_mutation"));
+    assert!(!control_module.contains("pub fn apply_long_term_memory_governance_policy_mutation"));
+    assert!(control_module.contains("pub(crate) fn apply_long_term_memory_control_mutation"));
+    assert!(
+        control_module.contains("pub(crate) fn apply_long_term_memory_governance_policy_mutation")
+    );
+}
 
 #[derive(Default)]
 struct InMemoryLongTermStore {
@@ -36,41 +60,33 @@ impl LongTermMemoryStore for InMemoryLongTermStore {
         let mut entries = self.entries.lock().expect("entries lock");
         let mut changed = 0usize;
         for draft in drafts {
-            let Some(normalized) = draft.normalized() else {
-                continue;
-            };
-            let Some(id) = normalized.stable_id() else {
-                continue;
-            };
-            let prior_created_at = entries.get(&id).map(|entry| entry.created_at);
-            let prior_last_used_at = entries.get(&id).map(|entry| entry.last_used_at);
-            entries.insert(
-                id.clone(),
-                LongTermMemoryEntry {
-                    id,
-                    kind: normalized.kind,
-                    topic: normalized.topic,
-                    content: normalized.content,
-                    keywords: normalized.keywords,
-                    source_chat_id: normalized.source_chat_id,
-                    source_type: normalized.source_type.unwrap_or_default(),
-                    source_scope: normalized.source_scope.unwrap_or_default(),
-                    confidence: normalized.confidence.unwrap_or_default(),
-                    freshness: normalized.freshness.unwrap_or_default(),
-                    stale_hint: normalized.stale_hint.unwrap_or_default(),
-                    supporting_citations: normalized.supporting_citations,
-                    evidence_count: normalized.evidence_count.unwrap_or(0),
-                    created_at: prior_created_at.unwrap_or(now_secs),
-                    updated_at: now_secs,
-                    observed_at: normalized.observed_at.unwrap_or(now_secs),
-                    last_confirmed_at: normalized.last_confirmed_at.unwrap_or(now_secs),
-                    source_revision: normalized.source_revision.unwrap_or(0),
-                    last_used_at: prior_last_used_at.unwrap_or(0),
-                },
-            );
-            changed += 1;
+            let id = draft.stable_id().expect("stable id");
+            match plan_long_term_memory_upsert(entries.get(&id), draft, now_secs) {
+                LongTermMemoryEntryPlan::Created(entry)
+                | LongTermMemoryEntryPlan::Updated(entry) => {
+                    entries.insert(id, entry);
+                    changed += 1;
+                }
+                LongTermMemoryEntryPlan::Noop => {}
+                LongTermMemoryEntryPlan::Rejected(reason) => panic!("rejected draft: {reason:?}"),
+            }
         }
         Ok(changed)
+    }
+
+    fn mutate_owner(
+        &self,
+        id: &str,
+        mutation: &LongTermMemoryOwnerMutation,
+        now_secs: u64,
+    ) -> Result<LongTermMemoryEntryPlan> {
+        let mut entries = self.entries.lock().expect("entries lock");
+        let existing = entries.get(id).expect("owner record").clone();
+        let plan = plan_long_term_memory_owner_mutation(&existing, mutation, now_secs);
+        if let LongTermMemoryEntryPlan::Updated(entry) = &plan {
+            entries.insert(id.to_string(), entry.clone());
+        }
+        Ok(plan)
     }
 
     fn recall(
@@ -138,6 +154,31 @@ impl LongTermMemoryStore for InMemoryLongTermStore {
     }
 }
 
+struct ReadOnlyLongTermView<'a>(&'a InMemoryLongTermStore);
+
+impl bm_core::memory::LongTermMemoryReadStore for ReadOnlyLongTermView<'_> {
+    fn recall(
+        &self,
+        query: &str,
+        source_chat_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryEntry>> {
+        LongTermMemoryStore::recall(self.0, query, source_chat_id, limit)
+    }
+
+    fn get(&self, id: &str) -> Result<Option<LongTermMemoryEntry>> {
+        LongTermMemoryStore::get(self.0, id)
+    }
+
+    fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
+        LongTermMemoryStore::list(self.0, limit)
+    }
+
+    fn count(&self) -> Result<usize> {
+        LongTermMemoryStore::count(self.0)
+    }
+}
+
 #[derive(Default)]
 struct InMemoryControlStore {
     revisions: Mutex<Vec<bm_core::memory::LongTermMemoryControlRevision>>,
@@ -146,18 +187,7 @@ struct InMemoryControlStore {
     audits: Mutex<Vec<LongTermMemoryControlAuditEvent>>,
 }
 
-impl LongTermMemoryControlStore for InMemoryControlStore {
-    fn put_long_term_control_revision(
-        &self,
-        revision: &bm_core::memory::LongTermMemoryControlRevision,
-    ) -> Result<()> {
-        self.revisions
-            .lock()
-            .expect("revisions lock")
-            .push(revision.clone());
-        Ok(())
-    }
-
+impl LongTermMemoryControlReadStore for InMemoryControlStore {
     fn list_long_term_control_revisions(
         &self,
         record_id: &str,
@@ -171,20 +201,9 @@ impl LongTermMemoryControlStore for InMemoryControlStore {
             .filter(|revision| revision.record_id == record_id)
             .cloned()
             .collect::<Vec<_>>();
-        revisions.sort_by(|left, right| right.revision.cmp(&left.revision));
+        revisions.sort_by(|left, right| right.owner_revision.cmp(&left.owner_revision));
         revisions.truncate(limit);
         Ok(revisions)
-    }
-
-    fn put_long_term_control_tombstone(
-        &self,
-        tombstone: &bm_core::memory::LongTermMemoryTombstone,
-    ) -> Result<()> {
-        self.tombstones
-            .lock()
-            .expect("tombstones lock")
-            .insert(tombstone.record_id.clone(), tombstone.clone());
-        Ok(())
     }
 
     fn get_long_term_control_tombstone(
@@ -215,6 +234,56 @@ impl LongTermMemoryControlStore for InMemoryControlStore {
         Ok(tombstones)
     }
 
+    fn list_long_term_governance_policies(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MemoryLongTermGovernancePolicy>> {
+        let mut policies = self
+            .policies
+            .lock()
+            .expect("policies lock")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        policies.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        policies.truncate(limit);
+        Ok(policies)
+    }
+
+    fn list_long_term_control_audit(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LongTermMemoryControlAuditEvent>> {
+        let mut audits = self.audits.lock().expect("audits lock").clone();
+        audits.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        audits.truncate(limit);
+        Ok(audits)
+    }
+}
+
+impl InMemoryControlStore {
+    fn put_long_term_control_revision(
+        &self,
+        revision: &bm_core::memory::LongTermMemoryControlRevision,
+    ) -> Result<()> {
+        self.revisions
+            .lock()
+            .expect("revisions lock")
+            .push(revision.clone());
+        Ok(())
+    }
+
+    fn put_long_term_control_tombstone(
+        &self,
+        tombstone: &bm_core::memory::LongTermMemoryTombstone,
+    ) -> Result<()> {
+        self.tombstones
+            .lock()
+            .expect("tombstones lock")
+            .insert(tombstone.record_id.clone(), tombstone.clone());
+        Ok(())
+    }
+
     fn put_long_term_governance_policy(
         &self,
         policy: &MemoryLongTermGovernancePolicy,
@@ -235,41 +304,130 @@ impl LongTermMemoryControlStore for InMemoryControlStore {
             .is_some())
     }
 
+    fn put_long_term_control_audit(&self, event: &LongTermMemoryControlAuditEvent) -> Result<()> {
+        self.audits.lock().expect("audits lock").push(event.clone());
+        Ok(())
+    }
+}
+
+fn apply_long_term_memory_control_mutation(
+    store: &InMemoryLongTermStore,
+    control: &InMemoryControlStore,
+    request: LongTermMemoryControlMutationRequest,
+) -> Result<bm_core::memory::MemoryLongTermMutationReport> {
+    let plan =
+        plan_long_term_memory_control_mutation(store, &ReadOnlyControlView(control), request)?;
+    for write in plan.owner_writes {
+        match write {
+            LongTermMemoryOwnerWrite::Put(entry) => {
+                let entry = *entry;
+                store
+                    .entries
+                    .lock()
+                    .expect("entries lock")
+                    .insert(entry.id.clone(), entry);
+            }
+            LongTermMemoryOwnerWrite::Delete { record_id } => {
+                store
+                    .entries
+                    .lock()
+                    .expect("entries lock")
+                    .remove(&record_id);
+            }
+        }
+    }
+    apply_control_writes(control, plan.control_writes)?;
+    Ok(plan.report)
+}
+
+fn apply_long_term_memory_governance_policy_mutation(
+    control: &InMemoryControlStore,
+    operation: MemoryGovernancePolicyMutation,
+    reason: String,
+    dry_run: bool,
+    now_secs: u64,
+) -> Result<MemoryGovernancePolicyMutationReport> {
+    let plan = plan_long_term_memory_governance_policy_mutation(
+        &ReadOnlyControlView(control),
+        operation,
+        reason,
+        dry_run,
+        now_secs,
+    )?;
+    apply_control_writes(control, plan.control_writes)?;
+    Ok(plan.report)
+}
+
+fn apply_control_writes(
+    control: &InMemoryControlStore,
+    writes: Vec<LongTermMemoryControlWrite>,
+) -> Result<()> {
+    for write in writes {
+        match write {
+            LongTermMemoryControlWrite::PutRevision(revision) => {
+                control.put_long_term_control_revision(&revision)?;
+            }
+            LongTermMemoryControlWrite::PutTombstone(tombstone) => {
+                control.put_long_term_control_tombstone(&tombstone)?;
+            }
+            LongTermMemoryControlWrite::PutGovernancePolicy(policy) => {
+                control.put_long_term_governance_policy(&policy)?;
+            }
+            LongTermMemoryControlWrite::DeleteGovernancePolicy { policy_id, .. } => {
+                control.delete_long_term_governance_policy(&policy_id)?;
+            }
+            LongTermMemoryControlWrite::AppendAudit(event) => {
+                control.put_long_term_control_audit(&event)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ReadOnlyControlView<'a>(&'a InMemoryControlStore);
+
+impl LongTermMemoryControlReadStore for ReadOnlyControlView<'_> {
+    fn list_long_term_control_revisions(
+        &self,
+        record_id: &str,
+        limit: usize,
+    ) -> Result<Vec<bm_core::memory::LongTermMemoryControlRevision>> {
+        self.0.list_long_term_control_revisions(record_id, limit)
+    }
+
+    fn get_long_term_control_tombstone(
+        &self,
+        record_id: &str,
+    ) -> Result<Option<bm_core::memory::LongTermMemoryTombstone>> {
+        self.0.get_long_term_control_tombstone(record_id)
+    }
+
+    fn list_long_term_control_tombstones(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<bm_core::memory::LongTermMemoryTombstone>> {
+        self.0.list_long_term_control_tombstones(limit)
+    }
+
     fn list_long_term_governance_policies(
         &self,
         limit: usize,
     ) -> Result<Vec<MemoryLongTermGovernancePolicy>> {
-        let mut policies = self
-            .policies
-            .lock()
-            .expect("policies lock")
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        policies.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        policies.truncate(limit);
-        Ok(policies)
-    }
-
-    fn put_long_term_control_audit(&self, event: &LongTermMemoryControlAuditEvent) -> Result<()> {
-        self.audits.lock().expect("audits lock").push(event.clone());
-        Ok(())
+        self.0.list_long_term_governance_policies(limit)
     }
 
     fn list_long_term_control_audit(
         &self,
         limit: usize,
     ) -> Result<Vec<LongTermMemoryControlAuditEvent>> {
-        let mut audits = self.audits.lock().expect("audits lock").clone();
-        audits.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        audits.truncate(limit);
-        Ok(audits)
+        self.0.list_long_term_control_audit(limit)
     }
 }
 
 fn draft(kind: LongTermMemoryKind, topic: &str, content: &str) -> LongTermMemoryDraft {
     LongTermMemoryDraft {
         kind,
+        privacy: MemoryPrivacyClass::SharedWithSubject,
         topic: topic.to_string(),
         content: content.to_string(),
         keywords: vec![topic.to_string()],
@@ -280,6 +438,7 @@ fn draft(kind: LongTermMemoryKind, topic: &str, content: &str) -> LongTermMemory
         freshness: None,
         stale_hint: None,
         supporting_citations: vec![transcript_ref().display_citation()],
+        canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(NOW_SECS - 10),
         last_confirmed_at: Some(NOW_SECS - 10),
@@ -325,9 +484,80 @@ fn derived_ref(record_id: &str) -> DerivedMemoryRef {
 }
 
 #[test]
+fn control_planner_returns_write_intent_without_mutating_read_stores() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let record_id = store.seed(draft(
+        LongTermMemoryKind::Preference,
+        "preferred-editor",
+        "The user prefers Helix for quick terminal edits.",
+    ));
+    let before = store.get(&record_id).expect("read before").expect("record");
+
+    let plan = plan_long_term_memory_control_mutation(
+        &ReadOnlyLongTermView(&store),
+        &ReadOnlyControlView(&control),
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::Correct {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                replacement: draft(
+                    LongTermMemoryKind::Preference,
+                    "preferred-editor",
+                    "The user prefers Neovim for quick terminal edits.",
+                ),
+            },
+            reason: "user_corrected_preference".to_string(),
+            dry_run: false,
+            actor_subject_id: Some("subject-human".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 1,
+        },
+    )
+    .expect("control plan");
+
+    assert!(plan.report.accepted);
+    assert_eq!(plan.owner_writes.len(), 1);
+    assert_eq!(plan.control_writes.len(), 2);
+    assert_eq!(store.get(&record_id).unwrap(), Some(before));
+    assert!(control.revisions.lock().unwrap().is_empty());
+    assert!(control.tombstones.lock().unwrap().is_empty());
+    assert!(control.policies.lock().unwrap().is_empty());
+    assert!(control.audits.lock().unwrap().is_empty());
+}
+
+#[test]
+fn governance_planner_returns_write_intent_without_mutating_read_store() {
+    let control = InMemoryControlStore::default();
+    let plan = plan_long_term_memory_governance_policy_mutation(
+        &ReadOnlyControlView(&control),
+        MemoryGovernancePolicyMutation::Pause {
+            selector: MemoryGovernanceSelector {
+                memory_space_id: Some("space-user".to_string()),
+                subject_id: Some("agent:assistant-main".to_string()),
+                kind: Some(LongTermMemoryKind::Preference),
+                topic_pattern: Some("temporary-*".to_string()),
+                source_chat_id: None,
+                source_scope: None,
+            },
+            expires_at: None,
+        },
+        "pause_temporary_preference_memory".to_string(),
+        false,
+        NOW_SECS + 2,
+    )
+    .expect("governance plan");
+
+    assert!(plan.report.accepted);
+    assert_eq!(plan.control_writes.len(), 2);
+    assert!(control.policies.lock().unwrap().is_empty());
+    assert!(control.audits.lock().unwrap().is_empty());
+}
+
+#[test]
 fn list_and_detail_return_active_records_with_evidence_and_cursor() {
     let store = InMemoryLongTermStore::default();
     let control = InMemoryControlStore::default();
+    let read_control = ReadOnlyControlView(&control);
     let first_id = store.seed(draft(
         LongTermMemoryKind::Preference,
         "preferred-editor",
@@ -341,7 +571,7 @@ fn list_and_detail_return_active_records_with_evidence_and_cursor() {
 
     let page = list_long_term_memory_control_page(
         &store,
-        &control,
+        &read_control,
         LongTermMemoryControlListRequest {
             query: LongTermMemoryQuery {
                 kind: Some(LongTermMemoryKind::Preference),
@@ -365,7 +595,7 @@ fn list_and_detail_return_active_records_with_evidence_and_cursor() {
 
     let detail = get_long_term_memory_control_detail(
         &store,
-        &control,
+        &read_control,
         LongTermMemoryControlDetailRequest {
             target: MemoryLongTermTarget::RecordId(first_id.clone()),
             view: MemoryLongTermControlView::HostUi,
@@ -380,7 +610,7 @@ fn list_and_detail_return_active_records_with_evidence_and_cursor() {
 
     let raw_detail = get_long_term_memory_control_detail(
         &store,
-        &control,
+        &read_control,
         LongTermMemoryControlDetailRequest {
             target: MemoryLongTermTarget::RecordId(first_id),
             view: MemoryLongTermControlView::RawOwner,
@@ -396,7 +626,7 @@ fn list_and_detail_return_active_records_with_evidence_and_cursor() {
 }
 
 #[test]
-fn correct_preserves_record_lineage_and_increments_source_revision() {
+fn correct_preserves_source_lineage_and_increments_owner_revision() {
     let store = InMemoryLongTermStore::default();
     let control = InMemoryControlStore::default();
     let record_id = store.seed(draft(
@@ -429,10 +659,13 @@ fn correct_preserves_record_lineage_and_increments_source_revision() {
     assert!(report.accepted);
     assert_eq!(report.affected_records.len(), 1);
     assert_eq!(report.affected_records[0].record_id, record_id);
-    assert_eq!(report.affected_records[0].previous_revision, 1);
-    assert_eq!(report.affected_records[0].new_revision, Some(2));
+    assert_eq!(report.affected_records[0].previous_owner_revision, 1);
+    assert_eq!(report.affected_records[0].new_owner_revision, Some(2));
+    assert_eq!(report.affected_records[0].previous_source_revision, Some(1));
+    assert_eq!(report.affected_records[0].new_source_revision, Some(1));
     let corrected = store.get(&record_id).expect("read").expect("corrected");
-    assert_eq!(corrected.source_revision, 2);
+    assert_eq!(corrected.source_revision, Some(1));
+    assert_eq!(corrected.owner_revision, 2);
     assert!(corrected.content.contains("Neovim"));
     assert_eq!(
         control
@@ -442,6 +675,70 @@ fn correct_preserves_record_lineage_and_increments_source_revision() {
         1
     );
     assert!(report.audit_event_id.is_some());
+}
+
+#[test]
+fn unchanged_correct_stale_privacy_and_scope_are_noop_without_control_writes() {
+    for operation_name in ["correct", "mark_stale", "change_privacy", "change_scope"] {
+        let store = InMemoryLongTermStore::default();
+        let control = InMemoryControlStore::default();
+        let original = draft(
+            LongTermMemoryKind::Preference,
+            "preferred-editor",
+            "The user prefers Helix for quick terminal edits.",
+        );
+        let record_id = store.seed(original.clone());
+        let operation = match operation_name {
+            "correct" => MemoryLongTermMutation::Correct {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                replacement: original,
+            },
+            "mark_stale" => MemoryLongTermMutation::MarkStale {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                stale_hint: LongTermMemoryStaleHint::None,
+            },
+            "change_privacy" => MemoryLongTermMutation::ChangePrivacy {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+            },
+            "change_scope" => MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                source_scope: LongTermMemorySourceScope::User,
+                subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            },
+            _ => unreachable!(),
+        };
+
+        let report = apply_long_term_memory_control_mutation(
+            &store,
+            &control,
+            LongTermMemoryControlMutationRequest {
+                operation,
+                reason: "same value".to_string(),
+                dry_run: false,
+                actor_subject_id: Some("subject-human".to_string()),
+                memory_space_id: Some("space-user".to_string()),
+                now_secs: NOW_SECS + 1,
+            },
+        )
+        .expect("noop report");
+
+        assert!(report.accepted, "{operation_name}");
+        assert!(report.affected_records.is_empty(), "{operation_name}");
+        assert_eq!(
+            store.get(&record_id).unwrap().unwrap().owner_revision,
+            1,
+            "{operation_name}"
+        );
+        assert!(
+            control.revisions.lock().unwrap().is_empty(),
+            "{operation_name}"
+        );
+        assert!(
+            control.audits.lock().unwrap().is_empty(),
+            "{operation_name}"
+        );
+    }
 }
 
 #[test]
@@ -524,7 +821,9 @@ fn supersede_and_delete_create_tombstones_and_exclude_old_records() {
     )
     .expect("deleted detail");
     assert!(deleted_detail.record.is_none());
-    assert!(deleted_detail.tombstone.is_some());
+    assert!(deleted_detail.revisions.is_empty());
+    assert!(deleted_detail.tombstone.is_none());
+    assert!(deleted_detail.transcript_refs.is_empty());
 }
 
 #[test]
@@ -719,6 +1018,80 @@ fn change_scope_reports_subject_visibility_without_host_role_names() {
     assert!(!rendered.contains("CEO"));
     assert!(!rendered.contains("BOSS"));
     assert!(!rendered.contains("财务总监"));
+}
+
+#[test]
+fn privacy_transition_requires_the_explicit_control_operation() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let original = draft(
+        LongTermMemoryKind::Preference,
+        "privacy-transition",
+        "Keep this memory subject-scoped until explicitly governed.",
+    );
+    let record_id = store.seed(original.clone());
+    let mut implicit = original;
+    implicit.privacy = MemoryPrivacyClass::PublicRuntime;
+
+    let rejected = apply_long_term_memory_control_mutation(
+        &store,
+        &control,
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::Correct {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                replacement: implicit,
+            },
+            reason: "ordinary correction must not broaden visibility".to_string(),
+            dry_run: false,
+            actor_subject_id: Some("subject-human".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 8,
+        },
+    )
+    .expect("rejected privacy correction");
+    assert!(!rejected.accepted);
+    assert_eq!(
+        rejected.policy_decision.reason,
+        "privacy_transition_requires_change_privacy"
+    );
+    assert_eq!(
+        store.get(&record_id).unwrap().unwrap().privacy,
+        MemoryPrivacyClass::SharedWithSubject
+    );
+
+    let changed = apply_long_term_memory_control_mutation(
+        &store,
+        &control,
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::ChangePrivacy {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                privacy: MemoryPrivacyClass::PublicRuntime,
+            },
+            reason: "owner explicitly approved public runtime visibility".to_string(),
+            dry_run: false,
+            actor_subject_id: Some("subject-human".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 9,
+        },
+    )
+    .expect("explicit privacy transition");
+    assert!(changed.accepted);
+    assert_eq!(changed.operation, "change_privacy");
+    assert_eq!(
+        store.get(&record_id).unwrap().unwrap().privacy,
+        MemoryPrivacyClass::PublicRuntime
+    );
+    let revision = control
+        .revisions
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|revision| revision.operation == "change_privacy")
+        .cloned()
+        .expect("change privacy revision");
+    assert_ne!(revision.previous_digest, revision.new_digest);
+    assert_eq!(revision.owner_revision, 2);
+    assert_eq!(revision.source_revision, Some(1));
 }
 
 #[test]

@@ -1,3 +1,5 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,9 +8,9 @@ use bm_core::platform::Platform as _;
 use bm_sdk::{
     ContinuitySnapshotImportMode, IngressKind, MemoryExportRequest, MemoryImportRequest,
     MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
-    StorePlatform,
+    MemoryRecallRequest, MemoryStoreHandle, MemoryWriteRequest, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 use support::{test_runtime, StaticHttpClient, StaticLlmClient};
@@ -23,7 +25,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
             .expect("clock")
             .as_nanos()
     ));
-    let store = StorePlatform::open(
+    let store = MemoryStoreHandle::open(
         StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config"),
     )
     .expect("store");
@@ -35,11 +37,12 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
             writes: vec![RuntimeSkillWrite {
                 name: "store_contract".to_string(),
                 topic: "store backend".to_string(),
-                title: "Use StorePlatform directly".to_string(),
-                summary: "SDK hosts open StorePlatform instead of implementing store traits."
+                title: "Use MemoryStoreHandle directly".to_string(),
+                summary: "SDK hosts open MemoryStoreHandle instead of implementing store traits."
                     .to_string(),
-                content: "1. choose backend\n2. open StorePlatform\n3. pass platform to runtime"
-                    .to_string(),
+                content:
+                    "1. choose backend\n2. open MemoryStoreHandle\n3. pass platform to runtime"
+                        .to_string(),
                 citations: vec!["sdk store opening contract".to_string()],
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
@@ -53,7 +56,8 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
-            query: "StorePlatform backend".to_string(),
+            structured_query_facets: Vec::new(),
+            query: "MemoryStoreHandle backend".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
         })
@@ -66,6 +70,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How do I open storage?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -85,7 +90,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
             MemoryMaintenanceRequest {
                 ingress: IngressKind::User,
                 user_content: "remember the store backend opening path".to_string(),
-                reply_content: "Use StorePlatform and pass it to MemoryRuntime.".to_string(),
+                reply_content: "Use MemoryStoreHandle and pass it to MemoryRuntime.".to_string(),
                 tool_calls: 0,
                 external_content_used: false,
                 runtime_skill_selected_ids: Vec::new(),
@@ -126,11 +131,12 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
         .expect("import");
     assert!(!imported.outcome.decisions.is_empty());
 
-    let reopened = StorePlatform::open(
+    let reopened = MemoryStoreHandle::open(
         StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config"),
     )
     .expect("reopen");
     assert!(reopened
+        .replay_harness()
         .skill_storage()
         .list_names()
         .expect("list")

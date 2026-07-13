@@ -7,10 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
-#[cfg(feature = "replay-harness")]
+#[cfg(feature = "nonproduction-replay-harness")]
 use bm_replay::{MemoryBenchmarkMode, MemoryBenchmarkReport};
 use bm_sdk::{
-    DeferredGovernanceQueueReport, MemoryStoreEvent, ProfileId, RuntimeBudgetReport,
+    DeferredGovernanceQueueReport, MemoryStoreTelemetryReport, ProfileId, RuntimeBudgetReport,
     RuntimeSkillDetailReport, RuntimeSkillListReport, RuntimeSkillMutationReport,
     RuntimeSkillSummary, StoreBackendKind, WorkbenchApiMap,
 };
@@ -196,7 +196,7 @@ pub struct EntryConsoleMemoryBenchmarkReport {
 }
 
 impl EntryConsoleMemoryBenchmarkReport {
-    #[cfg(feature = "replay-harness")]
+    #[cfg(feature = "nonproduction-replay-harness")]
     pub fn from_report(report: MemoryBenchmarkReport) -> Self {
         Self {
             suite: report.suite,
@@ -314,7 +314,7 @@ pub struct EntryConsoleMemoryBenchmarkFailure {
     pub reason: String,
 }
 
-#[cfg(feature = "replay-harness")]
+#[cfg(feature = "nonproduction-replay-harness")]
 const fn memory_benchmark_mode(mode: MemoryBenchmarkMode) -> &'static str {
     match mode {
         MemoryBenchmarkMode::Compact => "compact",
@@ -352,8 +352,8 @@ pub struct EntryConsoleWorkbenchFacetInspector {
     pub fallback_full_scan: bool,
     pub source_candidate_count: usize,
     pub matched_source_candidate_count: usize,
-    pub exact_facet_doc_count: usize,
-    pub expanded_facet_doc_count: usize,
+    pub exact_facet_match_count: usize,
+    pub expanded_facet_match_count: usize,
     pub index_revision: Option<String>,
     pub render_growth: usize,
     pub failures: Vec<String>,
@@ -380,7 +380,7 @@ pub struct EntryConsoleWorkbenchProjectionInspector {
     pub privacy_decisions: usize,
     pub dropped_candidates: usize,
     pub faithfulness_passed: bool,
-    pub unsupported_claims: Vec<String>,
+    pub unsupported_claim_count: usize,
     pub disclosure_integrity_passed: bool,
     pub raw_private_violation_count: u32,
     pub agent_tool_hints: usize,
@@ -642,72 +642,14 @@ pub struct EntryConsoleTelemetrySnapshot {
 }
 
 impl EntryConsoleTelemetrySnapshot {
-    pub fn from_events(events: &[MemoryStoreEvent]) -> Self {
-        let today_start = today_start_unix_secs();
-        let mut snapshot = Self::default();
-        let mut lifecycle_writes_today = 0_u64;
-        let mut lifecycle_write_timestamps = Vec::new();
-        let mut raw_write_timestamps = Vec::new();
-        let mut latest_projection_timestamp = 0;
-        for event in events {
-            if event.kind_name == "memory.write" && event.timestamp_unix_secs >= today_start {
-                raw_write_timestamps.push(event.timestamp_unix_secs);
-                continue;
-            }
-            if event.kind_name != "runtime.lifecycle" {
-                continue;
-            }
-            let Some(operation) = event.payload.get("operation").map(String::as_str) else {
-                continue;
-            };
-            let result_summary = event
-                .payload
-                .get("result_summary")
-                .map(String::as_str)
-                .unwrap_or_default();
-            if result_summary.starts_with("write.")
-                && event.timestamp_unix_secs >= today_start
-                && event_payload_bool(event, "success")
-            {
-                let changed_count = event_payload_u64(event, "changed_count").unwrap_or(1);
-                lifecycle_writes_today = lifecycle_writes_today.saturating_add(changed_count);
-                if changed_count > 0 {
-                    lifecycle_write_timestamps.push(event.timestamp_unix_secs);
-                }
-            }
-            if operation == "project" && result_summary == "projection_completed" {
-                snapshot.projection_requests = snapshot.projection_requests.saturating_add(1);
-                if event.timestamp_unix_secs >= latest_projection_timestamp {
-                    latest_projection_timestamp = event.timestamp_unix_secs;
-                    snapshot.last_projection_chars =
-                        event_payload_usize(event, "system_memory_chars").unwrap_or(0);
-                }
-            }
-            let has_hit_telemetry =
-                event.payload.contains_key("memory_hit") || event.payload.contains_key("hit_count");
-            let counts_as_recall_request = has_hit_telemetry
-                && ((operation == "project" && result_summary == "projection_completed")
-                    || (operation == "inspect" && result_summary == "recall_completed"));
-            if counts_as_recall_request {
-                snapshot.recall_requests = snapshot.recall_requests.saturating_add(1);
-                if event_payload_bool(event, "memory_hit")
-                    || event_payload_usize(event, "hit_count").unwrap_or(0) > 0
-                {
-                    snapshot.recall_hits = snapshot.recall_hits.saturating_add(1);
-                }
-            }
+    pub fn from_store_telemetry(report: MemoryStoreTelemetryReport) -> Self {
+        Self {
+            writes_today: report.writes_since,
+            recall_requests: report.recall_requests,
+            recall_hits: report.recall_hits,
+            projection_requests: report.projection_requests,
+            last_projection_chars: report.last_projection_chars,
         }
-        let raw_writes_without_write_lifecycle = raw_write_timestamps
-            .into_iter()
-            .filter(|timestamp| {
-                !lifecycle_write_timestamps
-                    .iter()
-                    .any(|candidate| candidate.abs_diff(*timestamp) <= 5)
-            })
-            .count() as u64;
-        snapshot.writes_today =
-            lifecycle_writes_today.saturating_add(raw_writes_without_write_lifecycle);
-        snapshot
     }
 
     pub fn merge(&mut self, other: Self) {
@@ -1212,7 +1154,7 @@ impl EntryConsoleState {
             }
             (AdapterOperation::Project, AdapterSdkReport::Project(report)) => {
                 inner.projection_requests = inner.projection_requests.saturating_add(1);
-                inner.last_projection_chars = report.system_memory_block.chars().count();
+                inner.last_projection_chars = report.chars;
                 let chars = inner.last_projection_chars;
                 push_event(
                     &mut inner,
@@ -1765,27 +1707,6 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.2} {}", UNITS[unit])
     }
-}
-
-fn today_start_unix_secs() -> u64 {
-    const SECS_PER_DAY: u64 = 24 * 60 * 60;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    (now / SECS_PER_DAY) * SECS_PER_DAY
-}
-
-fn event_payload_usize(event: &MemoryStoreEvent, key: &str) -> Option<usize> {
-    event.payload.get(key)?.parse().ok()
-}
-
-fn event_payload_u64(event: &MemoryStoreEvent, key: &str) -> Option<u64> {
-    event.payload.get(key)?.parse().ok()
-}
-
-fn event_payload_bool(event: &MemoryStoreEvent, key: &str) -> bool {
-    matches!(event.payload.get(key).map(String::as_str), Some("true"))
 }
 
 fn percentage_value(value: u64, total: u64) -> f32 {

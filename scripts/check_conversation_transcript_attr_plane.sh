@@ -57,10 +57,10 @@ require_fixed "attr_key" crates/core/src/memory/transcript.rs docs/en/replay-and
 require_fixed "AttrVisibility" crates/core/src/memory/transcript.rs
 require_fixed "AttrValueBudget" crates/core/src/memory/transcript.rs
 require_fixed "AttrLifecyclePolicy" crates/core/src/memory/transcript.rs
-require_fixed "conversation_transcript_attr" crates/store/src/platform.rs crates/sdk/src/lib.rs docs/en/api.md docs/zh-CN/api.md docs/en/operator-guide.md docs/zh-CN/operator-guide.md
-require_fixed "upsert_transcript_attrs" crates/core/src/memory/transcript.rs crates/store/src/platform.rs
-require_fixed "list_transcript_attrs" crates/core/src/memory/transcript.rs crates/store/src/platform.rs
-require_fixed "list_transcript_attr_repair_issues" crates/core/src/memory/transcript.rs crates/store/src/platform.rs
+require_fixed "conversation_transcript_attr" crates/sdk/src/store_internal/platform.rs crates/sdk/src/lib.rs docs/en/api.md docs/zh-CN/api.md docs/en/operator-guide.md docs/zh-CN/operator-guide.md
+require_fixed "upsert_transcript_attrs" crates/core/src/memory/transcript.rs crates/sdk/src/store_internal/platform.rs
+require_fixed "list_transcript_attrs" crates/core/src/memory/transcript.rs crates/sdk/src/store_internal/platform.rs
+require_fixed "list_transcript_attr_repair_issues" crates/core/src/memory/transcript.rs crates/sdk/src/store_internal/platform.rs
 require_fixed "MissingAttrTargetTurn" crates/core/src/memory/transcript.rs docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
 require_fixed "MissingAttrTargetMessage" crates/core/src/memory/transcript.rs docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
 require_fixed "MemoryTranscriptAttrWriteRequest" crates/sdk/src/ops.rs crates/sdk/src/lib.rs docs/en/api.md docs/zh-CN/api.md docs/en/cli-usage.md docs/zh-CN/cli-usage.md
@@ -81,8 +81,8 @@ require_fixed "memory_transcript_attr_write_request" crates/a2a/src/lib.rs crate
 require_fixed "transcript-attr-write" crates/cli/src/lib.rs crates/cli/tests/cli_contract.rs docs/en/cli-usage.md docs/zh-CN/cli-usage.md
 require_fixed "runtime_records_transcript_attrs_and_replays_host_ui_message_usage" crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "memory_space_export_redacts_raw_conversation_transcript_by_default" crates/sdk/tests/conversation_transcript_runtime_contract.rs
-require_fixed "store_persists_transcript_attrs_and_replays_visible_message_attrs" crates/store/tests/conversation_transcript_store_contract.rs
-require_fixed "store_repair_reports_corrupt_transcript_attr_records_without_failing_replay" crates/store/tests/conversation_transcript_store_contract.rs
+require_fixed "store_persists_transcript_attrs_and_replays_visible_message_attrs" crates/store-contract-tests/tests/conversation_transcript_store_contract.rs
+require_fixed "store_repair_reports_corrupt_transcript_attr_records_without_failing_replay" crates/store-contract-tests/tests/conversation_transcript_store_contract.rs
 require_fixed "transcript_attrs_are_filtered_per_replay_view_and_attached_to_message" crates/core/tests/conversation_transcript_contract.rs
 require_fixed "transcript_attrs_obey_mask_and_delete_raw_lifecycle_policies" crates/core/tests/conversation_transcript_contract.rs
 require_fixed "host.beetle_agent.model_usage" dev-docs/conversation-transcript-attribute-plane-plan.md
@@ -114,8 +114,8 @@ if rg -n 'TaskRecord|TaskDelegationLifecycleEvent|PolicyDecision|HumanGate|Capab
 fi
 
 store_attr_scan="$(
-  sed -n '/fn upsert_transcript_attrs/,/^    fn append_derived_memory_ref/p' crates/store/src/platform.rs
-  sed -n '/fn transcript_attr_rejection/,/^impl LongTermMemoryStore/p' crates/store/src/platform.rs
+  sed -n '/fn upsert_transcript_attrs/,/^    fn append_derived_memory_ref/p' crates/sdk/src/store_internal/platform.rs
+  sed -n '/fn transcript_attr_rejection/,/^impl ScopedLongTermMemoryStore/p' crates/sdk/src/store_internal/platform.rs
 )"
 if printf '%s\n' "$store_attr_scan" | rg -n 'TaskRecord|TaskDelegationLifecycleEvent|PolicyDecision|HumanGate|CapabilityCall|ArtifactRecord|FileWorkspace' \
   | rg -v 'TranscriptAttr|DerivedMemory|MemoryLongTermTarget'; then
@@ -123,7 +123,7 @@ if printf '%s\n' "$store_attr_scan" | rg -n 'TaskRecord|TaskDelegationLifecycleE
   exit 1
 fi
 
-if rg -n 'max_attrs_per_turn|max_attrs_per_message' crates/store/src; then
+if rg -n 'max_attrs_per_turn|max_attrs_per_message' crates/sdk/src/store_internal; then
   echo "StorePlatform must not own transcript attr profile budgets" >&2
   exit 1
 fi

@@ -3,34 +3,12 @@ use serde::{Deserialize, Serialize};
 use crate::skills::{runtime_skill_name_for_topic, RuntimeSkillWrite};
 
 use super::{
-    GovernedWriteDecision, LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, MemoryEvidenceAuthority, MemoryPlaneGovernanceReport,
-    MemoryWriteAuthority, MemoryWriteDomain, PostTurnSemanticGovernanceReport,
-    SoulCandidateDisposition, SoulCandidateHandoffReport,
+    CanonicalEntityRef, GovernedWriteDecision, LongTermMemoryConfidence, LongTermMemoryDraft,
+    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryEvidenceAuthority,
+    MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemoryWriteAuthority, MemoryWriteDomain,
+    PostTurnSemanticGovernanceReport, SoulCandidateDisposition, SoulCandidateHandoffReport,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryPrivacyClass {
-    PublicRuntime,
-    SharedWithSubject,
-    PrivateGarden,
-    SoulPrivate,
-    OperatorDiagnostic,
-}
-
-impl MemoryPrivacyClass {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::PublicRuntime => "public_runtime",
-            Self::SharedWithSubject => "shared_with_subject",
-            Self::PrivateGarden => "private_garden",
-            Self::SoulPrivate => "soul_private",
-            Self::OperatorDiagnostic => "operator_diagnostic",
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "target", rename_all = "snake_case")]
@@ -170,6 +148,7 @@ pub struct MemoryWriteCandidate {
     pub content: MemoryCandidateContent,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    pub canonical_entities: Vec<CanonicalEntityRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_judgment: Option<MemoryCandidateSemanticJudgment>,
 }
@@ -200,6 +179,7 @@ impl MemoryWriteCandidate {
             topic: topic.clone(),
             content: self.content.body().trim().to_string(),
             keywords: self.content.keywords(),
+            privacy: self.privacy,
             source_chat_id: Some(source_chat_id.to_string()),
             source_type: Some(match self.authority {
                 MemoryEvidenceAuthority::RuntimeObservation => {
@@ -230,10 +210,11 @@ impl MemoryWriteCandidate {
             freshness: Some(LongTermMemoryFreshness::Stable),
             stale_hint: Some(LongTermMemoryStaleHint::None),
             supporting_citations: self.evidence_refs.clone(),
+            canonical_entities: self.canonical_entities.clone(),
             evidence_count: Some(self.evidence_refs.len().max(1) as u32),
             observed_at: Some(now_secs),
             last_confirmed_at: Some(now_secs),
-            source_revision: Some(now_secs),
+            source_revision: None,
         })
     }
 

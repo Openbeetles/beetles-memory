@@ -16,9 +16,9 @@ use super::{
     render_private_doc_workspace_block, render_private_memory_boundary_block,
     render_self_continuity_block, render_self_model_block, render_shared_factual_plane_block,
     whole_record_lease_advanced, ExecutionState, ExecutionStateStore, InnerLifePolicy,
-    InnerLifeStore, InternalMemoryLayerFocus, LongTermMemoryStore, MemoryProfile, PrivateDocStore,
-    PrivateDocWorkspace, SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore,
-    SessionMessage, SessionStore, SessionSummaryStore,
+    InnerLifeStore, InternalMemoryLayerFocus, LongTermMemoryReadStore, MemoryProfile,
+    PrivateDocStore, PrivateDocWorkspace, SelfContinuity, SelfContinuityStore, SelfModel,
+    SelfModelStore, SessionMessage, SessionStore, SessionSummaryStore,
 };
 
 pub const INNER_LIFE_SYSTEM_PROMPT: &str = "You maintain the AI assistant's private inner life. Return JSON only: either null or one object with fields internal_monologue, private_journal, emotional_drift, attention_drift. This layer is subjective, first-person is allowed, and it may carry ambiguity, mood, or inward texture. It must stay compact. Do not copy transcript lines, generic assistant boilerplate, raw tool payloads, secrets, or factual memory that belongs elsewhere. Durable objective material belongs in the shared factual plane, and durable private identity belongs in self-continuity or self-model; use this layer for active inward afterglow, emotional movement, and current attentional drift.";
@@ -72,7 +72,7 @@ pub struct InnerLifeRefreshContext<'a> {
     pub session_store: &'a dyn SessionStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub self_model_store: &'a dyn SelfModelStore,
     pub private_doc_store: &'a dyn PrivateDocStore,
     pub self_continuity_store: &'a dyn SelfContinuityStore,

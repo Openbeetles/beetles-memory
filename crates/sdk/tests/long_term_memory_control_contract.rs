@@ -1,22 +1,70 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
+use bm_core::memory::{
+    scoped_long_term_control_storage_key, LongTermMemoryControlRevision, LongTermMemoryTombstone,
+    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+};
 use bm_core::platform::Platform as _;
+use bm_sdk::nonproduction_replay_harness::StoreSnapshotJsonDoc;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
     LongTermMemoryKind, LongTermMemoryQuery, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryEvidenceAuthority, MemoryFacetOwnerPlane, MemoryGovernancePolicyMutation,
     MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryLongTermControlView,
-    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
-    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    RuntimeLifecycleOperation, TranscriptEvidenceRef, TranscriptInputMessage, TranscriptReplayView,
+    MemoryLongTermDetailRequest, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
+    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeLifecycleOperation, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptReplayView,
 };
 
 use support::{StaticHttpClient, StaticLlmClient};
+
+fn inject_scoped_control_metadata_at_store_trust_boundary(
+    platform: &bm_sdk::MemoryStoreHandle,
+    memory_space_id: &str,
+    revision: &LongTermMemoryControlRevision,
+    tombstone: &LongTermMemoryTombstone,
+) {
+    let revision_key = scoped_long_term_control_storage_key(
+        memory_space_id,
+        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+        &revision.revision_id,
+    )
+    .expect("scoped revision key");
+    let tombstone_key = scoped_long_term_control_storage_key(
+        memory_space_id,
+        LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+        &tombstone.record_id,
+    )
+    .expect("scoped tombstone key");
+    let mut snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("export control metadata fixture");
+    snapshot.json_docs.push(StoreSnapshotJsonDoc {
+        namespace: LONG_TERM_CONTROL_REVISION_NAMESPACE.to_string(),
+        key: revision_key,
+        value: serde_json::to_value(revision).expect("serialize revision"),
+    });
+    snapshot.json_docs.push(StoreSnapshotJsonDoc {
+        namespace: LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE.to_string(),
+        key: tombstone_key,
+        value: serde_json::to_value(tombstone).expect("serialize tombstone"),
+    });
+    platform
+        .replay_harness()
+        .import_store_snapshot(&snapshot)
+        .expect("inject scoped control metadata snapshot");
+}
 
 fn turn_source() -> MemoryTurnSource {
     MemoryTurnSource {
@@ -128,20 +176,208 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
         })
         .expect("deleted detail");
     assert!(deleted_detail.record.is_none());
-    assert!(deleted_detail.tombstone.is_some());
+    assert!(deleted_detail.revisions.is_empty());
+    assert!(deleted_detail.tombstone.is_none());
+    assert!(deleted_detail.transcript_refs.is_empty());
 
     let tombstone = event_reader
-        .long_term_memory_control_store()
+        .replay_harness()
+        .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
+        .expect("scoped long-term control store")
         .get_long_term_control_tombstone(&record_id)
         .unwrap();
     assert!(tombstone.is_some());
     assert!(event_reader
+        .replay_harness()
         .read_events()
         .unwrap()
         .iter()
         .any(|event| event.kind_name == "operator.action"
             && event.payload.get("action").map(String::as_str)
                 == Some("long_term_memory_control")));
+    assert!(event_reader
+        .replay_harness()
+        .read_events()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            [
+                LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+                LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+            ]
+            .contains(&event.plane.as_str())
+        })
+        .all(|event| !event.record_key.starts_with("scope:")));
+}
+
+#[test]
+fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let platform = support::empty_store_platform(profile);
+    let runtime = support::test_runtime_with_identity_scope_and_subject(
+        platform.clone(),
+        profile,
+        "agent-a",
+        "owner-a",
+        "subject-a",
+        "local",
+        "chat-a",
+    );
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![
+                    bm_sdk::LongTermMemoryDraft {
+                        kind: LongTermMemoryKind::Fact,
+                        topic: "governed visible record".to_string(),
+                        content: "Only the owning runtime may list this governed record."
+                            .to_string(),
+                        keywords: vec!["governed".to_string()],
+                        privacy: MemoryPrivacyClass::SharedWithSubject,
+                        source_chat_id: Some("chat-a".to_string()),
+                        source_type: None,
+                        source_scope: None,
+                        confidence: None,
+                        freshness: None,
+                        stale_hint: None,
+                        supporting_citations: vec!["external_eval:governed-visible".to_string()],
+                        canonical_entities: Vec::new(),
+                        evidence_count: Some(1),
+                        observed_at: Some(1_800_000_000),
+                        last_confirmed_at: Some(1_800_000_000),
+                        source_revision: Some(1),
+                    },
+                    bm_sdk::LongTermMemoryDraft {
+                        kind: LongTermMemoryKind::Fact,
+                        topic: "governed private record".to_string(),
+                        content: "PRIVATE_CONTROL_SURFACE_SENTINEL".to_string(),
+                        keywords: vec!["private".to_string()],
+                        privacy: MemoryPrivacyClass::SoulPrivate,
+                        source_chat_id: Some("chat-a".to_string()),
+                        source_type: None,
+                        source_scope: None,
+                        confidence: None,
+                        freshness: None,
+                        stale_hint: None,
+                        supporting_citations: vec!["private://control-sentinel".to_string()],
+                        canonical_entities: Vec::new(),
+                        evidence_count: Some(1),
+                        observed_at: Some(1_800_000_000),
+                        last_confirmed_at: Some(1_800_000_000),
+                        source_revision: Some(1),
+                    },
+                ],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed governed and private records");
+    let raw_records = platform
+        .replay_harness()
+        .scoped_long_term_memory_read_store(runtime.memory_space_id())
+        .expect("scoped long-term read store")
+        .list(10)
+        .expect("raw owner records");
+    let visible_id = raw_records
+        .iter()
+        .find(|entry| entry.content.contains("Only the owning runtime"))
+        .expect("visible owner record")
+        .id
+        .clone();
+    let private_id = raw_records
+        .iter()
+        .find(|entry| entry.content.contains("PRIVATE_CONTROL_SURFACE_SENTINEL"))
+        .expect("private owner record")
+        .id
+        .clone();
+
+    let owner_list = runtime
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: None,
+            limit: 10,
+            view: MemoryLongTermControlView::Operator,
+        })
+        .expect("owner governed list");
+    assert_eq!(owner_list.records.len(), 1);
+    assert_eq!(owner_list.records[0].record.id, visible_id);
+    for record_id in [&private_id, &visible_id] {
+        inject_scoped_control_metadata_at_store_trust_boundary(
+            &platform,
+            runtime.memory_space_id(),
+            &LongTermMemoryControlRevision {
+                schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+                revision_id: format!("known-id-revision:{record_id}"),
+                record_id: record_id.clone(),
+                successor_record_id: None,
+                operation: "correct".to_string(),
+                owner_revision: 2,
+                source_revision: Some(1),
+                previous_digest: "previous-digest".to_string(),
+                new_digest: "new-digest".to_string(),
+                reason: "known id metadata must remain governed".to_string(),
+                actor_subject_id: Some("subject-a".to_string()),
+                memory_space_id: Some(runtime.memory_space_id().to_string()),
+                created_at: 1_800_000_001,
+            },
+            &LongTermMemoryTombstone {
+                schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+                tombstone_id: format!("known-id-tombstone:{record_id}"),
+                record_id: record_id.clone(),
+                operation: "delete".to_string(),
+                last_owner_revision: 2,
+                last_source_revision: Some(1),
+                previous_digest: "previous-digest".to_string(),
+                reason: "known id tombstone must remain governed".to_string(),
+                actor_subject_id: Some("subject-a".to_string()),
+                memory_space_id: Some(runtime.memory_space_id().to_string()),
+                created_at: 1_800_000_002,
+            },
+        );
+    }
+
+    let private_detail = runtime
+        .get_long_term_memory(MemoryLongTermDetailRequest {
+            target: MemoryLongTermTarget::RecordId(private_id.clone()),
+            view: MemoryLongTermControlView::Operator,
+        })
+        .expect("private governed detail");
+    assert!(private_detail.record.is_none());
+    assert!(private_detail.revisions.is_empty());
+    assert!(private_detail.tombstone.is_none());
+    assert!(private_detail.transcript_refs.is_empty());
+
+    let other_runtime = support::test_runtime_with_identity_scope_and_subject(
+        platform,
+        profile,
+        "agent-b",
+        "owner-b",
+        "subject-b",
+        "local",
+        "chat-b",
+    );
+    assert!(other_runtime
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: None,
+            limit: 10,
+            view: MemoryLongTermControlView::Operator,
+        })
+        .expect("cross-space governed list")
+        .records
+        .is_empty());
+    let cross_subject_detail = other_runtime
+        .get_long_term_memory(MemoryLongTermDetailRequest {
+            target: MemoryLongTermTarget::RecordId(visible_id),
+            view: MemoryLongTermControlView::Operator,
+        })
+        .expect("cross-space governed detail");
+    assert!(cross_subject_detail.record.is_none());
+    assert!(cross_subject_detail.revisions.is_empty());
+    assert!(cross_subject_detail.tombstone.is_none());
+    assert!(cross_subject_detail.transcript_refs.is_empty());
 }
 
 #[test]
@@ -159,6 +395,7 @@ fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() 
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![bm_sdk::LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
+                    privacy: bm_sdk::MemoryPrivacyClass::SharedWithSubject,
                     topic: "facet control review".to_string(),
                     content: "Workbench control deletes must expose affected facet docs."
                         .to_string(),
@@ -170,6 +407,7 @@ fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() 
                     freshness: None,
                     stale_hint: None,
                     supporting_citations: vec!["external_eval:facet-control-review".to_string()],
+                    canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
                     last_confirmed_at: Some(1_800_000_000),
@@ -210,7 +448,7 @@ fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() 
         .iter()
         .any(|doc| doc.owner_record_id == record_id
             && doc.action == "delete"
-            && doc.facet_doc_id.starts_with("facet-index:")
+            && doc.facet_doc_id.starts_with("facet-owner:")
             && doc.report_view.redacted_sensitive_metadata));
     assert!(delete
         .affected_facet_docs
@@ -300,7 +538,9 @@ fn runtime_policy_mutation_persists_suppression_policy() {
 
     assert!(report.accepted);
     let policies = event_reader
-        .long_term_memory_control_store()
+        .replay_harness()
+        .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
+        .expect("scoped long-term control store")
         .list_long_term_governance_policies(10)
         .unwrap();
     assert_eq!(policies.len(), 1);
@@ -342,6 +582,7 @@ fn runtime_tombstone_hides_record_from_recall_and_projection_context() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: "release safety".to_string(),
             limit: 10,
             tool_registry_refs: Vec::new(),
@@ -354,6 +595,7 @@ fn runtime_tombstone_hides_record_from_recall_and_projection_context() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "How should release safety work?".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -414,6 +656,7 @@ fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
                     keywords: vec!["temporary".to_string(), "tone".to_string()],
                 },
                 evidence_refs: vec!["turn:candidate-temporary-tone".to_string()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(bm_core::memory::MemoryCandidateSemanticJudgment {
                     source: bm_core::memory::MemorySemanticJudgmentSource::LlmGovernance,
                     decision: bm_core::memory::MemoryCandidateSemanticDecision::Accept,
@@ -432,7 +675,15 @@ fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
         report.reason.contains("suppressed_by_long_term_policy"),
         "write report should make policy blocking visible"
     );
-    assert_eq!(platform.long_term_memory_store().count().unwrap(), 0);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .scoped_long_term_memory_read_store("space:owner-default")
+            .expect("scoped long-term read store")
+            .count()
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -468,6 +719,7 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![bm_sdk::LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Preference,
+                    privacy: bm_sdk::MemoryPrivacyClass::SharedWithSubject,
                     topic: "temporary-tone".to_string(),
                     content: "User briefly wants pirate tone in this one chat.".to_string(),
                     keywords: vec!["temporary".to_string(), "tone".to_string()],
@@ -478,6 +730,7 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
                     freshness: None,
                     stale_hint: None,
                     supporting_citations: vec!["transcript:chat-1#message=1".to_string()],
+                    canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
                     last_confirmed_at: Some(1_800_000_000),
@@ -491,7 +744,15 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
 
     assert_eq!(report.changed, 0);
     assert!(report.reason.contains("suppressed_by_long_term_policy"));
-    assert_eq!(platform.long_term_memory_store().count().unwrap(), 0);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .scoped_long_term_memory_read_store("space:owner-default")
+            .expect("scoped long-term read store")
+            .count()
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -548,7 +809,15 @@ fn runtime_suppression_policy_blocks_automatic_post_turn_long_term_refresh() {
         )
         .expect("finalize");
 
-    assert_eq!(platform.long_term_memory_store().count().unwrap(), 0);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .scoped_long_term_memory_read_store("space:owner-default")
+            .expect("scoped long-term read store")
+            .count()
+            .unwrap(),
+        0
+    );
     assert_eq!(report.semantic_governance.accepted_count, 0);
     assert!(report
         .semantic_governance
@@ -609,6 +878,7 @@ fn runtime_mutates_long_term_memory_from_transcript_derived_ref_target() {
                     keywords: vec!["concise".to_string()],
                 },
                 evidence_refs: vec![evidence_ref.display_citation()],
+                canonical_entities: Vec::new(),
                 semantic_judgment: Some(MemoryCandidateSemanticJudgment {
                     source: MemorySemanticJudgmentSource::LlmGovernance,
                     decision: MemoryCandidateSemanticDecision::Accept,
@@ -708,6 +978,7 @@ fn runtime_mutates_shared_fact_memory_from_transcript_derived_ref_target() {
     )
     .unwrap();
     let derived_ref = platform
+        .replay_harness()
         .conversation_transcript_store()
         .list_derived_memory_refs(&key, None)
         .unwrap()
@@ -728,7 +999,15 @@ fn runtime_mutates_shared_fact_memory_from_transcript_derived_ref_target() {
 
     assert!(report.accepted);
     assert_eq!(report.target_report.resolved_count, 1);
-    assert_eq!(platform.long_term_memory_store().count().unwrap(), 0);
+    assert_eq!(
+        platform
+            .replay_harness()
+            .scoped_long_term_memory_read_store("space:owner-default")
+            .expect("scoped long-term read store")
+            .count()
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

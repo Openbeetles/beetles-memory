@@ -23,7 +23,6 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --no-deps --no-default-features \
   -p bm-core \
-  -p bm-store \
   -p bm-sdk \
   -p bm-replay \
   -p bm-evolve \
@@ -34,6 +33,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-wss \
   -p bm-mcp \
   -p bm-a2a
+cargo test -p bm-store-contract-tests
 bash scripts/check_platform_compile_gates.sh
 bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh
@@ -49,9 +49,10 @@ bash scripts/check_cross_target_compile_gates.sh --strict
 
 ## Publish Order
 
+`bm-sdk` 是唯一的公开 persistence 发布面。`bm-store-contract-tests` 是不发布的验收门禁，必须在发布 `bm-sdk` 前通过。
+
 ```text
 bm-core
-bm-store
 bm-sdk
 bm-replay / bm-evolve / bm-adapter
 bm-entry

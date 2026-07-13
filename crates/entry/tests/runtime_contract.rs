@@ -56,12 +56,12 @@ fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
             topic: "entry-runtime".to_string(),
             title: format!("Entry runtime {name}"),
             summary: format!(
-                "Entry runtime factory shares one StorePlatform across scoped runtimes. {marker}"
+                "Entry runtime factory shares one MemoryStoreHandle across scoped runtimes. {marker}"
             ),
             content: format!(
                 "1. Open EntryRuntimeFactory once for the base store config.\n\
                  2. Resolve an EntryRuntimeScope before handling a gateway request.\n\
-                 3. Build the scoped EntryRuntime from the shared StorePlatform.\n\
+                 3. Build the scoped EntryRuntime from the shared MemoryStoreHandle.\n\
                  4. Keep identity and chat scope on the scoped runtime. Marker: {marker}."
             ),
             citations: vec!["entry runtime factory contract".to_string()],
@@ -129,6 +129,7 @@ fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
         .handle(
             context(AdapterOperation::Recall, "idem-recall-1"),
             AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
                 tool_registry_refs: Vec::new(),
@@ -195,6 +196,7 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
         .handle(
             context(AdapterOperation::Recall, "idem-factory-recall"),
             AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: "entry runtime".to_string(),
                 limit: 4,
                 tool_registry_refs: Vec::new(),
@@ -315,6 +317,7 @@ fn entry_runtime_rejects_operation_mismatch_before_sdk_runtime_call() {
         .handle(
             context(AdapterOperation::Write, "idem-mismatch-1"),
             AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
                 tool_registry_refs: Vec::new(),

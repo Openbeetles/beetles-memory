@@ -94,6 +94,11 @@ needles=(
   "index_effect_proven"
   "stage_hit_counts"
   "index_diagnostics"
+  "selected_hit_final_rendered_miss"
+  "final_projection_integrity"
+  "delivery_drop_reason_counts"
+  "p7_match_gold_groups"
+  "p7_augment_gold_match"
 )
 
 for needle in "${needles[@]}"; do
@@ -102,18 +107,19 @@ done
 
 operator_needles=(
   "BM_W4_EXTERNAL_BENCH_ROOT"
-  "BM_W4_EXTERNAL_EXPECT_BLOCKED"
+  "BM_P7_RUN_ID"
   "bm-w4-external-noisy-wall"
-  "runner/src/main.rs"
+  "--preflight-report"
+  "preflight-report.json"
+  "--summary"
   "locomo.merged.summary.json"
   "longmemeval_oracle.merged.summary.json"
   "longmemeval_s_cleaned.merged.summary.json"
   "longmemeval_m_cleaned.merged.summary.json"
-  "shasum -a 256"
 )
 
 for needle in "${operator_needles[@]}"; do
-  rg -q "$needle" scripts/check_w4_external_noisy_wall_operator.sh
+  rg -q -- "$needle" scripts/check_w4_external_noisy_wall_operator.sh
 done
 
-! rg -q "jsonl|data/|invalid-pre-runner-fix|runner/target" scripts/check_w4_external_noisy_wall_operator.sh
+! rg -q "jsonl|data/|invalid-pre-runner-fix|runner/target|runner-source-sha256|shasum -a 256|p7_provenance_valid|rg -" scripts/check_w4_external_noisy_wall_operator.sh

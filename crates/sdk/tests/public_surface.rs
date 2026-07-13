@@ -18,14 +18,14 @@ use bm_sdk::{
     MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
     MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryProfile,
-    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
-    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
-    MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest, MemoryWriteRequest,
-    PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
+    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemoryStoreHandle,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
+    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
     PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
     ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
     PromptParticipationPlan, RedactedTranscriptSlice, SoulLifeProjectionReport, StoreBackendConfig,
-    StorePlatform, SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
+    SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
     TranscriptEvidenceRef, TranscriptLifecycleTransition, TranscriptRedactionReason,
     TranscriptRedactionReportItem, TranscriptRepairIssue, TranscriptRepairIssueKind,
     TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage,
@@ -243,8 +243,17 @@ fn profile_and_system_kind_aliases_are_unambiguous() {
 }
 
 #[test]
-fn sdk_runtime_uses_store_platform_as_public_store_entry() {
-    let store = StorePlatform::open_in_memory(
+fn sdk_runtime_uses_opaque_memory_store_handle_as_public_store_entry() {
+    let store_surface = include_str!("../src/store.rs");
+    let sdk_surface = include_str!("../src/lib.rs");
+    let runtime_surface = include_str!("../src/runtime.rs");
+    assert!(!store_surface.contains("pub fn read_events("));
+    assert!(!store_surface.contains("pub fn read_file_store_events("));
+    assert!(!sdk_surface.contains("profile_memory_system_kind, MemoryStoreEvent,"));
+    assert!(!runtime_surface.contains("pub fn runtime_metrics_report_from_events("));
+    assert!(!sdk_surface.contains("pub use crate::store_internal::*"));
+
+    let store = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
     )
     .unwrap();
@@ -253,7 +262,7 @@ fn sdk_runtime_uses_store_platform_as_public_store_entry() {
         .identity(MemoryIdentity::new("agent-main", "owner-default").unwrap())
         .scope(MemoryScope::new("local", "chat-1").unwrap())
         .profile(ProfileId::ServerLinuxDevFull)
-        .store_platform(store)
+        .store(store)
         .build()
         .unwrap();
 
@@ -269,6 +278,56 @@ fn sdk_runtime_uses_store_platform_as_public_store_entry() {
         runtime.capabilities().profile,
         ProfileId::ServerLinuxDevFull
     );
+}
+
+#[test]
+fn production_long_term_owner_mutation_is_not_exposed_by_host_store_surfaces() {
+    let sdk_runtime = include_str!("../src/runtime.rs");
+    let core_platform = include_str!("../../core/src/platform/mod.rs");
+    let store_platform = include_str!("../src/store_internal/platform.rs");
+    let shared_governance = include_str!("../../core/src/memory/shared_memory_governance.rs");
+
+    assert!(!sdk_runtime.contains("pub fn platform("));
+    assert!(!core_platform.contains("fn long_term_memory_store("));
+    assert!(!store_platform.contains("impl LongTermMemoryStore for MemoryStoreHandle"));
+    assert!(!store_platform.contains("pub fn scoped_long_term_memory_store("));
+    assert!(!shared_governance.contains("pub fn write_governed_shared_memory("));
+    assert!(!shared_governance.contains("pub fn write_governed_shared_memory_in_space("));
+    assert!(!store_platform.contains("pub fn commit_mutation_batch("));
+    assert!(!store_platform.contains("pub fn commit_mutation_batch_with_preconditions("));
+}
+
+#[test]
+fn production_long_term_control_mutation_is_not_exposed_by_host_store_surfaces() {
+    let core_platform = include_str!("../../core/src/platform/mod.rs");
+    let store_platform = include_str!("../src/store_internal/platform.rs");
+
+    assert!(!core_platform.contains("fn long_term_memory_control_store("));
+    assert!(!store_platform.contains("impl LongTermMemoryControlStore for MemoryStoreHandle"));
+    assert!(!store_platform.contains("pub struct ScopedLongTermMemoryControlStore"));
+    assert!(!store_platform.contains("pub fn scoped_long_term_memory_control_store("));
+}
+
+#[test]
+fn production_continuity_and_shared_memory_planners_are_read_only() {
+    let continuity = include_str!("../../core/src/memory/continuity_snapshot.rs");
+    let shared_governance = include_str!("../../core/src/memory/shared_memory_governance.rs");
+    let hygiene = include_str!("../../core/src/memory/hygiene.rs");
+    let extraction = include_str!("../../core/src/memory/long_term_extraction.rs");
+    let maintenance = include_str!("../../core/src/memory/maintenance.rs");
+    let task_learning = include_str!("../../core/src/task_execution/learning.rs");
+    let import_context = continuity
+        .split("pub struct ContinuitySnapshotImportContext")
+        .nth(1)
+        .and_then(|source| source.split('}').next())
+        .expect("continuity import context source");
+
+    assert!(import_context.contains("LongTermMemoryReadStore"));
+    assert!(!import_context.contains("LongTermMemoryStore"));
+    assert!(shared_governance.contains("S: LongTermMemoryReadStore + ?Sized"));
+    for source in [hygiene, extraction, maintenance, task_learning] {
+        assert!(!source.contains("long_term_memory_store: &'a dyn LongTermMemoryStore"));
+    }
 }
 
 #[test]
@@ -297,7 +356,7 @@ fn next_gen_builders_are_sdk_public_without_adapter_ownership() {
         &graph,
         GraphRecallExpansionBudget::runtime_default(),
     );
-    assert_eq!(rerank.selected_ids, vec!["fact:current"]);
+    assert_eq!(rerank.reranked_candidate_ids, vec!["fact:current"]);
     let _budget_report: GraphRecallExpansionBudgetReport = rerank.expansion_budget.clone();
     assert!(graph.gate.high_confidence_projection_allowed);
     assert_eq!(graph.compact_graph.nodes.len(), 1);

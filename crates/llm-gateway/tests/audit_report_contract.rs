@@ -8,9 +8,9 @@ use bm_llm_gateway::{
 };
 use bm_sdk::{
     board_subject_scope_id, private_garden_scope_id, MemoryAuditSink, MemoryClock, MemoryIdentity,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope, NoopMemoryAuditSink,
-    Platform as _, PressureLevel, PrivateDocEntry, PrivateDocWorkspace, ProfileId,
-    RuntimeLifecycleModeInput, StoreBackendConfig, StorePlatform,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    NoopMemoryAuditSink, PressureLevel, PrivateDocEntry, PrivateDocWorkspace, ProfileId,
+    RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 
 #[test]
@@ -55,13 +55,13 @@ fn gateway_audit_report_has_stages_without_raw_sensitive_payloads() {
 
 #[test]
 fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnostics() {
-    let platform = StorePlatform::open_in_memory(
+    let platform = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("store config"),
     )
     .expect("store platform");
     platform
-        .private_doc_store()
-        .set(
+        .replay_harness()
+        .seed_private_doc_workspace(
             board_subject_scope_id(),
             &PrivateDocWorkspace {
                 inner_journal: Some(PrivateDocEntry {
@@ -74,8 +74,8 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         )
         .expect("private workspace seed");
     platform
-        .private_garden_store()
-        .write(
+        .replay_harness()
+        .seed_private_garden_doc(
             private_garden_scope_id(),
             "diary/gateway.md",
             "RAW_PRIVATE_GARDEN_NOTE_DO_NOT_AUDIT",
@@ -89,7 +89,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
         .profile(ProfileId::ServerLinuxDevFull)
-        .store_platform(platform)
+        .store(platform)
         .clock(Arc::new(FixedClock))
         .capability_policy(bm_sdk::MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(privacy)
@@ -98,6 +98,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .expect("runtime");
     let projection = runtime
         .project(MemoryProjectionRequest {
+            structured_query_facets: Vec::new(),
             user_query: "gateway private audit".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 8,
@@ -159,10 +160,10 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .block
         .as_deref()
         .expect("redacted projection block");
+    assert_eq!(block, projection.projection_surfaces.gateway_raw_audit);
     assert!(block.contains("## Subject Mount"), "{block}");
-    assert!(block.contains("## Soul Private Runtime Context"), "{block}");
     assert!(
-        block.contains("[redacted:protected_runtime_context:"),
+        !block.contains("## Soul Private Runtime Context"),
         "{block}"
     );
     assert!(!block.contains("RAW_PRIVATE_WORKSPACE_NOTE_DO_NOT_AUDIT"));

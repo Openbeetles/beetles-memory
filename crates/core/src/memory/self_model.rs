@@ -18,7 +18,7 @@ use super::{
     memory_policy, render_execution_state_block, render_internal_memory_topology_block,
     render_private_memory_boundary_block, render_recent_persona_evidence_block,
     render_shared_factual_plane_block, ExecutionState, ExecutionStateStore,
-    InternalMemoryLayerFocus, LongTermMemoryStore, MemoryProfile, PrivateDocWorkspace,
+    InternalMemoryLayerFocus, LongTermMemoryReadStore, MemoryProfile, PrivateDocWorkspace,
     PrivateGardenDocRecord, RecentPersonaEvidence, SelfModelPolicy, SelfModelStore, SessionMessage,
     SessionStore, SessionSummaryStore,
 };
@@ -115,7 +115,7 @@ pub struct SelfModelRefreshContext<'a> {
     pub session_store: &'a dyn SessionStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
-    pub long_term_memory_store: &'a dyn LongTermMemoryStore,
+    pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub self_model_store: &'a dyn SelfModelStore,
 }
 
@@ -759,6 +759,7 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::llm::{LlmModelCompat, LlmResponse, StopReason};
+    use crate::memory::LongTermMemoryStore;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Mutex;

@@ -236,6 +236,16 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
     )
     .expect("project with experience");
     let projected_body: Value = serde_json::from_str(&projected.body).expect("project json");
+    assert!(projected_body.get("system_memory_block").is_none());
+    assert_eq!(projected_body["projection_surface"], "ui_api");
+    assert_eq!(
+        projected_body["chars"],
+        projected_body["projection_block"]
+            .as_str()
+            .expect("projection block")
+            .chars()
+            .count()
+    );
     assert_eq!(
         projected_body["agent_tool_hints"][0]["tool_id"],
         "pdf.extract"

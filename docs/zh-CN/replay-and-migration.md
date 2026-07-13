@@ -68,7 +68,7 @@ SDK transcript replay/export request 通过 `cursor`、`next_cursor` 和 `has_mo
 
 Transcript attrs 会跟随 target turn/message 一起 replay。`TranscriptAttrEnvelope` 只用于模型用量、latency、retry status、附件摘要、provenance 标签等轻量 metadata；它不替代宿主拥有的 task、capability call、artifact、human gate、file workspace 或 governance command/report 本体。`HostUi` 只看到 HostUi-visible attrs，`ModelContext` 只看到 model-context attrs，`Export` 只看到 export-visible 且 `export_allowed=true` 的 attrs。Profile budget 可以裁剪每 turn/message 可见 attrs，并在 `TranscriptRedactionReportItem` 中用 `AttrValueBudget`、`attr_id`、`attr_key` 记录；当裁剪来自 profile ceiling 时，replay audit 也会记录 `ProfileBudget`。
 
-`HostUi` transcript replay 由 SDK `transcript_replay` capability 控制。桌面和 embedded SDK 宿主可以提交 transcript turn 后，把同一个 conversation 读回给 UI 展示；这不要求打开 `MemoryRuntime::replay`、replay harness、raw owner replay 或 deep inspection。
+`HostUi` transcript replay 由 SDK `transcript_replay` capability 控制。桌面和 embedded SDK 宿主可以提交 transcript turn 后，把同一个 conversation 读回给 UI 展示；这不要求打开 `MemoryRuntime::replay`、仅开发验收的 `nonproduction-replay-harness`、raw owner replay 或 deep inspection。
 
 `TranscriptLifecycleReport.derived_memory_refs` 可以作为下一步长期记忆控制的 target 来源。比如 raw transcript 被 mask 或 delete 后，report 会列出受影响的 `DerivedMemoryRef`；宿主或 operator 若要撤销某条 accepted long-term memory，应把对应 `DerivedMemoryRef` 传给 `MemoryLongTermTarget::TranscriptDerivedRef`，再调用 `MemoryRuntime::mutate_long_term_memory`。Transcript lifecycle 不会自动级联删除 accepted long-term memory、shared fact、procedural skill、private garden 或 soul handoff。
 
@@ -117,6 +117,7 @@ Compact profile 可以按 `TranscriptGovernanceBudget` 裁剪 transcript turns�
 ## Harness And Proposal Sandbox
 
 - `bm-replay` 提供 fixture runner、cross-store replay、memory harness gate 和 benchmark gate。
+- `nonproduction-replay-harness` 是 fixture 和合同验证的开发验收 feature，不是部署能力、协议表面或宿主 runtime dependency。
 - `bm-evolve` 提供 proposal-only sandbox。Proposal 仍需要经过 SDK 写入路径才能改变记忆状态。
 - ESP profile 暴露 compact validation；`profile-server-linux-dev-full` 暴露完整 replay 和 benchmark surface。
 - `fixtures/sdk-host-readiness/generic-rust-host/` 与 `fixtures/sdk-host-readiness/beetle-derived/` 由 `scripts/check_sdk_host_integration_readiness.sh` 覆盖。

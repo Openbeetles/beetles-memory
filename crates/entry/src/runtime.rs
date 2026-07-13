@@ -1,30 +1,30 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use bm_adapter::{
-    dispatch_adapter_command_with_services, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
-    AdapterResponse, AdapterRuntimeServices,
+    dispatch_adapter_command_with_services, project_adapter_report, AdapterCommand,
+    AdapterEnvelope, AdapterErrorKey, AdapterResponse, AdapterRuntimeServices,
 };
-#[cfg(feature = "replay-harness")]
+#[cfg(feature = "nonproduction-replay-harness")]
 use bm_replay::{load_memory_benchmark_fixture_dir, run_memory_benchmark_wall};
 use bm_sdk::{
     compile_runtime_budget, probe_host_runtime_resource, resolve_memory_capabilities,
     AgentSkillDirConfig, Error, MemoryCapabilityPolicy, MemoryCloseRequest,
     MemoryFacetRecallIndexReport, MemoryIdentity, MemoryInspectionRequest, MemoryPrivacyPolicy,
     MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest, NoopMemoryAuditSink, PressureLevel,
-    ProfileId, Result, RuntimeBudgetInput, RuntimeBudgetReport, RuntimeLifecycleModeInput,
-    RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
-    RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest, StaticPlatformManifest,
-    StoreBackendConfig, StoreBackendKind, StoreOpenReport, StorePlatform, WorkbenchApiMap,
+    MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest, MemoryStoreHandle,
+    NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeBudgetInput, RuntimeBudgetReport,
+    RuntimeLifecycleModeInput, RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest,
+    RuntimeSkillEditRequest, RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest,
+    StaticPlatformManifest, StoreBackendConfig, StoreBackendKind, StoreOpenReport, WorkbenchApiMap,
     WorkbenchSurface,
 };
 
 use crate::config::{enabled_capability_policy, privacy_policy};
 use crate::console::EntryConsoleTelemetrySnapshot;
-#[cfg(feature = "replay-harness")]
+#[cfg(feature = "nonproduction-replay-harness")]
 use crate::EntryConsoleMemoryBenchmarkReport;
 use crate::{
     EntryAuthConfig, EntryCapabilityView, EntryConsoleDevice, EntryConsoleDeviceCreate,
@@ -97,7 +97,7 @@ impl EntryRuntimeConfig {
 
 pub struct EntryRuntimeFactory {
     base: EntryRuntimeBaseConfig,
-    store: StorePlatform,
+    store: MemoryStoreHandle,
     runtime_budget: RuntimeBudgetReport,
 }
 
@@ -124,7 +124,7 @@ impl EntryRuntimeFactory {
             privacy: self.base.privacy.clone(),
             capability: self.base.capability.clone(),
         };
-        EntryRuntime::from_store_platform(config, self.store.clone(), self.runtime_budget.clone())
+        EntryRuntime::from_store_handle(config, self.store.clone(), self.runtime_budget.clone())
     }
 }
 
@@ -219,7 +219,7 @@ impl EntryRuntimeManagerState {
 
 pub struct EntryRuntime {
     config: EntryRuntimeConfig,
-    store: StorePlatform,
+    store: MemoryStoreHandle,
     runtime: MemoryRuntime,
     runtime_budget: RuntimeBudgetReport,
     capability: EntryCapabilityView,
@@ -233,9 +233,9 @@ impl EntryRuntime {
         factory.runtime_for_scope(config.runtime_scope())
     }
 
-    fn from_store_platform(
+    fn from_store_handle(
         config: EntryRuntimeConfig,
-        store: StorePlatform,
+        store: MemoryStoreHandle,
         runtime_budget: RuntimeBudgetReport,
     ) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
@@ -250,7 +250,7 @@ impl EntryRuntime {
                 config.scope.chat_id.clone(),
             )?)
             .profile(config.profile)
-            .store_platform(store.clone())
+            .store(store.clone())
             .runtime_budget(runtime_budget.clone())
             .agent_skill_dirs(agent_skill_dirs_from_env())
             .capability_policy(capability_policy.clone())
@@ -361,11 +361,11 @@ impl EntryRuntime {
                 },
             ],
             missing_report_apis: {
-                #[cfg(feature = "replay-harness")]
+                #[cfg(feature = "nonproduction-replay-harness")]
                 {
                     Vec::new()
                 }
-                #[cfg(not(feature = "replay-harness"))]
+                #[cfg(not(feature = "nonproduction-replay-harness"))]
                 {
                     vec!["sdk.replay.memory_benchmark_report".to_string()]
                 }
@@ -387,16 +387,16 @@ impl EntryRuntime {
     }
 
     fn console_workbench_benchmark_wall(&self) -> EntryConsoleWorkbenchBenchmarkWall {
-        #[cfg(not(feature = "replay-harness"))]
+        #[cfg(not(feature = "nonproduction-replay-harness"))]
         {
-            return EntryConsoleWorkbenchBenchmarkWall {
+            EntryConsoleWorkbenchBenchmarkWall {
                 status: EntryConsoleWorkbenchStatus::limited("replay_harness_not_compiled"),
                 fixture_root: "fixtures/memory-benchmark-wall".to_string(),
                 report: None,
-            };
+            }
         }
 
-        #[cfg(feature = "replay-harness")]
+        #[cfg(feature = "nonproduction-replay-harness")]
         {
             let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
@@ -428,6 +428,7 @@ impl EntryRuntime {
     fn console_workbench_recall_inspector(&self) -> EntryConsoleWorkbenchRecallInspector {
         let query = "workbench memory inspection".to_string();
         match self.runtime.recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query: query.clone(),
             limit: 6,
             tool_registry_refs: Vec::new(),
@@ -453,7 +454,7 @@ impl EntryRuntime {
                         .graph_gate
                         .high_confidence_projection_allowed,
                     graph_failures: report.graph_gate.failures,
-                    graph_selected_ids: report.graph_rerank.selected_ids,
+                    graph_selected_ids: report.graph_rerank.reranked_candidate_ids,
                     stale_false_positive_count: report.graph_rerank.stale_false_positive_count,
                     agent_tool_hints: report.agent_tool_hints.len(),
                     tool_experience_reason: report.tool_experience_status.reason,
@@ -483,6 +484,7 @@ impl EntryRuntime {
     fn console_workbench_facet_inspector(&self) -> EntryConsoleWorkbenchFacetInspector {
         let query = "workbench facet index inspection".to_string();
         match self.runtime.recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
             query,
             limit: 6,
             tool_registry_refs: Vec::new(),
@@ -500,8 +502,8 @@ impl EntryRuntime {
                     fallback_full_scan: facet.fallback_full_scan,
                     source_candidate_count: facet.source_candidate_count,
                     matched_source_candidate_count: facet.matched_source_candidate_count,
-                    exact_facet_doc_count: facet.exact_facet_doc_count,
-                    expanded_facet_doc_count: facet.expanded_facet_doc_count,
+                    exact_facet_match_count: facet.exact_facet_match_count,
+                    expanded_facet_match_count: facet.expanded_facet_match_count,
                     index_revision: facet.index_revision.clone(),
                     render_growth: facet.render_growth,
                     failures: facet.failures.clone(),
@@ -521,8 +523,8 @@ impl EntryRuntime {
                 fallback_full_scan: false,
                 source_candidate_count: 0,
                 matched_source_candidate_count: 0,
-                exact_facet_doc_count: 0,
-                expanded_facet_doc_count: 0,
+                exact_facet_match_count: 0,
+                expanded_facet_match_count: 0,
                 index_revision: None,
                 render_growth: 0,
                 failures: vec!["facet_index_report_unavailable".to_string()],
@@ -535,46 +537,42 @@ impl EntryRuntime {
 
     fn console_workbench_projection_inspector(&self) -> EntryConsoleWorkbenchProjectionInspector {
         let query = "Show operator-safe memory workbench context.".to_string();
-        match self.runtime.project(MemoryProjectionRequest {
-            user_query: query.clone(),
-            system_max_len: self
-                .runtime_budget
-                .projection_render_budget
-                .system_block_max_chars,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        }) {
+        match project_adapter_report(
+            &self.runtime,
+            MemoryProjectionRequest {
+                structured_query_facets: Vec::new(),
+                user_query: query.clone(),
+                system_max_len: self
+                    .runtime_budget
+                    .projection_render_budget
+                    .system_block_max_chars,
+                recent_messages_limit: 8,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+                tool_registry_refs: Vec::new(),
+            },
+        ) {
             Ok(report) => EntryConsoleWorkbenchProjectionInspector {
                 status: EntryConsoleWorkbenchStatus::ready("sdk_projection_report_available"),
                 query,
-                system_memory_chars: report.audit.system_memory_chars,
+                system_memory_chars: report.chars,
                 source_budget_chars: report.audit.source_budget_chars,
                 render_budget_chars: report.audit.render_budget_chars,
                 injected: report.audit.injected,
                 truncated: report.audit.truncated,
-                runtime_private_context_allowed: report
-                    .audit
-                    .private_gate
-                    .runtime_private_context_allowed,
-                foreground_disclosure_allowed: report
-                    .audit
-                    .private_gate
-                    .foreground_disclosure_allowed,
-                private_gate_reason: report.audit.private_gate.reason,
-                evidence_refs: report.subject_projection.evidence_refs.len(),
-                budget_decisions: report.subject_projection.budget_decisions.len(),
-                privacy_decisions: report.subject_projection.privacy_decisions.len(),
-                dropped_candidates: report.subject_projection.dropped_candidates.len(),
-                faithfulness_passed: report.projection_faithfulness.passed,
-                unsupported_claims: report.projection_faithfulness.unsupported_claims,
-                disclosure_integrity_passed: report.private_disclosure_integrity.passed,
-                raw_private_violation_count: report
-                    .private_disclosure_integrity
-                    .raw_private_violation_count,
-                agent_tool_hints: report.runtime_projection.agent_tool_hints.len(),
-                agent_tool_rejections: report.audit.agent_tools.rejected.len(),
+                runtime_private_context_allowed: report.audit.runtime_private_context_allowed,
+                foreground_disclosure_allowed: report.audit.foreground_disclosure_allowed,
+                private_gate_reason: report.audit.private_gate_reason,
+                evidence_refs: report.audit.evidence_ref_count,
+                budget_decisions: report.audit.budget_decision_count,
+                privacy_decisions: report.audit.privacy_decision_count,
+                dropped_candidates: report.audit.dropped_candidate_count,
+                faithfulness_passed: report.audit.faithfulness_passed,
+                unsupported_claim_count: report.audit.unsupported_claim_count,
+                disclosure_integrity_passed: report.audit.disclosure_integrity_passed,
+                raw_private_violation_count: report.audit.raw_private_violation_count,
+                agent_tool_hints: report.agent_tool_hints.len(),
+                agent_tool_rejections: report.audit.agent_tool_rejection_count,
             },
             Err(error) => EntryConsoleWorkbenchProjectionInspector {
                 status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
@@ -592,7 +590,7 @@ impl EntryRuntime {
                 privacy_decisions: 0,
                 dropped_candidates: 0,
                 faithfulness_passed: false,
-                unsupported_claims: Vec::new(),
+                unsupported_claim_count: 0,
                 disclosure_integrity_passed: false,
                 raw_private_violation_count: 0,
                 agent_tool_hints: 0,
@@ -653,7 +651,7 @@ impl EntryRuntime {
                             target_memory_space_id: target_memory_space_id.clone(),
                             source_profile: self.config.profile,
                             target_profile: self.config.profile,
-                            snapshot: export.snapshot,
+                            archive: export.archive,
                         });
                 match preview {
                     Ok(report) => {
@@ -965,21 +963,13 @@ impl EntryRuntime {
         &self,
         event_store_paths: &[PathBuf],
     ) -> EntryConsoleTelemetrySnapshot {
-        let mut events = Vec::new();
-        let mut seen = HashSet::new();
-        for event in self.store.read_events().unwrap_or_default() {
-            if seen.insert(event.event_id.clone()) {
-                events.push(event);
-            }
-        }
-        for path in event_store_paths {
-            for event in StorePlatform::read_file_store_events(path).unwrap_or_default() {
-                if seen.insert(event.event_id.clone()) {
-                    events.push(event);
-                }
-            }
-        }
-        EntryConsoleTelemetrySnapshot::from_events(&events)
+        const SECS_PER_DAY: u64 = 24 * 60 * 60;
+        let today_start = (current_unix_secs() / SECS_PER_DAY) * SECS_PER_DAY;
+        let report = self
+            .store
+            .telemetry_report_with_file_stores(event_store_paths, today_start)
+            .unwrap_or_default();
+        EntryConsoleTelemetrySnapshot::from_store_telemetry(report)
     }
 }
 
@@ -1053,11 +1043,15 @@ fn facet_audit_markdown_preview(
         "- Matched source candidates: {}",
         report.matched_source_candidate_count
     );
-    let _ = writeln!(out, "- Exact facet docs: {}", report.exact_facet_doc_count);
     let _ = writeln!(
         out,
-        "- Expanded facet docs: {}",
-        report.expanded_facet_doc_count
+        "- Exact facet matches: {}",
+        report.exact_facet_match_count
+    );
+    let _ = writeln!(
+        out,
+        "- Expanded facet matches: {}",
+        report.expanded_facet_match_count
     );
     let _ = writeln!(
         out,
@@ -1105,7 +1099,7 @@ fn open_store(
     config: &EntryStoreConfig,
     profile: ProfileId,
     runtime_budget: &RuntimeBudgetReport,
-) -> Result<StorePlatform> {
+) -> Result<MemoryStoreHandle> {
     let store_config = match config.backend {
         StoreBackendKind::InMemory => StoreBackendConfig::in_memory(profile)?,
         StoreBackendKind::Embedded => StoreBackendConfig::embedded(profile)?,
@@ -1126,7 +1120,7 @@ fn open_store(
     }
     .with_fsync(config.fsync)
     .with_runtime_store_budget(runtime_budget.store_budget);
-    StorePlatform::open(store_config)
+    MemoryStoreHandle::open(store_config)
 }
 
 fn validate_absolute_store_path(path: &std::path::Path, backend: &str) -> Result<()> {

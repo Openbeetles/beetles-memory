@@ -1362,9 +1362,11 @@ fn render_report(report: AdapterSdkReport) -> String {
         .to_string(),
         AdapterSdkReport::Project(report) => json!({
             "status": "accepted",
-            "system_memory_block": report.system_memory_block,
-            "agent_tool_hints": report.runtime_projection.agent_tool_hints,
-            "agent_tools": report.audit.agent_tools,
+            "projection_surface": "ui_api",
+            "projection_block": report.projection_block,
+            "chars": report.chars,
+            "agent_tool_hints": report.agent_tool_hints,
+            "audit": report.audit,
         })
         .to_string(),
         AdapterSdkReport::LongTermList(report) => json!({
