@@ -21,6 +21,7 @@ mod continuity_snapshot;
 mod core_revision_ledger;
 mod execution_state;
 mod felt_significance;
+mod governed_evidence_document;
 mod governed_post_image;
 #[cfg(all(
     any(test, feature = "nonproduction-replay-harness"),
@@ -183,6 +184,16 @@ pub(crate) use felt_significance::{
 pub use felt_significance::{
     render_felt_significance_block, FeltSignificance, FeltSignificanceRefreshOutcome,
     FELT_SIGNIFICANCE_SYSTEM_CONTRACT, FELT_SIGNIFICANCE_TOTAL_CHAR_LIMIT,
+};
+pub use governed_evidence_document::{
+    governed_evidence_document_content_digest, plan_governed_evidence_document_upsert,
+    scoped_governed_evidence_document_key, validate_governed_evidence_document,
+    validate_governed_evidence_document_draft, GovernedEvidenceDocument,
+    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft, GovernedEvidenceDocumentPlan,
+    GovernedEvidenceDocumentReadStore, GovernedEvidenceDocumentRejection,
+    GovernedEvidenceDocumentSourceKind, MAX_GOVERNED_EVIDENCE_DOCUMENT_BODY_BYTES,
+    MAX_GOVERNED_EVIDENCE_DOCUMENT_BYTES, MAX_GOVERNED_EVIDENCE_DOCUMENT_CHUNKS,
+    MAX_GOVERNED_EVIDENCE_DOCUMENT_CHUNK_BYTES,
 };
 pub use governed_post_image::{GovernedDocumentImage, GovernedPostImageValidation};
 pub(crate) use hygiene::run_memory_hygiene_jobs;
