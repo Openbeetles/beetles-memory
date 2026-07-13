@@ -1406,57 +1406,64 @@ impl MemoryRuntime {
             })
             .unwrap_or_default();
 
-        let (skill_changed, procedural_evolution, governed_skill_pairs) =
-            if accepted_skill_writes.is_empty() {
-                (0, None, Vec::new())
-            } else {
-                let storage = self.config.platform.skill_storage();
-                let plan = plan_governed_runtime_skills(
-                    storage.as_ref(),
-                    &accepted_skill_writes,
-                    RuntimeSkillWriteSource::Manual,
-                )?;
-                for mutation in &plan.mutations {
-                    match mutation {
-                        RuntimeSkillStorageMutation::Upsert { name, content } => {
-                            mutations.push(StoreMutation::PutBlob {
-                                namespace: "skills".to_string(),
-                                key: name.clone(),
-                                value: content.clone(),
-                                event_kind: MemoryStoreEventKind::MemoryWrite,
-                                plane: "skills".to_string(),
-                                record_key: name.clone(),
-                            });
-                        }
-                        RuntimeSkillStorageMutation::Delete { name } => {
-                            mutations.push(StoreMutation::DeleteBlob {
-                                namespace: "skills".to_string(),
-                                key: name.clone(),
-                                event_kind: MemoryStoreEventKind::MemoryDelete,
-                                plane: "skills".to_string(),
-                                record_key: name.clone(),
-                            });
-                        }
+        let (
+            skill_changed,
+            skill_accepted,
+            skill_rejected,
+            procedural_evolution,
+            governed_skill_pairs,
+        ) = if accepted_skill_writes.is_empty() {
+            (0, 0, 0, None, Vec::new())
+        } else {
+            let storage = self.config.platform.skill_storage();
+            let plan = plan_governed_runtime_skills(
+                storage.as_ref(),
+                &accepted_skill_writes,
+                RuntimeSkillWriteSource::Manual,
+            )?;
+            for mutation in &plan.mutations {
+                match mutation {
+                    RuntimeSkillStorageMutation::Upsert { name, content } => {
+                        mutations.push(StoreMutation::PutBlob {
+                            namespace: "skills".to_string(),
+                            key: name.clone(),
+                            value: content.clone(),
+                            event_kind: MemoryStoreEventKind::MemoryWrite,
+                            plane: "skills".to_string(),
+                            record_key: name.clone(),
+                        });
+                    }
+                    RuntimeSkillStorageMutation::Delete { name } => {
+                        mutations.push(StoreMutation::DeleteBlob {
+                            namespace: "skills".to_string(),
+                            key: name.clone(),
+                            event_kind: MemoryStoreEventKind::MemoryDelete,
+                            plane: "skills".to_string(),
+                            record_key: name.clone(),
+                        });
                     }
                 }
-                let governed_skill_pairs = accepted_normalized_skill_pairs
-                    .iter()
-                    .zip(plan.outcome.reports.iter())
-                    .filter(|&((_candidate, _write), report)| {
-                        matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                    })
-                    .map(|((candidate, write), _report)| (*candidate, write.clone()))
-                    .collect::<Vec<_>>();
-                let procedural_evolution = build_skill_evolution_report_from_write_outcome(
-                    &accepted_skill_writes,
-                    &plan.outcome,
-                );
-                (
-                    plan.outcome.changed,
-                    Some(procedural_evolution),
-                    governed_skill_pairs,
-                )
-            };
+            }
+            let governed_skill_pairs = accepted_normalized_skill_pairs
+                .iter()
+                .zip(plan.outcome.reports.iter())
+                .filter(|&((_candidate, _write), report)| {
+                    matches!(report.action, RuntimeSkillWriteAction::Accepted)
+                })
+                .map(|((candidate, write), _report)| (*candidate, write.clone()))
+                .collect::<Vec<_>>();
+            let procedural_evolution = build_skill_evolution_report_from_write_outcome(
+                &accepted_skill_writes,
+                &plan.outcome,
+            );
+            (
+                plan.outcome.changed,
+                plan.outcome.accepted,
+                plan.outcome.rejected,
+                Some(procedural_evolution),
+                governed_skill_pairs,
+            )
+        };
 
         mutations.extend(plan_candidate_derived_memory_ref_mutations(
             &self.config.subject_id,
@@ -1500,6 +1507,15 @@ impl MemoryRuntime {
         )?;
         let transaction =
             memory_write_transaction_report(operation, planned_mutations, changed, store_report);
+        let shared_fact_accepted = shared_fact_governance
+            .as_ref()
+            .map(|outcome| outcome.accepted)
+            .unwrap_or(0);
+        let shared_fact_rejected = shared_fact_governance
+            .as_ref()
+            .map(|outcome| outcome.rejected)
+            .unwrap_or(0);
+        let final_accepted_count = shared_fact_accepted.saturating_add(skill_accepted);
         let policy_reason = if suppressed_draft_count > 0 {
             format!(
                 ", suppressed_by_long_term_policy={}, policy_ids={}",
@@ -1511,16 +1527,26 @@ impl MemoryRuntime {
         };
 
         Ok(MemoryWriteReport {
-            accepted: semantic_governance.accepted_count > 0
-                && semantic_governance.rejected_count == 0,
+            accepted: semantic_governance.proposal_count > 0
+                && semantic_governance.rejected_count == 0
+                && semantic_governance.deferred_count == 0
+                && shared_fact_rejected == 0
+                && skill_rejected == 0
+                && suppressed_draft_count == 0
+                && final_accepted_count == semantic_governance.proposal_count,
             changed,
             operation,
             reason: format!(
-                "submitted={}, accepted={}, rejected={}, deferred={}{}",
+                "submitted={}, semantic_accepted={}, semantic_rejected={}, semantic_deferred={}, final_accepted={}, shared_fact_accepted={}, shared_fact_rejected={}, skill_accepted={}, skill_rejected={}{}",
                 semantic_governance.proposal_count,
                 semantic_governance.accepted_count,
                 semantic_governance.rejected_count,
                 semantic_governance.deferred_count,
+                final_accepted_count,
+                shared_fact_accepted,
+                shared_fact_rejected,
+                skill_accepted,
+                skill_rejected,
                 policy_reason
             ),
             lifecycle_report,

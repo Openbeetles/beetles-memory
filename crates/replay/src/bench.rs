@@ -17,7 +17,7 @@ use std::{
     process::Command,
 };
 
-const P7_CONTRACT_VERSION: &str = "p7_recall_delivery_v1";
+const P7_CONTRACT_VERSION: &str = "p7_recall_delivery_v2";
 const P7_RUNNER_PROJECTION_DIGEST_OBSERVATION_SCHEMA_VERSION: &str =
     "p7_runner_projection_digest_observation_v1";
 const P7_TRUSTED_SDK_BUILD_FINGERPRINT: &str = env!("BM_P7_TRUSTED_SDK_BUILD_FINGERPRINT");
@@ -47,11 +47,7 @@ const P7_REQUIRED_ABLATION_SLICES: [&str; 7] = [
 // Freezing this identity is an explicit release action after source, lockfile, SDK,
 // and the release executable are final. SHA256 is a reproducible identity check, not
 // a promise to resist a same-user local attacker who can rewrite all benchmark files.
-const P7_TRUSTED_RUNNER_RELEASE: Option<P7TrustedRunnerRelease> = Some(P7TrustedRunnerRelease {
-    runner_build_fingerprint: "380db602f8932bd24db77a5dc00727cac661053d1b69a4d9ac9ee65d9bc3b141",
-    runner_lock_fingerprint: "db0c3d6a2fa54d683a10149635617cf34b2c43c1cd5b04f2f436094fc4cb6488",
-    executable_sha256: "758076183b7ab3414f6c8967aeb7bcb95befae7c299bd305a37b694aeebe8e6c",
-});
+const P7_TRUSTED_RUNNER_RELEASE: Option<P7TrustedRunnerRelease> = None;
 
 #[derive(Clone, Copy)]
 struct P7TrustedRunnerRelease {

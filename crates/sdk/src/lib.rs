@@ -138,13 +138,13 @@ pub use bm_core::memory::{
     ContinuityCapsuleMaintenanceOutcome, ContinuitySnapshot, ContinuitySnapshotImportMode,
     ContinuitySnapshotImportOutcome, ContinuitySnapshotMode, IngressKind,
     IntelligenceReplayInspection, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind,
-    LongTermMemoryQuery, LongTermMemorySourceScope, MemoryHygieneInspection, MemoryProfile,
-    MemorySystemKind as MemoryRuntimeSystemKind, ParsedLongTermMemoryExtraction,
-    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostReplyMemoryMaintenanceOutcome, ProjectionSourceAuthority, PromptMemoryContext,
-    PromptMemoryContextParams, PromptParticipationPlan, PromptProjectionSource,
-    PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate, RecallPlane, RecallQuery,
-    RecallSelectionReport, WorkingRecallInspection,
+    LongTermMemoryQuery, LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
+    MemoryHygieneInspection, MemoryProfile, MemorySystemKind as MemoryRuntimeSystemKind,
+    ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
+    PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome, ProjectionSourceAuthority,
+    PromptMemoryContext, PromptMemoryContextParams, PromptParticipationPlan,
+    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate,
+    RecallPlane, RecallQuery, RecallSelectionReport, WorkingRecallInspection,
 };
 pub use bm_core::memory::{FacetReportView, MemoryFacetOwnerPlane, MemoryLongTermAffectedFacetDoc};
 pub use bm_core::orchestrator::PressureLevel;

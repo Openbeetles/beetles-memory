@@ -1865,7 +1865,7 @@ fn w4_external_noisy_operator_rejects_self_consistent_untrusted_fingerprints() {
         "completed": true,
         "shards": ["longmemeval_oracle.shard-0-of-1.summary.json"],
         "p7_provenance": {
-        "contract_version": "p7_recall_delivery_v1",
+        "contract_version": "p7_recall_delivery_v2",
         "sdk_report_schema_version": bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
         "sdk_build_fingerprint": "a".repeat(64),
         "runner_build_fingerprint": "b".repeat(64),
@@ -1895,7 +1895,7 @@ fn w4_external_noisy_operator_rejects_changed_dataset_hash_claim() {
         "suite": "longmemeval_oracle",
         "shards": ["longmemeval_oracle.shard-0-of-1.summary.json"],
         "p7_provenance": {
-            "contract_version": "p7_recall_delivery_v1",
+            "contract_version": "p7_recall_delivery_v2",
             "sdk_report_schema_version": bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
             "sdk_build_fingerprint": "a".repeat(64),
             "runner_build_fingerprint": "b".repeat(64),
@@ -2518,7 +2518,7 @@ fn attach_p7_release_evidence(
     summary.runner_source_sha256 = Some("b".repeat(64));
     summary.p7_provenance = Some(bm_replay::W4ExternalNoisyP7Provenance {
         run_id: summary.run_id.clone(),
-        contract_version: "p7_recall_delivery_v1".to_string(),
+        contract_version: "p7_recall_delivery_v2".to_string(),
         sdk_report_schema_version: bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
         sdk_build_fingerprint: "c".repeat(64),
         runner_build_fingerprint: "b".repeat(64),
