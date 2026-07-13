@@ -240,3 +240,43 @@ fn candidate_report_rejects_mixed_batch_with_a_final_plane_rejection() {
         vec!["runtime_skill__weak-procedure".to_string()]
     );
 }
+
+#[test]
+fn candidate_write_rejects_duplicate_durable_owner_identity_before_commit() {
+    let profile = ProfileId::ServerLinuxDevFull;
+    let runtime = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
+        .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
+        .profile(profile)
+        .store(empty_store_platform(profile))
+        .build()
+        .expect("runtime");
+    let mut first = accepted_fact_candidate(
+        "candidate-fact-duplicate-a",
+        "The release owner is the memory-space governance plane.",
+    );
+    let mut second = accepted_fact_candidate(
+        "candidate-fact-duplicate-b",
+        "The release owner remains the memory-space governance plane.",
+    );
+    for candidate in [&mut first, &mut second] {
+        if let MemoryCandidateTarget::LongTermMemory { topic, .. } = &mut candidate.target {
+            *topic = "duplicate-durable-owner".to_string();
+        }
+        if let MemoryCandidateContent::Text { topic, .. } = &mut candidate.content {
+            *topic = "duplicate-durable-owner".to_string();
+        }
+        if let Some(judgment) = &mut candidate.semantic_judgment {
+            judgment.governed_target = Some(candidate.target.clone());
+        }
+    }
+
+    let error = runtime
+        .write(MemoryWriteRequest::Candidates {
+            candidates: vec![first, second],
+        })
+        .expect_err("duplicate durable owner must fail closed");
+
+    assert_eq!(error.stage(), "memory_facet_index_plan");
+    assert!(error.to_string().contains("duplicate"));
+}

@@ -252,3 +252,47 @@ fn graph_v2_persistent_keys_and_dependency_digests_use_explicit_sha256_contract(
         .iter()
         .all(|membership| membership.dependency_digest.starts_with("sha256:")));
 }
+
+#[test]
+fn graph_v2_plans_ten_thousand_node_chain_with_bounded_two_hop_dependencies() {
+    const NODE_COUNT: usize = 10_000;
+    let nodes = (0..NODE_COUNT)
+        .map(|index| node(&format!("ltm:{index}"), &format!("evidence:{index}")))
+        .collect::<Vec<_>>();
+    let edges = (1..NODE_COUNT)
+        .map(|index| {
+            edge(
+                &format!("edge:{}:{index}", index - 1),
+                &format!("ltm:{}", index - 1),
+                &format!("ltm:{index}"),
+                &format!("evidence:{index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let backlinks = (0..NODE_COUNT)
+        .map(|index| backlink(&format!("evidence:{index}")))
+        .collect::<Vec<_>>();
+    let owners = (0..NODE_COUNT)
+        .map(|index| owner(&format!("ltm:{index}"), 1))
+        .collect::<Vec<_>>();
+
+    let plan = build_memory_graph_persistence_plan(
+        "space:large-chain",
+        "subject:user",
+        1,
+        nodes,
+        edges,
+        backlinks,
+        owners,
+    );
+
+    assert!(plan.accepted, "{:?}", plan.failures);
+    assert_eq!(plan.node_memberships.len(), NODE_COUNT);
+    assert_eq!(plan.edge_memberships.len(), NODE_COUNT - 1);
+    assert_eq!(plan.backlink_memberships.len(), NODE_COUNT);
+    assert_eq!(plan.recall_indexes.len(), NODE_COUNT);
+    assert!(plan
+        .recall_indexes
+        .iter()
+        .all(|index| index.node_memberships.len() <= 5));
+}

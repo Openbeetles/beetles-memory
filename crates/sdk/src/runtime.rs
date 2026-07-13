@@ -1309,10 +1309,18 @@ impl MemoryRuntime {
         let transaction_id = format!("memory_write_txn_{}", lifecycle.event_id);
         let operation = "write.candidates";
         let semantic_governance = govern_write_candidates(&candidates);
+        let semantically_accepted_candidate_ids = semantic_governance
+            .plane_reports
+            .iter()
+            .filter(|report| report.decision == GovernedWriteDecision::Accepted)
+            .flat_map(|report| report.evidence_refs.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>();
         let accepted_candidates = candidates
             .iter()
             .filter(|candidate| {
-                candidate_semantically_accepted(candidate, &semantic_governance.plane_reports)
+                let candidate_id = candidate.candidate_id.trim();
+                !candidate_id.is_empty()
+                    && semantically_accepted_candidate_ids.contains(candidate_id)
             })
             .collect::<Vec<_>>();
         let accepted_draft_pairs = accepted_candidates
@@ -1644,6 +1652,40 @@ impl MemoryRuntime {
                 .any(|subject_id| subject_id == mounted_subject_id)
     }
 
+    fn memory_facet_owner_version_map(
+        versions: &[MemoryFacetOwnerVersion],
+        stage: &'static str,
+    ) -> Result<BTreeMap<String, MemoryFacetOwnerVersion>> {
+        let mut by_owner = BTreeMap::new();
+        for version in versions {
+            if by_owner
+                .insert(version.owner_record_id.clone(), version.clone())
+                .is_some()
+            {
+                return Err(Error::config(stage, "memory_facet_owner_version_duplicate"));
+            }
+        }
+        Ok(by_owner)
+    }
+
+    fn memory_facet_posting_revision_map(
+        revisions: &[MemoryFacetPostingRevision],
+    ) -> Result<BTreeMap<String, MemoryFacetPostingRevision>> {
+        let mut by_posting = BTreeMap::new();
+        for revision in revisions {
+            if by_posting
+                .insert(revision.posting_key.clone(), revision.clone())
+                .is_some()
+            {
+                return Err(Error::config(
+                    "memory_facet_manifest_plan",
+                    "memory_facet_posting_revision_duplicate",
+                ));
+            }
+        }
+        Ok(by_posting)
+    }
+
     fn long_term_facet_index_doc(&self, entry: &LongTermMemoryEntry) -> MemoryFacetIndexDoc {
         build_long_term_memory_facet_index_doc(
             entry,
@@ -1835,77 +1877,98 @@ impl MemoryRuntime {
                 posting_raw_by_key.get(key).cloned(),
             ));
         }
+        struct PlanningFacetPosting {
+            document: MemoryFacetPostingDoc,
+            owner_versions: BTreeMap<String, MemoryFacetOwnerVersion>,
+        }
         let mut postings = posting_raw_docs
             .into_iter()
             .map(|doc| {
                 serde_json::from_value::<MemoryFacetPostingDoc>(doc.value)
-                    .map(|posting| (posting.posting_key.clone(), posting))
                     .map_err(|error| Error::config("memory_facet_posting_plan", error.to_string()))
+                    .and_then(|posting| {
+                        let owner_versions = Self::memory_facet_owner_version_map(
+                            &posting.owner_versions,
+                            "memory_facet_posting_plan",
+                        )?;
+                        Ok((
+                            posting.posting_key.clone(),
+                            PlanningFacetPosting {
+                                document: posting,
+                                owner_versions,
+                            },
+                        ))
+                    })
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         for posting_key in &posting_keys {
             postings
                 .entry(posting_key.clone())
-                .or_insert_with(|| MemoryFacetPostingDoc {
-                    schema_version: bm_core::memory::MEMORY_FACET_SCHEMA_VERSION,
-                    memory_space_id: self.config.memory_space_id.clone(),
-                    subject_id: subject_id.to_string(),
-                    posting_key: posting_key.clone(),
-                    revision: 0,
-                    owner_versions: Vec::new(),
+                .or_insert_with(|| PlanningFacetPosting {
+                    document: MemoryFacetPostingDoc {
+                        schema_version: bm_core::memory::MEMORY_FACET_SCHEMA_VERSION,
+                        memory_space_id: self.config.memory_space_id.clone(),
+                        subject_id: subject_id.to_string(),
+                        posting_key: posting_key.clone(),
+                        revision: 0,
+                        owner_versions: Vec::new(),
+                    },
+                    owner_versions: BTreeMap::new(),
                 });
         }
         for (owner_record_id, next) in &changes {
             if let Some(previous) = previous_docs.get(owner_record_id) {
                 for posting_key in posting_keys_for(previous)? {
                     if let Some(posting) = postings.get_mut(&posting_key) {
-                        posting
-                            .owner_versions
-                            .retain(|existing| existing.owner_record_id != *owner_record_id);
+                        posting.owner_versions.remove(owner_record_id);
                     }
                 }
             }
             if let Some(next) = next {
                 for posting_key in posting_keys_for(next)? {
                     if let Some(posting) = postings.get_mut(&posting_key) {
-                        posting
-                            .owner_versions
-                            .retain(|existing| existing.owner_record_id != *owner_record_id);
-                        posting.owner_versions.push(MemoryFacetOwnerVersion {
-                            owner_record_id: owner_record_id.clone(),
-                            owner_revision: next.owner_revision,
-                            facet_index_revision: next.facet_index_revision,
-                        });
+                        posting.owner_versions.insert(
+                            owner_record_id.clone(),
+                            MemoryFacetOwnerVersion {
+                                owner_record_id: owner_record_id.clone(),
+                                owner_revision: next.owner_revision,
+                                facet_index_revision: next.facet_index_revision,
+                            },
+                        );
                     }
                 }
             }
         }
+        let mut manifest_owner_versions = Self::memory_facet_owner_version_map(
+            &manifest.owner_versions,
+            "memory_facet_manifest_plan",
+        )?;
         for (owner_record_id, next) in &changes {
-            manifest
-                .owner_versions
-                .retain(|existing| existing.owner_record_id != *owner_record_id);
+            manifest_owner_versions.remove(owner_record_id);
             if let Some(next) = next.as_ref().filter(|doc| {
                 doc.privacy.projection_content_allowed()
                     && doc.status == MemoryFacetStatus::Active
                     && doc.subject_ids.iter().any(|subject| subject == subject_id)
             }) {
-                manifest.owner_versions.push(MemoryFacetOwnerVersion {
-                    owner_record_id: owner_record_id.clone(),
-                    owner_revision: next.owner_revision,
-                    facet_index_revision: next.facet_index_revision,
-                });
+                manifest_owner_versions.insert(
+                    owner_record_id.clone(),
+                    MemoryFacetOwnerVersion {
+                        owner_record_id: owner_record_id.clone(),
+                        owner_revision: next.owner_revision,
+                        facet_index_revision: next.facet_index_revision,
+                    },
+                );
             }
         }
-        manifest.owner_versions.sort();
-        manifest.owner_versions.dedup();
+        manifest.owner_versions = manifest_owner_versions.into_values().collect();
         manifest.revision = previous_manifest_revision.saturating_add(1).max(1);
-        for mut posting in postings.into_values() {
-            posting.owner_versions.sort();
-            posting.owner_versions.dedup();
+        let mut manifest_posting_revisions =
+            Self::memory_facet_posting_revision_map(&manifest.posting_revisions)?;
+        for planning in postings.into_values() {
+            let mut posting = planning.document;
+            posting.owner_versions = planning.owner_versions.into_values().collect();
             let key = posting.posting_key.clone();
-            manifest
-                .posting_revisions
-                .retain(|existing| existing.posting_key != key);
+            manifest_posting_revisions.remove(&key);
             if posting.owner_versions.is_empty() {
                 mutations.push(StoreMutation::DeleteJson {
                     namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
@@ -1916,10 +1979,13 @@ impl MemoryRuntime {
                 });
             } else {
                 posting.revision = posting.revision.saturating_add(1).max(1);
-                manifest.posting_revisions.push(MemoryFacetPostingRevision {
-                    posting_key: key.clone(),
-                    revision: posting.revision,
-                });
+                manifest_posting_revisions.insert(
+                    key.clone(),
+                    MemoryFacetPostingRevision {
+                        posting_key: key.clone(),
+                        revision: posting.revision,
+                    },
+                );
                 mutations.push(StoreMutation::PutJson {
                     namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
                     key: key.clone(),
@@ -1932,8 +1998,7 @@ impl MemoryRuntime {
                 });
             }
         }
-        manifest.posting_revisions.sort();
-        manifest.posting_revisions.dedup();
+        manifest.posting_revisions = manifest_posting_revisions.into_values().collect();
         manifest.owner_doc_count = manifest.owner_versions.len();
         manifest.posting_doc_count = manifest.posting_revisions.len();
         if manifest.owner_versions.is_empty() || manifest.posting_revisions.is_empty() {
@@ -1970,15 +2035,21 @@ impl MemoryRuntime {
         &self,
         entries: &[LongTermMemoryEntry],
     ) -> Result<MemoryStoreMutationPlan> {
-        let changes = entries
-            .iter()
-            .map(|entry| {
-                (
+        let mut changes = BTreeMap::new();
+        for entry in entries {
+            if changes
+                .insert(
                     entry.id.clone(),
                     Some(self.long_term_facet_index_doc(entry)),
                 )
-            })
-            .collect::<BTreeMap<_, _>>();
+                .is_some()
+            {
+                return Err(Error::config(
+                    "memory_facet_index_plan",
+                    "memory_facet_owner_change_duplicate",
+                ));
+            }
+        }
         self.plan_long_term_facet_index_changes(changes)
     }
 
@@ -13185,21 +13256,6 @@ fn session_record_from_transcript_message(
         authority: Some(message.authority),
     });
     record
-}
-
-fn candidate_semantically_accepted(
-    candidate: &MemoryWriteCandidate,
-    plane_reports: &[MemoryPlaneGovernanceReport],
-) -> bool {
-    let candidate_id = candidate.candidate_id.trim();
-    !candidate_id.is_empty()
-        && plane_reports.iter().any(|report| {
-            report.decision == GovernedWriteDecision::Accepted
-                && report
-                    .evidence_refs
-                    .iter()
-                    .any(|evidence_ref| evidence_ref == candidate_id)
-        })
 }
 
 fn long_term_extraction_derived_plane(draft: &LongTermMemoryDraft) -> DerivedMemoryPlane {

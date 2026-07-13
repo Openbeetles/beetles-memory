@@ -2202,35 +2202,45 @@ pub fn build_temporal_memory_graph_gate_report(
     edges: Vec<MemoryGraphEdge>,
     evidence_backlinks: Vec<EvidenceBacklink>,
 ) -> TemporalMemoryGraphGateReport {
+    temporal_memory_graph_gate_report(&nodes, &edges, &evidence_backlinks)
+}
+
+fn temporal_memory_graph_gate_report(
+    nodes: &[MemoryGraphNode],
+    edges: &[MemoryGraphEdge],
+    evidence_backlinks: &[EvidenceBacklink],
+) -> TemporalMemoryGraphGateReport {
     let mut failures = Vec::new();
     if nodes.is_empty() {
         failures.push("memory_graph_nodes_empty".to_string());
     }
-    for node in &nodes {
+    for node in nodes {
         let validation = node.validate_contract();
         if !validation.accepted {
             failures.push(format!("node:{}:{}", node.node_id, validation.reason));
         }
     }
-    for edge in &edges {
+    for edge in edges {
         let validation = edge.validate_contract();
         if !validation.accepted {
             failures.push(format!("edge:{}:{}", edge.edge_id, validation.reason));
         }
     }
+    let valid_backlink_sources = evidence_backlinks
+        .iter()
+        .filter(|backlink| !backlink.fingerprint.is_empty())
+        .map(|backlink| backlink.source_id.as_str())
+        .collect::<BTreeSet<_>>();
     for evidence_ref in nodes
         .iter()
         .flat_map(|node| node.evidence_refs.iter())
         .chain(edges.iter().flat_map(|edge| edge.evidence_refs.iter()))
     {
-        if !evidence_backlinks
-            .iter()
-            .any(|backlink| backlink.source_id == *evidence_ref && !backlink.fingerprint.is_empty())
-        {
+        if !valid_backlink_sources.contains(evidence_ref.as_str()) {
             failures.push(format!("missing_evidence_backlink:{evidence_ref}"));
         }
     }
-    for backlink in &evidence_backlinks {
+    for backlink in evidence_backlinks {
         if contains_raw_soul_private_marker(&backlink.source_kind)
             || contains_raw_soul_private_marker(&backlink.source_id)
         {
@@ -2259,25 +2269,7 @@ pub fn plan_temporal_memory_graph_write(
     edges: Vec<MemoryGraphEdge>,
     backlinks: Vec<EvidenceBacklink>,
 ) -> MemoryGraphWritePlan {
-    let mut gate =
-        build_temporal_memory_graph_gate_report(nodes.clone(), edges.clone(), backlinks.clone());
-    for edge in &edges {
-        if !nodes.iter().any(|node| node.node_id == edge.from_node_id) {
-            gate.failures.push(format!(
-                "edge:{}:memory_graph_edge_from_missing",
-                edge.edge_id
-            ));
-        }
-        if !nodes.iter().any(|node| node.node_id == edge.to_node_id) {
-            gate.failures.push(format!(
-                "edge:{}:memory_graph_edge_to_missing",
-                edge.edge_id
-            ));
-        }
-    }
-    gate.failures.sort();
-    gate.failures.dedup();
-    gate.high_confidence_projection_allowed = gate.failures.is_empty();
+    let gate = temporal_memory_graph_write_gate(&nodes, &edges, &backlinks);
 
     MemoryGraphWritePlan {
         operation: operation.into(),
@@ -2291,6 +2283,36 @@ pub fn plan_temporal_memory_graph_write(
         backlinks,
         gate_failures: gate.failures,
     }
+}
+
+fn temporal_memory_graph_write_gate(
+    nodes: &[MemoryGraphNode],
+    edges: &[MemoryGraphEdge],
+    backlinks: &[EvidenceBacklink],
+) -> TemporalMemoryGraphGateReport {
+    let mut gate = temporal_memory_graph_gate_report(nodes, edges, backlinks);
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for edge in edges {
+        if !node_ids.contains(edge.from_node_id.as_str()) {
+            gate.failures.push(format!(
+                "edge:{}:memory_graph_edge_from_missing",
+                edge.edge_id
+            ));
+        }
+        if !node_ids.contains(edge.to_node_id.as_str()) {
+            gate.failures.push(format!(
+                "edge:{}:memory_graph_edge_to_missing",
+                edge.edge_id
+            ));
+        }
+    }
+    gate.failures.sort();
+    gate.failures.dedup();
+    gate.high_confidence_projection_allowed = gate.failures.is_empty();
+    gate
 }
 
 pub fn memory_graph_recall_index_key(
@@ -2316,13 +2338,7 @@ pub fn build_memory_graph_persistence_plan(
 ) -> MemoryGraphPersistencePlan {
     let memory_space_id = memory_space_id.into().trim().to_string();
     let mounted_subject_id = mounted_subject_id.into().trim().to_string();
-    let mut failures = plan_temporal_memory_graph_write(
-        "memory_graph.write",
-        nodes.clone(),
-        edges.clone(),
-        backlinks.clone(),
-    )
-    .gate_failures;
+    let mut failures = temporal_memory_graph_write_gate(&nodes, &edges, &backlinks).failures;
     if memory_space_id.is_empty() {
         failures.push("memory_graph_memory_space_id_empty".to_string());
     }
@@ -2442,6 +2458,64 @@ pub fn build_memory_graph_persistence_plan(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let nodes_by_id = nodes
+        .iter()
+        .map(|node| (node.node_id.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
+    let edges_by_id = edges
+        .iter()
+        .map(|edge| (edge.edge_id.as_str(), edge))
+        .collect::<BTreeMap<_, _>>();
+    let mut recall_adjacency = BTreeMap::<&str, Vec<(&str, &str)>>::new();
+    for edge in &edges {
+        if !graph_edge_allows_recall_expansion(edge.kind) {
+            continue;
+        }
+        recall_adjacency
+            .entry(edge.from_node_id.as_str())
+            .or_default()
+            .push((edge.to_node_id.as_str(), edge.edge_id.as_str()));
+        recall_adjacency
+            .entry(edge.to_node_id.as_str())
+            .or_default()
+            .push((edge.from_node_id.as_str(), edge.edge_id.as_str()));
+    }
+    for neighbors in recall_adjacency.values_mut() {
+        neighbors.sort();
+        neighbors.dedup();
+    }
+    let mut backlink_keys_by_evidence = BTreeMap::<&str, Vec<String>>::new();
+    for backlink in &backlinks {
+        let backlink_key = memory_graph_backlink_key(&backlink.source_kind, &backlink.source_id);
+        backlink_keys_by_evidence
+            .entry(backlink.source_id.as_str())
+            .or_default()
+            .push(
+                backlink_membership_keys
+                    .get(&backlink_key)
+                    .expect("validated backlink membership key")
+                    .clone(),
+            );
+    }
+    for keys in backlink_keys_by_evidence.values_mut() {
+        keys.sort();
+        keys.dedup();
+    }
+    let backlink_keys_for_evidence = |evidence_refs: &[String]| {
+        let mut keys = evidence_refs
+            .iter()
+            .flat_map(|evidence_ref| {
+                backlink_keys_by_evidence
+                    .get(evidence_ref.as_str())
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        keys
+    };
 
     #[derive(Clone)]
     struct RawIndexDependencies {
@@ -2457,34 +2531,22 @@ pub fn build_memory_graph_persistence_plan(
     let raw_indexes = nodes
         .iter()
         .map(|node| {
-            let (node_ids, edge_ids) = graph_recall_dependency_ids(&node.node_id, &nodes, &edges);
+            let (node_ids, edge_ids) =
+                graph_recall_dependency_ids(&node.node_id, &nodes_by_id, &recall_adjacency);
             let mut evidence_refs = node_ids
                 .iter()
-                .filter_map(|node_id| nodes.iter().find(|node| node.node_id == *node_id))
+                .filter_map(|node_id| nodes_by_id.get(node_id.as_str()).copied())
                 .flat_map(|node| node.evidence_refs.iter().cloned())
                 .collect::<Vec<_>>();
             evidence_refs.extend(
                 edge_ids
                     .iter()
-                    .filter_map(|edge_id| edges.iter().find(|edge| edge.edge_id == *edge_id))
+                    .filter_map(|edge_id| edges_by_id.get(edge_id.as_str()).copied())
                     .flat_map(|edge| edge.evidence_refs.iter().cloned()),
             );
             evidence_refs.sort();
             evidence_refs.dedup();
-            let mut dependency_backlinks = backlinks
-                .iter()
-                .filter(|backlink| evidence_refs.contains(&backlink.source_id))
-                .map(|backlink| {
-                    let backlink_key =
-                        memory_graph_backlink_key(&backlink.source_kind, &backlink.source_id);
-                    backlink_membership_keys
-                        .get(&backlink_key)
-                        .expect("validated backlink membership key")
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-            dependency_backlinks.sort();
-            dependency_backlinks.dedup();
+            let dependency_backlinks = backlink_keys_for_evidence(&evidence_refs);
             let index_id = format!("graph_index:{}", node.node_id);
             RawIndexDependencies {
                 index_key: memory_graph_recall_index_key(
@@ -2514,19 +2576,7 @@ pub fn build_memory_graph_persistence_plan(
     let mut node_memberships = nodes
         .iter()
         .map(|node| {
-            let mut backlink_keys = backlinks
-                .iter()
-                .filter(|backlink| node.evidence_refs.contains(&backlink.source_id))
-                .map(|backlink| {
-                    let key = memory_graph_backlink_key(&backlink.source_kind, &backlink.source_id);
-                    backlink_membership_keys
-                        .get(&key)
-                        .expect("validated backlink membership key")
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-            backlink_keys.sort();
-            backlink_keys.dedup();
+            let backlink_keys = backlink_keys_for_evidence(&node.evidence_refs);
             let mut membership = MemoryGraphNodeMembership {
                 schema_version: MEMORY_GRAPH_SCHEMA_VERSION,
                 memory_space_id: memory_space_id.clone(),
@@ -2567,19 +2617,7 @@ pub fn build_memory_graph_persistence_plan(
     let mut edge_memberships = edges
         .iter()
         .map(|edge| {
-            let mut backlink_keys = backlinks
-                .iter()
-                .filter(|backlink| edge.evidence_refs.contains(&backlink.source_id))
-                .map(|backlink| {
-                    let key = memory_graph_backlink_key(&backlink.source_kind, &backlink.source_id);
-                    backlink_membership_keys
-                        .get(&key)
-                        .expect("validated backlink membership key")
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-            backlink_keys.sort();
-            backlink_keys.dedup();
+            let backlink_keys = backlink_keys_for_evidence(&edge.evidence_refs);
             let mut membership = MemoryGraphEdgeMembership {
                 schema_version: MEMORY_GRAPH_SCHEMA_VERSION,
                 memory_space_id: memory_space_id.clone(),
@@ -2615,6 +2653,46 @@ pub fn build_memory_graph_persistence_plan(
         .collect::<Vec<_>>();
     edge_memberships.sort_by(|left, right| left.membership_key.cmp(&right.membership_key));
 
+    let mut backlink_node_keys = BTreeMap::<&str, Vec<String>>::new();
+    for membership in &node_memberships {
+        for backlink_key in &membership.backlink_membership_keys {
+            backlink_node_keys
+                .entry(backlink_key.as_str())
+                .or_default()
+                .push(membership.membership_key.clone());
+        }
+    }
+    let mut backlink_edge_keys = BTreeMap::<&str, Vec<String>>::new();
+    for membership in &edge_memberships {
+        for backlink_key in &membership.backlink_membership_keys {
+            backlink_edge_keys
+                .entry(backlink_key.as_str())
+                .or_default()
+                .push(membership.membership_key.clone());
+        }
+    }
+    let mut backlink_index_keys = BTreeMap::<&str, Vec<String>>::new();
+    for index in &raw_indexes {
+        for backlink_key in &index.backlink_membership_keys {
+            backlink_index_keys
+                .entry(backlink_key.as_str())
+                .or_default()
+                .push(index.index_key.clone());
+        }
+    }
+    for keys in backlink_node_keys.values_mut() {
+        keys.sort();
+        keys.dedup();
+    }
+    for keys in backlink_edge_keys.values_mut() {
+        keys.sort();
+        keys.dedup();
+    }
+    for keys in backlink_index_keys.values_mut() {
+        keys.sort();
+        keys.dedup();
+    }
+
     let mut backlink_memberships = backlinks
         .iter()
         .map(|backlink| {
@@ -2624,35 +2702,18 @@ pub fn build_memory_graph_persistence_plan(
                 .get(&backlink_key)
                 .expect("validated backlink membership")
                 .clone();
-            let mut node_keys = node_memberships
-                .iter()
-                .filter(|membership| {
-                    membership
-                        .backlink_membership_keys
-                        .contains(&membership_key)
-                })
-                .map(|membership| membership.membership_key.clone())
-                .collect::<Vec<_>>();
-            let mut edge_keys = edge_memberships
-                .iter()
-                .filter(|membership| {
-                    membership
-                        .backlink_membership_keys
-                        .contains(&membership_key)
-                })
-                .map(|membership| membership.membership_key.clone())
-                .collect::<Vec<_>>();
-            let mut index_keys = raw_indexes
-                .iter()
-                .filter(|index| index.backlink_membership_keys.contains(&membership_key))
-                .map(|index| index.index_key.clone())
-                .collect::<Vec<_>>();
-            node_keys.sort();
-            node_keys.dedup();
-            edge_keys.sort();
-            edge_keys.dedup();
-            index_keys.sort();
-            index_keys.dedup();
+            let node_keys = backlink_node_keys
+                .get(membership_key.as_str())
+                .cloned()
+                .unwrap_or_default();
+            let edge_keys = backlink_edge_keys
+                .get(membership_key.as_str())
+                .cloned()
+                .unwrap_or_default();
+            let index_keys = backlink_index_keys
+                .get(membership_key.as_str())
+                .cloned()
+                .unwrap_or_default();
             let mut membership = MemoryGraphBacklinkMembership {
                 schema_version: MEMORY_GRAPH_SCHEMA_VERSION,
                 memory_space_id: memory_space_id.clone(),
@@ -3144,43 +3205,34 @@ where
 
 fn graph_recall_dependency_ids(
     source_node_id: &str,
-    nodes: &[MemoryGraphNode],
-    edges: &[MemoryGraphEdge],
+    nodes_by_id: &BTreeMap<&str, &MemoryGraphNode>,
+    recall_adjacency: &BTreeMap<&str, Vec<(&str, &str)>>,
 ) -> (Vec<String>, Vec<String>) {
-    let recall_edges = edges
-        .iter()
-        .filter(|edge| graph_edge_allows_recall_expansion(edge.kind))
-        .collect::<Vec<_>>();
-    let mut node_ids = vec![source_node_id.to_string()];
-    let mut edge_ids = Vec::new();
-    let mut direct_neighbors = Vec::new();
-    for edge in &recall_edges {
-        if edge.from_node_id == source_node_id {
-            push_unique(&mut direct_neighbors, edge.to_node_id.clone());
-            push_unique(&mut edge_ids, edge.edge_id.clone());
-        } else if edge.to_node_id == source_node_id {
-            push_unique(&mut direct_neighbors, edge.from_node_id.clone());
-            push_unique(&mut edge_ids, edge.edge_id.clone());
-        }
-    }
-    for neighbor in &direct_neighbors {
-        push_unique(&mut node_ids, neighbor.clone());
-        for edge in &recall_edges {
-            if edge.from_node_id == *neighbor {
-                push_unique(&mut node_ids, edge.to_node_id.clone());
-                push_unique(&mut edge_ids, edge.edge_id.clone());
-            } else if edge.to_node_id == *neighbor {
-                push_unique(&mut node_ids, edge.from_node_id.clone());
-                push_unique(&mut edge_ids, edge.edge_id.clone());
+    let mut node_ids = BTreeSet::from([source_node_id.to_string()]);
+    let mut edge_ids = BTreeSet::new();
+    let direct_neighbors = recall_adjacency
+        .get(source_node_id)
+        .into_iter()
+        .flatten()
+        .map(|(neighbor_id, edge_id)| {
+            node_ids.insert((*neighbor_id).to_string());
+            edge_ids.insert((*edge_id).to_string());
+            *neighbor_id
+        })
+        .collect::<BTreeSet<_>>();
+    for neighbor in direct_neighbors {
+        if let Some(second_hop) = recall_adjacency.get(neighbor) {
+            for (second_hop_id, edge_id) in second_hop {
+                node_ids.insert((*second_hop_id).to_string());
+                edge_ids.insert((*edge_id).to_string());
             }
         }
     }
-    node_ids.retain(|node_id| nodes.iter().any(|node| node.node_id == *node_id));
-    node_ids.sort();
-    node_ids.dedup();
-    edge_ids.sort();
-    edge_ids.dedup();
-    (node_ids, edge_ids)
+    node_ids.retain(|node_id| nodes_by_id.contains_key(node_id.as_str()));
+    (
+        node_ids.into_iter().collect(),
+        edge_ids.into_iter().collect(),
+    )
 }
 
 fn memory_graph_serialized_digest<T: Serialize>(value: &T) -> String {
