@@ -1,3 +1,4 @@
+mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -7,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use bm_core::feature_gate::ProfileId;
 use bm_sdk::nonproduction_replay_harness::{
-    EmbeddedStoreEngine, FileStoreEngine, MemoryStoreEvent, MemoryStoreEventKind,
-    StoreBackendConfig, StoreCapacityBudget, StoreConsistentReadRequest, StoreEngine,
-    StoreEngineMutation, StoreEventLog, StoreEventScope, StoreJsonAddress, StoreJsonPrecondition,
+    EmbeddedStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
+    StoreCapacityBudget, StoreConsistentReadRequest, StoreEngine, StoreEngineMutation,
+    StoreEventLog, StoreEventScope, StoreJsonAddress, StoreJsonPrecondition,
     StoreTransactionReport, StoreTransactionRequest,
 };
 use serde_json::{json, Value};
@@ -101,8 +102,12 @@ fn assert_one_cas_winner(
 #[test]
 fn independent_file_opens_exact_cas_has_one_winner() {
     let root = temp_root("file-independent-open");
-    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config");
-    let (seed, _, _) = FileStoreEngine::open(&config).expect("seed engine");
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let (seed, _, _) = support::open_file_engine(&config).expect("seed engine");
     let v1 = json!({"generation": 1});
     seed.commit_transaction(&put_request(
         "file-seed",
@@ -114,8 +119,8 @@ fn independent_file_opens_exact_cas_has_one_winner() {
     ))
     .expect("seed");
 
-    let (first, _, _) = FileStoreEngine::open(&config).expect("first engine");
-    let (second, _, _) = FileStoreEngine::open(&config).expect("second engine");
+    let (first, _, _) = support::open_file_engine(&config).expect("first engine");
+    let (second, _, _) = support::open_file_engine(&config).expect("second engine");
     let barrier = Arc::new(Barrier::new(2));
     let first_barrier = barrier.clone();
     let first_v1 = v1.clone();
@@ -149,7 +154,7 @@ fn independent_file_opens_exact_cas_has_one_winner() {
         first.join().expect("first writer"),
         second.join().expect("second writer"),
     );
-    let (reader, _, _) = FileStoreEngine::open(&config).expect("reader");
+    let (reader, _, _) = support::open_file_engine(&config).expect("reader");
     assert_eq!(reader.read_events().expect("events").len(), 2);
     assert_eq!(read_value(&reader, KEY)["generation"], 2);
 }
@@ -157,12 +162,14 @@ fn independent_file_opens_exact_cas_has_one_winner() {
 #[cfg(feature = "sqlite-store")]
 #[test]
 fn independent_sqlite_opens_exact_cas_has_one_winner() {
-    use bm_sdk::nonproduction_replay_harness::SqliteStoreEngine;
-
     let root = temp_root("sqlite-independent-open");
     let path = root.join("memory.sqlite3");
-    let config = StoreBackendConfig::sqlite(&path, ProfileId::ServerLinuxDevFull).expect("config");
-    let (seed, _) = SqliteStoreEngine::open(&config).expect("seed engine");
+    let config = StoreBackendConfig::sqlite(
+        &path,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let (seed, _) = support::open_sqlite_engine(&config).expect("seed engine");
     let v1 = json!({"generation": 1});
     seed.commit_transaction(&put_request(
         "sqlite-seed",
@@ -174,8 +181,8 @@ fn independent_sqlite_opens_exact_cas_has_one_winner() {
     ))
     .expect("seed");
 
-    let (first, _) = SqliteStoreEngine::open(&config).expect("first engine");
-    let (second, _) = SqliteStoreEngine::open(&config).expect("second engine");
+    let (first, _) = support::open_sqlite_engine(&config).expect("first engine");
+    let (second, _) = support::open_sqlite_engine(&config).expect("second engine");
     let barrier = Arc::new(Barrier::new(2));
     let first_barrier = barrier.clone();
     let first_v1 = v1.clone();
@@ -209,7 +216,7 @@ fn independent_sqlite_opens_exact_cas_has_one_winner() {
         first.join().expect("first writer"),
         second.join().expect("second writer"),
     );
-    let (reader, _) = SqliteStoreEngine::open(&config).expect("reader");
+    let (reader, _) = support::open_sqlite_engine(&config).expect("reader");
     assert_eq!(reader.read_events().expect("events").len(), 2);
     assert_eq!(read_value(&reader, KEY)["generation"], 2);
 }
@@ -217,9 +224,13 @@ fn independent_sqlite_opens_exact_cas_has_one_winner() {
 #[test]
 fn independent_file_open_consistent_read_never_observes_mixed_generation() {
     let root = temp_root("file-consistent-read");
-    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config");
-    let (writer, _, _) = FileStoreEngine::open(&config).expect("writer");
-    let (reader, _, _) = FileStoreEngine::open(&config).expect("reader");
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let (writer, _, _) = support::open_file_engine(&config).expect("writer");
+    let (reader, _, _) = support::open_file_engine(&config).expect("reader");
     let keys = ["generation-a", "generation-b"];
     writer
         .commit_transaction(&generation_request(1, None, &keys))
@@ -258,8 +269,12 @@ fn independent_file_open_consistent_read_never_observes_mixed_generation() {
 #[test]
 fn file_incomplete_transaction_marker_fails_closed_for_open_and_consistent_read() {
     let root = temp_root("file-incomplete-transaction");
-    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config");
-    let (engine, _, _) = FileStoreEngine::open(&config).expect("engine");
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let (engine, _, _) = support::open_file_engine(&config).expect("engine");
     fs::write(
         root.join(".beetle-memory.transaction"),
         br#"{"schema_version":1,"transaction_id":"interrupted","state":"prepared"}"#,
@@ -270,18 +285,18 @@ fn file_incomplete_transaction_marker_fails_closed_for_open_and_consistent_read(
         .read_consistent(&StoreConsistentReadRequest::default())
         .expect_err("incomplete transaction must block reads");
     assert_eq!(read_error.stage(), "store_transaction_recovery_required");
-    let open_error = FileStoreEngine::open(&config)
+    let open_error = support::open_file_engine(&config)
         .err()
         .expect("incomplete transaction must block reopen");
     assert_eq!(open_error.stage(), "store_transaction_recovery_required");
 }
 
 #[test]
-fn embedded_transaction_keeps_bounded_event_ring() {
+fn embedded_transaction_rejects_append_only_audit_overflow() {
     let mut capacity = StoreCapacityBudget::full();
     capacity.event_log_max_items = 2;
     let engine = EmbeddedStoreEngine::new(capacity);
-    for sequence in 1..=3 {
+    for sequence in 1..=2 {
         engine
             .commit_transaction(&StoreTransactionRequest::new(
                 format!("embedded-{sequence}"),
@@ -291,8 +306,19 @@ fn embedded_transaction_keeps_bounded_event_ring() {
                 }],
                 None,
             ))
-            .expect("embedded ring transaction");
+            .expect("embedded append-only audit transaction");
     }
+    let error = engine
+        .commit_transaction(&StoreTransactionRequest::new(
+            "embedded-3",
+            Vec::new(),
+            vec![StoreEngineMutation::AppendEvent {
+                event: Box::new(event("embedded-3")),
+            }],
+            None,
+        ))
+        .expect_err("third event must not evict append-only audit history");
+    assert_eq!(error.stage(), "store_budget_exceeded");
 
     let event_ids = engine
         .read_consistent(&StoreConsistentReadRequest {
@@ -304,7 +330,7 @@ fn embedded_transaction_keeps_bounded_event_ring() {
         .into_iter()
         .map(|event| event.event_id)
         .collect::<Vec<_>>();
-    assert_eq!(event_ids, vec!["embedded-2", "embedded-3"]);
+    assert_eq!(event_ids, vec!["embedded-1", "embedded-2"]);
 }
 
 fn generation_request(
@@ -349,8 +375,12 @@ fn generation_request(
 fn multiprocess_file_exact_cas_has_one_winner() {
     let root = temp_root("file-multiprocess");
     fs::create_dir_all(&root).expect("root");
-    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config");
-    let (seed, _, _) = FileStoreEngine::open(&config).expect("seed engine");
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let (seed, _, _) = support::open_file_engine(&config).expect("seed engine");
     seed.commit_transaction(&put_request(
         "process-seed",
         StoreJsonPrecondition::Absent {
@@ -391,7 +421,7 @@ fn multiprocess_file_exact_cas_has_one_winner() {
             .count(),
         1
     );
-    let (reader, _, _) = FileStoreEngine::open(&config).expect("reader");
+    let (reader, _, _) = support::open_file_engine(&config).expect("reader");
     assert_eq!(reader.read_events().expect("events").len(), 2);
 }
 
@@ -427,8 +457,12 @@ fn file_transaction_worker() {
     let writer = std::env::var("BM_STORE_FILE_TX_WRITER").expect("writer");
     let result =
         PathBuf::from(std::env::var_os("BM_STORE_FILE_TX_RESULT").expect("worker result path"));
-    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config");
-    let (engine, _, _) = FileStoreEngine::open(&config).expect("worker engine");
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let (engine, _, _) = support::open_file_engine(&config).expect("worker engine");
     fs::write(root.join("ready").join(&writer), b"ready").expect("ready marker");
     wait_for_paths(&[root.join("go")]);
     let outcome = engine.commit_transaction(&put_request(

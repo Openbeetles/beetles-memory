@@ -1,11 +1,10 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 use bm_entry::{
-    EntryAuthConfig, EntryIdempotencyConfig, EntryRuntimeBaseConfig, EntryStoreConfig,
-    EntryTransportConfig,
+    EntryAuthConfig, EntryIdempotencyConfig, EntryRuntimeBaseConfig, EntryTransportConfig,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, PressureLevel, ProfileId, StoreBackendKind,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, PressureLevel, ProfileId, StoreBackendConfig,
 };
 
 use crate::{GatewayError, GatewayProviderConfig, GatewayScopeResolverConfig};
@@ -26,18 +25,20 @@ pub struct GatewayConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewayServerConfig {
     pub bind_addr: String,
-    pub loopback_only: bool,
     pub memory_required: bool,
-    pub require_token_for_remote: bool,
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for GatewayServerConfig {
     fn default() -> Self {
         Self {
             bind_addr: "127.0.0.1:8787".to_string(),
-            loopback_only: true,
             memory_required: true,
-            require_token_for_remote: true,
+            allowed_origins: vec![
+                "http://127.0.0.1:8787".to_string(),
+                "http://localhost:8787".to_string(),
+                "http://[::1]:8787".to_string(),
+            ],
         }
     }
 }
@@ -109,15 +110,13 @@ impl GatewayConfig {
         );
         let mut capability = MemoryCapabilityPolicy::strict_profile();
         capability.communication_adapter_enabled = true;
+        let store = StoreBackendConfig::in_memory(host_production_gateway_profile())
+            .expect("host production gateway profile must support in-memory store")
+            .with_fsync(false);
         Self {
             entry: EntryRuntimeBaseConfig {
-                profile: ProfileId::ServerLinuxDevFull,
-                store: EntryStoreConfig {
-                    backend: StoreBackendKind::InMemory,
-                    data_path: None,
-                    fsync: false,
-                },
-                transports: EntryTransportConfig::all_enabled(),
+                store,
+                transports: llm_gateway_transport_config(),
                 auth: EntryAuthConfig::disabled_for_local(),
                 idempotency: EntryIdempotencyConfig { max_keys: 1024 },
                 privacy: MemoryPrivacyPolicy::standard_private_boundary(),
@@ -135,6 +134,30 @@ impl GatewayConfig {
     }
 
     pub fn validate(&self) -> crate::Result<()> {
+        if self.entry.transports != llm_gateway_transport_config() {
+            return Err(GatewayError::invalid_config(
+                "LLM Gateway entry transports must enable only llm_gateway_server",
+            ));
+        }
+        let capability_view = bm_entry::entry_capability_view(
+            self.entry.store.profile(),
+            &self.entry.capability,
+            &self.entry.privacy,
+            &self.entry.transports,
+        )
+        .map_err(|error| {
+            GatewayError::invalid_config(format!(
+                "LLM Gateway profile capability resolution failed: {error}"
+            ))
+        })?;
+        if !capability_view.llm_gateway_server.profile_allowed
+            || !capability_view.llm_gateway_server.visible
+        {
+            return Err(GatewayError::invalid_config(format!(
+                "profile {} does not authorize the LLM Gateway server entry",
+                self.entry.store.profile().as_str()
+            )));
+        }
         if self.runtime_cache.max_runtimes == 0 {
             return Err(GatewayError::invalid_config(
                 "runtime_cache.max_runtimes must be greater than zero",
@@ -150,14 +173,23 @@ impl GatewayConfig {
                 "server.bind_addr must not be empty",
             ));
         }
-        if self.server.loopback_only && !is_loopback_bind_addr(&self.server.bind_addr) {
+        let bind_addr = self.server.bind_addr.parse::<SocketAddr>().map_err(|_| {
+            GatewayError::invalid_config("server.bind_addr must be a socket address")
+        })?;
+        if !bind_addr.ip().is_loopback() && !self.entry.auth.has_bearer_verifier() {
             return Err(GatewayError::invalid_config(
-                "server.loopback_only requires a loopback bind address",
+                "non-loopback gateway bind requires a configured bearer verifier",
             ));
         }
-        if !self.server.loopback_only && !self.server.require_token_for_remote {
+        if self.server.allowed_origins.is_empty()
+            || self
+                .server
+                .allowed_origins
+                .iter()
+                .any(|origin| !is_exact_local_origin(origin))
+        {
             return Err(GatewayError::invalid_config(
-                "remote gateway requires token enforcement",
+                "server.allowed_origins must contain only exact local http(s) origins",
             ));
         }
         if self.audit.enabled && self.audit.record_raw_projection {
@@ -176,17 +208,95 @@ impl GatewayConfig {
     }
 }
 
-fn is_loopback_bind_addr(bind_addr: &str) -> bool {
-    let trimmed = bind_addr.trim();
-    let host = if let Some(rest) = trimmed.strip_prefix('[') {
-        rest.split_once(']')
-            .map(|(host, _)| host)
-            .unwrap_or(trimmed)
+pub const fn llm_gateway_transport_config() -> EntryTransportConfig {
+    EntryTransportConfig {
+        cli: false,
+        http_server: false,
+        wss_client: false,
+        wss_server: false,
+        mcp_server: false,
+        a2a_bridge: false,
+        llm_gateway_server: true,
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn host_production_gateway_profile() -> ProfileId {
+    ProfileId::ServerLinuxMemoryGateway
+}
+
+#[cfg(target_os = "macos")]
+const fn host_production_gateway_profile() -> ProfileId {
+    ProfileId::DesktopMacosStandaloneMemory
+}
+
+#[cfg(target_os = "windows")]
+const fn host_production_gateway_profile() -> ProfileId {
+    panic!("bm-llm-gateway has no Windows production profile")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("bm-llm-gateway has no production profile for this target OS");
+
+fn is_exact_local_origin(origin: &str) -> bool {
+    if origin.trim() != origin || origin.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return false;
+    }
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https")
+        || authority.is_empty()
+        || authority
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@'))
+    {
+        return false;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        if !suffix.is_empty() && !suffix.strip_prefix(':').is_some_and(valid_origin_port) {
+            return false;
+        }
+        host
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if !valid_origin_port(port) {
+            return false;
+        }
+        host
     } else {
-        trimmed
-            .rsplit_once(':')
-            .map(|(host, _)| host)
-            .unwrap_or(trimmed)
+        authority
     };
     matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn valid_origin_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+#[cfg(test)]
+mod host_profile_tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_gateway_profile_is_linux_memory_gateway() {
+        assert_eq!(
+            host_production_gateway_profile(),
+            ProfileId::ServerLinuxMemoryGateway
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn production_gateway_profile_is_macos_standalone_memory() {
+        assert_eq!(
+            host_production_gateway_profile(),
+            ProfileId::DesktopMacosStandaloneMemory
+        );
+    }
 }

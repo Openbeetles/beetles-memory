@@ -9,6 +9,8 @@ use bm_sdk::{
 };
 use serde_json::{json, Value};
 
+mod support;
+
 fn gateway_config() -> GatewayConfig {
     let mut config = GatewayConfig::default_for_local_dev();
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -22,11 +24,10 @@ fn gateway_config() -> GatewayConfig {
 
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
-        auth_subject: Some("owner-token".to_string()),
         workspace_root_digest: Some("workspace-digest".to_string()),
         client_conversation_hint: Some("thread-7".to_string()),
         model_alias: Some("local".to_string()),
-        ..GatewayScopeRequest::default()
+        ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
 }
 
@@ -117,7 +118,6 @@ fn models_endpoint_proxies_openai_provider_models_without_projection() {
 
     let response = handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::get("/v1/models", scope_request()),
         &mut upstream,
     )
@@ -143,7 +143,6 @@ fn chat_non_streaming_injects_memory_and_preserves_openai_payload_shape() {
 
     let response = handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope,
@@ -213,7 +212,6 @@ fn chat_full_history_uses_latest_user_message_as_projection_query() {
 
     handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope,
@@ -253,7 +251,6 @@ fn chat_streaming_passes_through_sse_chunks_without_json_buffering() {
 
     let response = handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope,
@@ -288,7 +285,6 @@ fn projection_failure_is_fail_closed_and_does_not_call_upstream() {
 
     let error = handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope_request(),

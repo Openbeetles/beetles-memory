@@ -15,6 +15,7 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | `bm-entry` | Process-level runtime opening, profile/auth/source/idempotency normalization, and adapter response envelope. |
 | `bm-cli` | CLI commands, capability rendering, platform snapshots, and memory command execution. |
 | `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` | Thin transport shells that consume `bm-entry` or `bm-adapter` and do not own memory semantics. |
+| `bm-ollama-transparent` | Published macOS-local controller for Ollama App transparent mode: cross-process OS transition lease, exact PID/start/executable receipts, verified executable launch with recoverable `launchd` job authority, and bounded process/probe reports. Its caller must provide an explicit absolute gateway path and typed memory authority; model and memory semantics remain owned by `bm-llm-gateway`. |
 
 ## Runtime Operations
 
@@ -34,7 +35,7 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Agent Tool Registry | `MemoryRuntimeBuilder::agent_tool_registry` / `MemoryRuntime::upsert_agent_tool_registry` | Hosts register tool indexes and fingerprints. The SDK returns `agent_tool_hints` only from governed tool experience; no experience means empty hints, not tool routing. |
 | Replay | `MemoryRuntime::replay` | Inspect turn ledger history for a chat. |
 | Transcript Attr Write | `MemoryRuntime::record_transcript_attrs` | Attach governed turn/message metadata to transcript evidence for replay, export, redaction, repair, and profile budgeting. |
-| Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | Move continuity snapshots between scopes. |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Transfer a typed `(memory_space_id, mounted_subject_id)` archive under an explicit private-material policy. |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
 
 ## Memory Evidence System
@@ -100,8 +101,10 @@ The most common SDK request types are:
 | `MemoryWriteRequest::Procedural` | `writes`, `source` | Each `RuntimeSkillWrite` includes `name`, `topic`, `title`, `summary`, `content`, `citations`, `source_chat_id`, and `observed_at`. |
 | `MemoryWriteRequest::AgentToolUsageFeedback` | `feedback` | Host reports tool execution observations with `registry_ref`; the SDK may turn repeated governed evidence into tool experience. |
 | `MemoryWriteRequest::LongTermExtraction` | `extraction` | Use when an extraction pipeline has produced a validated long-term memory extraction. |
-| `MemoryRecallRequest` | `query`, `limit`, `tool_registry_refs` | Returns runtime skill hits, standard Agent Skill hits, working recall inspection data, and experience-backed `agent_tool_hints`; without governed experience, hints are empty. |
-| `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `tool_registry_refs` | Returns `system_memory_block` bounded by `system_max_len`; standard Agent Skills enter only as read-only hint summaries, and Agent Tools enter only as experience hints without full schemas. |
+| `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | Atomically creates, revises, or deletes governed evidence owners together with source claims and derived indexes. `Upsert` carries a bounded `GovernedEvidenceDocumentDraft`; `Delete` requires an expected owner revision. |
+| `MemoryRecallRequest` | `query`, `limit`, `structured_query_facets`, `tool_registry_refs` | Returns runtime skill hits, standard Agent Skill hits, working recall inspection data, and experience-backed `agent_tool_hints`; structured facets are typed query constraints, and without governed experience tool hints are empty. |
+| `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | Returns `system_memory_block` bounded by `system_max_len`; structured facets use the same governed query contract as recall, standard Agent Skills enter only as read-only hint summaries, and Agent Tools enter only as experience hints without full schemas. |
+| `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | Reads an exact bounded set of governed evidence documents through `MemoryRuntime::read_governed_evidence_documents(request)`. The runtime rejects a memory-space mismatch, empty/duplicate document ids, and requests above the current profile read budget; each result is privacy-filtered and carries typed owner identity, revision, canonical evidence binding, safe source metadata, and bounded body/chunks. |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, operator inspection data, the Agent Skill directory report, and the Agent Tool registry report. |
 | `RuntimeSkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | Returns `RuntimeSkillListReport` with total, active, disabled, runtime_skills, and runtime skill summaries. |
 | `RuntimeSkillDetailRequest` | `name` | Returns `RuntimeSkillDetailReport` with summary/procedure/citations/lineage/strategy diffs/raw content. |
@@ -114,12 +117,12 @@ The most common SDK request types are:
 | `MemoryLongTermPolicyRequest` | `operation`, `reason`, `dry_run`, `mode_input` | Runs pause, resume, suppress, or remove_suppression. Writes blocked by the policy appear in SDK governance reports. |
 | `MemoryTranscriptAttrWriteRequest` | `memory_space_id`, `channel_id`, `conversation_id`, `attrs`, `dry_run` | Writes governed `TranscriptAttrEnvelope` metadata to existing transcript turns/messages. `idempotency_key` is accepted for host/adapter correlation; dry-run validates target existence and attr envelope rules without persisting and returns rejected attrs plus `redactions_preview`. |
 | `MemoryReplayRequest` | `chat_id`, `limit` | Inspection-only replay surface. |
-| `MemoryExportRequest` | `chat_id` | Exports a continuity snapshot. |
-| `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode is `BootstrapImport` or `FullRestore`. |
+| `MemorySpaceExportRequest` | `scope`, `include_private` | Exports only the runtime's exact typed memory-space and mounted-subject projection. |
+| `MemorySpaceImportRequest` | `scope`, `expected_private_material_policy`, `archive` | Imports only when runtime, request, archive scope, and private-material policy match before store access. |
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | Runs recoverable lifecycle recovery. |
 | `MemoryCloseRequest` | `reason` | Emits a close lifecycle report. |
 
-Generic adapter dispatch supports write, recall, project, inspect, recover, replay, export, import, long-term list/detail/mutate/policy, transcript attr write, capabilities, and close. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
+Generic adapter dispatch supports write, recall, project, inspect, recover, replay, long-term list/detail/mutate/policy, transcript attr write, capabilities, and close. Governed memory-space export/import is runtime-scoped and is not exposed through the legacy free-form snapshot commands. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
 
 Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/tool/message surface.
 
@@ -237,7 +240,8 @@ assert!(capabilities.transcript_replay.visible);
 Use the CLI to render a stable platform snapshot:
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features profile-server-linux-memory-gateway -- \
   platform capability-snapshot \
   --profile profile-server-linux-memory-gateway
 ```

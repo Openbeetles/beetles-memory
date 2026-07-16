@@ -1,12 +1,38 @@
 use bm_adapter::AdapterOperation;
 use bm_sdk::{
-    resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId,
-    RuntimeBudgetReport,
+    resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryStoreHandle,
+    ProfileId, StoreBackendConfig,
 };
-use bm_wss::{message_specs, WssBudget};
+use bm_wss::message_specs;
 
 #[test]
 fn inbound_messages_map_to_adapter_commands() {
+    assert_eq!(
+        message_specs()
+            .iter()
+            .map(|message| message.name)
+            .collect::<Vec<_>>(),
+        vec![
+            "command.write",
+            "command.recall",
+            "command.project",
+            "command.inspect",
+            "command.replay",
+            "command.long_term.list",
+            "command.long_term.detail",
+            "command.long_term.mutate",
+            "command.long_term.policy",
+            "command.transcript.attrs",
+            "command.capabilities",
+            "subscribe.projection",
+            "subscribe.inspection",
+            "subscribe.replay",
+            "subscribe.capability",
+            "event.report",
+            "event.lifecycle",
+            "event.error",
+        ]
+    );
     let operations: Vec<_> = message_specs()
         .iter()
         .filter_map(|message| message.inbound_operation)
@@ -55,9 +81,23 @@ fn esp_standalone_wss_is_summary_only_with_bounded_frames() {
     assert!(!catalog.adapter.wss.private_data_allowed);
     assert!(catalog.adapter.wss.visible);
 
-    let budget = WssBudget::from_runtime_budget(&RuntimeBudgetReport::static_for_profile(
-        ProfileId::EspStandaloneMemory,
-    ));
-    assert!(budget.max_frame_bytes <= 8 * 1024);
-    assert!(budget.max_subscriptions <= 4);
+    let report = MemoryStoreHandle::open(
+        StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory).expect("store config"),
+    )
+    .expect("store")
+    .runtime_budget();
+    assert!(report.adapter_budget.wss_frame_max_bytes <= 8 * 1024);
+    assert!(report.adapter_budget.wss_max_subscriptions <= 4);
+}
+
+#[test]
+fn production_wss_api_exposes_no_budget_injection_surface() {
+    let source = include_str!("../src/lib.rs");
+
+    assert!(!source.contains("pub struct WssBudget"));
+    assert!(!source.contains("budget: WssBudget"));
+    assert!(!source.contains("WssBudget::from_runtime_budget"));
+    assert!(!source.contains("buffer.len() > 8192"));
+    assert!(source.contains("adapter_budget.http_header_max_bytes"));
+    assert!(source.contains("adapter_budget.wss_frame_max_bytes"));
 }

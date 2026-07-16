@@ -1,5 +1,5 @@
 use bm_llm_gateway::{
-    handle_openai_request_with_services, serve_openai_http_stream_with_services,
+    handle_openai_request_with_services, serve_openai_http_accepted_stream_with_services,
     GatewayAuditOutcome, GatewayAuditStage, GatewayConfig, GatewayRuntime, GatewayScopeRequest,
     GatewayScopeResolver, OpenAiCompatibleUpstream, OpenAiGatewayBody, OpenAiGatewayRequest,
     OpenAiGatewayServices, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
@@ -9,7 +9,8 @@ use bm_sdk::{
     PressureLevel, ResponseBody, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
 };
 use serde_json::json;
-use std::io::{Cursor, Read, Write};
+
+mod support;
 
 fn gateway_config() -> GatewayConfig {
     GatewayConfig::default_for_local_dev()
@@ -17,11 +18,10 @@ fn gateway_config() -> GatewayConfig {
 
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
-        auth_subject: Some("owner-token".to_string()),
         workspace_root_digest: Some("workspace-digest".to_string()),
         client_conversation_hint: Some("thread-7".to_string()),
         model_alias: Some("local".to_string()),
-        ..GatewayScopeRequest::default()
+        ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
 }
 
@@ -128,7 +128,6 @@ fn non_streaming_response_runs_post_reply_maintenance_when_services_are_injected
 
     let response = handle_openai_request_with_services(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope_request(),
@@ -164,7 +163,6 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
 
     let response = handle_openai_request_with_services(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope_request(),
@@ -243,7 +241,6 @@ fn missing_maintenance_services_skip_without_polluting_successful_response() {
 
     let response = handle_openai_request_with_services(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope_request(),
@@ -309,7 +306,6 @@ fn maintenance_hidden_records_skipped_without_blocking_turn_commit() {
 
     let response = handle_openai_request_with_services(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope_request(),
@@ -376,7 +372,6 @@ fn streaming_response_records_maintenance_after_body_is_drained() {
 
     let mut response = handle_openai_request_with_services(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope_request(),
@@ -422,7 +417,6 @@ fn streaming_response_without_done_does_not_commit_partial_assistant() {
 
     let mut response = handle_openai_request_with_services(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/chat/completions",
             scope_request(),
@@ -469,41 +463,6 @@ fn streaming_response_without_done_does_not_commit_partial_assistant() {
     assert!(projection.context.recent_messages.is_empty());
 }
 
-struct MemoryStream {
-    read: Cursor<Vec<u8>>,
-    written: Vec<u8>,
-}
-
-impl MemoryStream {
-    fn new(input: String) -> Self {
-        Self {
-            read: Cursor::new(input.into_bytes()),
-            written: Vec::new(),
-        }
-    }
-
-    fn written_string(&self) -> String {
-        String::from_utf8(self.written.clone()).expect("utf8 response")
-    }
-}
-
-impl Read for MemoryStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.read.read(buf)
-    }
-}
-
-impl Write for MemoryStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.written.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[test]
 fn streaming_response_finishes_maintenance_after_sse_done_without_rewriting_chunks() {
     let config = gateway_config();
@@ -519,7 +478,7 @@ fn streaming_response_finishes_maintenance_after_sse_done_without_rewriting_chun
         body.len(),
         body
     );
-    let mut stream = MemoryStream::new(request);
+    let (mut stream, client) = support::accepted_request(request);
     let mut upstream = MockOpenAiUpstream::with_response(OpenAiUpstreamResponse::sse(
         200,
         vec![
@@ -532,16 +491,16 @@ fn streaming_response_finishes_maintenance_after_sse_done_without_rewriting_chun
     let llm = StaticLlmClient;
     let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    serve_openai_http_stream_with_services(
+    serve_openai_http_accepted_stream_with_services(
         &gateway,
-        &config,
         &mut upstream,
         &mut services,
         &mut stream,
     )
     .expect("serve openai request");
 
-    let response = stream.written_string();
+    drop(stream);
+    let response = support::finish_request(client);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("content-type: text/event-stream\r\n"));
     assert!(!response.contains("content-length:"));

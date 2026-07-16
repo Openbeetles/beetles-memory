@@ -2,25 +2,30 @@
 
 mod support;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use bm_core::memory::{
-    canonical_evidence_ref_from_source, canonical_recall_evidence_group, memory_facet_manifest_key,
-    CanonicalEntityKey, CanonicalEntityKind, CanonicalEntityRef, QueryFacetInput,
-    RecallDeliverySelectionDropReason, TemporalAnchor, TemporalAnchorKind, TemporalAnchorPrecision,
-    MEMORY_FACET_POSTING_NAMESPACE,
+    canonical_evidence_ref_from_source, canonical_recall_evidence_group,
+    governed_memory_recall_candidate_id, memory_facet_manifest_key, CanonicalEntityKey,
+    CanonicalEntityKind, CanonicalEntityRef, CanonicalEvidenceRef,
+    CanonicalRecallEvidenceFamilyGroup, QueryFacetInput, RecallDeliverySelectionDropReason,
+    TemporalAnchor, TemporalAnchorKind, TemporalAnchorPrecision, MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_sdk::{
-    default_agent_subject_id, EvidenceBacklink, LongTermMemoryDraft, LongTermMemoryKind,
-    MemoryEvalRecallBenchmarkContext, MemoryEvalRecallRequest, MemoryEvidenceRefVisibility,
-    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryPrivacyClass,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel, ProfileId,
+    default_agent_subject_id, EvidenceBacklink, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    LongTermMemoryDraft, LongTermMemoryKind, MemoryEvalRecallBenchmarkContext,
+    MemoryEvalRecallRequest, MemoryEvidenceRefVisibility, MemoryGraphEdge, MemoryGraphEdgeKind,
+    MemoryGraphNode, MemoryGraphNodeKind, MemoryPrivacyClass, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryWriteRequest, NonproductionRuntimeBudgetLimits, PressureLevel,
     RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    TemporalMemoryGraphWriteRequest, TemporalValidity,
+    TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, TemporalValidity,
+    MEMORY_GRAPH_SCHEMA_VERSION,
 };
 
 use support::{
-    empty_store_platform, test_runtime, test_runtime_with_delegated_actor,
-    test_runtime_with_identity_scope_and_subject, test_runtime_with_scope_and_subject,
-    test_runtime_with_scope_subject_and_budget,
+    empty_store_platform, empty_store_platform_with_budget, test_runtime,
+    test_runtime_with_delegated_actor, test_runtime_with_identity_scope_and_subject,
+    test_runtime_with_scope_and_subject,
 };
 
 fn graph_node(
@@ -53,6 +58,27 @@ fn graph_edge(edge_id: &str, from: &str, to: &str, evidence_ref: &str) -> Memory
     }
 }
 
+fn long_term_graph_owner(node_id: &str, owner_id: &str) -> TemporalMemoryGraphNodeOwnerRef {
+    TemporalMemoryGraphNodeOwnerRef {
+        node_id: node_id.to_string(),
+        owner_ref: GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner_id),
+    }
+}
+
+fn long_term_candidate_id(owner_id: &str) -> String {
+    governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        owner_id,
+    ))
+}
+
+fn runtime_skill_candidate_id(owner_id: &str) -> String {
+    governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::RuntimeSkill,
+        owner_id,
+    ))
+}
+
 fn long_term_draft(topic: &str, content: &str, citation: &str) -> LongTermMemoryDraft {
     LongTermMemoryDraft {
         kind: LongTermMemoryKind::Fact,
@@ -75,16 +101,14 @@ fn long_term_draft(topic: &str, content: &str, citation: &str) -> LongTermMemory
     }
 }
 
-fn release_artifact_source_decoys(prefix: &str) -> Vec<LongTermMemoryDraft> {
-    (0..4)
-        .map(|index| {
-            long_term_draft(
-                &format!("{prefix} source decoy {index}"),
-                &format!("Release artifact source decoy {index} has no persistent graph index."),
-                &format!("external_eval:{prefix}-source-decoy-{index}"),
-            )
-        })
-        .collect()
+fn evidence_with_family(source: &str, family: &str) -> CanonicalEvidenceRef {
+    let mut evidence = canonical_evidence_ref_from_source(source).expect("canonical evidence");
+    evidence.evidence_family_group = Some(
+        CanonicalRecallEvidenceFamilyGroup::from_structured_identity(family)
+            .expect("structured evidence family")
+            .into_string(),
+    );
+    evidence
 }
 
 fn seed_governed_long_term(runtime: &bm_sdk::MemoryRuntime, drafts: Vec<LongTermMemoryDraft>) {
@@ -101,8 +125,8 @@ fn seed_governed_long_term(runtime: &bm_sdk::MemoryRuntime, drafts: Vec<LongTerm
 
 #[test]
 fn production_delivery_rejects_private_owner_records_before_capsule_render() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let mut private = long_term_draft(
         "private delivery sentinel",
         "SOUL_PRIVATE_RAW_SENTINEL must never reach recall delivery.",
@@ -150,6 +174,10 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
                     "turn:restricted-neighbor",
                 ),
             ],
+            node_owners: vec![
+                long_term_graph_owner(&public_id, &public_id),
+                long_term_graph_owner(&private_id, &private_id),
+            ],
             edges: vec![graph_edge(
                 "edge:public-anchor:restricted-neighbor",
                 &public_id,
@@ -184,27 +212,28 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
             tool_registry_refs: Vec::new(),
         })
         .expect("production recall");
+    let private_candidate_id = long_term_candidate_id(&private_id);
 
     assert!(!report.graph_index_report.used);
     assert!(!report.graph_index_report.maintenance_required);
     assert_eq!(report.graph_index_report.read_path_mutation_delta, 0);
-    assert!(!report.source_candidate_ids.contains(&private_id));
+    assert!(!report.source_candidate_ids.contains(&private_candidate_id));
     assert!(!report
         .graph_rerank
         .reranked_candidate_ids
-        .contains(&private_id));
+        .contains(&private_candidate_id));
     assert!(!report
         .facet_index_report
         .exact_facet_candidate_ids
-        .contains(&private_id));
+        .contains(&private_candidate_id));
     assert!(!report
         .facet_index_report
         .expanded_facet_candidate_ids
-        .contains(&private_id));
+        .contains(&private_candidate_id));
     assert!(!report
         .graph_candidate_evidence_ref_index
         .iter()
-        .any(|entry| entry.candidate_id == private_id
+        .any(|entry| entry.candidate_id == private_candidate_id
             || entry
                 .evidence_refs
                 .iter()
@@ -219,7 +248,7 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
         .selection_decisions
         .iter()
         .any(|decision| {
-            decision.candidate_id == private_id
+            decision.candidate_id == private_candidate_id
                 || decision
                     .canonical_evidence_groups
                     .iter()
@@ -268,8 +297,8 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
 
 #[test]
 fn persistent_graph_recall_drops_ownerless_private_like_nodes_and_dependents() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     seed_governed_long_term(
         &runtime,
         vec![long_term_draft(
@@ -308,6 +337,10 @@ fn persistent_graph_recall_drops_ownerless_private_like_nodes_and_dependents() {
                     ownerless_label,
                     ownerless_evidence,
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&visible_id, &visible_id),
+                long_term_graph_owner(ownerless_id, ownerless_id),
             ],
             edges: vec![graph_edge(
                 "edge:visible-owner:ownerless-private-like",
@@ -387,7 +420,7 @@ fn persistent_graph_recall_drops_ownerless_private_like_nodes_and_dependents() {
 
 #[test]
 fn governed_read_filters_private_records_before_source_recall_limit() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform.clone(), profile);
     let mut public = long_term_draft(
@@ -434,17 +467,18 @@ fn governed_read_filters_private_records_before_source_recall_limit() {
         })
         .expect("governed recall");
 
-    assert!(report.source_candidate_ids.contains(&public_id));
+    let public_candidate_id = long_term_candidate_id(&public_id);
+    assert!(report.source_candidate_ids.contains(&public_candidate_id));
     assert!(report
         .source_candidate_ids
         .iter()
-        .all(|candidate_id| candidate_id == &public_id));
+        .all(|candidate_id| candidate_id == &public_candidate_id));
 }
 
 #[test]
 fn production_capsule_exposes_non_public_locator_only_as_stable_opaque_ref() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     seed_governed_long_term(
         &runtime,
         vec![long_term_draft(
@@ -481,24 +515,26 @@ fn production_capsule_exposes_non_public_locator_only_as_stable_opaque_ref() {
     assert!(first_view
         .reference
         .as_deref()
-        .is_some_and(|reference| reference.starts_with("opaque:evidence:")
+        .is_some_and(|reference| reference.starts_with("opaque:governed-source:")
             && !reference.contains("private-path")));
 }
 
 #[test]
 fn delivery_and_loss_reports_never_expose_archive_or_transcript_locators() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.recall_delivery_budget.max_selected_candidates = 1;
     budget.recall_delivery_budget.max_rendered_capsules = 1;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_recall_delivery_budget(budget.recall_delivery_budget)
+        .expect("valid recall delivery budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "opaque-report",
         "subject-opaque-report",
-        budget,
     );
     let archive_locator = "archive:/private/releases.md#turn=7";
     let transcript_locator = "transcript:private-chat#message=9";
@@ -553,7 +589,7 @@ fn delivery_and_loss_reports_never_expose_archive_or_transcript_locators() {
 
 #[test]
 fn evidence_locator_fragments_never_count_as_typed_exact_facet_matches() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform.clone(), profile);
     seed_governed_long_term(
@@ -579,6 +615,7 @@ fn evidence_locator_fragments_never_count_as_typed_exact_facet_matches() {
         })
         .expect("owner record")
         .id;
+    let owner_candidate_id = long_term_candidate_id(&owner_id);
 
     for weak_locator_fragment in ["external", "eval", "d1", "12", "session_1"] {
         let report = runtime
@@ -592,17 +629,17 @@ fn evidence_locator_fragments_never_count_as_typed_exact_facet_matches() {
         assert!(!report
             .facet_index_report
             .exact_facet_candidate_ids
-            .contains(&owner_id));
+            .contains(&owner_candidate_id));
         assert!(!report
             .facet_index_report
             .expanded_facet_candidate_ids
-            .contains(&owner_id));
+            .contains(&owner_candidate_id));
     }
 }
 
 #[test]
 fn facet_recall_fails_closed_when_manifest_counts_are_corrupt() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let source_platform = empty_store_platform(profile);
     let source_runtime = test_runtime(source_platform.clone(), profile);
     seed_governed_long_term(
@@ -655,7 +692,7 @@ fn facet_recall_fails_closed_when_manifest_counts_are_corrupt() {
 
 #[test]
 fn facet_recall_fails_closed_for_independent_owner_and_facet_version_drift() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let source_platform = empty_store_platform(profile);
     let source_runtime = test_runtime(source_platform.clone(), profile);
     seed_governed_long_term(
@@ -718,7 +755,7 @@ fn facet_recall_fails_closed_for_independent_owner_and_facet_version_drift() {
 
 #[test]
 fn facet_recall_reports_verified_zero_hit_when_query_posting_is_absent_from_manifest() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform, profile);
     seed_governed_long_term(
@@ -758,7 +795,7 @@ fn facet_recall_reports_verified_zero_hit_when_query_posting_is_absent_from_mani
 
 #[test]
 fn facet_recall_fails_closed_when_manifest_posting_document_is_missing() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let source_platform = empty_store_platform(profile);
     let source_runtime = test_runtime(source_platform.clone(), profile);
     let mut draft = long_term_draft(
@@ -811,17 +848,19 @@ fn facet_recall_fails_closed_when_manifest_posting_document_is_missing() {
 
 #[test]
 fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projection_and_eval() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.facet_recall_budget.max_query_facets = 1;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_facet_recall_budget(budget.facet_recall_budget)
+        .expect("valid facet recall budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
         profile,
         "llm.gateway",
         "typed-temporal",
         "subject-typed-temporal",
-        budget,
     );
     let mut temporal_owner = long_term_draft(
         "typed temporal owner",
@@ -854,6 +893,14 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
         .expect("text owner")
         .id
         .clone();
+    let temporal_candidate_id = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        &temporal_owner_id,
+    ));
+    let text_candidate_id = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        &text_owner_id,
+    ));
     let evidence = canonical_evidence_ref_from_source("external_eval:typed-temporal-query")
         .expect("canonical typed temporal query evidence");
     let typed_facet = QueryFacetInput::Temporal(TemporalAnchor {
@@ -873,12 +920,12 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
         .expect("typed temporal recall");
     assert_eq!(
         recall.facet_index_report.exact_facet_candidate_ids,
-        vec![temporal_owner_id.clone()]
+        vec![temporal_candidate_id.clone()]
     );
     assert!(!recall
         .facet_index_report
         .exact_facet_candidate_ids
-        .contains(&text_owner_id));
+        .contains(&text_candidate_id));
 
     let projection = runtime
         .project(MemoryProjectionRequest {
@@ -895,7 +942,7 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
         .recall_delivery_report
         .rendered_capsules
         .iter()
-        .any(|capsule| capsule.candidate_id == temporal_owner_id));
+        .any(|capsule| capsule.candidate_id == temporal_candidate_id));
 
     let eval = runtime
         .eval_recall(MemoryEvalRecallRequest {
@@ -912,13 +959,13 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
         .expect("typed temporal eval recall");
     assert_eq!(
         eval.facet_index_report.exact_facet_candidate_ids,
-        vec![temporal_owner_id]
+        vec![temporal_candidate_id]
     );
 }
 
 #[test]
 fn production_typed_entity_facet_hits_a_governed_owner() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform.clone(), profile);
     let citation = "external_eval:typed-entity-owner";
@@ -950,6 +997,10 @@ fn production_typed_entity_facet_hits_a_governed_owner() {
         .find(|entry| entry.content.contains("canonical entity facet"))
         .expect("entity owner")
         .id;
+    let candidate_id = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        owner_id,
+    ));
     let report = runtime
         .recall(MemoryRecallRequest {
             query: "text query without entity owner terms".to_string(),
@@ -962,13 +1013,13 @@ fn production_typed_entity_facet_hits_a_governed_owner() {
     assert!(report.facet_index_report.manifest_integrity_verified);
     assert_eq!(
         report.facet_index_report.exact_facet_candidate_ids,
-        vec![owner_id]
+        vec![candidate_id]
     );
 }
 
 #[test]
 fn invalid_or_unresolved_typed_entity_and_temporal_facets_reject_all_production_entries() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let runtime = test_runtime(empty_store_platform(profile), profile);
     let requests = [
         (
@@ -1028,17 +1079,19 @@ fn invalid_or_unresolved_typed_entity_and_temporal_facets_reject_all_production_
 
 #[test]
 fn facet_recall_fails_closed_before_owner_reads_when_posting_exceeds_governed_budget() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.facet_recall_budget.max_facet_index_docs_read = 8;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_facet_recall_budget(budget.facet_recall_budget)
+        .expect("valid facet recall budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "facet-owner-budget",
         "subject-facet-owner-budget",
-        budget,
     );
     let drafts = (0..9)
         .map(|index| {
@@ -1079,12 +1132,52 @@ fn facet_recall_fails_closed_before_owner_reads_when_posting_exceeds_governed_bu
         .facet_index_report
         .exact_facet_candidate_ids
         .is_empty());
+
+    let exact_limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_facet_recall_budget(budget.facet_recall_budget)
+        .expect("valid exact facet recall budget");
+    let exact_platform = empty_store_platform_with_budget(profile, exact_limits);
+    let exact_runtime = test_runtime_with_scope_and_subject(
+        exact_platform,
+        profile,
+        "llm.gateway",
+        "facet-owner-budget-exact",
+        "subject-facet-owner-budget-exact",
+    );
+    let exact_drafts = (0..8)
+        .map(|index| {
+            let mut draft = long_term_draft(
+                &format!("exact governed owner {index}"),
+                &format!("Exact governed owner {index} belongs to the admitted posting."),
+                &format!("external_eval:exact-governed-owner-{index}"),
+            );
+            draft.keywords = vec!["exact-posting".to_string()];
+            draft
+        })
+        .collect::<Vec<_>>();
+    seed_governed_long_term(&exact_runtime, exact_drafts);
+
+    let exact_report = exact_runtime
+        .recall(MemoryRecallRequest {
+            query: "unrelated exact text".to_string(),
+            limit: 8,
+            structured_query_facets: vec![QueryFacetInput::Keyword("exact-posting".to_string())],
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("exact governed posting recall");
+
+    assert!(exact_report.facet_index_report.used);
+    assert!(exact_report.facet_index_report.manifest_integrity_verified);
+    assert_eq!(exact_report.facet_index_report.owner_key_lookup_count, 8);
+    assert_eq!(exact_report.facet_index_report.owner_doc_read_count, 8);
+    assert_eq!(exact_report.facet_index_report.exact_facet_match_count, 8);
+    assert!(exact_report.store_snapshot_consistent);
 }
 
 #[test]
 fn eval_recall_reports_production_selection_render_loss_ledger() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     seed_governed_long_term(
         &runtime,
         vec![
@@ -1144,6 +1237,10 @@ fn eval_recall_reports_production_selection_render_loss_ledger() {
                     "Release beta evidence",
                     "external_eval:beta",
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&alpha_id, &alpha_id),
+                long_term_graph_owner(&beta_id, &beta_id),
             ],
             edges: vec![graph_edge(
                 "edge:p7-alpha-beta",
@@ -1258,7 +1355,7 @@ fn eval_recall_reports_production_selection_render_loss_ledger() {
         .loss_ledger
         .expanded_hit_selected_miss
         .iter()
-        .all(|entry| entry.selection_drop_reason.is_some()));
+        .all(|entry| !entry.selection_losses.is_empty()));
     assert!(report
         .stage_diagnostics
         .loss_ledger
@@ -1268,8 +1365,8 @@ fn eval_recall_reports_production_selection_render_loss_ledger() {
 
 #[test]
 fn projection_consumes_production_evidence_capsules_without_render_budget_growth() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     seed_governed_long_term(
         &runtime,
         vec![long_term_draft(
@@ -1385,8 +1482,8 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
 
 #[test]
 fn projection_keeps_unicode_capsules_consistent_with_the_character_budget() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
     let repeated_evidence = "记忆证据".repeat(80);
     let drafts = (0..16)
         .map(|index| {
@@ -1414,7 +1511,7 @@ fn projection_keeps_unicode_capsules_consistent_with_the_character_budget() {
     assert!(projection.recall_delivery_report.rendered_capsules.len() > 1);
     assert!(projection.system_memory_block.chars().count() <= 4096);
     assert!(projection.system_memory_block.len() > 4096);
-    assert_eq!(projection.delivery_digest_manifest.schema_version, 2);
+    assert_eq!(projection.delivery_digest_manifest.schema_version, 3);
     assert!(projection.delivery_digest_manifest.exact_render_match);
     assert!(projection
         .delivery_digest_manifest
@@ -1452,8 +1549,8 @@ fn projection_keeps_unicode_capsules_consistent_with_the_character_budget() {
 
 #[test]
 fn projection_digest_proves_duplicate_content_by_candidate_source_id() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
     let duplicate_content =
         "Duplicate projection content must remain attributable to its exact candidate source id.";
     seed_governed_long_term(
@@ -1510,8 +1607,8 @@ fn projection_digest_proves_duplicate_content_by_candidate_source_id() {
 
 #[test]
 fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
 
     runtime
         .write(MemoryWriteRequest::Procedural {
@@ -1564,33 +1661,41 @@ fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
             tool_registry_refs: Vec::new(),
         })
         .expect("eval recall");
+    let release_guard_candidate_id = runtime_skill_candidate_id("runtime_skill__release_guard");
 
     assert!(report
         .source_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == "runtime_skill__release_guard"));
+        .any(|candidate| candidate.candidate_id == release_guard_candidate_id));
     assert!(report
         .expanded_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == "runtime_skill__release_guard"));
+        .any(|candidate| candidate.candidate_id == release_guard_candidate_id));
     assert!(report
         .reranked_candidates
         .iter()
         .any(
-            |candidate| candidate.candidate_id == "runtime_skill__release_guard"
+            |candidate| candidate.candidate_id == release_guard_candidate_id
                 && candidate.score_breakdown.evidence_quality_score > 0
                 && candidate.score_breakdown.source_authority_score > 0
         ));
     assert!(!report
         .selected_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == "runtime_skill__release_guard"));
+        .any(|candidate| candidate.candidate_id == release_guard_candidate_id));
     assert!(report.rendered_candidates.is_empty());
-    assert!(!report
+    let unavailable_decision = report
         .delivery_report
         .selection_decisions
         .iter()
-        .any(|decision| decision.candidate_id == "runtime_skill__release_guard"));
+        .find(|decision| decision.candidate_id == release_guard_candidate_id)
+        .expect("every reranked candidate has a typed delivery decision");
+    assert_eq!(unavailable_decision.owner_ref, None);
+    assert!(!unavailable_decision.selected);
+    assert_eq!(
+        unavailable_decision.drop_reason,
+        Some(RecallDeliverySelectionDropReason::OwnerRecordUnavailable)
+    );
     assert!(report
         .delivery_report
         .delivery_drop_reasons
@@ -1614,7 +1719,11 @@ fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
     assert!(report.metrics.any_evidence_hit);
     assert!(!report.metrics.all_evidence_hit);
     assert!(report.metrics.mrr_bps > 0);
-    assert!(report.privacy_report.passed);
+    assert!(
+        report.privacy_report.passed,
+        "privacy failures: {:?}",
+        report.privacy_report.failures
+    );
     assert!(report
         .graph_gate
         .failures
@@ -1624,24 +1733,40 @@ fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
 
 #[test]
 fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let anchor = long_term_draft(
         "release artifact anchor",
         "Release artifact anchor owns the persistent graph seed.",
         "external_eval:release-artifact-anchor",
     );
-    let anchor_id = anchor.stable_id().expect("anchor owner id");
     let mut manifest = long_term_draft(
         "manifest graph neighbor",
         "Manifest checksum evidence is available through graph expansion.",
         "turn:release-manifest",
     );
     manifest.keywords = vec!["manifest-checksum".to_string()];
-    let manifest_id = manifest.stable_id().expect("manifest owner id");
-    let mut owners = vec![anchor, manifest];
-    owners.extend(release_artifact_source_decoys("persistent-graph"));
-    seed_governed_long_term(&runtime, owners);
+    seed_governed_long_term(&runtime, vec![anchor, manifest]);
+    let records = platform
+        .replay_harness()
+        .scoped_long_term_memory_read_store("space:owner-default")
+        .expect("scoped long-term read store")
+        .list(usize::MAX)
+        .expect("list graph owners");
+    let anchor_id = records
+        .iter()
+        .find(|entry| entry.content.contains("owns the persistent graph seed"))
+        .expect("anchor owner")
+        .id
+        .clone();
+    let manifest_id = records
+        .iter()
+        .find(|entry| entry.content.contains("Manifest checksum evidence"))
+        .expect("manifest owner")
+        .id
+        .clone();
+    let anchor_candidate_id = long_term_candidate_id(&anchor_id);
+    let manifest_candidate_id = long_term_candidate_id(&manifest_id);
 
     let preview = runtime
         .recall(MemoryRecallRequest {
@@ -1675,6 +1800,10 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
                     "turn:release-manifest",
                 ),
             ],
+            node_owners: vec![
+                long_term_graph_owner(&anchor_id, &anchor_id),
+                long_term_graph_owner(&manifest_id, &manifest_id),
+            ],
             edges: vec![graph_edge(
                 "edge:release_guard:manifest_check",
                 &anchor_id,
@@ -1697,6 +1826,13 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
         .expect("graph write report");
     assert!(graph_write.accepted);
     assert!(graph_write.gate_failures.is_empty());
+    assert!(platform
+        .replay_harness()
+        .scoped_long_term_memory_read_store("space:owner-default")
+        .expect("scoped long-term read store after graph write")
+        .get(&manifest_id)
+        .expect("read manifest owner after graph write")
+        .is_some());
 
     let recall = runtime
         .recall(MemoryRecallRequest {
@@ -1706,7 +1842,16 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
             tool_registry_refs: Vec::new(),
         })
         .expect("persistent graph recall");
-    assert!(recall.graph_gate.high_confidence_projection_allowed);
+    assert!(
+        recall.graph_gate.high_confidence_projection_allowed,
+        "failures={:?} source={:?} anchors={:?} graph_index={:?} long_term={:?} consistent={}",
+        recall.graph_gate.failures,
+        recall.source_candidate_ids,
+        recall.graph_anchor_candidate_ids,
+        recall.graph_index_report,
+        recall.working.long_term_memory_text,
+        recall.store_snapshot_consistent,
+    );
     assert!(!recall
         .graph_gate
         .failures
@@ -1716,27 +1861,28 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
         .graph_rerank
         .candidate_ids
         .iter()
-        .any(|candidate| candidate == &anchor_id));
+        .any(|candidate| candidate == &anchor_candidate_id));
     assert!(recall
         .graph_rerank
         .expanded_candidate_ids
         .iter()
-        .any(|candidate| candidate == &manifest_id));
+        .any(|candidate| candidate == &manifest_candidate_id));
     assert!(
-        recall
-            .graph_rerank
-            .graph_neighbor_ids
-            .iter()
-            .any(|candidate| candidate == &manifest_id),
+        recall.graph_index_report.used,
         "{:#?}",
-        recall.graph_rerank
+        recall.graph_index_report
     );
+    assert!(recall
+        .graph_index_report
+        .source_anchor_ids
+        .iter()
+        .any(|candidate| candidate == &anchor_candidate_id));
     let manifest_evidence_group = canonical_recall_evidence_group("turn:release-manifest");
     assert!(recall
         .compact_graph
         .nodes
         .iter()
-        .any(|node| node.node_id == manifest_id
+        .any(|node| node.node_id == manifest_candidate_id
             && node
                 .evidence_refs
                 .iter()
@@ -1783,15 +1929,15 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
     assert!(report
         .expanded_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == manifest_id
+        .any(|candidate| candidate.candidate_id == manifest_candidate_id
             && candidate
                 .graph_neighbor_ids
                 .iter()
-                .any(|neighbor| neighbor == &anchor_id)));
+                .any(|neighbor| neighbor == &anchor_candidate_id)));
     assert!(report
         .reranked_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == manifest_id
+        .any(|candidate| candidate.candidate_id == manifest_candidate_id
             && candidate
                 .evidence_refs
                 .iter()
@@ -1827,7 +1973,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
     assert!(!report
         .source_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == manifest_id));
+        .any(|candidate| candidate.candidate_id == manifest_candidate_id));
     assert!(!report
         .rendered_block_preview
         .contains("Release manifest check"));
@@ -1835,7 +1981,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
 
 #[test]
 fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_identity_scope_and_subject(
         platform.clone(),
@@ -1985,6 +2131,10 @@ fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
                         neighbor_ref,
                     ),
                 ],
+                node_owners: vec![
+                    long_term_graph_owner(anchor_id, anchor_id),
+                    long_term_graph_owner(neighbor_id, neighbor_id),
+                ],
                 edges: vec![graph_edge(
                     &format!("edge:{anchor_id}:shared-neighbor"),
                     anchor_id,
@@ -2072,8 +2222,8 @@ fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
 
 #[test]
 fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let anchor = long_term_draft(
         "release artifact guard",
         "Release artifact guard is the visible governed graph anchor.",
@@ -2085,9 +2235,7 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
         "turn:release-manifest",
     );
     manifest.keywords = vec!["manifest-checksum".to_string()];
-    let mut owners = vec![anchor, manifest];
-    owners.extend(release_artifact_source_decoys("w41"));
-    seed_governed_long_term(&runtime, owners);
+    seed_governed_long_term(&runtime, vec![anchor, manifest]);
     let records = platform
         .replay_harness()
         .scoped_long_term_memory_read_store("space:owner-default")
@@ -2106,6 +2254,8 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
         .expect("manifest owner")
         .id
         .clone();
+    let anchor_candidate_id = long_term_candidate_id(&anchor_id);
+    let manifest_candidate_id = long_term_candidate_id(&manifest_id);
 
     runtime
         .write_temporal_memory_graph(TemporalMemoryGraphWriteRequest {
@@ -2123,6 +2273,10 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
                     "Release manifest check",
                     "turn:release-manifest",
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&anchor_id, &anchor_id),
+                long_term_graph_owner(&manifest_id, &manifest_id),
             ],
             edges: vec![graph_edge(
                 "edge:release_guard:manifest_check",
@@ -2167,27 +2321,195 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
     assert!(report
         .graph_anchor_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == anchor_id));
+        .any(|candidate| candidate.candidate_id == anchor_candidate_id));
     assert!(report
         .eval_candidate_pool
         .iter()
-        .any(|candidate| candidate.candidate_id == manifest_id));
+        .any(|candidate| candidate.candidate_id == manifest_candidate_id));
     let manifest_evidence_group = canonical_recall_evidence_group("turn:release-manifest");
     assert!(report
         .evidence_ref_index
         .iter()
-        .any(|entry| entry.candidate_id == manifest_id
+        .any(|entry| entry.candidate_id == manifest_candidate_id
             && entry
                 .evidence_refs
                 .iter()
                 .any(|evidence_ref| evidence_ref == &manifest_evidence_group)));
-
+    let evidence_index = report
+        .evidence_ref_index
+        .iter()
+        .map(|entry| {
+            (
+                entry.candidate_id.as_str(),
+                entry
+                    .evidence_refs
+                    .iter()
+                    .map(|reference| canonical_recall_evidence_group(reference))
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert!(report
+        .evidence_ref_index
+        .windows(2)
+        .all(|window| window[0].candidate_id < window[1].candidate_id));
+    assert!(report.evidence_ref_index.iter().all(|entry| {
+        !entry.candidate_id.trim().is_empty()
+            && entry
+                .evidence_refs
+                .windows(2)
+                .all(|window| window[0] < window[1])
+            && entry
+                .evidence_refs
+                .iter()
+                .all(|group| group == &canonical_recall_evidence_group(group))
+    }));
+    for candidate in report
+        .source_candidates
+        .iter()
+        .chain(report.expanded_candidates.iter())
+        .chain(report.reranked_candidates.iter())
+    {
+        let groups = candidate
+            .evidence_refs
+            .iter()
+            .map(|reference| canonical_recall_evidence_group(reference))
+            .collect::<BTreeSet<_>>();
+        assert!(groups.is_subset(
+            evidence_index
+                .get(candidate.candidate_id.as_str())
+                .expect("pre-delivery candidate authoritative binding")
+        ));
+    }
+    let selected_from_delivery = report
+        .delivery_report
+        .selection_decisions
+        .iter()
+        .filter(|decision| decision.selected)
+        .map(|decision| {
+            (
+                decision.candidate_id.as_str(),
+                decision
+                    .canonical_evidence_groups
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let selected_from_eval = report
+        .selected_candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.candidate_id.as_str(),
+                candidate
+                    .evidence_refs
+                    .iter()
+                    .map(|reference| canonical_recall_evidence_group(reference))
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(selected_from_eval, selected_from_delivery);
+    let rendered_from_capsules = report
+        .delivery_report
+        .rendered_capsules
+        .iter()
+        .map(|capsule| {
+            (
+                capsule.candidate_id.as_str(),
+                capsule
+                    .canonical_evidence_groups
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let rendered_from_eval = report
+        .rendered_candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.candidate_id.as_str(),
+                candidate
+                    .evidence_refs
+                    .iter()
+                    .map(|reference| canonical_recall_evidence_group(reference))
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(rendered_from_eval, rendered_from_capsules);
+    for slice in &report.ablation_report.slices {
+        for binding in slice
+            .baseline_selected_candidate_bindings
+            .iter()
+            .chain(slice.off_run_selected_candidate_bindings.iter())
+        {
+            assert_eq!(
+                evidence_index.get(binding.candidate_id.as_str()),
+                Some(
+                    &binding
+                        .canonical_evidence_groups
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                ),
+                "selected bindings must equal the report-wide authoritative evidence index"
+            );
+        }
+        for (selected, rendered) in [
+            (
+                &slice.baseline_selected_candidate_bindings,
+                &slice.baseline_rendered_candidate_bindings,
+            ),
+            (
+                &slice.off_run_selected_candidate_bindings,
+                &slice.off_run_rendered_candidate_bindings,
+            ),
+        ] {
+            let selected = selected
+                .iter()
+                .map(|binding| {
+                    (
+                        binding.candidate_id.as_str(),
+                        binding
+                            .canonical_evidence_groups
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            for binding in rendered {
+                let groups = binding
+                    .canonical_evidence_groups
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                assert!(
+                    groups.is_subset(
+                        evidence_index
+                            .get(binding.candidate_id.as_str())
+                            .expect("rendered candidate authoritative binding")
+                    ) && groups.is_subset(
+                        selected
+                            .get(binding.candidate_id.as_str())
+                            .expect("rendered candidate selected binding")
+                    ),
+                    "rendered bindings must be selected evidence subsets"
+                );
+            }
+        }
+    }
     let rendered_candidate_ids = report
         .rendered_candidates
         .iter()
         .map(|candidate| candidate.candidate_id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(rendered_candidate_ids, vec![anchor_id.clone()]);
+    assert_eq!(rendered_candidate_ids, vec![anchor_candidate_id.clone()]);
     assert!(report.eval_candidate_pool.len() > report.rendered_candidates.len());
     assert!(report.eval_candidate_pool.iter().any(|candidate| {
         !rendered_candidate_ids
@@ -2238,7 +2560,7 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
         diagnostics
             .graph_distance_to_gold
             .iter()
-            .any(|distance| distance.candidate_id == manifest_id
+            .any(|distance| distance.candidate_id == manifest_candidate_id
                 && distance.evidence_ref
                     == canonical_recall_evidence_group("turn:release-manifest")
                 && distance.distance == Some(1)),
@@ -2247,19 +2569,19 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
     assert!(diagnostics
         .source_anchor_ids
         .iter()
-        .any(|candidate| candidate == &anchor_id));
+        .any(|candidate| candidate == &anchor_candidate_id));
     assert!(diagnostics
         .graph_anchor_candidate_ids
         .iter()
-        .any(|candidate| candidate == &anchor_id));
+        .any(|candidate| candidate == &anchor_candidate_id));
     assert!(diagnostics
         .expanded_node_ids
         .iter()
-        .any(|candidate| candidate == &manifest_id));
+        .any(|candidate| candidate == &manifest_candidate_id));
     assert!(diagnostics
         .graph_neighbor_ids
         .iter()
-        .any(|candidate| candidate == &manifest_id));
+        .any(|candidate| candidate == &manifest_candidate_id));
     assert_eq!(diagnostics.truncated_count, 0);
     assert!(diagnostics.blocked_reasons.is_empty());
     assert_eq!(
@@ -2283,8 +2605,8 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
 
 #[test]
 fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let store = platform
         .replay_harness()
         .scoped_long_term_memory_read_store("space:owner-default")
@@ -2349,9 +2671,10 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
         .list(20)
         .expect("list long-term")
         .into_iter()
-        .find(|entry| !initial_source_ids.contains(&entry.id))
+        .find(|entry| !initial_source_ids.contains(&long_term_candidate_id(&entry.id)))
         .expect("target anchor outside prompt source pool");
     let target_anchor_id = target_anchor.id;
+    let target_anchor_candidate_id = long_term_candidate_id(&target_anchor_id);
     let target_anchor_ref = target_anchor
         .supporting_citations
         .first()
@@ -2363,6 +2686,7 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
         "external_eval:target-gold",
     );
     let target_gold_id = target_gold.stable_id().expect("target gold owner id");
+    let target_gold_candidate_id = long_term_candidate_id(&target_gold_id);
     seed_governed_long_term(&runtime, vec![target_gold]);
 
     runtime
@@ -2381,6 +2705,10 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
                     "Release target gold evidence",
                     "external_eval:target-gold",
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&target_anchor_id, &target_anchor_id),
+                long_term_graph_owner(&target_gold_id, &target_gold_id),
             ],
             edges: vec![graph_edge(
                 "edge:release-target-anchor:gold",
@@ -2430,22 +2758,24 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
     assert!(
         !source_ids
             .iter()
-            .any(|candidate| candidate == &target_anchor_id),
+            .any(|candidate| candidate == &target_anchor_candidate_id),
         "target anchor should stay outside prompt source pool: {source_ids:?}"
     );
     assert!(report
         .graph_anchor_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == target_anchor_id));
+        .any(|candidate| candidate.candidate_id == target_anchor_candidate_id));
     let target_gold_evidence_group = canonical_recall_evidence_group("external_eval:target-gold");
     assert!(report
         .eval_candidate_pool
         .iter()
-        .any(|candidate| candidate.candidate_id == target_gold_id
-            && candidate
-                .evidence_refs
-                .iter()
-                .any(|evidence_ref| evidence_ref == &target_gold_evidence_group)));
+        .any(
+            |candidate| candidate.candidate_id == target_gold_candidate_id
+                && candidate
+                    .evidence_refs
+                    .iter()
+                    .any(|evidence_ref| evidence_ref == &target_gold_evidence_group)
+        ));
     assert_eq!(
         report.stage_diagnostics.first_any_hit_stage.as_deref(),
         Some("expanded")
@@ -2453,11 +2783,11 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
     assert!(report
         .rendered_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == target_anchor_id));
+        .any(|candidate| candidate.candidate_id == target_anchor_candidate_id));
     assert!(report
         .rendered_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == target_gold_id));
+        .any(|candidate| candidate.candidate_id == target_gold_candidate_id));
     assert_eq!(report.delivery_report.render_growth, 0);
     assert!(report.graph_index_report.used);
     assert!(!report.graph_index_report.fallback_full_scan);
@@ -2465,8 +2795,8 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
 
 #[test]
 fn eval_recall_reports_facet_stage_for_expanded_miss() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     seed_governed_long_term(
         &runtime,
         vec![long_term_draft(
@@ -2587,8 +2917,8 @@ fn eval_recall_reports_facet_stage_for_expanded_miss() {
 
 #[test]
 fn facet_recall_expands_graph_anchor_pool_without_render_growth() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
@@ -2713,18 +3043,20 @@ fn facet_recall_expands_graph_anchor_pool_without_render_growth() {
 
 #[test]
 fn facet_recall_respects_privacy_scope_and_profile_budget() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.facet_recall_budget.max_facet_anchor_candidates = 1;
     budget.facet_recall_budget.max_facet_expanded_candidates = 1;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_facet_recall_budget(budget.facet_recall_budget)
+        .expect("valid facet recall budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
         profile,
         "llm.gateway",
         "facet-budget",
         "subject-alpha",
-        budget.clone(),
     );
 
     runtime
@@ -2784,13 +3116,12 @@ fn facet_recall_respects_privacy_scope_and_profile_budget() {
     }));
     assert_eq!(alpha.facet_index_report.render_growth, 0);
 
-    let other_runtime = test_runtime_with_scope_subject_and_budget(
+    let other_runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "facet-budget",
         "subject-beta",
-        budget,
     );
     let beta = other_runtime
         .eval_recall(MemoryEvalRecallRequest {
@@ -2836,8 +3167,8 @@ fn facet_recall_respects_privacy_scope_and_profile_budget() {
 
 #[test]
 fn facet_rank_fusion_preserves_pool_provenance() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
@@ -2926,20 +3257,27 @@ fn facet_rank_fusion_preserves_pool_provenance() {
 
 #[test]
 fn facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.graph_expansion_budget.max_seed_candidates = 2;
     budget.facet_recall_budget.max_facet_anchor_candidates = 8;
     budget.facet_recall_budget.max_facet_expanded_candidates = 8;
     budget.recall_delivery_budget.max_selected_candidates = 2;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    budget.recall_delivery_budget.max_rendered_capsules = 2;
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_graph_expansion_budget(budget.graph_expansion_budget)
+        .expect("valid graph expansion budget")
+        .try_with_facet_recall_budget(budget.facet_recall_budget)
+        .expect("valid facet recall budget")
+        .try_with_recall_delivery_budget(budget.recall_delivery_budget)
+        .expect("valid recall delivery budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "facet-coverage",
         "subject-coverage",
-        budget,
     );
 
     runtime
@@ -3041,19 +3379,23 @@ fn facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups() {
 
 #[test]
 fn facet_graph_anchor_selection_never_backfills_duplicate_evidence_group() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.graph_expansion_budget.max_seed_candidates = 8;
     budget.facet_recall_budget.max_facet_anchor_candidates = 8;
     budget.facet_recall_budget.max_facet_expanded_candidates = 8;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_graph_expansion_budget(budget.graph_expansion_budget)
+        .expect("valid graph expansion budget")
+        .try_with_facet_recall_budget(budget.facet_recall_budget)
+        .expect("valid facet recall budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "facet-no-backfill",
         "subject-no-backfill",
-        budget,
     );
     seed_governed_long_term(
         &runtime,
@@ -3066,7 +3408,7 @@ fn facet_graph_anchor_selection_never_backfills_duplicate_evidence_group() {
             long_term_draft(
                 "facet/no-backfill/secondary",
                 "Secondary duplicate-group evidence.",
-                "external_eval:no-backfill-shared|session_2",
+                "external_eval:no-backfill-shared|session_1",
             ),
         ],
     );
@@ -3110,19 +3452,21 @@ fn facet_graph_anchor_selection_never_backfills_duplicate_evidence_group() {
 
 #[test]
 fn production_delivery_enforces_profile_capsule_character_ceiling() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.recall_delivery_budget.max_selected_candidates = 2;
     budget.recall_delivery_budget.max_rendered_capsules = 2;
     budget.recall_delivery_budget.max_capsule_chars = 64;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_recall_delivery_budget(budget.recall_delivery_budget)
+        .expect("valid recall delivery budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "capsule-budget",
         "subject-capsule-budget",
-        budget,
     );
     seed_governed_long_term(
         &runtime,
@@ -3204,8 +3548,8 @@ fn production_delivery_enforces_profile_capsule_character_ceiling() {
 
 #[test]
 fn capsule_dedupe_assigns_each_exact_evidence_group_to_one_primary_capsule() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
     let mut first = long_term_draft(
         "overlap evidence alpha",
         "Overlap evidence alpha carries the first and shared proof.",
@@ -3214,9 +3558,18 @@ fn capsule_dedupe_assigns_each_exact_evidence_group_to_one_primary_capsule() {
     first
         .supporting_citations
         .push("external_eval:D1:2".to_string());
-    first
-        .supporting_citations
-        .push("external_eval:D1:1|session_1".to_string());
+    first.canonical_entities = vec![CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Document,
+            canonical_id: "partial-overlap-first".to_string(),
+        },
+        display_label: None,
+        aliases: Vec::new(),
+        evidence_refs: vec![
+            evidence_with_family("external_eval:D1:1", "session:family-a"),
+            evidence_with_family("external_eval:D1:2", "session:family-b"),
+        ],
+    }];
     let mut second = long_term_draft(
         "overlap evidence beta",
         "Overlap evidence beta carries the shared and third proof.",
@@ -3225,6 +3578,18 @@ fn capsule_dedupe_assigns_each_exact_evidence_group_to_one_primary_capsule() {
     second
         .supporting_citations
         .push("external_eval:D1:3".to_string());
+    second.canonical_entities = vec![CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Document,
+            canonical_id: "partial-overlap-second".to_string(),
+        },
+        display_label: None,
+        aliases: Vec::new(),
+        evidence_refs: vec![
+            evidence_with_family("external_eval:D1:2", "session:family-b"),
+            evidence_with_family("external_eval:D1:3", "session:family-c"),
+        ],
+    }];
     seed_governed_long_term(&runtime, vec![first, second]);
 
     let report = runtime
@@ -3268,23 +3633,19 @@ fn capsule_dedupe_assigns_each_exact_evidence_group_to_one_primary_capsule() {
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
         }));
-    assert_eq!(report.delivery_report.selected_candidate_ids.len(), 1);
+    assert_eq!(report.delivery_report.selected_candidate_ids.len(), 2);
     assert!(report
         .delivery_report
         .selection_decisions
         .iter()
-        .any(|decision| {
-            !decision.selected
-                && decision.drop_reason
-                    == Some(RecallDeliverySelectionDropReason::DuplicateEvidenceGroup)
-        }));
-    assert_eq!(delivered_groups.len(), 2);
+        .all(|decision| decision.selected && decision.drop_reason.is_none()));
+    assert_eq!(delivered_groups.len(), 3);
     assert_eq!(
         delivered_groups
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        2
+        3
     );
     assert_eq!(
         report
@@ -3294,19 +3655,211 @@ fn capsule_dedupe_assigns_each_exact_evidence_group_to_one_primary_capsule() {
             .duplicate_rendered_group_count,
         0
     );
+    let group_b = canonical_recall_evidence_group("external_eval:D1:2");
+    let group_c = canonical_recall_evidence_group("external_eval:D1:3");
+    let second_decision = report
+        .delivery_report
+        .selection_decisions
+        .iter()
+        .find(|decision| {
+            decision
+                .canonical_evidence_groups
+                .iter()
+                .any(|group| group == &group_b)
+                && decision
+                    .canonical_evidence_groups
+                    .iter()
+                    .any(|group| group == &group_c)
+        })
+        .expect("partial-overlap second owner decision");
+    let renderable_group_b_owner_count = report
+        .delivery_report
+        .selection_decisions
+        .iter()
+        .filter(|decision| {
+            decision
+                .renderable_evidence_groups
+                .iter()
+                .any(|group| group == &group_b)
+        })
+        .count();
+    assert_eq!(renderable_group_b_owner_count, 1);
+    assert!(second_decision
+        .renderable_evidence_groups
+        .iter()
+        .any(|group| group == &group_c));
+    let second_capsule = report
+        .delivery_report
+        .rendered_capsules
+        .iter()
+        .find(|capsule| capsule.candidate_id == second_decision.candidate_id)
+        .expect("partial-overlap second owner capsule");
+    assert_eq!(
+        second_capsule
+            .canonical_evidence_groups
+            .iter()
+            .collect::<BTreeSet<_>>(),
+        second_decision
+            .renderable_evidence_groups
+            .iter()
+            .collect::<BTreeSet<_>>()
+    );
+    let family_b = CanonicalRecallEvidenceFamilyGroup::from_structured_identity("session:family-b")
+        .expect("family b")
+        .into_string();
+    let family_c = CanonicalRecallEvidenceFamilyGroup::from_structured_identity("session:family-c")
+        .expect("family c")
+        .into_string();
+    assert_eq!(
+        second_decision
+            .evidence_family_groups
+            .iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([&family_b, &family_c])
+    );
+    assert!(report
+        .delivery_report
+        .covered_evidence_family_groups
+        .contains(&family_c));
+}
+
+#[test]
+fn delivery_reports_selected_owner_families_separately_from_rendered_families() {
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
+    budget.recall_delivery_budget.max_selected_candidates = 2;
+    budget.recall_delivery_budget.max_rendered_capsules = 1;
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_recall_delivery_budget(budget.recall_delivery_budget)
+        .expect("valid delivery family budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime(platform, profile);
+    let mut first = long_term_draft(
+        "selected family alpha",
+        "Selected family alpha remains independently useful.",
+        "external_eval:selected-family-alpha",
+    );
+    first.canonical_entities = vec![CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Document,
+            canonical_id: "selected-family-alpha".to_string(),
+        },
+        display_label: None,
+        aliases: Vec::new(),
+        evidence_refs: vec![evidence_with_family(
+            "external_eval:selected-family-alpha",
+            "session:selected-family-alpha",
+        )],
+    }];
+    let mut second = long_term_draft(
+        "selected family beta",
+        "Selected family beta remains independently useful.",
+        "external_eval:selected-family-beta",
+    );
+    second.canonical_entities = vec![CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Document,
+            canonical_id: "selected-family-beta".to_string(),
+        },
+        display_label: None,
+        aliases: Vec::new(),
+        evidence_refs: vec![evidence_with_family(
+            "external_eval:selected-family-beta",
+            "session:selected-family-beta",
+        )],
+    }];
+    seed_governed_long_term(&runtime, vec![first, second]);
+
+    let report = runtime
+        .recall(MemoryRecallRequest {
+            structured_query_facets: Vec::new(),
+            query: "selected family independently useful".to_string(),
+            limit: 2,
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("family reporting recall");
+    let selected_owner_families = report
+        .delivery_report
+        .selection_decisions
+        .iter()
+        .filter(|decision| decision.selected)
+        .flat_map(|decision| decision.evidence_family_groups.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let rendered_families = report
+        .delivery_report
+        .covered_evidence_family_groups
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(report.delivery_report.selected_candidate_ids.len(), 2);
+    assert_eq!(report.delivery_report.rendered_capsules.len(), 1);
+    assert_eq!(selected_owner_families.len(), 2);
+    assert_eq!(rendered_families.len(), 1);
+    assert!(rendered_families.is_subset(&selected_owner_families));
+}
+
+#[test]
+fn zero_gold_is_typed_not_applicable_without_ablation_blockers() {
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
+    seed_governed_long_term(
+        &runtime,
+        vec![long_term_draft(
+            "zero gold integrity evidence",
+            "Zero-gold questions still exercise production recall and privacy integrity.",
+            "external_eval:zero-gold-integrity",
+        )],
+    );
+
+    let report = runtime
+        .eval_recall(MemoryEvalRecallRequest {
+            structured_query_facets: Vec::new(),
+            query: "zero gold integrity evidence".to_string(),
+            k: 4,
+            include_expanded_candidates: true,
+            include_graph_neighbors: true,
+            include_score_breakdown: true,
+            include_missing_evidence: true,
+            benchmark_context: Some(MemoryEvalRecallBenchmarkContext {
+                suite: "unit_p7".to_string(),
+                question_id: "zero-gold".to_string(),
+                question_type: "single_gold".to_string(),
+                expected_evidence_refs: Vec::new(),
+            }),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("zero-gold production integrity run");
+
+    assert_eq!(
+        report
+            .benchmark_context
+            .as_ref()
+            .map(|context| context.question_type.as_str()),
+        Some("no_gold")
+    );
+    assert_eq!(
+        report.question_evaluation.applicability,
+        bm_sdk::MemoryEvalEvidenceApplicability::NoGold
+    );
+    assert_eq!(report.question_evaluation.canonical_gold_count, 0);
+    assert!(report.ablation_report.required_slices.is_empty());
+    assert!(report.ablation_report.slices.is_empty());
+    assert!(report.ablation_report.blocked_reasons.is_empty());
+    assert!(report.privacy_report.passed);
+    assert!(report.delivery_report.integrity_failures.is_empty());
 }
 
 #[test]
 fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
-    let alpha_runtime = test_runtime_with_scope_subject_and_budget(
+    let alpha_runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
         profile,
         "llm.gateway",
         "facet-hidden-alpha",
         "subject-alpha",
-        bm_sdk::RuntimeBudgetReport::static_for_profile(profile),
     );
 
     alpha_runtime
@@ -3323,13 +3876,12 @@ fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
         })
         .expect("seed subject-alpha hidden facet doc");
 
-    let beta_runtime = test_runtime_with_scope_subject_and_budget(
+    let beta_runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "facet-hidden-beta",
         "subject-beta",
-        bm_sdk::RuntimeBudgetReport::static_for_profile(profile),
     );
     let beta = beta_runtime
         .eval_recall(MemoryEvalRecallRequest {
@@ -3386,7 +3938,7 @@ fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
 
 #[test]
 fn delegated_actor_is_not_added_to_shared_memory_owner_subjects() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let actor_subject_id = default_agent_subject_id("agent-actor");
     let mounted_subject_id = default_agent_subject_id("agent-delegated");
@@ -3451,7 +4003,7 @@ fn delegated_actor_is_not_added_to_shared_memory_owner_subjects() {
 
 #[test]
 fn subject_local_capsule_never_enters_cross_subject_shared_fact_surface() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform, profile);
     let content = "Subject-local release evidence must stay out of the shared fact surface.";
@@ -3485,8 +4037,8 @@ fn subject_local_capsule_never_enters_cross_subject_shared_fact_surface() {
 
 #[test]
 fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
     let anchor_draft = long_term_draft(
         "facet/p4/propagation-anchor",
         "Facet propagation anchor binds to persistent graph neighbors.",
@@ -3505,6 +4057,9 @@ fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
         "external_eval:facet-p4-distinct-beta",
     );
     let beta_id = beta_draft.stable_id().expect("beta owner id");
+    let anchor_candidate_id = long_term_candidate_id(&anchor_id);
+    let alpha_candidate_id = long_term_candidate_id(&alpha_id);
+    let beta_candidate_id = long_term_candidate_id(&beta_id);
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
@@ -3537,6 +4092,11 @@ fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
                     "Facet P4 distinct beta evidence",
                     "external_eval:facet-p4-distinct-beta",
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&anchor_id, &anchor_id),
+                long_term_graph_owner(&alpha_id, &alpha_id),
+                long_term_graph_owner(&beta_id, &beta_id),
             ],
             edges: vec![
                 graph_edge(
@@ -3601,23 +4161,23 @@ fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
         .graph_index_report
         .source_anchor_ids
         .iter()
-        .any(|source| source == &anchor_id));
+        .any(|source| source == &anchor_candidate_id));
     assert!(report
         .graph_anchor_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == anchor_id));
+        .any(|candidate| candidate.candidate_id == anchor_candidate_id));
     assert!(report
         .expanded_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == alpha_id));
+        .any(|candidate| candidate.candidate_id == alpha_candidate_id));
     assert!(report
         .expanded_candidates
         .iter()
-        .any(|candidate| candidate.candidate_id == beta_id));
+        .any(|candidate| candidate.candidate_id == beta_candidate_id));
     let alpha = report
         .eval_candidate_pool
         .iter()
-        .find(|candidate| candidate.candidate_id == alpha_id)
+        .find(|candidate| candidate.candidate_id == alpha_candidate_id)
         .expect("alpha expanded candidate");
     assert!(alpha.score_breakdown.facet_exact_score > 0);
     assert!(alpha.score_breakdown.facet_diversity_score > 0);
@@ -3642,14 +4202,18 @@ fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
 
 #[test]
 fn persistent_graph_recall_uses_sdk_owned_production_index_report() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform.clone(), ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let anchor = long_term_draft(
         "release artifact indexed anchor",
         "Release artifact indexed anchor owns the production graph index.",
         "external_eval:release-index-anchor",
     );
     let anchor_id = anchor.stable_id().expect("index anchor id");
+    let anchor_candidate_id = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        anchor_id.clone(),
+    ));
     let manifest = long_term_draft(
         "indexed manifest neighbor",
         "Manifest evidence has a visible long-term owner.",
@@ -3674,6 +4238,10 @@ fn persistent_graph_recall_uses_sdk_owned_production_index_report() {
                     "Release manifest check",
                     "turn:release-manifest",
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&anchor_id, &anchor_id),
+                long_term_graph_owner(&manifest_id, &manifest_id),
             ],
             edges: vec![graph_edge(
                 "edge:release_guard:manifest_check",
@@ -3708,8 +4276,9 @@ fn persistent_graph_recall_uses_sdk_owned_production_index_report() {
     assert!(snapshot.json_docs.iter().any(|doc| {
         doc.namespace == "memory_graph_indexes"
             && doc.value["owner"] == "bm-sdk::MemoryRuntime"
-            && doc.value["source_anchor_id"] == anchor_id
-            && doc.value["schema_version"] == 2
+            && doc.value["owner_candidate_id"] == anchor_candidate_id
+            && doc.value["source_anchor_node_ids"] == serde_json::json!([anchor_id])
+            && doc.value["schema_version"] == MEMORY_GRAPH_SCHEMA_VERSION
             && doc.value["owner_revision"] == 1
             && doc.value["manifest_generation"] == 1
             && doc.value["node_memberships"]
@@ -3734,12 +4303,16 @@ fn persistent_graph_recall_uses_sdk_owned_production_index_report() {
         .graph_index_report
         .source_anchor_ids
         .iter()
-        .any(|source| source == &anchor_id));
+        .any(|source| source == &anchor_candidate_id));
+    let manifest_candidate_id = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        manifest_id,
+    ));
     assert!(recall
         .graph_index_report
         .expanded_node_ids
         .iter()
-        .any(|node| node == &manifest_id));
+        .any(|node| node == &manifest_candidate_id));
 
     let eval = runtime
         .eval_recall(MemoryEvalRecallRequest {
@@ -3774,14 +4347,15 @@ fn persistent_graph_recall_uses_sdk_owned_production_index_report() {
 
 #[test]
 fn large_persistent_graph_index_report_explains_anchor_and_expansion_coverage() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
     let anchor = long_term_draft(
         "release artifact large index anchor",
         "Release artifact large index anchor owns the graph seed.",
         "external_eval:release-large-index-anchor",
     );
     let anchor_id = anchor.stable_id().expect("large index anchor id");
+    let anchor_candidate_id = long_term_candidate_id(&anchor_id);
     let manifest = long_term_draft(
         "large index manifest owner",
         "Manifest graph evidence has a governed owner.",
@@ -3845,6 +4419,13 @@ fn large_persistent_graph_index_report_explains_anchor_and_expansion_coverage() 
                     "Unrelated receipt",
                     "turn:unrelated-receipt",
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&anchor_id, &anchor_id),
+                long_term_graph_owner(&manifest_id, &manifest_id),
+                long_term_graph_owner(&policy_id, &policy_id),
+                long_term_graph_owner(&unrelated_audit_id, &unrelated_audit_id),
+                long_term_graph_owner(&unrelated_receipt_id, &unrelated_receipt_id),
             ],
             edges: vec![
                 graph_edge(
@@ -3915,7 +4496,7 @@ fn large_persistent_graph_index_report_explains_anchor_and_expansion_coverage() 
     assert!(index
         .source_anchor_ids
         .iter()
-        .any(|source| source == &anchor_id));
+        .any(|source| source == &anchor_candidate_id));
     assert!(index.unmatched_source_anchor_ids.is_empty());
     assert_eq!(index.indexed_neighbor_count, 5);
     assert_eq!(index.filtered_node_count, 5);
@@ -3957,17 +4538,19 @@ fn large_persistent_graph_index_report_explains_anchor_and_expansion_coverage() 
 
 #[test]
 fn persistent_graph_recall_fails_closed_when_loaded_graph_exceeds_profile_budget() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = support::host_test_profile();
+    let mut budget = empty_store_platform(profile).runtime_budget();
     budget.graph_expansion_budget.max_graph_nodes_loaded = 1;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_graph_expansion_budget(budget.graph_expansion_budget)
+        .expect("valid graph expansion budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "graph-budget",
         &default_agent_subject_id("agent-main"),
-        budget,
     );
     let anchor = long_term_draft(
         "release budget anchor",
@@ -3999,6 +4582,10 @@ fn persistent_graph_recall_fails_closed_when_loaded_graph_exceeds_profile_budget
                     "Release budget neighbor",
                     "turn:release-budget-neighbor",
                 ),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&anchor_id, &anchor_id),
+                long_term_graph_owner(&neighbor_id, &neighbor_id),
             ],
             edges: vec![graph_edge(
                 "edge:release_budget:neighbor",

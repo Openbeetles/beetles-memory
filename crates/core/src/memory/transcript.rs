@@ -96,6 +96,7 @@ impl ConversationKey {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptConversationAlias {
     pub memory_space_id: String,
+    pub mounted_subject_id: String,
     pub channel_id: String,
     pub chat_id: String,
     pub conversation_id: String,
@@ -105,6 +106,7 @@ pub struct TranscriptConversationAlias {
 impl TranscriptConversationAlias {
     pub fn new(
         memory_space_id: impl Into<String>,
+        mounted_subject_id: impl Into<String>,
         channel_id: impl Into<String>,
         chat_id: impl Into<String>,
         conversation_id: impl Into<String>,
@@ -112,6 +114,7 @@ impl TranscriptConversationAlias {
     ) -> Result<Self> {
         let alias = Self {
             memory_space_id: memory_space_id.into().trim().to_string(),
+            mounted_subject_id: mounted_subject_id.into().trim().to_string(),
             channel_id: channel_id.into().trim().to_string(),
             chat_id: chat_id.into().trim().to_string(),
             conversation_id: conversation_id.into().trim().to_string(),
@@ -122,13 +125,24 @@ impl TranscriptConversationAlias {
     }
 
     pub fn storage_key(&self) -> String {
-        Self::storage_key_for(&self.memory_space_id, &self.channel_id, &self.chat_id)
+        Self::storage_key_for(
+            &self.memory_space_id,
+            &self.mounted_subject_id,
+            &self.channel_id,
+            &self.chat_id,
+        )
     }
 
-    pub fn storage_key_for(memory_space_id: &str, channel_id: &str, chat_id: &str) -> String {
+    pub fn storage_key_for(
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        channel_id: &str,
+        chat_id: &str,
+    ) -> String {
         format!(
-            "{}__{}__{}",
+            "{}__{}__{}__{}",
             encode_labeled_key_component("ms", memory_space_id),
+            encode_labeled_key_component("subject", mounted_subject_id),
             encode_labeled_key_component("ch", channel_id),
             encode_labeled_key_component("chat", chat_id)
         )
@@ -140,6 +154,12 @@ impl TranscriptConversationAlias {
             self.channel_id.clone(),
             self.conversation_id.clone(),
         )?;
+        if self.mounted_subject_id.trim().is_empty() {
+            return Err(Error::config(
+                "conversation_transcript_alias",
+                "mounted_subject_id must not be empty",
+            ));
+        }
         if self.chat_id.trim().is_empty() {
             return Err(Error::config(
                 "conversation_transcript_alias",
@@ -1097,6 +1117,17 @@ pub struct TranscriptRepairIssue {
     pub reason: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptRepairInspection {
+    pub turns: Vec<TranscriptTurnRecord>,
+    pub derived_refs: Vec<DerivedMemoryRef>,
+    pub attrs: Vec<TranscriptAttrEnvelope>,
+    pub issues: Vec<TranscriptRepairIssue>,
+    pub checked_turns: usize,
+    pub checked_derived_refs: usize,
+    pub checked_attrs: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptRepairReport {
     pub key: ConversationKey,
@@ -1216,27 +1247,36 @@ pub trait ConversationTranscriptStore: Send + Sync {
     fn resolve_conversation_alias(
         &self,
         memory_space_id: &str,
+        mounted_subject_id: &str,
         channel_id: &str,
         chat_id: &str,
     ) -> Result<Option<String>>;
     fn get_turn(
         &self,
         key: &ConversationKey,
+        mounted_subject_id: &str,
         turn_id: &str,
     ) -> Result<Option<TranscriptTurnRecord>>;
-    fn list_turns(&self, key: &ConversationKey, limit: usize) -> Result<Vec<TranscriptTurnRecord>>;
+    fn list_turns(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TranscriptTurnRecord>>;
     fn list_turns_page(
         &self,
         key: &ConversationKey,
+        mounted_subject_id: &str,
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<TranscriptTurnPage> {
-        let records = self.list_turns(key, usize::MAX)?;
+        let records = self.list_turns(key, mounted_subject_id, usize::MAX)?;
         TranscriptTurnPage::from_records(key.clone(), &records, cursor, limit)
     }
     fn upsert_transcript_attrs(
         &self,
         _key: &ConversationKey,
+        _mounted_subject_id: &str,
         _attrs: &[TranscriptAttrEnvelope],
     ) -> Result<TranscriptAttrWriteReport> {
         Err(Error::config(
@@ -1247,14 +1287,9 @@ pub trait ConversationTranscriptStore: Send + Sync {
     fn list_transcript_attrs(
         &self,
         _key: &ConversationKey,
+        _mounted_subject_id: &str,
         _turn_id: Option<&str>,
     ) -> Result<Vec<TranscriptAttrEnvelope>> {
-        Ok(Vec::new())
-    }
-    fn list_transcript_attr_repair_issues(
-        &self,
-        _key: &ConversationKey,
-    ) -> Result<Vec<TranscriptRepairIssue>> {
         Ok(Vec::new())
     }
     fn append_derived_memory_ref(
@@ -1265,21 +1300,43 @@ pub trait ConversationTranscriptStore: Send + Sync {
     fn list_derived_memory_refs(
         &self,
         key: &ConversationKey,
+        mounted_subject_id: &str,
         turn_id: Option<&str>,
     ) -> Result<Vec<DerivedMemoryRef>>;
     fn apply_lifecycle_request(
         &self,
+        mounted_subject_id: &str,
         request: &TranscriptLifecycleRequest,
     ) -> Result<TranscriptLifecycleReport>;
+
+    fn inspect_repair_records(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+    ) -> Result<TranscriptRepairInspection> {
+        let turns = self.list_turns(key, mounted_subject_id, usize::MAX)?;
+        let attrs = self.list_transcript_attrs(key, mounted_subject_id, None)?;
+        let derived_refs = self.list_derived_memory_refs(key, mounted_subject_id, None)?;
+        Ok(TranscriptRepairInspection {
+            checked_turns: turns.len(),
+            checked_derived_refs: derived_refs.len(),
+            checked_attrs: attrs.len(),
+            turns,
+            derived_refs,
+            attrs,
+            issues: Vec::new(),
+        })
+    }
 
     fn redacted_replay(
         &self,
         key: &ConversationKey,
+        mounted_subject_id: &str,
         limit: usize,
         view: TranscriptReplayView,
     ) -> Result<RedactedTranscriptSlice> {
-        let records = self.list_turns(key, limit)?;
-        let attrs = self.list_transcript_attrs(key, None)?;
+        let records = self.list_turns(key, mounted_subject_id, limit)?;
+        let attrs = self.list_transcript_attrs(key, mounted_subject_id, None)?;
         Ok(RedactedTranscriptSlice::from_records_with_attrs(
             key.clone(),
             view,
@@ -1291,12 +1348,13 @@ pub trait ConversationTranscriptStore: Send + Sync {
     fn redacted_replay_page(
         &self,
         key: &ConversationKey,
+        mounted_subject_id: &str,
         cursor: Option<&str>,
         limit: usize,
         view: TranscriptReplayView,
     ) -> Result<(RedactedTranscriptSlice, Option<String>, bool)> {
-        let page = self.list_turns_page(key, cursor, limit)?;
-        let attrs = self.list_transcript_attrs(key, None)?;
+        let page = self.list_turns_page(key, mounted_subject_id, cursor, limit)?;
+        let attrs = self.list_transcript_attrs(key, mounted_subject_id, None)?;
         Ok((
             RedactedTranscriptSlice::from_records_with_attrs(
                 key.clone(),
@@ -1309,13 +1367,19 @@ pub trait ConversationTranscriptStore: Send + Sync {
         ))
     }
 
-    fn repair_report(&self, key: &ConversationKey) -> Result<TranscriptRepairReport> {
-        let turns = self.list_turns(key, usize::MAX)?;
+    fn repair_report(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+    ) -> Result<TranscriptRepairReport> {
+        let inspection = self.inspect_repair_records(key, mounted_subject_id)?;
+        let turns = inspection.turns;
+        let attrs = inspection.attrs;
+        let derived_refs = inspection.derived_refs;
         let mut turn_message_ids = HashMap::<String, HashSet<String>>::new();
         let mut turn_ids = HashSet::<String>::new();
         let mut turn_sequences = HashMap::<u64, String>::new();
-        let mut issues = self.list_transcript_attr_repair_issues(key)?;
-        let corrupt_attr_count = issues.len();
+        let mut issues = inspection.issues;
         for turn in &turns {
             if turn.turn_id.trim().is_empty() {
                 issues.push(TranscriptRepairIssue {
@@ -1371,7 +1435,6 @@ pub trait ConversationTranscriptStore: Send + Sync {
             }
             turn_message_ids.insert(turn.turn_id.clone(), message_ids);
         }
-        let attrs = self.list_transcript_attrs(key, None)?;
         for attr in &attrs {
             if attr.target.key != *key {
                 issues.push(TranscriptRepairIssue {
@@ -1415,7 +1478,6 @@ pub trait ConversationTranscriptStore: Send + Sync {
                 }
             }
         }
-        let derived_refs = self.list_derived_memory_refs(key, None)?;
         for derived in &derived_refs {
             if derived.store_key.trim().is_empty() {
                 issues.push(TranscriptRepairIssue {
@@ -1463,9 +1525,9 @@ pub trait ConversationTranscriptStore: Send + Sync {
         }
         Ok(TranscriptRepairReport {
             key: key.clone(),
-            checked_turns: turns.len(),
-            checked_derived_refs: derived_refs.len(),
-            checked_attrs: attrs.len().saturating_add(corrupt_attr_count),
+            checked_turns: inspection.checked_turns,
+            checked_derived_refs: inspection.checked_derived_refs,
+            checked_attrs: inspection.checked_attrs,
             profile_budget_applied: false,
             fail_closed: !issues.is_empty(),
             issues,

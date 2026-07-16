@@ -1,9 +1,17 @@
 use crate::store_internal::StorePlatform;
 
-use crate::Result;
+use crate::{Result, RuntimeBudgetLease};
 use std::collections::HashSet;
+use std::sync::Arc;
+
+use bm_core::budget::RuntimeBudgetReport;
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_core::budget::StoreRuntimeBudget;
+use bm_core::resource::RuntimeResourceProbe;
 
 use crate::store_internal::MemoryStoreEvent;
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::store_internal::StorePlatformPreparation;
 pub use crate::store_internal::{
     profile_memory_system_kind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget,
     StoreOpenReport, StorePathBudget, StoreRepairPolicy, StoreRepairReport,
@@ -34,6 +42,27 @@ pub struct ReplayStoreHarness<'a> {
 }
 
 #[cfg(feature = "nonproduction-replay-harness")]
+pub struct NonproductionStorePreparation {
+    inner: StorePlatformPreparation,
+}
+
+#[cfg(feature = "nonproduction-replay-harness")]
+impl NonproductionStorePreparation {
+    pub fn runtime_budget(&self) -> &RuntimeBudgetReport {
+        self.inner.runtime_budget()
+    }
+
+    pub fn open_with_benchmark_store_capacity(
+        self,
+        capacity: StoreRuntimeBudget,
+    ) -> Result<MemoryStoreHandle> {
+        self.inner
+            .open_with_benchmark_store_capacity(capacity)
+            .map(|inner| MemoryStoreHandle { inner })
+    }
+}
+
+#[cfg(feature = "nonproduction-replay-harness")]
 impl std::ops::Deref for ReplayStoreHarness<'_> {
     type Target = StorePlatform;
 
@@ -44,6 +73,10 @@ impl std::ops::Deref for ReplayStoreHarness<'_> {
 
 #[cfg(feature = "nonproduction-replay-harness")]
 impl ReplayStoreHarness<'_> {
+    pub(crate) fn new(platform: &StorePlatform) -> ReplayStoreHarness<'_> {
+        ReplayStoreHarness { platform }
+    }
+
     pub fn seed_private_doc_workspace(
         &self,
         scope_id: &str,
@@ -81,12 +114,60 @@ impl MemoryStoreHandle {
         })
     }
 
+    pub fn open_with_firmware_resource_probe(
+        config: StoreBackendConfig,
+        probe: Arc<dyn RuntimeResourceProbe>,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: StorePlatform::open_with_firmware_resource_probe(config, probe)?,
+        })
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn open_for_nonproduction_harness(config: StoreBackendConfig) -> Result<Self> {
+        Ok(Self {
+            inner: StorePlatform::open(config)?,
+        })
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn prepare_for_nonproduction_harness(
+        config: StoreBackendConfig,
+    ) -> Result<NonproductionStorePreparation> {
+        StorePlatform::prepare_for_nonproduction_harness(config)
+            .map(|inner| NonproductionStorePreparation { inner })
+    }
+
     pub fn config(&self) -> &StoreBackendConfig {
         self.inner.config()
     }
 
     pub fn open_report(&self) -> &StoreOpenReport {
         self.inner.open_report()
+    }
+
+    pub fn runtime_budget(&self) -> RuntimeBudgetReport {
+        let authority = self.inner.runtime_budget_authority();
+        RuntimeBudgetLease::active_report(&authority).unwrap_or_else(|| {
+            self.inner
+                .current_runtime_budget(current_runtime_resource_unix_secs())
+        })
+    }
+
+    pub fn acquire_runtime_budget_lease(&self) -> Result<RuntimeBudgetLease> {
+        RuntimeBudgetLease::issue(self.inner.runtime_budget_authority())
+    }
+
+    pub fn execute_with_runtime_budget_lease<T>(
+        &self,
+        lease: &RuntimeBudgetLease,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        lease.execute(&self.inner.runtime_budget_authority(), operation)
+    }
+
+    pub fn capacity(&self) -> StoreCapacityBudget {
+        self.inner.capacity()
     }
 
     pub fn telemetry_report(&self, since_unix_secs: u64) -> Result<MemoryStoreTelemetryReport> {
@@ -109,7 +190,7 @@ impl MemoryStoreHandle {
             }
         }
         for root in roots {
-            for event in StorePlatform::read_file_store_events(root)? {
+            for event in StorePlatform::read_file_store_events(root, self.capacity())? {
                 if seen.insert(event.event_id.clone()) {
                     events.push(event);
                 }
@@ -118,6 +199,7 @@ impl MemoryStoreHandle {
         Ok(telemetry_report_from_events(&events, since_unix_secs))
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     pub(crate) fn platform(&self) -> &StorePlatform {
         &self.inner
     }
@@ -146,10 +228,15 @@ impl MemoryStoreHandle {
 
     #[cfg(feature = "nonproduction-replay-harness")]
     pub fn replay_harness(&self) -> ReplayStoreHarness<'_> {
-        ReplayStoreHarness {
-            platform: &self.inner,
-        }
+        ReplayStoreHarness::new(&self.inner)
     }
+}
+
+fn current_runtime_resource_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn telemetry_report_from_events(

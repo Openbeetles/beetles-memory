@@ -7,7 +7,7 @@ use bm_sdk::{
     default_memory_space_id, CanonicalTurnDelta, ConversationScope, DeferredGovernanceJob,
     DeferredGovernanceJobStatus, MemoryDeferredGovernanceRunRequest, MemoryInspectionRequest,
     MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, TranscriptInputMessage,
+    PressureLevel, RuntimeLifecycleModeInput, TranscriptInputMessage,
 };
 
 use support::{
@@ -67,7 +67,7 @@ fn finalize_request_for_scope(subject_id: &str, chat_id: &str) -> MemoryTurnFina
 
 #[test]
 fn maintenance_unavailable_commits_turn_and_enqueues_deferred_governance() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -102,7 +102,7 @@ fn maintenance_unavailable_commits_turn_and_enqueues_deferred_governance() {
 
 #[test]
 fn duplicate_canonical_turn_does_not_enqueue_duplicate_deferred_governance() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -152,7 +152,7 @@ fn duplicate_canonical_turn_does_not_enqueue_duplicate_deferred_governance() {
 
 #[test]
 fn deferred_governance_worker_runs_stored_turn_without_recommitting_session() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -212,7 +212,7 @@ fn deferred_governance_worker_runs_stored_turn_without_recommitting_session() {
 
 #[test]
 fn deferred_governance_queue_report_exposes_operator_visible_scope_and_status() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -269,7 +269,7 @@ fn deferred_governance_queue_report_exposes_operator_visible_scope_and_status() 
 
 #[test]
 fn deferred_governance_worker_and_report_are_isolated_by_memory_space_subject_and_channel() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_identity_scope_and_subject(
         platform.clone(),

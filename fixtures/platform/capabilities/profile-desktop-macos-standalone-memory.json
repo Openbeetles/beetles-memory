@@ -123,7 +123,7 @@
     "llm_gateway_server": {
       "visible": false,
       "client_allowed": false,
-      "server_allowed": false,
+      "server_allowed": true,
       "private_data_allowed": false
     }
   },

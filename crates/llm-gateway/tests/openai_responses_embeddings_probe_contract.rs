@@ -10,6 +10,8 @@ use bm_sdk::{
 };
 use serde_json::{json, Value};
 
+mod support;
+
 fn gateway_config() -> GatewayConfig {
     let mut config = GatewayConfig::default_for_local_dev();
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -23,11 +25,10 @@ fn gateway_config() -> GatewayConfig {
 
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
-        auth_subject: Some("owner-token".to_string()),
         workspace_root_digest: Some("workspace-digest".to_string()),
         client_conversation_hint: Some("thread-7".to_string()),
         model_alias: Some("local".to_string()),
-        ..GatewayScopeRequest::default()
+        ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
 }
 
@@ -131,7 +132,6 @@ fn responses_stateless_injects_memory_into_instructions_and_preserves_payload() 
 
     let response = handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/responses",
             scope,
@@ -191,7 +191,6 @@ fn responses_previous_response_id_is_capability_error_without_upstream_call() {
 
     let error = handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/responses",
             scope_request(),
@@ -217,7 +216,6 @@ fn embeddings_passthrough_does_not_project_or_maintain() {
 
     let response = handle_openai_request(
         &gateway,
-        &config,
         OpenAiGatewayRequest::post_json(
             "/v1/embeddings",
             scope_request(),

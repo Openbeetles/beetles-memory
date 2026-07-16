@@ -1,10 +1,11 @@
+mod support;
 use bm_sdk::{
     AgentToolDescriptor, AgentToolExperienceGovernanceDecision, AgentToolObservationDigest,
     AgentToolOutcome, AgentToolRegistrySnapshot, AgentToolUsageFeedback, MemoryIdentity,
     MemoryInspectionRequest, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime,
-    MemoryScope, MemoryStoreHandle, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, StoreBackendConfig,
-    AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
+    MemoryScope, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
+    RuntimeSkillReuseOutcome, StoreBackendConfig, AGENT_TOOL_NO_EXPERIENCE_REASON,
+    AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
 };
 
 fn registry() -> AgentToolRegistrySnapshot {
@@ -15,14 +16,13 @@ fn registry() -> AgentToolRegistrySnapshot {
 }
 
 fn runtime_with_registry(registry: AgentToolRegistrySnapshot) -> MemoryRuntime {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let store =
-        MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile).expect("store config"))
+        support::open_memory_store(StoreBackendConfig::in_memory(profile).expect("store config"))
             .expect("store");
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-tool-test", "owner-default").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-1").expect("scope"))
-        .profile(profile)
         .store(store)
         .agent_tool_registry(registry)
         .build()

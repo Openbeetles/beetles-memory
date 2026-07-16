@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+cargo() {
+  command cargo --locked "$@"
+}
+export -f cargo
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -26,8 +31,14 @@ case "$mode" in
 esac
 
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --exclude bm-desktop
+cargo clippy --workspace --exclude bm-desktop --all-targets -- -D warnings
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  cargo check -p bm-desktop --no-default-features \
+    --features profile-desktop-macos-standalone-memory
+  cargo clippy -p bm-desktop --all-targets --no-default-features \
+    --features profile-desktop-macos-standalone-memory -- -D warnings
+fi
 bash scripts/check_profile_matrix.sh
 bash scripts/check_adapter_communication_contract.sh
 bash scripts/check_platform_dependency_budget.sh

@@ -10,7 +10,6 @@ fn main() -> bm_sdk::Result<()> {
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("esp-host-agent", "owner-default")?)
         .scope(MemoryScope::new("device", "chat-1")?)
-        .profile(profile)
         .store(store)
         .build()?;
 

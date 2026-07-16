@@ -1,7 +1,6 @@
 use bm_sdk::{
-    AgentToolRegistryRef, AgentToolUsageFeedback, ContinuitySnapshot, ContinuitySnapshotImportMode,
-    IngressKind, LongTermMemoryQuery, MemoryCloseRequest, MemoryExportRequest,
-    MemoryGovernancePolicyMutation, MemoryImportRequest, MemoryInspectionRequest,
+    AgentToolRegistryRef, AgentToolUsageFeedback, IngressKind, LongTermMemoryQuery,
+    MemoryCloseRequest, MemoryGovernancePolicyMutation, MemoryInspectionRequest,
     MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
     MemoryLongTermTarget, MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest,
@@ -18,7 +17,6 @@ use crate::{AdapterCommand, AdapterOperation};
 pub struct AdapterJsonCommandOptions {
     pub citation: String,
     pub default_source_chat_id: Option<String>,
-    pub default_observed_at: u64,
 }
 
 impl AdapterJsonCommandOptions {
@@ -26,17 +24,11 @@ impl AdapterJsonCommandOptions {
         Self {
             citation: citation.into(),
             default_source_chat_id: None,
-            default_observed_at: 1_800_000_000,
         }
     }
 
     pub fn with_default_source_chat_id(mut self, chat_id: impl Into<String>) -> Self {
         self.default_source_chat_id = Some(chat_id.into());
-        self
-    }
-
-    pub const fn with_default_observed_at(mut self, observed_at: u64) -> Self {
-        self.default_observed_at = observed_at;
         self
     }
 }
@@ -62,7 +54,7 @@ pub fn decode_json_adapter_command(
             let payload: ProjectPayload = parse_json(body)?;
             Ok(AdapterCommand::Project(MemoryProjectionRequest {
                 user_query: payload.user_query,
-                system_max_len: payload.system_max_len.unwrap_or(4096),
+                system_max_len: payload.system_max_len,
                 recent_messages_limit: payload.recent_messages_limit.unwrap_or(8),
                 pressure: payload.pressure,
                 mode_input: payload.mode_input,
@@ -90,7 +82,7 @@ pub fn decode_json_adapter_command(
             let payload: InspectPayload = parse_json(body)?;
             Ok(AdapterCommand::Inspect(MemoryInspectionRequest {
                 query: payload.query,
-                system_max_len: payload.system_max_len.unwrap_or(4096),
+                system_max_len: payload.system_max_len,
                 pressure: payload.pressure,
                 mode_input: payload.mode_input,
             }))
@@ -108,20 +100,6 @@ pub fn decode_json_adapter_command(
                 chat_id: payload.chat_id,
                 limit: payload.limit.unwrap_or(8),
             }))
-        }
-        AdapterOperation::Export => {
-            let payload: ExportPayload = parse_json(body)?;
-            Ok(AdapterCommand::Export(MemoryExportRequest {
-                chat_id: payload.chat_id,
-            }))
-        }
-        AdapterOperation::Import => {
-            let payload: ImportPayload = parse_json(body)?;
-            Ok(AdapterCommand::Import(Box::new(MemoryImportRequest {
-                snapshot: payload.snapshot,
-                target_chat_id: payload.target_chat_id,
-                mode: payload.mode,
-            })))
         }
         AdapterOperation::LongTermList => {
             let payload: LongTermListPayload = parse_json(body)?;
@@ -196,7 +174,7 @@ fn decode_write(body: &str, options: &AdapterJsonCommandOptions) -> Result<Adapt
             MemoryWriteRequest::AgentToolUsageFeedback { feedback },
         ));
     }
-    let writes = if payload.writes.is_empty() {
+    let mut writes = if payload.writes.is_empty() {
         vec![RuntimeSkillWrite {
             name: required_field(payload.name, "name")?,
             topic: required_field(payload.topic, "topic")?,
@@ -210,11 +188,18 @@ fn decode_write(body: &str, options: &AdapterJsonCommandOptions) -> Result<Adapt
             source_chat_id: payload
                 .source_chat_id
                 .or_else(|| options.default_source_chat_id.clone()),
-            observed_at: payload.observed_at.unwrap_or(options.default_observed_at),
+            observed_at: 0,
         }]
     } else {
-        payload.writes
+        payload
+            .writes
+            .into_iter()
+            .map(AdapterRuntimeSkillWritePayload::into_runtime_write)
+            .collect()
     };
+    for write in &mut writes {
+        write.observed_at = 0;
+    }
     Ok(AdapterCommand::Write(MemoryWriteRequest::Procedural {
         writes,
         source: payload.source,
@@ -243,11 +228,12 @@ fn required_field(value: Option<String>, field: &'static str) -> Result<String> 
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WritePayload {
     #[serde(default)]
     tool_usage_feedback: Option<AgentToolUsageFeedback>,
     #[serde(default)]
-    writes: Vec<RuntimeSkillWrite>,
+    writes: Vec<AdapterRuntimeSkillWritePayload>,
     #[serde(default)]
     source: RuntimeSkillWriteSource,
     #[serde(default)]
@@ -264,8 +250,35 @@ struct WritePayload {
     citations: Option<Vec<String>>,
     #[serde(default)]
     source_chat_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdapterRuntimeSkillWritePayload {
+    name: String,
+    topic: String,
+    title: String,
+    summary: String,
+    content: String,
     #[serde(default)]
-    observed_at: Option<u64>,
+    citations: Vec<String>,
+    #[serde(default)]
+    source_chat_id: Option<String>,
+}
+
+impl AdapterRuntimeSkillWritePayload {
+    fn into_runtime_write(self) -> RuntimeSkillWrite {
+        RuntimeSkillWrite {
+            name: self.name,
+            topic: self.topic,
+            title: self.title,
+            summary: self.summary,
+            content: self.content,
+            citations: self.citations,
+            source_chat_id: self.source_chat_id,
+            observed_at: 0,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -283,8 +296,7 @@ struct RecallPayload {
 struct ProjectPayload {
     #[serde(alias = "query")]
     user_query: String,
-    #[serde(default, alias = "max_len")]
-    system_max_len: Option<usize>,
+    system_max_len: usize,
     #[serde(default)]
     recent_messages_limit: Option<usize>,
     #[serde(default)]
@@ -326,8 +338,7 @@ struct MaintainPayload {
 #[derive(Deserialize)]
 struct InspectPayload {
     query: String,
-    #[serde(default, alias = "max_len")]
-    system_max_len: Option<usize>,
+    system_max_len: usize,
     #[serde(default)]
     pressure: PressureLevel,
     #[serde(default)]
@@ -347,11 +358,6 @@ struct ReplayPayload {
     chat_id: String,
     #[serde(default)]
     limit: Option<usize>,
-}
-
-#[derive(Deserialize)]
-struct ExportPayload {
-    chat_id: String,
 }
 
 fn default_long_term_control_view() -> MemoryLongTermControlView {
@@ -411,14 +417,6 @@ struct TranscriptAttrWritePayload {
 }
 
 #[derive(Deserialize)]
-struct ImportPayload {
-    snapshot: ContinuitySnapshot,
-    target_chat_id: String,
-    #[serde(default = "default_import_mode")]
-    mode: ContinuitySnapshotImportMode,
-}
-
-#[derive(Deserialize)]
 struct ClosePayload {
     #[serde(default)]
     reason: String,
@@ -426,8 +424,4 @@ struct ClosePayload {
 
 const fn default_recover_trigger() -> RuntimeLifecycleTrigger {
     RuntimeLifecycleTrigger::OperatorRequested
-}
-
-const fn default_import_mode() -> ContinuitySnapshotImportMode {
-    ContinuitySnapshotImportMode::FullRestore
 }

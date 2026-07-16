@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::governed_evidence_document::{
+    scoped_governed_evidence_document_key, validate_governed_evidence_document,
+    GovernedEvidenceDocument, GovernedEvidenceDocumentSourceKind,
+};
+use super::governed_memory_owner::{
+    governed_long_term_owner_evidence_bindings, GovernedLexicalContent, GovernedMemoryOwnerPlane,
+    GovernedMemoryOwnerRef,
+};
 use super::governed_post_image::{
     revision_is_exact_successor, GovernedDocumentImage, GovernedPostImageValidation,
 };
@@ -12,21 +20,16 @@ use super::long_term::{
     CanonicalEntityRef, CanonicalEvidenceRef, LongTermMemoryEntry, LongTermMemoryFreshness,
     LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
 };
-use super::recall_anchor::{canonical_recall_evidence_group, recall_source_authority_score};
+use super::recall_anchor::{
+    canonical_recall_evidence_group, recall_source_authority_score,
+    CanonicalRecallEvidenceFamilyGroup, CanonicalRecallEvidenceGroup,
+};
 use super::MemoryPrivacyClass;
 
 pub const MEMORY_FACET_INDEX_NAMESPACE: &str = "memory_facet_indexes";
 pub const MEMORY_FACET_POSTING_NAMESPACE: &str = "memory_facet_postings";
-pub const MEMORY_FACET_SCHEMA_VERSION: u32 = 3;
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryFacetOwnerPlane {
-    LongTerm,
-    ConversationTranscript,
-    MemoryGraph,
-    RuntimeSkill,
-}
+pub const MEMORY_FACET_SCHEMA_VERSION: u32 = 4;
+pub const MAX_EVIDENCE_DOCUMENT_FACET_LEXICAL_TERMS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -432,8 +435,7 @@ impl MemoryFacet {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryFacetIndexDoc {
-    pub owner_record_id: String,
-    pub owner_plane: MemoryFacetOwnerPlane,
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub schema_version: u32,
     pub owner_revision: u64,
     pub facet_index_revision: u64,
@@ -468,8 +470,8 @@ impl MemoryFacetIndexDoc {
         namespaces.dedup();
 
         FacetReportView {
-            owner_record_id: self.owner_record_id.clone(),
-            owner_plane: self.owner_plane,
+            owner_ref: (!redacted).then(|| self.owner_ref.clone()),
+            owner_token: facet_owner_report_token(&self.owner_ref),
             schema_version: self.schema_version,
             owner_revision: self.owner_revision,
             facet_index_revision: self.facet_index_revision,
@@ -510,7 +512,7 @@ impl MemoryFacetIndexDoc {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MemoryFacetOwnerVersion {
-    pub owner_record_id: String,
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub owner_revision: u64,
     pub facet_index_revision: u64,
 }
@@ -547,10 +549,17 @@ pub struct MemoryFacetIndexManifest {
 pub struct MemoryFacetPostImageClosure {
     pub memory_space_id: String,
     pub mounted_subject_id: String,
-    pub owner_records: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    pub long_term_owners: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    pub evidence_document_owners: Vec<GovernedDocumentImage<GovernedEvidenceDocument>>,
     pub facet_owners: Vec<GovernedDocumentImage<MemoryFacetIndexDoc>>,
     pub postings: Vec<GovernedDocumentImage<MemoryFacetPostingDoc>>,
     pub manifest: GovernedDocumentImage<MemoryFacetIndexManifest>,
+}
+
+#[derive(Clone, Copy)]
+struct FacetOwnerPostImageState {
+    owner_revision: u64,
+    privacy: MemoryPrivacyClass,
 }
 
 pub fn validate_memory_facet_post_image(
@@ -565,7 +574,7 @@ pub fn validate_memory_facet_post_image(
     }
 
     let mut owners = BTreeMap::new();
-    for image in &closure.owner_records {
+    for image in &closure.long_term_owners {
         let logical_id = image
             .after
             .as_ref()
@@ -587,22 +596,83 @@ pub fn validate_memory_facet_post_image(
             failures.push("memory_facet_owner_revision_successor_drift".to_string());
         }
         if let Some(owner) = image.after.as_ref() {
-            if owners.insert(owner.id.as_str(), owner).is_some() {
+            let owner_ref =
+                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone());
+            if owners
+                .insert(
+                    owner_ref,
+                    FacetOwnerPostImageState {
+                        owner_revision: owner.owner_revision,
+                        privacy: owner.privacy,
+                    },
+                )
+                .is_some()
+            {
                 failures.push("memory_facet_owner_duplicate".to_string());
             }
         }
     }
 
-    let mut facet_owners = BTreeMap::new();
-    for image in &closure.facet_owners {
+    for image in &closure.evidence_document_owners {
         let logical_id = image
             .after
             .as_ref()
             .or(image.before.as_ref())
-            .map(|owner| owner.owner_record_id.as_str())
+            .map(|owner| owner.document_id.as_str())
             .unwrap_or_default();
-        let expected_key =
-            scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, logical_id);
+        if scoped_governed_evidence_document_key(memory_space_id, logical_id)
+            .map(|expected| image.physical_key != expected)
+            .unwrap_or(true)
+        {
+            failures.push("memory_facet_owner_physical_key_drift".to_string());
+        }
+        if image.before != image.after
+            && !revision_is_exact_successor(
+                image.before.as_ref().map(|owner| owner.owner_revision),
+                image.after.as_ref().map(|owner| owner.owner_revision),
+            )
+        {
+            failures.push("memory_facet_owner_revision_successor_drift".to_string());
+        }
+        let Some(owner) = image.after.as_ref() else {
+            continue;
+        };
+        if validate_governed_evidence_document(owner).is_err()
+            || owner.memory_space_id != memory_space_id
+            || owner.mounted_subject_id != subject_id
+        {
+            failures.push("memory_facet_owner_scope_or_schema_drift".to_string());
+        }
+        let owner_ref = GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::EvidenceDocument,
+            owner.document_id.clone(),
+        );
+        if owners
+            .insert(
+                owner_ref,
+                FacetOwnerPostImageState {
+                    owner_revision: owner.owner_revision,
+                    privacy: owner.privacy,
+                },
+            )
+            .is_some()
+        {
+            failures.push("memory_facet_owner_duplicate".to_string());
+        }
+    }
+
+    let mut facet_owners = BTreeMap::new();
+    for image in &closure.facet_owners {
+        let owner_ref = image
+            .after
+            .as_ref()
+            .or(image.before.as_ref())
+            .map(|owner| &owner.owner_ref);
+        let expected_key = owner_ref
+            .ok_or(MemoryFacetValidationError::OwnerScopeMismatch)
+            .and_then(|owner_ref| {
+                scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, owner_ref)
+            });
         if expected_key.as_ref().is_err()
             || expected_key
                 .as_ref()
@@ -626,7 +696,7 @@ pub fn validate_memory_facet_post_image(
         };
         if facet_owner.schema_version != MEMORY_FACET_SCHEMA_VERSION
             || facet_owner.memory_space_id != memory_space_id
-            || facet_owner.owner_plane != MemoryFacetOwnerPlane::LongTerm
+            || !facet_owner.owner_ref.is_valid()
             || !facet_owner
                 .subject_ids
                 .iter()
@@ -635,14 +705,14 @@ pub fn validate_memory_facet_post_image(
         {
             failures.push("memory_facet_owner_doc_scope_or_status_drift".to_string());
         }
-        match owners.get(facet_owner.owner_record_id.as_str()) {
+        match owners.get(&facet_owner.owner_ref) {
             Some(owner)
                 if owner.owner_revision == facet_owner.owner_revision
                     && owner.privacy == facet_owner.privacy => {}
             _ => failures.push("memory_facet_owner_doc_owner_binding_drift".to_string()),
         }
         if facet_owners
-            .insert(facet_owner.owner_record_id.as_str(), facet_owner)
+            .insert(facet_owner.owner_ref.clone(), facet_owner)
             .is_some()
         {
             failures.push("memory_facet_owner_doc_duplicate".to_string());
@@ -653,14 +723,12 @@ pub fn validate_memory_facet_post_image(
         .values()
         .filter(|owner| owner.privacy.projection_content_allowed())
         .map(|owner| MemoryFacetOwnerVersion {
-            owner_record_id: owner.owner_record_id.clone(),
+            owner_ref: owner.owner_ref.clone(),
             owner_revision: owner.owner_revision,
             facet_index_revision: owner.facet_index_revision,
         })
         .collect::<Vec<_>>();
-    if owners.keys().copied().collect::<BTreeSet<_>>()
-        != facet_owners.keys().copied().collect::<BTreeSet<_>>()
-    {
+    if owners.keys().collect::<BTreeSet<_>>() != facet_owners.keys().collect::<BTreeSet<_>>() {
         failures.push("memory_facet_owner_doc_exact_closure_drift".to_string());
     }
     let mut expected_posting_owners: BTreeMap<String, Vec<MemoryFacetOwnerVersion>> =
@@ -676,7 +744,7 @@ pub fn validate_memory_facet_post_image(
                         .entry(key)
                         .or_default()
                         .push(MemoryFacetOwnerVersion {
-                            owner_record_id: owner.owner_record_id.clone(),
+                            owner_ref: owner.owner_ref.clone(),
                             owner_revision: owner.owner_revision,
                             facet_index_revision: owner.facet_index_revision,
                         });
@@ -811,6 +879,7 @@ pub enum MemoryFacetValidationError {
     PostingOwnerMembershipMissing,
     PostingOwnerVersionMismatch,
     OwnerSchemaVersionMismatch,
+    OwnerDocumentInvalid,
     OwnerScopeMismatch,
     OwnerVersionMismatch,
     OwnerStatusMismatch,
@@ -852,6 +921,7 @@ impl MemoryFacetValidationError {
             Self::PostingOwnerMembershipMissing => "memory_facet_posting_owner_membership_missing",
             Self::PostingOwnerVersionMismatch => "memory_facet_posting_owner_version_mismatch",
             Self::OwnerSchemaVersionMismatch => "memory_facet_owner_schema_version_mismatch",
+            Self::OwnerDocumentInvalid => "memory_facet_owner_document_invalid",
             Self::OwnerScopeMismatch => "memory_facet_owner_scope_mismatch",
             Self::OwnerVersionMismatch => "memory_facet_owner_version_mismatch",
             Self::OwnerStatusMismatch => "memory_facet_owner_status_mismatch",
@@ -876,7 +946,7 @@ pub fn memory_facet_manifest_key(
 ) -> Result<String, MemoryFacetValidationError> {
     let (memory_space_id, subject_id) = validate_memory_facet_scope(memory_space_id, subject_id)?;
     let key = format!(
-        "v3|{}:{}|{}:{}",
+        "v4|{}:{}|{}:{}",
         memory_space_id.len(),
         memory_space_id,
         subject_id.len(),
@@ -888,16 +958,20 @@ pub fn memory_facet_manifest_key(
 pub fn scoped_memory_facet_owner_storage_key(
     memory_space_id: &str,
     subject_id: &str,
-    logical_owner_id: &str,
+    owner_ref: &GovernedMemoryOwnerRef,
 ) -> Result<String, MemoryFacetValidationError> {
     let (memory_space_id, subject_id) = validate_memory_facet_scope(memory_space_id, subject_id)?;
-    let logical_owner_id = logical_owner_id.trim();
-    if logical_owner_id.is_empty() {
+    if !owner_ref.is_valid() {
         return Err(MemoryFacetValidationError::OwnerScopeMismatch);
     }
     let mut hasher = Sha256::new();
-    hasher.update(b"memory_facet_owner_storage_v1");
-    for field in [memory_space_id, subject_id, logical_owner_id] {
+    hasher.update(b"memory_facet_owner_storage_v2");
+    for field in [
+        memory_space_id,
+        subject_id,
+        owner_ref.owner_plane.as_str(),
+        owner_ref.owner_id.as_str(),
+    ] {
         hasher.update((field.len() as u64).to_be_bytes());
         hasher.update(field.as_bytes());
     }
@@ -911,7 +985,7 @@ pub fn memory_facet_posting_key(
 ) -> Result<String, MemoryFacetValidationError> {
     let (memory_space_id, subject_id) = validate_memory_facet_scope(memory_space_id, subject_id)?;
     let key = format!(
-        "v3|{}:{}|{}:{}|{}|{}|{}:{}",
+        "v4|{}:{}|{}:{}|{}|{}|{}:{}",
         memory_space_id.len(),
         memory_space_id,
         subject_id.len(),
@@ -937,12 +1011,12 @@ pub fn validate_memory_facet_read_chain(
     let manifest_owner = manifest
         .owner_versions
         .iter()
-        .find(|membership| membership.owner_record_id == owner.owner_record_id)
+        .find(|membership| membership.owner_ref == owner.owner_ref)
         .ok_or(MemoryFacetValidationError::ManifestOwnerMembershipMissing)?;
     let posting_owner = posting
         .owner_versions
         .iter()
-        .find(|membership| membership.owner_record_id == owner.owner_record_id)
+        .find(|membership| membership.owner_ref == owner.owner_ref)
         .ok_or(MemoryFacetValidationError::PostingOwnerMembershipMissing)?;
 
     if owner.schema_version != MEMORY_FACET_SCHEMA_VERSION {
@@ -1009,7 +1083,7 @@ pub fn validate_memory_facet_posting(
         let manifest_owner = manifest
             .owner_versions
             .iter()
-            .find(|membership| membership.owner_record_id == posting_owner.owner_record_id)
+            .find(|membership| membership.owner_ref == posting_owner.owner_ref)
             .ok_or(MemoryFacetValidationError::ManifestOwnerMembershipMissing)?;
         if manifest_owner.owner_revision != posting_owner.owner_revision
             || manifest_owner.facet_index_revision != posting_owner.facet_index_revision
@@ -1032,8 +1106,9 @@ pub enum FacetReportAudience {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FacetReportView {
-    pub owner_record_id: String,
-    pub owner_plane: MemoryFacetOwnerPlane,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_ref: Option<GovernedMemoryOwnerRef>,
+    pub owner_token: String,
     pub schema_version: u32,
     pub owner_revision: u64,
     pub facet_index_revision: u64,
@@ -1051,7 +1126,7 @@ pub struct FacetIndexRebuildReport {
     pub namespace: String,
     pub scanned_owner_records: usize,
     pub rebuilt_index_docs: usize,
-    pub orphan_owner_record_ids: Vec<String>,
+    pub orphan_owner_refs: Vec<GovernedMemoryOwnerRef>,
     pub schema_failures: Vec<String>,
     pub migration_failures: Vec<String>,
 }
@@ -1097,7 +1172,7 @@ pub struct FacetCoverageSelectionReport {
 pub struct HumanFacetSuggestion {
     pub suggestion_id: String,
     pub suggested_by: String,
-    pub owner_record_id: String,
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub proposed_facets: Vec<String>,
     pub governed_proposal_id: Option<String>,
 }
@@ -1116,7 +1191,7 @@ impl HumanFacetSuggestion {
         if self.suggestion_id.trim().is_empty() {
             return rejected("human_facet_suggestion_id_empty");
         }
-        if self.owner_record_id.trim().is_empty() {
+        if !self.owner_ref.is_valid() {
             return rejected("human_facet_suggestion_owner_empty");
         }
         if self.proposed_facets.is_empty() {
@@ -1182,18 +1257,25 @@ pub fn build_long_term_memory_facet_index_doc(
     memory_space_id: impl Into<String>,
     subject_ids: Vec<String>,
     facet_index_revision: u64,
-) -> MemoryFacetIndexDoc {
-    let canonical_evidence_refs = canonicalize_evidence_refs(entry);
-    let primary_evidence = canonical_evidence_refs
-        .first()
-        .cloned()
-        .unwrap_or_else(|| synthetic_owner_evidence_ref(&entry.id));
-    let owner_record_id = entry.id.clone();
+) -> Result<MemoryFacetIndexDoc, MemoryFacetValidationError> {
+    let canonical_evidence_refs = canonicalize_evidence_refs(entry)?;
+    let canonical_evidence_by_safe_ref = canonical_evidence_refs
+        .iter()
+        .map(|evidence| (evidence.source_ref.as_str(), evidence))
+        .collect::<BTreeMap<_, _>>();
+    let primary_evidence = canonical_evidence_refs.first().cloned().unwrap_or_else(|| {
+        synthetic_owner_evidence_ref(&GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::LongTerm,
+            entry.id.clone(),
+        ))
+    });
+    let owner_ref =
+        GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id.clone());
     let mut exact_facets = Vec::new();
 
     push_facet(
         &mut exact_facets,
-        &owner_record_id,
+        &owner_ref,
         MemoryFacetNamespace::Kind,
         MemoryFacetValue::Kind {
             normalized: kind_value(&entry.kind).to_string(),
@@ -1205,7 +1287,7 @@ pub fn build_long_term_memory_facet_index_doc(
     if !normalized_topic.is_empty() {
         push_facet(
             &mut exact_facets,
-            &owner_record_id,
+            &owner_ref,
             MemoryFacetNamespace::Topic,
             MemoryFacetValue::Topic {
                 normalized: normalized_topic.clone(),
@@ -1222,7 +1304,7 @@ pub fn build_long_term_memory_facet_index_doc(
         }
         push_facet(
             &mut exact_facets,
-            &owner_record_id,
+            &owner_ref,
             MemoryFacetNamespace::Keyword,
             MemoryFacetValue::Keyword { normalized },
             vec![primary_evidence.clone()],
@@ -1230,20 +1312,31 @@ pub fn build_long_term_memory_facet_index_doc(
     }
 
     for entity in &entry.canonical_entities {
+        let entity_evidence_refs = entity
+            .evidence_refs
+            .iter()
+            .map(|evidence| {
+                canonical_evidence_by_safe_ref
+                    .get(evidence.source_ref.as_str())
+                    .cloned()
+                    .cloned()
+                    .ok_or(MemoryFacetValidationError::OwnerDocumentInvalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         push_facet(
             &mut exact_facets,
-            &owner_record_id,
+            &owner_ref,
             MemoryFacetNamespace::Entity,
             MemoryFacetValue::Entity {
                 entity: entity.clone(),
             },
-            entity.evidence_refs.clone(),
+            entity_evidence_refs,
         );
     }
 
     push_facet(
         &mut exact_facets,
-        &owner_record_id,
+        &owner_ref,
         MemoryFacetNamespace::SourceScope,
         MemoryFacetValue::SourceScope {
             normalized: source_scope_value(entry.source_scope).to_string(),
@@ -1252,7 +1345,7 @@ pub fn build_long_term_memory_facet_index_doc(
     );
     push_facet(
         &mut exact_facets,
-        &owner_record_id,
+        &owner_ref,
         MemoryFacetNamespace::SourceType,
         MemoryFacetValue::SourceType {
             normalized: source_type_value(entry.source_type).to_string(),
@@ -1261,7 +1354,7 @@ pub fn build_long_term_memory_facet_index_doc(
     );
     push_facet(
         &mut exact_facets,
-        &owner_record_id,
+        &owner_ref,
         MemoryFacetNamespace::Freshness,
         MemoryFacetValue::Freshness {
             normalized: freshness_value(entry.freshness).to_string(),
@@ -1278,7 +1371,7 @@ pub fn build_long_term_memory_facet_index_doc(
         }
         push_facet(
             &mut exact_facets,
-            &owner_record_id,
+            &owner_ref,
             MemoryFacetNamespace::Temporal,
             MemoryFacetValue::Temporal {
                 anchor: TemporalAnchor {
@@ -1295,7 +1388,7 @@ pub fn build_long_term_memory_facet_index_doc(
     for evidence in &canonical_evidence_refs {
         push_facet(
             &mut exact_facets,
-            &owner_record_id,
+            &owner_ref,
             MemoryFacetNamespace::Evidence,
             MemoryFacetValue::Evidence {
                 evidence: evidence.clone(),
@@ -1305,11 +1398,10 @@ pub fn build_long_term_memory_facet_index_doc(
     }
 
     dedup_facets(&mut exact_facets);
-    let expanded_facets = build_expanded_facets(&owner_record_id, &exact_facets);
+    let expanded_facets = build_expanded_facets(&owner_ref, &exact_facets);
 
-    MemoryFacetIndexDoc {
-        owner_record_id,
-        owner_plane: MemoryFacetOwnerPlane::LongTerm,
+    Ok(MemoryFacetIndexDoc {
+        owner_ref,
         schema_version: MEMORY_FACET_SCHEMA_VERSION,
         owner_revision: entry.owner_revision,
         facet_index_revision,
@@ -1321,10 +1413,98 @@ pub fn build_long_term_memory_facet_index_doc(
         expanded_facets,
         canonical_evidence_refs,
         updated_at: entry.updated_at.max(entry.created_at),
-    }
+    })
 }
 
-fn build_expanded_facets(owner_record_id: &str, exact_facets: &[MemoryFacet]) -> Vec<MemoryFacet> {
+pub fn build_governed_evidence_document_facet_index_doc(
+    document: &GovernedEvidenceDocument,
+    subject_ids: Vec<String>,
+    facet_index_revision: u64,
+) -> Result<MemoryFacetIndexDoc, MemoryFacetValidationError> {
+    validate_governed_evidence_document(document)
+        .map_err(|_| MemoryFacetValidationError::OwnerDocumentInvalid)?;
+    let material = document
+        .owner_material()
+        .map_err(|_| MemoryFacetValidationError::OwnerDocumentInvalid)?;
+    let owner_ref = material.owner_ref().clone();
+    let binding = material
+        .evidence_bindings()
+        .first()
+        .ok_or(MemoryFacetValidationError::OwnerDocumentInvalid)?;
+    let evidence_ref = CanonicalEvidenceRef {
+        source_ref: binding.safe_evidence_ref().to_string(),
+        canonical_evidence_group: binding.canonical_evidence_group().to_string(),
+        evidence_family_group: binding.evidence_family_group().map(str::to_string),
+        source_kind: evidence_document_source_kind_value(document.source_kind).to_string(),
+        source_authority_score: recall_source_authority_score(binding.safe_evidence_ref()),
+    };
+    let canonical_evidence_refs = vec![evidence_ref.clone()];
+    let mut exact_facets = Vec::new();
+    push_facet(
+        &mut exact_facets,
+        &owner_ref,
+        MemoryFacetNamespace::SourceType,
+        MemoryFacetValue::SourceType {
+            normalized: evidence_document_source_kind_value(document.source_kind).to_string(),
+        },
+        vec![evidence_ref.clone()],
+    );
+    push_facet(
+        &mut exact_facets,
+        &owner_ref,
+        MemoryFacetNamespace::Evidence,
+        MemoryFacetValue::Evidence {
+            evidence: evidence_ref.clone(),
+        },
+        vec![evidence_ref.clone()],
+    );
+    if document.observed_at > 0 {
+        push_facet(
+            &mut exact_facets,
+            &owner_ref,
+            MemoryFacetNamespace::Temporal,
+            MemoryFacetValue::Temporal {
+                anchor: TemporalAnchor {
+                    anchor_kind: TemporalAnchorKind::ObservedAt,
+                    epoch_secs: document.observed_at,
+                    precision: TemporalAnchorPrecision::Second,
+                    evidence_ref: evidence_ref.clone(),
+                },
+            },
+            vec![evidence_ref.clone()],
+        );
+    }
+    for term in evidence_document_lexical_terms(material.lexical_content()) {
+        push_facet(
+            &mut exact_facets,
+            &owner_ref,
+            MemoryFacetNamespace::Keyword,
+            MemoryFacetValue::Keyword { normalized: term },
+            vec![evidence_ref.clone()],
+        );
+    }
+    dedup_facets(&mut exact_facets);
+
+    Ok(MemoryFacetIndexDoc {
+        owner_ref,
+        schema_version: MEMORY_FACET_SCHEMA_VERSION,
+        owner_revision: document.owner_revision,
+        facet_index_revision,
+        memory_space_id: document.memory_space_id.clone(),
+        subject_ids: normalize_subject_ids(subject_ids),
+        privacy: document.privacy,
+        status: MemoryFacetStatus::Active,
+        exact_facets,
+        expanded_facets: Vec::new(),
+        canonical_evidence_refs,
+        updated_at: document.updated_at.max(document.created_at),
+    })
+}
+
+fn build_expanded_facets(
+    owner_ref: &GovernedMemoryOwnerRef,
+    exact_facets: &[MemoryFacet],
+) -> Vec<MemoryFacet> {
     let mut expanded = Vec::new();
     for exact in exact_facets {
         match &exact.value {
@@ -1337,7 +1517,7 @@ fn build_expanded_facets(owner_record_id: &str, exact_facets: &[MemoryFacet]) ->
                     };
                     expanded.push(MemoryFacet {
                         facet_id: facet_id(
-                            owner_record_id,
+                            owner_ref,
                             MemoryFacetNamespace::Topic,
                             &value,
                             "expanded",
@@ -1358,7 +1538,7 @@ fn build_expanded_facets(owner_record_id: &str, exact_facets: &[MemoryFacet]) ->
                     };
                     expanded.push(MemoryFacet {
                         facet_id: facet_id(
-                            owner_record_id,
+                            owner_ref,
                             MemoryFacetNamespace::Entity,
                             &value,
                             "expanded",
@@ -1380,13 +1560,13 @@ fn build_expanded_facets(owner_record_id: &str, exact_facets: &[MemoryFacet]) ->
 
 fn push_facet(
     facets: &mut Vec<MemoryFacet>,
-    owner_record_id: &str,
+    owner_ref: &GovernedMemoryOwnerRef,
     namespace: MemoryFacetNamespace,
     value: MemoryFacetValue,
     source_evidence_refs: Vec<CanonicalEvidenceRef>,
 ) {
     facets.push(MemoryFacet {
-        facet_id: facet_id(owner_record_id, namespace, &value, "exact"),
+        facet_id: facet_id(owner_ref, namespace, &value, "exact"),
         namespace,
         value,
         source_evidence_refs,
@@ -1396,14 +1576,15 @@ fn push_facet(
 }
 
 fn facet_id(
-    owner_record_id: &str,
+    owner_ref: &GovernedMemoryOwnerRef,
     namespace: MemoryFacetNamespace,
     value: &MemoryFacetValue,
     tier: &str,
 ) -> String {
     let key = format!(
-        "{}:{}:{}:{}",
-        owner_record_id,
+        "{}:{}:{}:{}:{}",
+        owner_ref.owner_plane.as_str(),
+        owner_ref.owner_id,
         namespace.label(),
         tier,
         value.canonical_key()
@@ -1411,28 +1592,81 @@ fn facet_id(
     format!("facet:{}:{}:{}", namespace.label(), tier, stable_hash(&key))
 }
 
-fn canonicalize_evidence_refs(entry: &LongTermMemoryEntry) -> Vec<CanonicalEvidenceRef> {
-    let mut refs = Vec::new();
-    for citation in &entry.supporting_citations {
-        if let Some(evidence) = canonical_evidence_ref(citation) {
-            push_unique_evidence_ref(&mut refs, evidence);
-        }
-    }
-    refs
+fn canonicalize_evidence_refs(
+    entry: &LongTermMemoryEntry,
+) -> Result<Vec<CanonicalEvidenceRef>, MemoryFacetValidationError> {
+    governed_long_term_owner_evidence_bindings(entry)
+        .map_err(|_| MemoryFacetValidationError::OwnerDocumentInvalid)?
+        .into_iter()
+        .map(|binding| {
+            let mut evidence = canonical_evidence_ref(binding.safe_evidence_ref())
+                .ok_or(MemoryFacetValidationError::OwnerDocumentInvalid)?;
+            evidence.evidence_family_group = binding.evidence_family_group().map(str::to_string);
+            Ok(evidence)
+        })
+        .collect()
 }
 
 fn canonical_evidence_ref(raw: &str) -> Option<CanonicalEvidenceRef> {
     canonical_evidence_ref_from_source(raw)
 }
 
-fn synthetic_owner_evidence_ref(owner_record_id: &str) -> CanonicalEvidenceRef {
-    let source_ref = format!("owner_record:{owner_record_id}");
+fn synthetic_owner_evidence_ref(owner_ref: &GovernedMemoryOwnerRef) -> CanonicalEvidenceRef {
+    let source_ref = format!(
+        "owner:{}:{}",
+        owner_ref.owner_plane.as_str(),
+        owner_ref.owner_id
+    );
     CanonicalEvidenceRef {
-        canonical_evidence_group: source_ref.clone(),
+        canonical_evidence_group: canonical_recall_evidence_group(&source_ref),
+        evidence_family_group: None,
         source_kind: "owner_record".to_string(),
         source_authority_score: recall_source_authority_score(&source_ref),
         source_ref,
     }
+}
+
+fn facet_owner_report_token(owner_ref: &GovernedMemoryOwnerRef) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"memory_facet_owner_report_token_v1");
+    for field in [owner_ref.owner_plane.as_str(), owner_ref.owner_id.as_str()] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    format!("facet-owner-token:{:x}", hasher.finalize())
+}
+
+fn evidence_document_source_kind_value(
+    source_kind: GovernedEvidenceDocumentSourceKind,
+) -> &'static str {
+    match source_kind {
+        GovernedEvidenceDocumentSourceKind::ConversationTranscript => "conversation_transcript",
+        GovernedEvidenceDocumentSourceKind::File => "file",
+        GovernedEvidenceDocumentSourceKind::Url => "url",
+        GovernedEvidenceDocumentSourceKind::Api => "api",
+        GovernedEvidenceDocumentSourceKind::Archive => "archive",
+        GovernedEvidenceDocumentSourceKind::ExternalContent => "external_content",
+        GovernedEvidenceDocumentSourceKind::StructuredMaterial => "structured_material",
+    }
+}
+
+fn evidence_document_lexical_terms(content: &GovernedLexicalContent<'_>) -> Vec<String> {
+    let mut terms = BTreeSet::new();
+    for input in content.segments().iter().map(|segment| segment.text()) {
+        for raw in input.split(|character: char| {
+            !character.is_alphanumeric() && character != '-' && character != '_'
+        }) {
+            let normalized = normalize_text_value(raw);
+            if normalized.chars().count() < 2 || normalized.chars().count() > 64 {
+                continue;
+            }
+            terms.insert(normalized);
+            if terms.len() == MAX_EVIDENCE_DOCUMENT_FACET_LEXICAL_TERMS {
+                return terms.into_iter().collect();
+            }
+        }
+    }
+    terms.into_iter().collect()
 }
 
 fn push_unique_evidence_ref(refs: &mut Vec<CanonicalEvidenceRef>, value: CanonicalEvidenceRef) {
@@ -1473,7 +1707,18 @@ fn temporal_lookup_value(anchor: &TemporalAnchor) -> String {
 }
 
 fn canonical_evidence_ref_is_valid(evidence: &CanonicalEvidenceRef) -> bool {
-    canonical_evidence_ref_from_source(&evidence.source_ref).as_ref() == Some(evidence)
+    !evidence.source_ref.trim().is_empty()
+        && evidence.source_ref == evidence.source_ref.trim()
+        && CanonicalRecallEvidenceGroup::from_canonical(evidence.canonical_evidence_group.clone())
+            .is_some()
+        && evidence
+            .evidence_family_group
+            .as_ref()
+            .is_none_or(|family| {
+                CanonicalRecallEvidenceFamilyGroup::from_canonical(family.clone()).is_some()
+            })
+        && !evidence.source_kind.trim().is_empty()
+        && evidence.source_authority_score == recall_source_authority_score(&evidence.source_ref)
 }
 
 fn rejected_query_facets(reason: &str) -> QueryFacetParseOutcome {
@@ -1647,12 +1892,12 @@ fn validate_memory_facet_posting_doc(
 
 fn owner_versions_are_valid(memberships: &[MemoryFacetOwnerVersion]) -> bool {
     memberships.iter().all(|membership| {
-        !membership.owner_record_id.trim().is_empty()
+        membership.owner_ref.is_valid()
             && membership.owner_revision > 0
             && membership.facet_index_revision > 0
     }) && memberships
         .windows(2)
-        .all(|pair| pair[0].owner_record_id < pair[1].owner_record_id)
+        .all(|pair| pair[0].owner_ref < pair[1].owner_ref)
 }
 
 fn posting_revisions_are_valid(memberships: &[MemoryFacetPostingRevision]) -> bool {

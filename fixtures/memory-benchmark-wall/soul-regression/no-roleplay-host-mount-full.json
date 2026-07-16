@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "soul-regression-no-roleplay-host-mount-full",
   "class": "soul_regression",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "Host mount must be grounded in subject ownership and source authority, not appended persona roleplay text.",

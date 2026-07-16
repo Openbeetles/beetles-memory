@@ -66,7 +66,7 @@ pub fn build_sdk_memory_harness_fixture(profile: ProfileId) -> bm_core::Result<R
 }
 
 pub fn run_sdk_memory_harness(backend: StoreBackendConfig) -> bm_core::Result<MemoryHarnessReport> {
-    let fixture = build_sdk_memory_harness_fixture(backend.profile)?;
+    let fixture = build_sdk_memory_harness_fixture(backend.profile())?;
     let mut config = ReplayRunnerConfig::for_backend(backend)?;
     config.identity = MemoryIdentity::new("harness-agent", "harness-owner")?;
     config.scope = MemoryScope::new("harness", "replay-chat")?;

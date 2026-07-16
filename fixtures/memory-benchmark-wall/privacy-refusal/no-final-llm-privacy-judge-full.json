@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "privacy-refusal-no-final-llm-privacy-judge-full",
   "class": "privacy_refusal",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "The hot path forbids a second LLM from judging and rewriting the final user-facing reply after the main reply is generated.",

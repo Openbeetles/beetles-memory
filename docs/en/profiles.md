@@ -9,9 +9,11 @@ Profiles bind a target platform to a runtime role. They control feature selectio
 | `profile-esp-standalone-memory` | ESP | standalone memory | embedded or in-memory | compact entry surface plus local/client transports allowed by capability policy |
 | `profile-esp-embedded-sdk` | ESP | embedded SDK | embedded or in-memory | in-process SDK by default |
 | `profile-linux-device-standalone-memory` | Linux device | standalone memory | file or sqlite | local/device entry surface |
-| `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file or sqlite | in-process Tauri command surface plus optional local transports |
+| `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file or sqlite | in-process Tauri commands, optional local transports, and the loopback LLM Gateway used by transparent Ollama |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
+| `profile-desktop-macos-dev-full` | macOS | nonproduction development full | sqlite, file, or in-memory | full adapter, LLM gateway, replay, and benchmark validation surfaces |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
+| `profile-desktop-windows-dev-full` | Windows | nonproduction development full | sqlite, file, or in-memory | full adapter, LLM gateway, replay, and benchmark validation surfaces |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file | HTTP, WebSocket, MCP, A2A, and LLM gateway server surfaces are profile-allowed; runtime visibility still depends on capability policy and transport config |
 | `profile-server-linux-dev-full` | Linux server | development full profile | sqlite, file, or in-memory | full adapter, LLM gateway server, and replay validation surfaces are profile-allowed; runtime visibility still depends on capability policy and transport config |
 
@@ -20,7 +22,8 @@ Profiles bind a target platform to a runtime role. They control feature selectio
 Developers select `profile-*` convenience features, for example `profile-server-linux-memory-gateway`. Each profile maps to one `target-*` feature and one `role-*` feature. Platform capability snapshot files also use the `profile-*` names.
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features profile-esp-standalone-memory -- \
   platform capability-snapshot \
   --profile profile-esp-standalone-memory
 ```
@@ -33,8 +36,8 @@ cargo run -p bm-cli --bin bm -- \
 - ESP profiles may use `embedded` or `in-memory` store backends.
 - ESP profiles reject `file` and `sqlite` store backends.
 - Linux device, desktop, and server profiles can use sqlite when the matching profile/store features are enabled.
-- `profile-server-linux-dev-full` is a development profile, not an embedded default.
-- `llm_gateway_server` belongs only to server Linux memory gateway / dev-full profiles; ESP, device, and desktop embedded SDK profiles do not expose this entry surface.
+- Every `*-dev-full` profile compiles the nonproduction replay harness, must match the real host target, and cannot be a production or embedded default.
+- `llm_gateway_server` belongs to the server Linux memory gateway, the macOS standalone-memory profile used by local transparent Ollama, and all three dev-full profiles. ESP, device, and desktop embedded SDK profiles do not expose this entry surface. Gateway startup still evaluates the runtime capability view before binding; catalog permission alone is not sufficient.
 - The profile catalog answers whether a surface is allowed for a profile. Runtime `EntryCapabilityView.visible` is the intersection of profile allowance, enabled capability policy, and `EntryTransportConfig`.
 - Long-term memory control is split into `long_term_control_inspect`, `long_term_control_mutation`, `long_term_control_policy`, and `long_term_control_bulk_forget`. Every profile should expose targeted inspect/mutation/policy or return a structured rejection; destructive bulk forget is visible only in profiles with sufficient operator surface, and ESP compact profiles hide it by default.
 

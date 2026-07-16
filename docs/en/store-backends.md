@@ -56,7 +56,7 @@ Allowed:
 
 - Choose backend type, data path, fsync, and repair policy.
 - Read `StoreOpenReport`, `StoreRepairReport`, lifecycle reports, and operator diagnosis.
-- Use SDK export/import for migration.
+- Use `MemoryRuntime::export_memory_space` / `import_memory_space` with an exact typed scope for migration.
 
 Not allowed:
 

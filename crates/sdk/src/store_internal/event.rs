@@ -155,6 +155,7 @@ impl MemoryStoreEvent {
 }
 
 pub trait StoreEventLog: Send + Sync {
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn append_event(&self, event: MemoryStoreEvent) -> Result<()>;
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>>;
 }

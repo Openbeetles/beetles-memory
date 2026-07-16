@@ -11,13 +11,13 @@ use bm_sdk::{
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
     MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryReplayRequest, MemorySemanticJudgmentSource,
-    MemorySpaceExportRequest, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
-    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
-    ProfileId, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
-    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
-    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    MemorySpaceExportRequest, MemorySpaceScope, MemoryTranscriptAttrWriteRequest,
+    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
+    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
+    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest,
+    ParsedLongTermMemoryExtraction, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeSkillReuseOutcome, RuntimeSkillWrite, TranscriptAttrEnvelope, TranscriptAttrGovernance,
+    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
     TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptRedactionReason,
     TranscriptReplayView,
@@ -133,7 +133,7 @@ fn model_usage_attr(
 
 #[test]
 fn finalize_turn_commits_conversation_transcript_in_runtime_memory_space() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -176,12 +176,17 @@ fn finalize_turn_commits_conversation_transcript_in_runtime_memory_space() {
 }
 
 #[test]
-fn desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
-    for profile in [
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn host_desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
+    #[cfg(target_os = "macos")]
+    let profiles = [
         ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
-        ProfileId::DesktopWindowsEmbeddedSdk,
-    ] {
+    ];
+    #[cfg(target_os = "windows")]
+    let profiles = [ProfileId::DesktopWindowsEmbeddedSdk];
+
+    for profile in profiles {
         let platform = empty_store_platform(profile);
         let runtime = test_runtime_with_scope_and_subject(
             platform,
@@ -233,7 +238,7 @@ fn desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
 
 #[test]
 fn runtime_records_transcript_attrs_and_replays_host_ui_message_usage() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -305,7 +310,7 @@ fn runtime_records_transcript_attrs_and_replays_host_ui_message_usage() {
 
 #[test]
 fn runtime_transcript_attr_dry_run_reports_without_persisting() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -367,7 +372,7 @@ fn runtime_transcript_attr_dry_run_reports_without_persisting() {
 
 #[test]
 fn finalize_turn_preserves_host_provided_actor_attribution() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -420,7 +425,7 @@ fn finalize_turn_preserves_host_provided_actor_attribution() {
 
 #[test]
 fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -439,7 +444,7 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
             ),
         )
         .unwrap();
-    platform
+    runtime
         .replay_harness()
         .session_store()
         .clear("chat-a")
@@ -479,7 +484,7 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
 
 #[test]
 fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -539,7 +544,7 @@ fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
 
 #[test]
 fn transcript_backed_projection_honors_recent_message_limit() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -562,7 +567,7 @@ fn transcript_backed_projection_honors_recent_message_limit() {
             finalize_request("limit second user", "limit second assistant"),
         )
         .unwrap();
-    platform
+    runtime
         .replay_harness()
         .session_store()
         .clear("chat-a")
@@ -595,7 +600,7 @@ fn transcript_backed_projection_honors_recent_message_limit() {
 
 #[test]
 fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -661,7 +666,7 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
 
 #[test]
 fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_raw_delete() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -719,8 +724,8 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_raw_delete
 }
 
 #[test]
-fn fresh_runtime_fails_closed_when_transcript_alias_is_corrupt() {
-    let profile = ProfileId::ServerLinuxDevFull;
+fn fresh_runtime_rejects_tampered_transcript_alias_digest() {
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -756,6 +761,7 @@ fn fresh_runtime_fails_closed_when_transcript_alias_is_corrupt() {
         .expect("conversation transcript alias doc");
     alias_doc.value = serde_json::json!({
         "memory_space_id": 7,
+        "mounted_subject_id": "subject-default",
         "channel_id": "llm.gateway",
         "chat_id": "chat-a",
         "conversation_id": "conversation-a",
@@ -766,15 +772,6 @@ fn fresh_runtime_fails_closed_when_transcript_alias_is_corrupt() {
         .replay_harness()
         .import_store_snapshot(&snapshot)
         .unwrap();
-    assert_eq!(
-        corrupt_platform
-            .replay_harness()
-            .session_store()
-            .message_count("chat-a")
-            .unwrap(),
-        2
-    );
-
     let fresh_runtime = test_runtime_with_scope_and_subject(
         corrupt_platform,
         profile,
@@ -782,28 +779,24 @@ fn fresh_runtime_fails_closed_when_transcript_alias_is_corrupt() {
         "chat-a",
         "subject-default",
     );
-    let projection = fresh_runtime
-        .project(MemoryProjectionRequest {
-            structured_query_facets: Vec::new(),
-            user_query: "what evidence exists?".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .unwrap();
-    assert!(projection.context.recent_messages.is_empty());
-    assert!(!projection
-        .context
-        .recent_messages
-        .iter()
-        .any(|message| message.content.contains("corrupt alias raw")));
+    let error = match fresh_runtime.project(MemoryProjectionRequest {
+        structured_query_facets: Vec::new(),
+        user_query: "what evidence exists?".to_string(),
+        system_max_len: 4096,
+        recent_messages_limit: 8,
+        pressure: PressureLevel::Normal,
+        mode_input: RuntimeLifecycleModeInput::default(),
+        tool_registry_refs: Vec::new(),
+    }) {
+        Ok(_) => panic!("tampered typed owner digest must fail before projection"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:?}").contains("content digest drift"));
 }
 
 #[test]
 fn recall_inspect_and_maintenance_do_not_fallback_to_session_shadow_after_transcript_mask() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -890,7 +883,7 @@ fn recall_inspect_and_maintenance_do_not_fallback_to_session_shadow_after_transc
 
 #[test]
 fn runtime_lifecycle_request_deletes_raw_transcript_without_deleting_session_shadow() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -940,7 +933,7 @@ fn runtime_lifecycle_request_deletes_raw_transcript_without_deleting_session_sha
 
 #[test]
 fn lifecycle_request_without_affected_turns_reports_noop() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -970,7 +963,7 @@ fn lifecycle_request_without_affected_turns_reports_noop() {
 
 #[test]
 fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1056,7 +1049,7 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
 
 #[test]
 fn candidate_write_records_only_second_stage_accepted_derived_refs() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1174,7 +1167,7 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
 
 #[test]
 fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1263,7 +1256,7 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
 
 #[test]
 fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -1318,7 +1311,7 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
     )
     .unwrap();
     let derived_refs = transcript_store
-        .list_derived_memory_refs(&key, None)
+        .list_derived_memory_refs(&key, runtime.subject_id(), None)
         .unwrap();
     assert!(
         derived_refs
@@ -1344,7 +1337,7 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
 
 #[test]
 fn soul_candidate_handoff_records_transcript_derived_ref_for_lifecycle_impact() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1436,7 +1429,7 @@ fn soul_candidate_handoff_records_transcript_derived_ref_for_lifecycle_impact() 
 
 #[test]
 fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -1511,7 +1504,10 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
 
     let redacted = runtime
         .export_memory_space(MemorySpaceExportRequest {
-            memory_space_id: runtime.memory_space_id().to_string(),
+            scope: MemorySpaceScope {
+                memory_space_id: runtime.memory_space_id().to_string(),
+                mounted_subject_id: runtime.subject_id().to_string(),
+            },
             include_private: false,
         })
         .unwrap();
@@ -1531,7 +1527,10 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
 
     let raw = runtime
         .export_memory_space(MemorySpaceExportRequest {
-            memory_space_id: runtime.memory_space_id().to_string(),
+            scope: MemorySpaceScope {
+                memory_space_id: runtime.memory_space_id().to_string(),
+                mounted_subject_id: runtime.subject_id().to_string(),
+            },
             include_private: true,
         })
         .unwrap();
@@ -1551,7 +1550,7 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
 
 #[test]
 fn private_garden_self_work_records_private_garden_derived_refs_without_raw_content() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1606,7 +1605,7 @@ fn private_garden_self_work_records_private_garden_derived_refs_without_raw_cont
 
 #[test]
 fn runtime_exposes_manual_transcript_commit_and_export_surface() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1643,7 +1642,7 @@ fn runtime_exposes_manual_transcript_commit_and_export_surface() {
 
 #[test]
 fn lifecycle_report_sanitizes_host_refs_for_operator_view() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1705,7 +1704,7 @@ fn lifecycle_report_sanitizes_host_refs_for_operator_view() {
 
 #[test]
 fn runtime_replay_and_export_transcript_support_cursor_pages() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -1765,7 +1764,7 @@ fn runtime_replay_and_export_transcript_support_cursor_pages() {
 
 #[test]
 fn manual_transcript_commit_is_idempotent_by_transcript_turn_even_if_session_shadow_was_cleared() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -1782,7 +1781,7 @@ fn manual_transcript_commit_is_idempotent_by_transcript_turn_even_if_session_sha
             host_refs: Vec::new(),
         })
         .unwrap();
-    platform
+    runtime
         .replay_harness()
         .session_store()
         .clear("chat-a")
@@ -1823,7 +1822,7 @@ fn manual_transcript_commit_is_idempotent_by_transcript_turn_even_if_session_sha
 
 #[test]
 fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -1881,7 +1880,7 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
 
 #[test]
 fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_already_has_turn() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -1933,7 +1932,7 @@ fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_al
 
 #[test]
 fn runtime_transcript_requests_reject_other_memory_space() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,

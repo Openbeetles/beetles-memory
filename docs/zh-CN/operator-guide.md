@@ -86,7 +86,8 @@ Close 会发出 lifecycle event。进程 supervisor 可以根据返回 report �
 ## CLI Inspection
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features profile-esp-standalone-memory -- \
   platform capability-snapshot \
   --profile profile-esp-standalone-memory
 ```
@@ -94,7 +95,11 @@ cargo run -p bm-cli --bin bm -- \
 Memory commands 同样通过 `bm-entry`：
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+BM_HOST_PROFILE=profile-desktop-macos-dev-full
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features "$BM_HOST_PROFILE" -- \
   memory capabilities \
-  --profile profile-server-linux-dev-full
+  --profile "$BM_HOST_PROFILE"
 ```
+
+`BM_HOST_PROFILE` 必须设置为实际编译并运行该命令的机器所对应的 dev-full profile：macOS desktop、Windows desktop 或 Linux server。Linux 不是通用本机默认值。

@@ -1,5 +1,7 @@
 #![cfg(feature = "sqlite-store")]
 
+mod support;
+
 use std::collections::BTreeSet;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -9,9 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_core::feature_gate::ProfileId;
 use bm_sdk::nonproduction_replay_harness::{
-    MemoryStoreEvent, MemoryStoreEventKind, SqliteStoreEngine, StoreBackendConfig,
-    StoreConsistentReadRequest, StoreEngine, StoreEngineMutation, StoreEventScope,
-    StoreJsonAddress, StoreJsonPrecondition, StoreTransactionRequest,
+    MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig, StoreConsistentReadRequest,
+    StoreEngine, StoreEngineMutation, StoreEventScope, StoreJsonAddress, StoreJsonPrecondition,
+    StoreTransactionRequest,
 };
 use serde_json::{json, Value};
 
@@ -33,7 +35,7 @@ fn sqlite_multiprocess_exact_cas_has_one_winner_and_complete_post_image() {
     std::fs::create_dir_all(&root).expect("create sqlite test root");
     let path = root.join("memory.sqlite3");
     let config = sqlite_config(&path);
-    let (seed, _) = SqliteStoreEngine::open(&config).expect("open seed sqlite engine");
+    let (seed, _) = support::open_sqlite_engine(&config).expect("open seed sqlite engine");
     seed.commit_transaction(&seed_request())
         .expect("seed expected revision");
 
@@ -73,7 +75,7 @@ fn sqlite_multiprocess_exact_cas_has_one_winner_and_complete_post_image() {
         .status
         .success());
 
-    let (reader, _) = SqliteStoreEngine::open(&config).expect("open fresh sqlite reader");
+    let (reader, _) = support::open_sqlite_engine(&config).expect("open fresh sqlite reader");
     let post_image = reader
         .read_consistent(&StoreConsistentReadRequest {
             json: vec![
@@ -119,7 +121,8 @@ fn sqlite_multiprocess_transaction_worker() {
     let barrier =
         std::env::var("BM_SQLITE_MULTIPROCESS_BARRIER").expect("worker process barrier address");
     let writer = writer.to_string_lossy().into_owned();
-    let (engine, _) = SqliteStoreEngine::open(&sqlite_config(&path)).expect("open worker engine");
+    let (engine, _) =
+        support::open_sqlite_engine(&sqlite_config(&path)).expect("open worker engine");
     let mut stream = TcpStream::connect(barrier).expect("connect process barrier");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -301,7 +304,11 @@ fn spawn_worker(path: &Path, barrier: std::net::SocketAddr, writer: &str) -> std
 }
 
 fn sqlite_config(path: &Path) -> StoreBackendConfig {
-    StoreBackendConfig::sqlite(path, ProfileId::ServerLinuxDevFull).expect("sqlite config")
+    StoreBackendConfig::sqlite(
+        path,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("sqlite config")
 }
 
 fn seed_request() -> StoreTransactionRequest {

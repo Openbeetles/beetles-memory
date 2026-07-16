@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "privacy-refusal-disclosure-protocol-in-main-runtime-full",
   "class": "privacy_refusal",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "The disclosure protocol is projected into the active LLM runtime envelope so the host speaks with its own boundary.",

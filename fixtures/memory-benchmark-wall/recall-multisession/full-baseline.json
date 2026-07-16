@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "recall-multisession-full-baseline",
   "class": "recall_multisession",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "Full profile recalls the current fact and evidence chain from multi-session store state.",

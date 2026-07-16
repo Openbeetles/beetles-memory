@@ -3,22 +3,19 @@
 mod support;
 
 use bm_core::memory::{
-    scoped_long_term_control_storage_key, LongTermMemoryControlRevision, LongTermMemoryTombstone,
     LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
-    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
 };
 use bm_core::platform::Platform as _;
-use bm_sdk::nonproduction_replay_harness::StoreSnapshotJsonDoc;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
     LongTermMemoryKind, LongTermMemoryQuery, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryFacetOwnerPlane, MemoryGovernancePolicyMutation,
-    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryLongTermControlView,
-    MemoryLongTermDetailRequest, MemoryLongTermListRequest, MemoryLongTermMutation,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
-    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemorySemanticJudgmentSource,
+    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermDetailRequest,
+    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest,
+    MemoryRecallRequest, MemorySemanticJudgmentSource, MemorySpaceExportRequest, MemorySpaceScope,
     MemorySubjectVisibilityPolicy, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
@@ -27,44 +24,6 @@ use bm_sdk::{
 };
 
 use support::{StaticHttpClient, StaticLlmClient};
-
-fn inject_scoped_control_metadata_at_store_trust_boundary(
-    platform: &bm_sdk::MemoryStoreHandle,
-    memory_space_id: &str,
-    revision: &LongTermMemoryControlRevision,
-    tombstone: &LongTermMemoryTombstone,
-) {
-    let revision_key = scoped_long_term_control_storage_key(
-        memory_space_id,
-        LONG_TERM_CONTROL_REVISION_NAMESPACE,
-        &revision.revision_id,
-    )
-    .expect("scoped revision key");
-    let tombstone_key = scoped_long_term_control_storage_key(
-        memory_space_id,
-        LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
-        &tombstone.record_id,
-    )
-    .expect("scoped tombstone key");
-    let mut snapshot = platform
-        .replay_harness()
-        .export_store_snapshot()
-        .expect("export control metadata fixture");
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: LONG_TERM_CONTROL_REVISION_NAMESPACE.to_string(),
-        key: revision_key,
-        value: serde_json::to_value(revision).expect("serialize revision"),
-    });
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE.to_string(),
-        key: tombstone_key,
-        value: serde_json::to_value(tombstone).expect("serialize tombstone"),
-    });
-    platform
-        .replay_harness()
-        .import_store_snapshot(&snapshot)
-        .expect("inject scoped control metadata snapshot");
-}
 
 fn turn_source() -> MemoryTurnSource {
     MemoryTurnSource {
@@ -112,7 +71,6 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
 #[test]
 fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
     let platform = support::seeded_store_platform(ProfileId::DesktopMacosStandaloneMemory);
-    let event_reader = platform.clone();
     let runtime = support::test_runtime_with_scope(
         platform,
         ProfileId::DesktopMacosStandaloneMemory,
@@ -180,14 +138,14 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
     assert!(deleted_detail.tombstone.is_none());
     assert!(deleted_detail.transcript_refs.is_empty());
 
-    let tombstone = event_reader
+    let tombstone = runtime
         .replay_harness()
         .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
         .expect("scoped long-term control store")
         .get_long_term_control_tombstone(&record_id)
         .unwrap();
     assert!(tombstone.is_some());
-    assert!(event_reader
+    assert!(runtime
         .replay_harness()
         .read_events()
         .unwrap()
@@ -195,7 +153,7 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
         .any(|event| event.kind_name == "operator.action"
             && event.payload.get("action").map(String::as_str)
                 == Some("long_term_memory_control")));
-    assert!(event_reader
+    assert!(runtime
         .replay_harness()
         .read_events()
         .unwrap()
@@ -214,7 +172,7 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
 
 #[test]
 fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = support::empty_store_platform(profile);
     let runtime = support::test_runtime_with_identity_scope_and_subject(
         platform.clone(),
@@ -303,40 +261,48 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
         .expect("owner governed list");
     assert_eq!(owner_list.records.len(), 1);
     assert_eq!(owner_list.records[0].record.id, visible_id);
-    for record_id in [&private_id, &visible_id] {
-        inject_scoped_control_metadata_at_store_trust_boundary(
-            &platform,
-            runtime.memory_space_id(),
-            &LongTermMemoryControlRevision {
-                schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-                revision_id: format!("known-id-revision:{record_id}"),
-                record_id: record_id.clone(),
-                successor_record_id: None,
-                operation: "correct".to_string(),
-                owner_revision: 2,
-                source_revision: Some(1),
-                previous_digest: "previous-digest".to_string(),
-                new_digest: "new-digest".to_string(),
-                reason: "known id metadata must remain governed".to_string(),
-                actor_subject_id: Some("subject-a".to_string()),
-                memory_space_id: Some(runtime.memory_space_id().to_string()),
-                created_at: 1_800_000_001,
+    let visible_revision = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Correct {
+                target: MemoryLongTermTarget::RecordId(visible_id.clone()),
+                replacement: bm_sdk::LongTermMemoryDraft {
+                    kind: LongTermMemoryKind::Fact,
+                    topic: "governed visible record".to_string(),
+                    content: "Only the owning runtime may list this governed record.".to_string(),
+                    keywords: vec!["governed".to_string(), "corrected".to_string()],
+                    privacy: MemoryPrivacyClass::SharedWithSubject,
+                    source_chat_id: Some("chat-a".to_string()),
+                    source_type: None,
+                    source_scope: None,
+                    confidence: None,
+                    freshness: None,
+                    stale_hint: None,
+                    supporting_citations: vec!["external_eval:governed-visible".to_string()],
+                    canonical_entities: Vec::new(),
+                    evidence_count: Some(1),
+                    observed_at: Some(1_800_000_000),
+                    last_confirmed_at: Some(1_800_000_000),
+                    source_revision: Some(2),
+                },
             },
-            &LongTermMemoryTombstone {
-                schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-                tombstone_id: format!("known-id-tombstone:{record_id}"),
-                record_id: record_id.clone(),
-                operation: "delete".to_string(),
-                last_owner_revision: 2,
-                last_source_revision: Some(1),
-                previous_digest: "previous-digest".to_string(),
-                reason: "known id tombstone must remain governed".to_string(),
-                actor_subject_id: Some("subject-a".to_string()),
-                memory_space_id: Some(runtime.memory_space_id().to_string()),
-                created_at: 1_800_000_002,
+            reason: "known visible metadata must remain scope governed".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("create governed visible revision");
+    assert!(visible_revision.accepted);
+
+    let private_mutation = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Delete {
+                target: MemoryLongTermTarget::RecordId(private_id.clone()),
             },
-        );
-    }
+            reason: "private owner must reject public control mutation".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("reject private control mutation through governed report");
+    assert!(!private_mutation.accepted);
 
     let private_detail = runtime
         .get_long_term_memory(MemoryLongTermDetailRequest {
@@ -382,10 +348,10 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
 
 #[test]
 fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() {
-    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope(
         platform,
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "local",
         "facet-control-chat",
     );
@@ -446,15 +412,15 @@ fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() 
     assert!(delete
         .affected_facet_docs
         .iter()
-        .any(|doc| doc.owner_record_id == record_id
-            && doc.action == "delete"
-            && doc.facet_doc_id.starts_with("facet-owner:")
-            && doc.report_view.redacted_sensitive_metadata));
+        .any(|doc| doc.action == "delete"
+            && doc.owner_token.starts_with("facet-owner-token:")
+            && !doc.owner_token.contains(&record_id)
+            && doc.report_view.redacted_sensitive_metadata
+            && doc.report_view.owner_ref.is_none()));
     assert!(delete
         .affected_facet_docs
         .iter()
-        .all(|doc| !doc.facet_doc_id.trim().is_empty()
-            && doc.owner_plane == MemoryFacetOwnerPlane::LongTerm));
+        .all(|doc| !doc.owner_token.trim().is_empty()));
 }
 
 #[test]
@@ -508,14 +474,9 @@ fn runtime_dry_run_does_not_mutate_long_term_store() {
 
 #[test]
 fn runtime_policy_mutation_persists_suppression_policy() {
-    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let event_reader = platform.clone();
-    let runtime = support::test_runtime_with_scope(
-        platform,
-        ProfileId::ServerLinuxDevFull,
-        "local",
-        "chat-1",
-    );
+    let platform = support::empty_store_platform(support::host_test_profile());
+    let runtime =
+        support::test_runtime_with_scope(platform, support::host_test_profile(), "local", "chat-1");
 
     let report = runtime
         .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
@@ -537,7 +498,7 @@ fn runtime_policy_mutation_persists_suppression_policy() {
         .expect("policy mutation");
 
     assert!(report.accepted);
-    let policies = event_reader
+    let policies = runtime
         .replay_harness()
         .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
         .expect("scoped long-term control store")
@@ -545,6 +506,63 @@ fn runtime_policy_mutation_persists_suppression_policy() {
         .unwrap();
     assert_eq!(policies.len(), 1);
     assert_eq!(report.policy_id, Some(policies[0].policy_id.clone()));
+}
+
+#[test]
+fn runtime_rejects_space_wide_policy_before_persistence_and_scoped_export() {
+    let platform = support::empty_store_platform(support::host_test_profile());
+    let runtime = support::test_runtime_with_scope(
+        platform.clone(),
+        support::host_test_profile(),
+        "local",
+        "chat-1",
+    );
+
+    let error = runtime
+        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
+            operation: MemoryGovernancePolicyMutation::Suppress {
+                selector: MemoryGovernanceSelector {
+                    memory_space_id: Some(runtime.memory_space_id().to_string()),
+                    subject_id: None,
+                    kind: Some(LongTermMemoryKind::Preference),
+                    topic_pattern: None,
+                    source_chat_id: None,
+                    source_scope: None,
+                },
+                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+            },
+            reason: "space-wide policy is outside scoped runtime storage".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect_err("space-wide policy must fail before persistence");
+    assert_eq!(error.stage(), "long_term_control_policy_subject_required");
+
+    let control_store = platform
+        .replay_harness()
+        .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
+        .expect("scoped control store");
+    assert!(control_store
+        .list_long_term_governance_policies(10)
+        .expect("policies")
+        .is_empty());
+    assert!(control_store
+        .list_long_term_control_audit(10)
+        .expect("audits")
+        .is_empty());
+
+    let archive = runtime
+        .export_memory_space(MemorySpaceExportRequest {
+            scope: MemorySpaceScope {
+                memory_space_id: runtime.memory_space_id().to_string(),
+                mounted_subject_id: runtime.subject_id().to_string(),
+            },
+            include_private: false,
+        })
+        .expect("scoped export")
+        .archive;
+    assert!(!archive.contains_json_namespace(LONG_TERM_GOVERNANCE_POLICY_NAMESPACE));
+    assert!(!archive.contains_json_namespace(LONG_TERM_CONTROL_AUDIT_NAMESPACE));
 }
 
 #[test]
@@ -614,10 +632,10 @@ fn runtime_tombstone_hides_record_from_recall_and_projection_context() {
 
 #[test]
 fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
-    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "local",
         "chat-1",
     );
@@ -688,10 +706,10 @@ fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
 
 #[test]
 fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
-    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "local",
         "chat-1",
     );
@@ -757,10 +775,10 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
 
 #[test]
 fn runtime_suppression_policy_blocks_automatic_post_turn_long_term_refresh() {
-    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope_and_subject(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
         "subject-default",
@@ -829,10 +847,10 @@ fn runtime_suppression_policy_blocks_automatic_post_turn_long_term_refresh() {
 
 #[test]
 fn runtime_mutates_long_term_memory_from_transcript_derived_ref_target() {
-    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope_and_subject(
         platform,
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
         "subject-default",
@@ -942,10 +960,10 @@ fn runtime_mutates_long_term_memory_from_transcript_derived_ref_target() {
 
 #[test]
 fn runtime_mutates_shared_fact_memory_from_transcript_derived_ref_target() {
-    let platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope_and_subject(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
         "subject-default",
@@ -980,7 +998,7 @@ fn runtime_mutates_shared_fact_memory_from_transcript_derived_ref_target() {
     let derived_ref = platform
         .replay_harness()
         .conversation_transcript_store()
-        .list_derived_memory_refs(&key, None)
+        .list_derived_memory_refs(&key, runtime.subject_id(), None)
         .unwrap()
         .into_iter()
         .find(|derived| derived.plane == DerivedMemoryPlane::SharedFact)

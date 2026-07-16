@@ -159,7 +159,7 @@ pub fn mark_long_term_memory_extraction_deferred(
     next_state
 }
 
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ParsedLongTermMemoryExtraction {
     pub upserts: Vec<LongTermMemoryDraft>,
     pub deletes: Vec<LongTermMemorySlot>,
@@ -2699,7 +2699,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_extraction_reuses_legacy_unscoped_project_slot() {
+    fn prepare_extraction_reuses_current_unscoped_project_slot() {
         let store = StubLongTermMemoryStore {
             recall_entries: vec![test_entry(
                 "ltm-legacy",

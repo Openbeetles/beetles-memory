@@ -1,17 +1,18 @@
 #![cfg(feature = "server-stdio")]
 
+mod support;
+
 use bm_entry::{
-    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryAuthConfig, EntryBearerPrincipal, EntryIdempotencyConfig, EntryIdentity,
+    EntryOperationCapability, EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
 };
 use bm_mcp::{McpToolCall, McpToolServer};
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
 
 fn remote_runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "mcp-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -20,13 +21,18 @@ fn remote_runtime() -> EntryRuntime {
             channel: "mcp.remote".to_string(),
             chat_id: "chat-remote".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(support::native_runtime_profile())
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_enabled(),
-        auth: EntryAuthConfig::required_bearer_token("secret-token"),
+        auth: EntryAuthConfig::required_bearer_principal(
+            "secret-token",
+            EntryBearerPrincipal::new(
+                "mcp-remote-principal",
+                "owner-default",
+                [EntryOperationCapability::Write],
+            ),
+        ),
         idempotency: EntryIdempotencyConfig { max_keys: 64 },
         privacy: MemoryPrivacyPolicy::standard_private_boundary(),
         capability,
@@ -37,7 +43,7 @@ fn remote_runtime() -> EntryRuntime {
 #[test]
 fn mcp_remote_write_without_explicit_source_scope_is_rejected() {
     let runtime = remote_runtime();
-    let server = McpToolServer::new("mcp-remote");
+    let server = McpToolServer::new("mcp-remote", "mcp-remote-client");
 
     let error = server
         .call(

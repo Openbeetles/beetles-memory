@@ -1,8 +1,9 @@
+mod support;
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
     InMemoryStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig, StoreEventLog,
-    StoreEventScope, StorePlatform, STORE_SCHEMA_VERSION,
+    StoreEventScope, STORE_SCHEMA_VERSION,
 };
 
 #[test]
@@ -65,19 +66,25 @@ fn file_store_can_reopen_without_runtime_event_id_collision() {
     ));
     let _ = std::fs::remove_dir_all(&root);
 
-    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).unwrap();
-    StorePlatform::open(config.clone()).expect("first open");
-    StorePlatform::open(config).expect("second open must not collide on runtime event id");
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .unwrap();
+    support::open_store(config.clone()).expect("first open");
+    support::open_store(config).expect("second open must not collide on runtime event id");
 }
 
 #[test]
 fn store_platform_events_use_configured_scope_and_content_hash() {
-    let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
-        .unwrap()
-        .with_event_scope(StoreEventScope::new(
-            "agent-a", "owner-a", "local", "chat-a",
-        ));
-    let platform = StorePlatform::open_in_memory(config).unwrap();
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .unwrap()
+    .with_event_scope(StoreEventScope::new(
+        "agent-a", "owner-a", "local", "chat-a",
+    ));
+    let platform = support::open_store_in_memory(config).unwrap();
 
     platform
         .state_fs()

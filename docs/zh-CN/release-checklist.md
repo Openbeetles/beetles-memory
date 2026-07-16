@@ -19,9 +19,9 @@
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo doc --no-deps --no-default-features \
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo doc --locked --no-deps --no-default-features \
   -p bm-core \
   -p bm-sdk \
   -p bm-replay \
@@ -33,7 +33,7 @@ cargo doc --no-deps --no-default-features \
   -p bm-wss \
   -p bm-mcp \
   -p bm-a2a
-cargo test -p bm-store-contract-tests
+cargo test --locked -p bm-store-contract-tests
 bash scripts/check_platform_compile_gates.sh
 bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh

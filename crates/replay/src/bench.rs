@@ -7,19 +7,60 @@ use bm_sdk::{
     ProfileId, MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION,
     MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
-    io::{BufRead, BufReader, Read},
-    path::{Path, PathBuf},
+    fs::{self, File, Metadata},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    path::{Component, Path, PathBuf},
     process::Command,
+    rc::Rc,
+    time::{Duration, SystemTime},
 };
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::p7_process::{
+    run_p7_bounded_command, run_p7_bounded_retained_executable, P7ProcessLimits,
+    P7ProcessTermination,
+};
+use crate::p7_secure_fs::P7RetainedDirectoryOwner;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 const P7_CONTRACT_VERSION: &str = "p7_recall_delivery_v2";
+const P7_PRODUCER_IDENTITY_SCHEMA_VERSION: &str = "p7_producer_identity_v2";
+const P7_RECORDED_PRODUCER_IDENTITY_SCHEMA_VERSION: &str = "p7_recorded_producer_identity_v1";
+const P7_VERIFIER_IDENTITY_SCHEMA_VERSION: &str = "p7_verifier_identity_v2";
+pub const P7_VERIFIER_RELEASE_MANIFEST_SCHEMA_VERSION: &str = "p7_verifier_release_manifest_v1";
+pub const P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME: &str = "verifier-release-manifest.json";
+pub const P7_VERIFIER_RELEASES_DIR: &str = "verifier/releases";
+const P7_VERIFICATION_RECEIPT_SCHEMA_VERSION: &str = "p7_verification_receipt_v2";
+const P7_VERIFICATION_POLICY_CONTRACT: &str = "p7_verification_policy_v2";
+pub const P7_DETAIL_SCHEMA_VERSION: &str = "p7_question_detail_v1";
+const P7_MAX_DETAIL_LINE_BYTES: usize = 16 * 1024 * 1024;
+const P7_MAX_DATASET_OBJECT_BYTES: usize = 16 * 1024 * 1024;
+const P7_MAX_DETAIL_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const P7_MAX_ALL_DETAIL_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const P7_QUESTION_EVALUATION_SCHEMA_VERSION: &str = "p7_question_evaluation_v1";
+const P7_SOUL_REGRESSION_GATE_SCHEMA_VERSION: &str = "p7_soul_regression_gate_v1";
+const P7_VERIFIER_PERFORMANCE_SCHEMA_VERSION: &str = "p7_verifier_performance_v2";
+const P7_ARTIFACT_LIFECYCLE_RECEIPT_SCHEMA_VERSION: &str = "p7_artifact_read_lifecycle_receipt_v1";
+const P7_VERIFIER_MAX_WALL_TIME: Duration = Duration::from_secs(30 * 60);
+const P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const P7_MAX_CONTROL_JSON_BYTES: u64 = 64 * 1024 * 1024;
+const P7_MAX_RSS_STDOUT_BYTES: u64 = 64 * 1024 * 1024;
+const P7_MAX_RSS_STDERR_BYTES: u64 = 4 * 1024 * 1024;
+const P7_MAX_RETAINED_ARTIFACT_HANDLES: usize = 4096;
+const P7_PROCESS_STDOUT_CAP_BYTES: u64 = 64 * 1024 * 1024;
+const P7_PROCESS_STDERR_CAP_BYTES: u64 = 64 * 1024 * 1024;
+const P7_PROCESS_TOTAL_CAP_BYTES: u64 = 96 * 1024 * 1024;
+const P7_MAX_RELEASE_SOURCE_FILES: usize = 4096;
 const P7_RUNNER_PROJECTION_DIGEST_OBSERVATION_SCHEMA_VERSION: &str =
-    "p7_runner_projection_digest_observation_v1";
+    "p7_runner_projection_digest_observation_v2";
+const P7_PROJECTION_OWNER_IDENTITY_TOKEN_PREFIX: &str = "projection-owner-token:";
 const P7_TRUSTED_SDK_BUILD_FINGERPRINT: &str = env!("BM_P7_TRUSTED_SDK_BUILD_FINGERPRINT");
 const P7_SDK_BUILD_FINGERPRINT_CONTRACT: &str = "p7_sdk_build_inputs_sha256_v2";
 const P7_SDK_BUILD_INPUTS: [&str; 6] = [
@@ -30,9 +71,120 @@ const P7_SDK_BUILD_INPUTS: [&str; 6] = [
     "crates/sdk/Cargo.toml",
     "crates/sdk/src",
 ];
-const P7_RUNNER_RELEASE_BINARY: &str = "runner/target/release/beetle-memory-external-bench-runner";
+const P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT: &str = env!("BM_P7_OPERATOR_BUILD_FINGERPRINT");
+const P7_BUILD_SOURCE_ATTESTATION: &str = env!("BM_P7_BUILD_SOURCE_ATTESTATION");
+const P7_WORKSPACE_BUILD_SOURCE_ATTESTATION: &str = "workspace_source";
+const P7_FROZEN_ANCHOR_SHA256: &str = env!("BM_P7_FROZEN_ANCHOR_SHA256");
+const P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256: &str =
+    env!("BM_P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256");
+const P7_OPERATOR_BUILD_PROFILE: &str = env!("BM_P7_OPERATOR_BUILD_PROFILE");
+const P7_OPERATOR_BUILD_FEATURES: &str = env!("BM_P7_OPERATOR_BUILD_FEATURES");
+#[cfg(test)]
+const P7_OPERATOR_BUILD_FINGERPRINT_CONTRACT: &str = "p7_operator_build_inputs_sha256_v1";
+#[cfg(test)]
+const P7_OPERATOR_BUILD_INPUTS: [&str; 12] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/replay/Cargo.toml",
+    "crates/replay/build.rs",
+    "crates/replay/src/bench.rs",
+    "crates/replay/src/fixture.rs",
+    "crates/replay/src/harness.rs",
+    "crates/replay/src/lib.rs",
+    "crates/replay/src/p7_process.rs",
+    "crates/replay/src/p7_secure_fs.rs",
+    "crates/replay/src/runner.rs",
+    "crates/replay/src/bin/bm-w4-external-noisy-wall.rs",
+];
+const P7_RUNNER_RELEASES_DIR: &str = "releases";
+const P7_RUNNER_RELEASE_FILE_NAME: &str = "beetle-memory-external-bench-runner";
+pub const P7_RELEASE_GATE_ATTESTATION_FILE_NAME: &str = "release-gate-attestation.json";
+pub const P7_RELEASE_GATE_SOURCE_MANIFEST_FILE_NAME: &str = "release-gate-source-manifest.json";
+pub const P7_RELEASE_METADATA_FILE_NAME: &str = "release-metadata.json";
+pub const P7_RELEASE_GATE_ATTESTATION_SCHEMA_VERSION: &str = "p7_release_gate_attestation_v2";
+pub const P7_RELEASE_GATE_SOURCE_MANIFEST_SCHEMA_VERSION: &str =
+    "p7_release_gate_source_manifest_v2";
+pub const P7_RELEASE_GATE_ORCHESTRATOR_CONTRACT: &str =
+    "p7_content_addressed_release_gate_orchestrator_v2";
+pub const P7_RELEASE_GATE_PLAN_SCHEMA_VERSION: &str = "p7_release_gate_plan_v1";
+pub const P7_RELEASE_METADATA_SCHEMA_VERSION: &str = "p7_content_addressed_release_metadata_v2";
+pub const P7_RELEASE_GATE_SOURCE_FINGERPRINT_CONTRACT: &str = "p7_release_gate_source_sha256_v3";
+pub const P7_PRODUCER_SEMANTIC_SOURCE_MANIFEST_SCHEMA_VERSION: &str =
+    "p7_producer_semantic_source_manifest_v1";
+pub const P7_PRODUCER_SEMANTIC_SOURCE_FINGERPRINT_CONTRACT: &str =
+    "p7_producer_semantic_source_sha256_v1";
+pub const P7_FROZEN_RUNNER_IDENTITY_RELATIVE_PATH: &str =
+    "crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs";
+pub const P7_RUNNER_PREFLIGHT_SCHEMA_VERSION: &str = "p7_runner_preflight_v3";
+pub const P7_COHORT_ADMISSION_SCHEMA_VERSION: &str = "p7_cohort_admission_v1";
+pub const P7_COHORT_ADMISSION_FILE_NAME: &str = "cohort-admission.json";
+pub const P7_SHARD_PRODUCER_PROVENANCE_SCHEMA_VERSION: &str = "p7_shard_producer_provenance_v2";
+pub const P7_MERGED_PROVENANCE_SCHEMA_VERSION: &str = "p7_merged_provenance_v2";
+pub const P7_REQUIRED_RELEASE_GATE_IDS: [&str; 12] = [
+    "agent-memory-fmt",
+    "agent-memory-check",
+    "agent-memory-clippy",
+    "agent-memory-test",
+    "agent-memory-write-transaction-contract",
+    "agent-memory-next-gen-plan-contract",
+    "runner-fmt",
+    "runner-test",
+    "runner-clippy",
+    "runner-shell-syntax",
+    "runner-full-wall-fake",
+    "runner-max-rss-fake",
+];
+const P7_PRODUCER_SEMANTIC_AGENT_MEMORY_INPUTS: [&str; 12] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/core/Cargo.toml",
+    "crates/core/src",
+    "crates/sdk/Cargo.toml",
+    "crates/sdk/src",
+    "crates/replay/Cargo.toml",
+    "crates/replay/build.rs",
+    "crates/replay/src/lib.rs",
+    "crates/replay/src/bench.rs",
+    "crates/replay/src/p7_process.rs",
+    "crates/replay/src/p7_secure_fs.rs",
+];
+const P7_PRODUCER_SEMANTIC_RUNNER_INPUTS: [&str; 5] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "src",
+    "run_full_p7_wall.sh",
+];
+const P7_AGENT_MEMORY_RELEASE_GATE_SOURCE_INPUTS: [&str; 1] = ["."];
+const P7_RUNNER_RELEASE_GATE_SOURCE_INPUTS: [&str; 1] = ["."];
+const P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES: [&str; 3] =
+    ["memory", "results", "crates/sdk/memory"];
+const P7_RUNNER_RELEASE_GATE_EXCLUDED_DIRECTORIES: [&str; 1] = ["releases"];
+const P7_RELEASE_GATE_EXCLUDED_DIRECTORY_NAMES: [&str; 10] = [
+    ".git",
+    ".agents",
+    ".codex",
+    ".DS_Store",
+    "target",
+    "node_modules",
+    "dist",
+    "cache",
+    ".cache",
+    "logs",
+];
 const P7_RUNNER_BUILD_FINGERPRINT_CONTRACT: &str = "p7_runner_build_inputs_sha256_v2";
 const P7_RUNNER_BUILD_INPUTS: [&str; 4] = ["Cargo.toml", "Cargo.lock", "build.rs", "src"];
+const P7_FINGERPRINT_READ_BUFFER_BYTES: usize = 64 * 1024;
+const P7_MAXIMUM_RSS_EVIDENCE_SCHEMA_VERSION: &str = "p7_maximum_rss_evidence_v3";
+pub const P7_MAXIMUM_RSS_MEASUREMENT_SCHEMA_VERSION: &str = "p7_maximum_rss_measurement_v3";
+pub const P7_MAXIMUM_RSS_MEASUREMENT_FILE_NAME: &str = "maximum-rss-measurement.json";
+pub const P7_MAXIMUM_RSS_REPORT_FILE_NAME: &str = "maximum-rss-report.json";
+const P7_MAXIMUM_RSS_SUITE: &str = "longmemeval_m_cleaned";
+const P7_MAXIMUM_RSS_DATASET_INDEX: usize = 0;
+const P7_MAXIMUM_RSS_QUESTION_INDEX: usize = 0;
+const P7_MAXIMUM_RSS_LIMIT_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+const P7_MAXIMUM_RSS_ARTIFACT_STEM: &str =
+    "longmemeval_m_cleaned.shard-0-of-1.limit-1.question-index-0";
 const P7_ABLATION_METHOD: &str = "sdk_eval_recall_off_run_v1";
 const P7_REQUIRED_ABLATION_SLICES: [&str; 7] = [
     "facet_off",
@@ -44,16 +196,15 @@ const P7_REQUIRED_ABLATION_SLICES: [&str; 7] = [
     "capsule_dedupe_off",
 ];
 
-// Freezing this identity is an explicit release action after source, lockfile, SDK,
-// and the release executable are final. SHA256 is a reproducible identity check, not
-// a promise to resist a same-user local attacker who can rewrite all benchmark files.
-const P7_TRUSTED_RUNNER_RELEASE: Option<P7TrustedRunnerRelease> = None;
-
-#[derive(Clone, Copy)]
-struct P7TrustedRunnerRelease {
-    runner_build_fingerprint: &'static str,
-    runner_lock_fingerprint: &'static str,
-    executable_sha256: &'static str,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct P7FrozenRunnerIdentity {
+    pub runner_build_fingerprint: &'static str,
+    pub runner_lock_fingerprint: &'static str,
+    pub executable_sha256: &'static str,
+    pub gate_attestation_sha256: &'static str,
+    pub release_metadata_sha256: &'static str,
+    pub gate_source_fingerprint: &'static str,
+    pub gate_source_manifest_sha256: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,11 +212,883 @@ struct P7RunnerDiskIdentity {
     runner_build_fingerprint: String,
     runner_lock_fingerprint: String,
     executable_sha256: String,
+    executable_canonical_path: PathBuf,
+    gate_attestation_sha256: String,
+    release_metadata_sha256: String,
+    gate_source_fingerprint: String,
+    gate_source_manifest_sha256: String,
+    gate_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct P7RunnerPreflightReport {
+    pub schema_version: String,
     pub run_id: String,
+    pub sdk_build_fingerprint: String,
+    pub runner_build_fingerprint: String,
+    pub runner_lock_fingerprint: String,
+    pub executable_sha256: String,
+    pub executable_canonical_path: String,
+    pub gate_attestation_sha256: String,
+    pub release_metadata_sha256: String,
+    pub gate_source_fingerprint: String,
+    pub gate_source_manifest_sha256: String,
+    pub gate_ids: Vec<String>,
+    pub build_profile: String,
+}
+
+impl P7RunnerPreflightReport {
+    pub fn published_release_identity(&self) -> P7PublishedReleaseIdentity {
+        P7PublishedReleaseIdentity {
+            sdk_build_fingerprint: self.sdk_build_fingerprint.clone(),
+            runner_build_fingerprint: self.runner_build_fingerprint.clone(),
+            runner_lock_fingerprint: self.runner_lock_fingerprint.clone(),
+            executable_sha256: self.executable_sha256.clone(),
+            build_profile: self.build_profile.clone(),
+            gate_attestation_sha256: self.gate_attestation_sha256.clone(),
+            release_metadata_sha256: self.release_metadata_sha256.clone(),
+            gate_source_fingerprint: self.gate_source_fingerprint.clone(),
+            gate_source_manifest_sha256: self.gate_source_manifest_sha256.clone(),
+            gate_ids: self.gate_ids.clone(),
+        }
+    }
+}
+
+pub fn p7_cohort_admission_creation_sequence() -> Vec<P7CohortAdmissionStep> {
+    vec![
+        P7CohortAdmissionStep {
+            ordinal: 1,
+            stage: P7CohortAdmissionStage::PreflightVerified,
+        },
+        P7CohortAdmissionStep {
+            ordinal: 2,
+            stage: P7CohortAdmissionStage::MaximumRssVerified,
+        },
+        P7CohortAdmissionStep {
+            ordinal: 3,
+            stage: P7CohortAdmissionStage::AdmissionPublished,
+        },
+    ]
+}
+
+pub fn validate_p7_cohort_admission_contract(
+    admission: &P7CohortAdmission,
+    run_id: &str,
+    preflight_report_sha256: &str,
+    maximum_rss_report_sha256: &str,
+    release: &P7PublishedReleaseIdentity,
+) -> Result<()> {
+    let expected_plan = p7_release_gate_plan();
+    let expected_producer_identity_sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(release).expect("P7 published release identity is serializable")
+        )
+    );
+    if admission.schema_version != P7_COHORT_ADMISSION_SCHEMA_VERSION
+        || admission.run_id != run_id
+        || admission.creation_sequence != p7_cohort_admission_creation_sequence()
+        || admission.preflight_report_sha256 != preflight_report_sha256
+        || admission.maximum_rss_report_sha256 != maximum_rss_report_sha256
+        || admission.orchestrator_plan_sha256 != expected_plan.plan_sha256
+        || admission.producer_identity_sha256 != expected_producer_identity_sha256
+        || admission.verifier_identity_sha256 != maximum_rss_report_sha256
+        || &admission.release != release
+        || !is_sha256(&admission.preflight_report_sha256)
+        || !is_sha256(&admission.maximum_rss_report_sha256)
+        || !is_sha256(&admission.orchestrator_plan_sha256)
+        || !is_sha256(&admission.producer_identity_sha256)
+        || !is_sha256(&admission.verifier_identity_sha256)
+        || !p7_published_release_identity_is_valid(&admission.release)
+    {
+        return Err(p7_provenance_error(
+            "P7 cohort admission does not bind the ordered preflight, RSS, and release identity",
+        ));
+    }
+    Ok(())
+}
+
+fn p7_published_release_identity_is_valid(release: &P7PublishedReleaseIdentity) -> bool {
+    release.build_profile == "release"
+        && release.gate_ids == P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        && [
+            release.sdk_build_fingerprint.as_str(),
+            release.runner_build_fingerprint.as_str(),
+            release.runner_lock_fingerprint.as_str(),
+            release.executable_sha256.as_str(),
+            release.gate_attestation_sha256.as_str(),
+            release.release_metadata_sha256.as_str(),
+            release.gate_source_fingerprint.as_str(),
+            release.gate_source_manifest_sha256.as_str(),
+        ]
+        .into_iter()
+        .all(is_sha256)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7MaximumRssEvidence {
+    pub schema_version: String,
+    pub completed: bool,
+    pub rss_gate_passed: bool,
+    pub run_id: String,
+    pub suite: String,
+    pub dataset_file: String,
+    pub dataset_sha256: String,
+    pub input_bytes: u64,
+    pub dataset_index: usize,
+    pub question_index: usize,
+    pub question_id: String,
+    pub question_sha256: String,
+    pub maximum_rss_bytes: u64,
+    pub rss_limit_bytes: u64,
+    pub measurement_report_sha256: String,
+    pub measurement_child_exit_status: i32,
+    pub measurement_elapsed_millis: u64,
+    pub supervisor_receipt: crate::p7_process::P7ProcessReceipt,
+    pub measured_executable_canonical_path: String,
+    pub measured_executable_sha256: String,
+    pub preflight_report_sha256: String,
+    pub runner_stdout_sha256: String,
+    pub runner_stderr_sha256: String,
+    pub detail_sha256: String,
+    pub summary_sha256: String,
+    pub preflight_validated_after_measurement: bool,
+    pub preflight: P7RunnerPreflightReport,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7MeasuredArtifactIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub byte_len: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7MaximumRssMeasurementReport {
+    pub schema_version: String,
+    pub run_id: String,
+    pub child_exit_status: i32,
+    pub child_executable_canonical_path: String,
+    pub child_executable_sha256: String,
+    pub child_args: Vec<String>,
+    pub maximum_rss_bytes: u64,
+    pub supervisor_receipt: crate::p7_process::P7ProcessReceipt,
+    pub runner_stdout: P7MeasuredArtifactIdentity,
+    pub runner_stderr: P7MeasuredArtifactIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct P7RegularFileFreshness {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+impl P7RegularFileFreshness {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            mode: metadata.mode(),
+            #[cfg(unix)]
+            modified_seconds: metadata.mtime(),
+            #[cfg(unix)]
+            modified_nanoseconds: metadata.mtime_nsec(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum P7PlatformFileIdentity {
+    #[cfg(unix)]
+    Unix { device: u64, inode: u64 },
+    #[cfg(windows)]
+    Windows {
+        volume_serial_number: u64,
+        file_id: [u8; 16],
+    },
+}
+
+#[cfg(unix)]
+fn p7_platform_file_identity(file: &File) -> Result<P7PlatformFileIdentity> {
+    let metadata = file.metadata().map_err(|source| Error::Io {
+        source,
+        stage: "p7_provenance_stat_file_identity",
+    })?;
+    Ok(P7PlatformFileIdentity::Unix {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn p7_platform_file_identity(file: &File) -> Result<P7PlatformFileIdentity> {
+    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    };
+
+    let mut info = MaybeUninit::<FILE_ID_INFO>::uninit();
+    // SAFETY: file owns a live handle and info has the exact layout requested by FileIdInfo.
+    let status = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if status == 0 {
+        return Err(Error::Io {
+            source: std::io::Error::last_os_error(),
+            stage: "p7_provenance_read_file_identity",
+        });
+    }
+    // SAFETY: a successful GetFileInformationByHandleEx initialized info.
+    let info = unsafe { info.assume_init() };
+    Ok(P7PlatformFileIdentity::Windows {
+        volume_serial_number: info.VolumeSerialNumber,
+        file_id: info.FileId.Identifier,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct P7OpenedArtifact {
+    path: PathBuf,
+    file_name: String,
+    canonical_path: PathBuf,
+    freshness: P7RegularFileFreshness,
+    identity: P7PlatformFileIdentity,
+    sha256: String,
+}
+
+impl P7OpenedArtifact {
+    #[cfg(test)]
+    fn capture(path: &Path, canonical_parent: &Path, canonical_root: &Path) -> Result<Self> {
+        let mut session = P7ArtifactReadSession::default();
+        let (_, _, _) = session.read_with(
+            path,
+            canonical_parent,
+            canonical_root,
+            None,
+            P7ArtifactReadKind::Control,
+            |reader, _| {
+                std::io::copy(reader, &mut std::io::sink()).map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_capture_snapshot",
+                })?;
+                Ok(())
+            },
+        )?;
+        session.verify_retained()?;
+        Ok(session.retained.remove(0).artifact)
+    }
+
+    fn open(path: &Path, owner: &P7RetainedDirectoryOwner) -> Result<(Self, File)> {
+        if path.parent() != Some(owner.path()) {
+            return Err(p7_provenance_error(
+                "P7 streamed artifact escaped its canonical owner directory",
+            ));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| p7_provenance_error("P7 artifact name is not valid UTF-8"))?
+            .to_string();
+        owner.verify_unchanged().map_err(|source| Error::Io {
+            source,
+            stage: "p7_provenance_verify_owner_before_open",
+        })?;
+        let file = owner
+            .open_existing_file(&file_name)
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_provenance_openat_streamed_artifact",
+            })?;
+        Self::from_open_file(path, owner, file)
+    }
+
+    fn from_open_file(
+        path: &Path,
+        owner: &P7RetainedDirectoryOwner,
+        file: File,
+    ) -> Result<(Self, File)> {
+        if path.parent() != Some(owner.path()) {
+            return Err(p7_provenance_error(
+                "P7 streamed artifact escaped its retained owner directory",
+            ));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| p7_provenance_error("P7 artifact name is not valid UTF-8"))?
+            .to_string();
+        let handle_metadata = file.metadata().map_err(|source| Error::Io {
+            source,
+            stage: "p7_provenance_stat_open_streamed_artifact",
+        })?;
+        let freshness = P7RegularFileFreshness::from_metadata(&handle_metadata);
+        let identity = p7_platform_file_identity(&file)?;
+        owner
+            .verify_file_identity(&file_name, &file)
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_provenance_verify_openat_artifact_identity",
+            })?;
+        Ok((
+            Self {
+                path: path.to_path_buf(),
+                file_name,
+                canonical_path: path.to_path_buf(),
+                freshness,
+                identity,
+                sha256: String::new(),
+            },
+            file,
+        ))
+    }
+
+    fn verify_retained_handle_unchanged(
+        &self,
+        file: &File,
+        owner: &P7RetainedDirectoryOwner,
+    ) -> Result<()> {
+        owner.verify_unchanged().map_err(|source| Error::Io {
+            source,
+            stage: "p7_provenance_verify_retained_owner",
+        })?;
+        owner
+            .verify_file_identity(&self.file_name, file)
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_provenance_verify_retained_artifact_entry",
+            })?;
+        let handle_changed = file
+            .metadata()
+            .map(|metadata| P7RegularFileFreshness::from_metadata(&metadata) != self.freshness)
+            .unwrap_or(true);
+        let identity_changed = p7_platform_file_identity(file)
+            .map(|identity| identity != self.identity)
+            .unwrap_or(true);
+        if handle_changed || identity_changed || owner.path().join(&self.file_name) != self.path {
+            return Err(p7_provenance_error(
+                "P7 evidence artifact identity or freshness changed during verification",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn verify_unchanged(&self) -> Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| p7_provenance_error("P7 snapshot artifact has no owner"))?;
+        let owner = P7RetainedDirectoryOwner::open_root(parent).map_err(|source| Error::Io {
+            source,
+            stage: "p7_snapshot_open_owner",
+        })?;
+        let file = owner
+            .open_existing_file(&self.file_name)
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_snapshot_open_artifact",
+            })?;
+        self.verify_retained_handle_unchanged(&file, &owner)
+    }
+}
+
+#[cfg(test)]
+type P7RegularArtifactSnapshot = P7OpenedArtifact;
+
+trait P7ArtifactAdmissionIdentity {
+    fn canonical_path(&self) -> &Path;
+    fn physical_identity(&self) -> Option<&P7PlatformFileIdentity>;
+}
+
+impl P7ArtifactAdmissionIdentity for P7OpenedArtifact {
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    fn physical_identity(&self) -> Option<&P7PlatformFileIdentity> {
+        Some(&self.identity)
+    }
+}
+
+impl P7ArtifactAdmissionIdentity for Path {
+    fn canonical_path(&self) -> &Path {
+        self
+    }
+
+    fn physical_identity(&self) -> Option<&P7PlatformFileIdentity> {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum P7ArtifactReadKind {
+    Control,
+    Dataset,
+    Detail,
+    Operator,
+    Release,
+    Summary,
+}
+
+#[derive(Default)]
+struct P7ArtifactReadLedger {
+    canonical_paths: BTreeSet<PathBuf>,
+    physical_identities: BTreeSet<P7PlatformFileIdentity>,
+    admitted_artifact_bytes: u64,
+    artifact_bytes_read: u64,
+    detail_artifact_bytes_read: u64,
+    admitted_detail_bytes: u64,
+    full_read_pass_count: u64,
+    duplicate_artifact_count: u64,
+}
+
+impl P7ArtifactReadLedger {
+    fn admit<T: P7ArtifactAdmissionIdentity + ?Sized>(
+        &mut self,
+        artifact: &T,
+        byte_len: u64,
+        kind: P7ArtifactReadKind,
+    ) -> Result<()> {
+        let duplicate_path = self.canonical_paths.contains(artifact.canonical_path());
+        let duplicate_identity = artifact
+            .physical_identity()
+            .is_some_and(|identity| self.physical_identities.contains(identity));
+        if duplicate_path || duplicate_identity {
+            self.duplicate_artifact_count = self
+                .duplicate_artifact_count
+                .checked_add(1)
+                .ok_or_else(|| p7_provenance_error("P7 duplicate artifact count overflow"))?;
+            return Err(p7_provenance_error(
+                "P7 verifier attempted a duplicate path or physical artifact read",
+            ));
+        }
+        self.canonical_paths
+            .insert(artifact.canonical_path().to_path_buf());
+        if let Some(identity) = artifact.physical_identity() {
+            self.physical_identities.insert(identity.clone());
+        }
+        if kind == P7ArtifactReadKind::Detail && byte_len > P7_MAX_DETAIL_ARTIFACT_BYTES {
+            return Err(p7_provenance_error(
+                "P7 detail artifact exceeds its individual metadata admission",
+            ));
+        }
+        let admitted_detail_bytes = if kind == P7ArtifactReadKind::Detail {
+            self.admitted_detail_bytes
+                .checked_add(byte_len)
+                .ok_or_else(|| p7_provenance_error("P7 all-detail admission overflow"))?
+        } else {
+            self.admitted_detail_bytes
+        };
+        if admitted_detail_bytes > P7_MAX_ALL_DETAIL_ARTIFACT_BYTES {
+            return Err(p7_provenance_error(
+                "P7 detail artifacts exceed the all-detail metadata admission",
+            ));
+        }
+        let admitted_artifact_bytes = self
+            .admitted_artifact_bytes
+            .checked_add(byte_len)
+            .ok_or_else(|| p7_provenance_error("P7 global artifact admission overflow"))?;
+        if admitted_artifact_bytes > P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES {
+            return Err(p7_provenance_error(
+                "P7 artifacts exceed the global metadata admission",
+            ));
+        }
+        self.admitted_detail_bytes = admitted_detail_bytes;
+        self.admitted_artifact_bytes = admitted_artifact_bytes;
+        Ok(())
+    }
+
+    fn complete(
+        &mut self,
+        admitted_len: u64,
+        bytes_read: u64,
+        kind: P7ArtifactReadKind,
+    ) -> Result<()> {
+        if bytes_read != admitted_len {
+            return Err(p7_provenance_error(
+                "P7 artifact byte length changed during its full read pass",
+            ));
+        }
+        self.full_read_pass_count = self
+            .full_read_pass_count
+            .checked_add(1)
+            .ok_or_else(|| p7_provenance_error("P7 full read pass count overflow"))?;
+        self.artifact_bytes_read = self
+            .artifact_bytes_read
+            .checked_add(bytes_read)
+            .ok_or_else(|| p7_provenance_error("P7 artifact bytes-read overflow"))?;
+        if kind == P7ArtifactReadKind::Detail {
+            self.detail_artifact_bytes_read = self
+                .detail_artifact_bytes_read
+                .checked_add(bytes_read)
+                .ok_or_else(|| p7_provenance_error("P7 detail bytes-read overflow"))?;
+        }
+        Ok(())
+    }
+
+    fn performance(&self, elapsed: Duration) -> P7VerifierPerformanceReport {
+        P7VerifierPerformanceReport {
+            schema_version: P7_VERIFIER_PERFORMANCE_SCHEMA_VERSION.to_string(),
+            elapsed_millis: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+            max_elapsed_millis: P7_VERIFIER_MAX_WALL_TIME.as_millis() as u64,
+            unique_artifact_count: self.canonical_paths.len() as u64,
+            full_read_pass_count: self.full_read_pass_count,
+            admitted_artifact_bytes: self.admitted_artifact_bytes,
+            artifact_bytes_read: self.artifact_bytes_read,
+            detail_artifact_bytes_read: self.detail_artifact_bytes_read,
+            duplicate_artifact_count: self.duplicate_artifact_count,
+            max_artifact_bytes_read: P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES,
+            passed: elapsed <= P7_VERIFIER_MAX_WALL_TIME
+                && self.admitted_artifact_bytes <= P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES
+                && self.artifact_bytes_read <= P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES
+                && self.canonical_paths.len() as u64 == self.full_read_pass_count
+                && self.duplicate_artifact_count == 0,
+        }
+    }
+}
+
+struct P7RetainedArtifact {
+    artifact: P7OpenedArtifact,
+    file: File,
+    owner: Rc<P7RetainedDirectoryOwner>,
+}
+
+impl P7RetainedArtifact {
+    fn verify_unchanged(&self) -> Result<()> {
+        self.artifact
+            .verify_retained_handle_unchanged(&self.file, self.owner.as_ref())
+    }
+}
+
+#[derive(Default)]
+struct P7ArtifactReadSession {
+    ledger: P7ArtifactReadLedger,
+    retained: Vec<P7RetainedArtifact>,
+    owners: BTreeMap<PathBuf, Rc<P7RetainedDirectoryOwner>>,
+}
+
+impl P7ArtifactReadSession {
+    fn owner_for(
+        &mut self,
+        canonical_parent: &Path,
+        canonical_root: &Path,
+    ) -> Result<Rc<P7RetainedDirectoryOwner>> {
+        if !canonical_parent.starts_with(canonical_root) {
+            return Err(p7_provenance_error(
+                "P7 artifact owner escaped the canonical benchmark root",
+            ));
+        }
+        if let Some(owner) = self.owners.get(canonical_parent) {
+            owner.verify_unchanged().map_err(|source| Error::Io {
+                source,
+                stage: "p7_provenance_verify_cached_owner",
+            })?;
+            return Ok(Rc::clone(owner));
+        }
+
+        let mut current_path = canonical_root.to_path_buf();
+        let mut current = if let Some(owner) = self.owners.get(canonical_root) {
+            Rc::clone(owner)
+        } else {
+            let owner = Rc::new(P7RetainedDirectoryOwner::open_root(canonical_root).map_err(
+                |source| Error::Io {
+                    source,
+                    stage: "p7_provenance_open_retained_root",
+                },
+            )?);
+            self.owners
+                .insert(canonical_root.to_path_buf(), Rc::clone(&owner));
+            owner
+        };
+
+        let relative = canonical_parent.strip_prefix(canonical_root).map_err(|_| {
+            p7_provenance_error("P7 artifact owner is outside the canonical benchmark root")
+        })?;
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                return Err(p7_provenance_error(
+                    "P7 artifact owner contains a non-normal path component",
+                ));
+            };
+            let component = component.to_str().ok_or_else(|| {
+                p7_provenance_error("P7 artifact owner component is not valid UTF-8")
+            })?;
+            current_path.push(component);
+            current = if let Some(owner) = self.owners.get(&current_path) {
+                Rc::clone(owner)
+            } else {
+                let owner =
+                    Rc::new(
+                        current
+                            .open_directory(component)
+                            .map_err(|source| Error::Io {
+                                source,
+                                stage: "p7_provenance_openat_retained_directory",
+                            })?,
+                    );
+                self.owners.insert(current_path.clone(), Rc::clone(&owner));
+                owner
+            };
+        }
+        current.verify_unchanged().map_err(|source| Error::Io {
+            source,
+            stage: "p7_provenance_verify_retained_owner",
+        })?;
+        Ok(current)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_with<T>(
+        &mut self,
+        path: &Path,
+        canonical_parent: &Path,
+        canonical_root: &Path,
+        expected_sha256: Option<&str>,
+        kind: P7ArtifactReadKind,
+        consume: impl FnOnce(&mut dyn Read, u64) -> Result<T>,
+    ) -> Result<(T, String, u64)> {
+        let owner = self.owner_for(canonical_parent, canonical_root)?;
+        let (artifact, file) = P7OpenedArtifact::open(path, owner.as_ref())?;
+        self.consume_opened(artifact, file, owner, expected_sha256, kind, consume)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_read_with<T>(
+        &mut self,
+        path: &Path,
+        canonical_parent: &Path,
+        canonical_root: &Path,
+        expected_sha256: Option<&str>,
+        kind: P7ArtifactReadKind,
+        consume: impl FnOnce(&mut dyn Read, u64) -> Result<T>,
+    ) -> Result<Option<(T, String, u64)>> {
+        let owner = self.owner_for(canonical_parent, canonical_root)?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| p7_provenance_error("P7 artifact name is not valid UTF-8"))?;
+        let Some(file) = owner
+            .try_open_existing_file(file_name)
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_provenance_try_openat_streamed_artifact",
+            })?
+        else {
+            return Ok(None);
+        };
+        let (artifact, file) = P7OpenedArtifact::from_open_file(path, owner.as_ref(), file)?;
+        self.consume_opened(artifact, file, owner, expected_sha256, kind, consume)
+            .map(Some)
+    }
+
+    fn consume_opened<T>(
+        &mut self,
+        mut artifact: P7OpenedArtifact,
+        mut file: File,
+        owner: Rc<P7RetainedDirectoryOwner>,
+        expected_sha256: Option<&str>,
+        kind: P7ArtifactReadKind,
+        consume: impl FnOnce(&mut dyn Read, u64) -> Result<T>,
+    ) -> Result<(T, String, u64)> {
+        if expected_sha256.is_some_and(|digest| !is_sha256(digest)) {
+            return Err(p7_provenance_error(
+                "P7 streamed artifact expected digest is invalid",
+            ));
+        }
+        if self.retained.len() >= P7_MAX_RETAINED_ARTIFACT_HANDLES {
+            return Err(p7_provenance_error(
+                "P7 read session exceeded its retained handle limit",
+            ));
+        }
+        let admitted_len = artifact.freshness.len;
+        self.ledger.admit(&artifact, admitted_len, kind)?;
+        let read_limit = admitted_len
+            .checked_add(1)
+            .ok_or_else(|| p7_provenance_error("P7 artifact read limit overflow"))?;
+        let mut limited = (&mut file).take(read_limit);
+        let mut reader = P7HashingReader::new(&mut limited);
+        let material = consume(&mut reader, admitted_len)?;
+        std::io::copy(&mut reader, &mut std::io::sink()).map_err(|source| Error::Io {
+            source,
+            stage: "p7_stream_artifact_growth_probe",
+        })?;
+        let (actual_sha256, bytes_read) = reader.finish();
+        if bytes_read > admitted_len {
+            return Err(p7_provenance_error(
+                "P7 artifact grew beyond its admitted length during verification",
+            ));
+        }
+        self.ledger.complete(admitted_len, bytes_read, kind)?;
+        if expected_sha256.is_some_and(|expected| expected != actual_sha256) {
+            return Err(p7_provenance_error("P7 artifact digest mismatch"));
+        }
+        artifact.sha256 = actual_sha256.clone();
+        artifact.verify_retained_handle_unchanged(&file, owner.as_ref())?;
+        self.retained.push(P7RetainedArtifact {
+            artifact,
+            file,
+            owner,
+        });
+        Ok((material, actual_sha256, bytes_read))
+    }
+
+    fn read_json<T: DeserializeOwned>(
+        &mut self,
+        path: &Path,
+        canonical_parent: &Path,
+        canonical_root: &Path,
+        expected_sha256: Option<&str>,
+        kind: P7ArtifactReadKind,
+        parse_stage: &'static str,
+    ) -> Result<(T, String)> {
+        let (parsed, digest, _) = self.read_with(
+            path,
+            canonical_parent,
+            canonical_root,
+            expected_sha256,
+            kind,
+            |reader, admitted_len| {
+                if admitted_len > P7_MAX_CONTROL_JSON_BYTES {
+                    return Err(p7_provenance_error(
+                        "P7 JSON artifact exceeds its bounded parse limit",
+                    ));
+                }
+                serde_json::from_reader(reader).map_err(|source| Error::Other {
+                    source: Box::new(source),
+                    stage: parse_stage,
+                })
+            },
+        )?;
+        Ok((parsed, digest))
+    }
+
+    fn try_read_json<T: DeserializeOwned>(
+        &mut self,
+        path: &Path,
+        canonical_parent: &Path,
+        canonical_root: &Path,
+        expected_sha256: Option<&str>,
+        kind: P7ArtifactReadKind,
+        parse_stage: &'static str,
+    ) -> Result<Option<(T, String)>> {
+        self.try_read_with(
+            path,
+            canonical_parent,
+            canonical_root,
+            expected_sha256,
+            kind,
+            |reader, admitted_len| {
+                if admitted_len > P7_MAX_CONTROL_JSON_BYTES {
+                    return Err(p7_provenance_error(
+                        "P7 JSON artifact exceeds its bounded parse limit",
+                    ));
+                }
+                serde_json::from_reader(reader).map_err(|source| Error::Other {
+                    source: Box::new(source),
+                    stage: parse_stage,
+                })
+            },
+        )
+        .map(|material| material.map(|(parsed, digest, _)| (parsed, digest)))
+    }
+
+    fn read_raw(
+        &mut self,
+        path: &Path,
+        canonical_parent: &Path,
+        canonical_root: &Path,
+        expected_sha256: Option<&str>,
+        kind: P7ArtifactReadKind,
+    ) -> Result<(String, u64)> {
+        let (_, digest, bytes_read) = self.read_with(
+            path,
+            canonical_parent,
+            canonical_root,
+            expected_sha256,
+            kind,
+            |reader, _| {
+                std::io::copy(reader, &mut std::io::sink()).map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_stream_raw_artifact",
+                })?;
+                Ok(())
+            },
+        )?;
+        Ok((digest, bytes_read))
+    }
+
+    fn verify_retained(&self) -> Result<()> {
+        for owner in self.owners.values() {
+            owner.verify_unchanged().map_err(|source| Error::Io {
+                source,
+                stage: "p7_provenance_verify_retained_directory_set",
+            })?;
+        }
+        for artifact in &self.retained {
+            artifact.verify_unchanged()?;
+        }
+        Ok(())
+    }
+
+    fn performance(&self, elapsed: Duration) -> P7VerifierPerformanceReport {
+        self.ledger.performance(elapsed)
+    }
+
+    fn lifecycle_receipt(&self, lifecycle: &str) -> P7ArtifactLifecycleReceipt {
+        P7ArtifactLifecycleReceipt {
+            schema_version: P7_ARTIFACT_LIFECYCLE_RECEIPT_SCHEMA_VERSION.to_string(),
+            lifecycle: lifecycle.to_string(),
+            unique_artifact_count: self.ledger.canonical_paths.len() as u64,
+            full_read_pass_count: self.ledger.full_read_pass_count,
+            admitted_artifact_bytes: self.ledger.admitted_artifact_bytes,
+            artifact_bytes_read: self.ledger.artifact_bytes_read,
+            detail_artifact_bytes_read: self.ledger.detail_artifact_bytes_read,
+            duplicate_artifact_count: self.ledger.duplicate_artifact_count,
+            max_artifact_bytes_read: P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES,
+            passed: self.ledger.admitted_artifact_bytes <= P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES
+                && self.ledger.artifact_bytes_read <= P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES
+                && self.ledger.canonical_paths.len() as u64 == self.ledger.full_read_pass_count
+                && self.ledger.duplicate_artifact_count == 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7RunnerBuildIdentity {
     pub sdk_build_fingerprint: String,
     pub runner_build_fingerprint: String,
     pub runner_lock_fingerprint: String,
@@ -73,13 +1096,528 @@ pub struct P7RunnerPreflightReport {
     pub build_profile: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-struct P7RunnerBuildIdentity {
-    sdk_build_fingerprint: String,
-    runner_build_fingerprint: String,
-    runner_lock_fingerprint: String,
-    executable_sha256: String,
-    build_profile: String,
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7PublishedReleaseIdentity {
+    pub sdk_build_fingerprint: String,
+    pub runner_build_fingerprint: String,
+    pub runner_lock_fingerprint: String,
+    pub executable_sha256: String,
+    pub build_profile: String,
+    pub gate_attestation_sha256: String,
+    pub release_metadata_sha256: String,
+    pub gate_source_fingerprint: String,
+    pub gate_source_manifest_sha256: String,
+    pub gate_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P7VerifiedPublishedReleaseBundle {
+    pub identity: P7PublishedReleaseIdentity,
+    pub executable_canonical_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P7VerifiedPreflightArtifact {
+    pub report: P7RunnerPreflightReport,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P7VerifiedWallCohortEvidence {
+    pub preflight: P7RunnerPreflightReport,
+    pub preflight_sha256: String,
+    pub maximum_rss: P7MaximumRssEvidence,
+    pub maximum_rss_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P7ShardBundleExpectation {
+    pub run_id: String,
+    pub suite: String,
+    pub shard_index: usize,
+    pub shard_total: usize,
+    pub limit: Option<usize>,
+    pub question_limit: Option<usize>,
+    pub question_index: Option<usize>,
+    pub build: P7RunnerBuildIdentity,
+    pub release: P7PublishedReleaseIdentity,
+    pub execution_kind: P7ProducerExecutionKind,
+    pub cohort_admission_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct P7VerifiedShardBundle {
+    pub summary: serde_json::Value,
+    pub summary_sha256: String,
+    pub detail_sha256: String,
+    pub detail_rows: u64,
+}
+
+pub const P7_SHARD_BUNDLE_COMMIT_SCHEMA_VERSION: &str = "p7_shard_bundle_commit_v1";
+pub const P7_MERGED_BUNDLE_COMMIT_SCHEMA_VERSION: &str = "p7_merged_bundle_commit_v1";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ShardBundleCommit {
+    pub schema_version: String,
+    pub run_id: String,
+    pub suite: String,
+    pub shard_index: usize,
+    pub shard_total: usize,
+    pub detail_file: String,
+    pub detail_bytes: u64,
+    pub detail_sha256: String,
+    pub summary_file: String,
+    pub summary_bytes: u64,
+    pub summary_sha256: String,
+    pub producer_identity_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7MergedBundleCommit {
+    pub schema_version: String,
+    pub run_id: String,
+    pub suite: String,
+    pub summary_file: String,
+    pub summary_bytes: u64,
+    pub summary_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P7UncommittedShardBundle {
+    pub summary_present: bool,
+    pub detail_present: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum P7ShardBundleState {
+    Absent,
+    Uncommitted(P7UncommittedShardBundle),
+    Complete(P7VerifiedShardBundle),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum P7CohortAdmissionStage {
+    PreflightVerified,
+    MaximumRssVerified,
+    AdmissionPublished,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7CohortAdmissionStep {
+    pub ordinal: u8,
+    pub stage: P7CohortAdmissionStage,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7CohortAdmission {
+    pub schema_version: String,
+    pub run_id: String,
+    pub creation_sequence: Vec<P7CohortAdmissionStep>,
+    pub preflight_report_sha256: String,
+    pub maximum_rss_report_sha256: String,
+    pub orchestrator_plan_sha256: String,
+    pub producer_identity_sha256: String,
+    pub verifier_identity_sha256: String,
+    #[serde(flatten)]
+    pub release: P7PublishedReleaseIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum P7ProducerExecutionKind {
+    #[default]
+    CohortShard,
+    MaximumRssDiagnostic,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ShardProducerProvenance {
+    pub schema_version: String,
+    pub execution_kind: P7ProducerExecutionKind,
+    pub run_id: String,
+    pub contract_version: String,
+    pub sdk_report_schema_version: u32,
+    pub sdk_build_fingerprint: String,
+    pub runner_build_fingerprint: String,
+    pub runner_lock_fingerprint: String,
+    pub executable_sha256: String,
+    pub build_profile: String,
+    pub gate_attestation_sha256: String,
+    pub release_metadata_sha256: String,
+    pub gate_source_fingerprint: String,
+    pub gate_source_manifest_sha256: String,
+    pub gate_ids: Vec<String>,
+    pub cohort_admission_sha256: String,
+    pub input_sha256: String,
+    pub detail_schema_version: String,
+    pub detail_sha256: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7RecordedProducerIdentity {
+    pub schema_version: String,
+    pub canonical_identity: String,
+    pub canonical_identity_sha256: String,
+}
+
+impl P7RecordedProducerIdentity {
+    pub fn record<T: Serialize>(identity: &T) -> std::result::Result<Self, serde_json::Error> {
+        let canonical_identity = serde_json::to_string(identity)?;
+        let canonical_identity_sha256 =
+            format!("{:x}", Sha256::digest(canonical_identity.as_bytes()));
+        Ok(Self {
+            schema_version: P7_RECORDED_PRODUCER_IDENTITY_SCHEMA_VERSION.to_string(),
+            canonical_identity,
+            canonical_identity_sha256,
+        })
+    }
+
+    pub fn parse<T: DeserializeOwned + Serialize>(&self) -> Result<T> {
+        if self.schema_version != P7_RECORDED_PRODUCER_IDENTITY_SCHEMA_VERSION
+            || !is_sha256(&self.canonical_identity_sha256)
+            || format!("{:x}", Sha256::digest(self.canonical_identity.as_bytes()))
+                != self.canonical_identity_sha256
+        {
+            return Err(p7_provenance_error(
+                "P7 recorded producer identity envelope or digest is invalid",
+            ));
+        }
+        let parsed =
+            serde_json::from_str::<T>(&self.canonical_identity).map_err(|source| Error::Other {
+                source: Box::new(source),
+                stage: "p7_recorded_producer_identity_parse",
+            })?;
+        let canonical = serde_json::to_string(&parsed).map_err(|source| Error::Other {
+            source: Box::new(source),
+            stage: "p7_recorded_producer_identity_reencode",
+        })?;
+        if canonical != self.canonical_identity {
+            return Err(p7_provenance_error(
+                "P7 producer identity original is not canonical JSON",
+            ));
+        }
+        Ok(parsed)
+    }
+}
+
+fn p7_parse_recorded_shard_producer(
+    value: &serde_json::Value,
+) -> Result<P7ShardProducerProvenance> {
+    let recorded =
+        serde_json::from_value::<P7RecordedProducerIdentity>(value.clone()).map_err(|source| {
+            Error::Other {
+                source: Box::new(source),
+                stage: "p7_recorded_shard_producer_envelope_parse",
+            }
+        })?;
+    recorded.parse()
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum P7QuestionType {
+    NoGold,
+    SingleGold,
+    MultiGold,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum P7EvaluationApplicability {
+    Applicable,
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum P7SafeLocatorVisibility {
+    GovernedOpaque,
+    Redacted,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P7SafeLocatorView {
+    visibility: P7SafeLocatorVisibility,
+    reference: P7RequiredNullableString,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct P7RequiredNullableString(Option<String>);
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7QuestionEvaluationContract {
+    pub schema_version: String,
+    pub question_type: P7QuestionType,
+    pub canonical_gold_count: usize,
+    pub applicability: P7EvaluationApplicability,
+}
+
+impl P7QuestionEvaluationContract {
+    pub fn from_canonical_gold_count(canonical_gold_count: usize) -> Self {
+        let (question_type, applicability) = match canonical_gold_count {
+            0 => (
+                P7QuestionType::NoGold,
+                P7EvaluationApplicability::NotApplicable,
+            ),
+            1 => (
+                P7QuestionType::SingleGold,
+                P7EvaluationApplicability::Applicable,
+            ),
+            _ => (
+                P7QuestionType::MultiGold,
+                P7EvaluationApplicability::Applicable,
+            ),
+        };
+        Self {
+            schema_version: P7_QUESTION_EVALUATION_SCHEMA_VERSION.to_string(),
+            question_type,
+            canonical_gold_count,
+            applicability,
+        }
+    }
+
+    pub fn is_evidence_question(&self) -> bool {
+        self.applicability == P7EvaluationApplicability::Applicable
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ProducerIdentity {
+    pub schema_version: String,
+    pub contract_version: String,
+    pub sdk_report_schema_version: u32,
+    pub sdk_build_fingerprint: String,
+    pub runner_build_fingerprint: String,
+    pub runner_lock_fingerprint: String,
+    pub executable_sha256: String,
+    pub build_profile: String,
+    pub input_sha256: String,
+    pub detail_schema_version: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7VerifierIdentity {
+    pub schema_version: String,
+    pub operator_build_fingerprint: String,
+    pub operator_executable_sha256: String,
+    pub build_profile: String,
+    pub build_features: Vec<String>,
+    pub release_manifest_sha256: String,
+    pub source_anchor_sha256: String,
+    pub verification_policy_contract: String,
+    pub verification_schema_version: String,
+    pub verifier_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7VerifierReleaseManifest {
+    pub schema_version: String,
+    pub executable_file_name: String,
+    pub executable_sha256: String,
+    pub build_profile: String,
+    pub build_features: Vec<String>,
+    pub verification_policy_contract: String,
+    pub verification_schema_version: String,
+    pub source_anchor_sha256: String,
+    pub frozen_anchor_sha256: String,
+    pub anchor_generator_receipt_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7VerifierReleasePublishReport {
+    pub executable_canonical_path: PathBuf,
+    pub executable_sha256: String,
+    pub manifest_sha256: String,
+    pub reused_identical: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7VerificationReceipt {
+    pub schema_version: String,
+    pub cohort_digest: String,
+    pub verifier_digest: String,
+    pub receipt_digest: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7SoulRegressionGateReport {
+    pub schema_version: String,
+    pub inspect_contract_passed: bool,
+    pub continuity_contract_passed: bool,
+    pub recovery_contract_passed: bool,
+    pub revision_contract_passed: bool,
+    pub command_receipts: Vec<P7SoulRegressionCommandReceipt>,
+    pub passed: bool,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7SoulRegressionCommandReceipt {
+    pub contract: String,
+    pub argv: Vec<String>,
+    pub exit_code: i32,
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7VerifierPerformanceReport {
+    pub schema_version: String,
+    pub elapsed_millis: u64,
+    pub max_elapsed_millis: u64,
+    pub unique_artifact_count: u64,
+    pub full_read_pass_count: u64,
+    pub admitted_artifact_bytes: u64,
+    pub artifact_bytes_read: u64,
+    pub detail_artifact_bytes_read: u64,
+    pub duplicate_artifact_count: u64,
+    pub max_artifact_bytes_read: u64,
+    pub passed: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ArtifactLifecycleReceipt {
+    pub schema_version: String,
+    pub lifecycle: String,
+    pub unique_artifact_count: u64,
+    pub full_read_pass_count: u64,
+    pub admitted_artifact_bytes: u64,
+    pub artifact_bytes_read: u64,
+    pub detail_artifact_bytes_read: u64,
+    pub duplicate_artifact_count: u64,
+    pub max_artifact_bytes_read: u64,
+    pub passed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseGateReceipt {
+    pub gate_id: String,
+    pub owner_root: String,
+    pub argv: Vec<String>,
+    pub tool_sha256: String,
+    pub environment_sha256: String,
+    pub exit_code: i32,
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
+    pub source_fingerprint_after: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum P7ReleaseGateOwner {
+    AgentMemory,
+    ExternalRunner,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseGatePlanStep {
+    pub ordinal: u8,
+    pub gate_id: String,
+    pub owner: P7ReleaseGateOwner,
+    pub argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseGatePlan {
+    pub schema_version: String,
+    pub orchestrator_contract: String,
+    pub producer_identity_contract: String,
+    pub verifier_identity_contract: String,
+    pub steps: Vec<P7ReleaseGatePlanStep>,
+    pub plan_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub enum P7ReleaseSourceManifestEntryKind {
+    RegularFile,
+    SymbolicLink,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseSourceManifestEntry {
+    pub owner: String,
+    pub relative_path: String,
+    pub entry_kind: P7ReleaseSourceManifestEntryKind,
+    pub byte_len: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseSourceManifest {
+    pub schema_version: String,
+    pub fingerprint_contract: String,
+    pub source_fingerprint: String,
+    pub entries: Vec<P7ReleaseSourceManifestEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseToolIdentity {
+    pub logical_name: String,
+    pub canonical_path: String,
+    pub sha256: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseEnvironmentAttestation {
+    pub variables: BTreeMap<String, String>,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseGateAttestation {
+    pub schema_version: String,
+    pub orchestrator_contract: String,
+    pub plan: P7ReleaseGatePlan,
+    pub identity: P7RunnerBuildIdentity,
+    pub source_fingerprint: String,
+    pub source_manifest_sha256: String,
+    pub tools: Vec<P7ReleaseToolIdentity>,
+    pub environment: P7ReleaseEnvironmentAttestation,
+    pub gates: Vec<P7ReleaseGateReceipt>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct P7ReleaseMetadata {
+    pub schema_version: String,
+    pub canonical_executable_path: String,
+    pub identity: P7RunnerBuildIdentity,
+    pub gate_attestation_sha256: String,
+    pub gate_source_fingerprint: String,
+    pub gate_source_manifest_sha256: String,
+    pub gate_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -595,12 +2133,16 @@ pub struct W4ExternalNoisyBenchmarkSummary {
     pub runner_source_sha256: Option<String>,
     #[serde(skip)]
     operator_content_hash_verified: bool,
+    #[serde(skip)]
+    producer_identity_digest: Option<String>,
     #[serde(default)]
     pub samples: usize,
     #[serde(default)]
     pub questions: usize,
     #[serde(default)]
     pub evidence_questions: usize,
+    #[serde(default)]
+    pub no_gold_questions: usize,
     #[serde(default)]
     pub any_evidence_hit: usize,
     #[serde(default)]
@@ -622,7 +2164,7 @@ pub struct W4ExternalNoisyBenchmarkSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p7_production_delivery: Option<W4ExternalNoisyP7ProductionDeliveryDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub p7_provenance: Option<W4ExternalNoisyP7Provenance>,
+    pub p7_provenance: Option<P7MergedProvenance>,
 }
 
 impl W4ExternalNoisyBenchmarkSummary {
@@ -879,28 +2421,27 @@ pub struct W4ExternalNoisyP7ShardDigest {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct W4ExternalNoisyP7Provenance {
-    #[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct P7MergedProvenance {
+    pub schema_version: String,
     pub run_id: String,
-    #[serde(default)]
     pub contract_version: String,
-    #[serde(default)]
     pub sdk_report_schema_version: u32,
-    #[serde(default)]
     pub sdk_build_fingerprint: String,
-    #[serde(default)]
     pub runner_build_fingerprint: String,
-    #[serde(default)]
     pub runner_lock_fingerprint: String,
-    #[serde(default)]
     pub executable_sha256: String,
-    #[serde(default)]
     pub build_profile: String,
-    #[serde(default)]
+    pub gate_attestation_sha256: String,
+    pub release_metadata_sha256: String,
+    pub gate_source_fingerprint: String,
+    pub gate_source_manifest_sha256: String,
+    pub gate_ids: Vec<String>,
+    pub cohort_admission_sha256: String,
     pub input_sha256: String,
-    #[serde(default)]
+    pub detail_schema_version: String,
+    pub producer_identity: P7RecordedProducerIdentity,
     pub merged_detail_sha256: String,
-    #[serde(default)]
     pub ordered_shard_digest_manifest: Vec<W4ExternalNoisyP7ShardDigest>,
 }
 
@@ -912,6 +2453,7 @@ pub struct W4ExternalNoisySuiteReport {
     pub samples: usize,
     pub questions: usize,
     pub evidence_questions: usize,
+    pub no_gold_questions: usize,
     pub any_evidence_hit: usize,
     pub all_evidence_hit: usize,
     pub write_errors: usize,
@@ -939,7 +2481,7 @@ pub struct W4ExternalNoisySuiteReport {
     pub facet_ablation: Option<W4ExternalNoisyFacetAblationDiagnostics>,
     pub p7_loss_ledger: Option<W4ExternalNoisyP7LossDiagnostics>,
     pub p7_production_delivery: Option<W4ExternalNoisyP7ProductionDeliveryDiagnostics>,
-    pub p7_provenance: Option<W4ExternalNoisyP7Provenance>,
+    pub p7_provenance: Option<P7MergedProvenance>,
     pub stage_attributed_improvement: bool,
     pub index_effect_proven: bool,
     pub facet_ablation_effect_proven: bool,
@@ -949,7 +2491,14 @@ pub struct W4ExternalNoisySuiteReport {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct W4ExternalNoisyWallReport {
     pub release_gate_passed: bool,
+    pub benchmark_gate_passed: bool,
     pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p7_preflight: Option<P7RunnerPreflightReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p7_maximum_rss: Option<P7MaximumRssEvidence>,
+    pub p7_maximum_rss_attached: bool,
+    pub p7_maximum_rss_within_limit: bool,
     pub cohort_valid: bool,
     pub summary_attached: bool,
     pub required_suites_covered: bool,
@@ -976,10 +2525,15 @@ pub struct W4ExternalNoisyWallReport {
     pub p7_ablation_effect_proven: bool,
     pub p7_no_render_growth: bool,
     pub p7_index_no_full_scan: bool,
-    pub p7_no_privacy_or_soul_regression: bool,
+    pub p7_no_privacy_regression: bool,
+    pub p7_soul_regression_gate: P7SoulRegressionGateReport,
     pub p7_no_p6_regression: bool,
     pub p7_production_delivery_proven: bool,
     pub p7_provenance_valid: bool,
+    pub producer_identities: Vec<P7ProducerIdentity>,
+    pub verifier_identity: P7VerifierIdentity,
+    pub verification_receipt: Option<P7VerificationReceipt>,
+    pub verifier_performance: P7VerifierPerformanceReport,
     pub suite_reports: Vec<W4ExternalNoisySuiteReport>,
     pub blocked_reasons: Vec<String>,
 }
@@ -1150,11 +2704,11 @@ pub fn evaluate_w4_external_noisy_wall(
                     .is_some_and(|diagnostics| diagnostics.render_growth == 0)
             });
     let p7_index_no_full_scan = index_diagnostics_attached && index_no_full_scan;
-    let p7_no_privacy_or_soul_regression = required_suites_covered
+    let p7_no_privacy_regression = required_suites_covered
         && summaries
             .iter()
             .filter(|summary| required_suites.iter().any(|suite| summary.suite == *suite))
-            .all(p7_production_delivery_has_no_privacy_or_soul_regression);
+            .all(p7_production_delivery_has_no_privacy_regression);
     let p7_no_p6_regression = shards_valid
         && noisy_improvement_proven
         && stage_attributed_improvement_proven
@@ -1185,7 +2739,11 @@ pub fn evaluate_w4_external_noisy_wall(
                     provenance.runner_build_fingerprint.clone(),
                     provenance.runner_lock_fingerprint.clone(),
                     provenance.executable_sha256.clone(),
+                    provenance.gate_attestation_sha256.clone(),
+                    provenance.gate_source_fingerprint.clone(),
+                    provenance.gate_ids.clone(),
                     provenance.build_profile.clone(),
+                    provenance.detail_schema_version.clone(),
                 )
             })
             .collect::<BTreeSet<_>>()
@@ -1315,8 +2873,8 @@ pub fn evaluate_w4_external_noisy_wall(
     );
     push_missing(
         &mut blocked_reasons,
-        p7_no_privacy_or_soul_regression,
-        "p7_privacy_or_soul_regression",
+        p7_no_privacy_regression,
+        "p7_privacy_regression",
     );
     push_missing(
         &mut blocked_reasons,
@@ -1334,12 +2892,21 @@ pub fn evaluate_w4_external_noisy_wall(
         "p7_provenance_invalid",
     );
     push_missing(&mut blocked_reasons, cohort_valid, "p7_run_cohort_invalid");
+    blocked_reasons.push("p7_soul_regression_gate_missing".to_string());
+    let benchmark_gate_passed = blocked_reasons.is_empty();
+    blocked_reasons.push("p7_runner_preflight_missing".to_string());
+    blocked_reasons.push("p7_maximum_rss_evidence_missing".to_string());
     blocked_reasons.sort();
     blocked_reasons.dedup();
 
     W4ExternalNoisyWallReport {
-        release_gate_passed: blocked_reasons.is_empty(),
+        release_gate_passed: false,
+        benchmark_gate_passed,
         run_id,
+        p7_preflight: None,
+        p7_maximum_rss: None,
+        p7_maximum_rss_attached: false,
+        p7_maximum_rss_within_limit: false,
         cohort_valid,
         summary_attached,
         required_suites_covered,
@@ -1366,13 +2933,1022 @@ pub fn evaluate_w4_external_noisy_wall(
         p7_ablation_effect_proven,
         p7_no_render_growth,
         p7_index_no_full_scan,
-        p7_no_privacy_or_soul_regression,
+        p7_no_privacy_regression,
+        p7_soul_regression_gate: P7SoulRegressionGateReport {
+            schema_version: P7_SOUL_REGRESSION_GATE_SCHEMA_VERSION.to_string(),
+            blocked_reasons: vec!["p7_soul_regression_gate_missing".to_string()],
+            ..P7SoulRegressionGateReport::default()
+        },
         p7_no_p6_regression,
         p7_production_delivery_proven,
         p7_provenance_valid,
+        producer_identities: p7_producer_identities(summaries),
+        verifier_identity: p7_verifier_identity(
+            P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT,
+            "",
+            P7_OPERATOR_BUILD_PROFILE,
+            p7_operator_build_features(),
+            "",
+            P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT,
+        ),
+        verification_receipt: None,
+        verifier_performance: P7VerifierPerformanceReport {
+            schema_version: P7_VERIFIER_PERFORMANCE_SCHEMA_VERSION.to_string(),
+            elapsed_millis: 0,
+            max_elapsed_millis: P7_VERIFIER_MAX_WALL_TIME.as_millis() as u64,
+            unique_artifact_count: 0,
+            full_read_pass_count: 0,
+            admitted_artifact_bytes: 0,
+            artifact_bytes_read: 0,
+            detail_artifact_bytes_read: 0,
+            duplicate_artifact_count: 0,
+            max_artifact_bytes_read: P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES,
+            passed: false,
+        },
         suite_reports,
         blocked_reasons,
     }
+}
+
+pub fn bind_p7_verifier_identity(
+    report: &mut W4ExternalNoisyWallReport,
+    summaries: &[W4ExternalNoisyBenchmarkSummary],
+    verifier: P7VerifierIdentity,
+) {
+    report.verification_receipt = p7_verification_receipt(summaries, &verifier);
+    report.verifier_identity = verifier;
+}
+
+fn p7_producer_identity(provenance: &P7MergedProvenance) -> Option<P7ProducerIdentity> {
+    provenance.producer_identity.parse().ok()
+}
+
+fn p7_json_digest(value: &impl Serialize) -> Option<String> {
+    serde_json::to_vec(value)
+        .ok()
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn p7_detail_schema_supported(schema_version: &str) -> bool {
+    matches!(schema_version, P7_DETAIL_SCHEMA_VERSION)
+}
+
+fn p7_producer_identities(
+    summaries: &[W4ExternalNoisyBenchmarkSummary],
+) -> Vec<P7ProducerIdentity> {
+    let mut identities = summaries
+        .iter()
+        .filter_map(|summary| summary.p7_provenance.as_ref())
+        .filter_map(p7_producer_identity)
+        .collect::<Vec<_>>();
+    identities.sort_by(|left, right| {
+        (&left.input_sha256, &left.executable_sha256)
+            .cmp(&(&right.input_sha256, &right.executable_sha256))
+    });
+    identities.dedup();
+    identities
+}
+
+fn p7_verifier_identity(
+    operator_build_fingerprint: &str,
+    operator_executable_sha256: &str,
+    build_profile: &str,
+    mut build_features: Vec<String>,
+    release_manifest_sha256: &str,
+    source_anchor_sha256: &str,
+) -> P7VerifierIdentity {
+    build_features.sort();
+    build_features.dedup();
+    let mut identity = P7VerifierIdentity {
+        schema_version: P7_VERIFIER_IDENTITY_SCHEMA_VERSION.to_string(),
+        operator_build_fingerprint: operator_build_fingerprint.to_string(),
+        operator_executable_sha256: operator_executable_sha256.to_string(),
+        build_profile: build_profile.to_string(),
+        build_features,
+        release_manifest_sha256: release_manifest_sha256.to_string(),
+        source_anchor_sha256: source_anchor_sha256.to_string(),
+        verification_policy_contract: P7_VERIFICATION_POLICY_CONTRACT.to_string(),
+        verification_schema_version: P7_VERIFICATION_RECEIPT_SCHEMA_VERSION.to_string(),
+        verifier_digest: String::new(),
+    };
+    identity.verifier_digest = p7_json_digest(&identity).unwrap_or_default();
+    identity
+}
+
+fn p7_operator_build_features() -> Vec<String> {
+    P7_OPERATOR_BUILD_FEATURES
+        .split(',')
+        .filter(|feature| !feature.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn p7_current_verifier_identity_with_session(
+    session: &mut P7ArtifactReadSession,
+) -> Result<P7VerifierIdentity> {
+    p7_require_workspace_build_source_attestation()?;
+    let current_executable = p7_retained_verifier_executable_locator()?;
+    let inherited = p7_inherited_verifier_executable()?;
+    p7_verifier_identity_for_executable_with_session(&current_executable, inherited, session)
+}
+
+fn p7_retained_verifier_executable_locator() -> Result<PathBuf> {
+    let locator = std::env::var_os("BM_P7_RETAINED_EXECUTABLE_PATH").ok_or_else(|| {
+        p7_provenance_error("P7 verifier is missing its retained release locator")
+    })?;
+    let locator = PathBuf::from(locator);
+    if !locator.is_absolute() {
+        return Err(p7_provenance_error(
+            "P7 retained verifier release locator must be absolute",
+        ));
+    }
+    Ok(locator)
+}
+
+pub fn verify_p7_verifier_release_manifest_with_receipt(
+    verifier_executable: &Path,
+) -> Result<(P7VerifierIdentity, P7ArtifactLifecycleReceipt)> {
+    p7_require_workspace_build_source_attestation()?;
+    let retained = crate::p7_secure_fs::P7RetainedFile::open_executable(verifier_executable)
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_retain_release_executable",
+        })?;
+    let executable = retained.clone_file().map_err(|source| Error::Io {
+        source,
+        stage: "p7_verifier_clone_release_executable",
+    })?;
+    let mut session = P7ArtifactReadSession::default();
+    let identity = p7_verifier_identity_for_executable_with_session(
+        verifier_executable,
+        Some(executable),
+        &mut session,
+    )?;
+    retained.verify_unchanged().map_err(|source| Error::Io {
+        source,
+        stage: "p7_verifier_recheck_release_executable",
+    })?;
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("verifier_release_manifest");
+    Ok((identity, receipt))
+}
+
+pub fn publish_p7_verifier_release(
+    benchmark_root: &Path,
+    _current_executable: &Path,
+) -> Result<P7VerifierReleasePublishReport> {
+    p7_require_workspace_build_source_attestation()?;
+    p7_require_canonical_real_directory(benchmark_root)?;
+    let verifier_executable = p7_retained_verifier_executable_locator()?;
+    if !verifier_executable.is_absolute() {
+        return Err(p7_provenance_error(
+            "P7 verifier publisher executable locator must be absolute",
+        ));
+    }
+    let executable_name = verifier_executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| p7_provenance_error("P7 verifier executable name is not UTF-8"))?
+        .to_string();
+    let releases = crate::p7_secure_fs::open_or_create_p7_verifier_release_store(benchmark_root)
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_open_releases_owner",
+        })?;
+    let releases_path = releases.path().to_path_buf();
+    if releases_path != benchmark_root.join(P7_VERIFIER_RELEASES_DIR) {
+        return Err(p7_provenance_error(
+            "P7 verifier release owner escaped the canonical benchmark root",
+        ));
+    }
+    let _guard = releases
+        .lock_bundle(".verifier-release-publish.lock")
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_lock_releases",
+        })?;
+    let staging_name = format!(
+        ".staging-verifier-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| p7_provenance_error("P7 verifier publish clock is before epoch"))?
+            .as_nanos()
+    );
+    let staging = releases
+        .create_directory(&staging_name)
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_create_staging",
+        })?;
+    let publish = (|| -> Result<P7VerifierReleasePublishReport> {
+        let mut staged_executable =
+            staging
+                .create_new_file(&executable_name)
+                .map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_verifier_publish_create_executable",
+                })?;
+        let executable_identity = p7_copy_inherited_verifier_executable(&mut staged_executable)?;
+        staged_executable.sync_all().map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_sync_executable",
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            staged_executable
+                .set_permissions(fs::Permissions::from_mode(0o555))
+                .map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_verifier_publish_mode_executable",
+                })?;
+            staged_executable.sync_all().map_err(|source| Error::Io {
+                source,
+                stage: "p7_verifier_publish_resync_executable",
+            })?;
+        }
+        drop(staged_executable);
+
+        let mut build_features = p7_operator_build_features();
+        build_features.sort();
+        build_features.dedup();
+        let manifest = P7VerifierReleaseManifest {
+            schema_version: P7_VERIFIER_RELEASE_MANIFEST_SCHEMA_VERSION.to_string(),
+            executable_file_name: executable_name.clone(),
+            executable_sha256: executable_identity.sha256.clone(),
+            build_profile: P7_OPERATOR_BUILD_PROFILE.to_string(),
+            build_features,
+            verification_policy_contract: P7_VERIFICATION_POLICY_CONTRACT.to_string(),
+            verification_schema_version: P7_VERIFICATION_RECEIPT_SCHEMA_VERSION.to_string(),
+            source_anchor_sha256: P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT.to_string(),
+            frozen_anchor_sha256: P7_FROZEN_ANCHOR_SHA256.to_string(),
+            anchor_generator_receipt_sha256: P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256.to_string(),
+        };
+        let mut manifest_bytes =
+            serde_json::to_vec_pretty(&manifest).map_err(|source| Error::Other {
+                source: Box::new(source),
+                stage: "p7_verifier_publish_serialize_manifest",
+            })?;
+        manifest_bytes.push(b'\n');
+        let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let mut manifest_file = staging
+            .create_new_file(P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME)
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_verifier_publish_create_manifest",
+            })?;
+        manifest_file
+            .write_all(&manifest_bytes)
+            .and_then(|_| manifest_file.sync_all())
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_verifier_publish_write_manifest",
+            })?;
+        drop(manifest_file);
+
+        let release_path = releases_path.join(&executable_identity.sha256);
+        let final_executable = release_path.join(&executable_name);
+        let reused_identical = match releases
+            .install_staged_directory(&staging_name, &executable_identity.sha256)
+        {
+            Ok(()) => false,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                p7_cleanup_verifier_staging(&releases, &staging, &staging_name, &executable_name)?;
+                true
+            }
+            Err(source) => {
+                return Err(Error::Io {
+                    source,
+                    stage: "p7_verifier_publish_install_release",
+                });
+            }
+        };
+        let (published_identity, receipt) =
+            verify_p7_verifier_release_manifest_with_receipt(&final_executable)?;
+        if published_identity.operator_executable_sha256 != executable_identity.sha256
+            || published_identity.release_manifest_sha256 != manifest_sha256
+        {
+            return Err(p7_provenance_error(
+                "P7 existing verifier release differs from the staged content address",
+            ));
+        }
+        if receipt.artifact_bytes_read == 0 {
+            return Err(p7_provenance_error(
+                "P7 verifier release verification read no artifact bytes",
+            ));
+        }
+        Ok(P7VerifierReleasePublishReport {
+            executable_canonical_path: final_executable,
+            executable_sha256: executable_identity.sha256,
+            manifest_sha256,
+            reused_identical,
+        })
+    })();
+    if publish.is_err() {
+        let _ = p7_cleanup_verifier_staging(&releases, &staging, &staging_name, &executable_name);
+    }
+    publish
+}
+
+fn p7_cleanup_verifier_staging(
+    releases: &crate::p7_secure_fs::P7CohortArtifactOwner,
+    staging: &crate::p7_secure_fs::P7CohortArtifactOwner,
+    staging_name: &str,
+    executable_name: &str,
+) -> Result<()> {
+    for file_name in [executable_name, P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME] {
+        staging
+            .discard_uncommitted_file(file_name)
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_verifier_publish_cleanup_staging_file",
+            })?;
+    }
+    releases
+        .discard_empty_directory(staging_name, staging)
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_cleanup_staging_directory",
+        })?;
+    Ok(())
+}
+
+fn p7_copy_inherited_verifier_executable(
+    destination: &mut File,
+) -> Result<crate::p7_secure_fs::P7ContentIdentity> {
+    let mut source = p7_inherited_verifier_executable()?.ok_or_else(|| {
+        p7_provenance_error("P7 verifier publisher requires a retained executable descriptor")
+    })?;
+    let before = source.metadata().map_err(|source| Error::Io {
+        source,
+        stage: "p7_verifier_publish_stat_inherited_executable",
+    })?;
+    if !before.file_type().is_file() {
+        return Err(p7_provenance_error(
+            "P7 inherited verifier executable is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    if before.mode() & 0o111 == 0 {
+        return Err(p7_provenance_error(
+            "P7 inherited verifier executable is not executable",
+        ));
+    }
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_rewind_inherited_executable",
+        })?;
+    let limit = before
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| p7_provenance_error("P7 inherited verifier length overflow"))?;
+    let mut reader = (&mut source).take(limit);
+    let mut hasher = Sha256::new();
+    let mut copied = 0_u64;
+    let mut buffer = vec![0_u8; P7_FINGERPRINT_READ_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_read_inherited_executable",
+        })?;
+        if read == 0 {
+            break;
+        }
+        destination
+            .write_all(&buffer[..read])
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_verifier_publish_copy_executable",
+            })?;
+        hasher.update(&buffer[..read]);
+        copied =
+            copied
+                .checked_add(u64::try_from(read).map_err(|_| {
+                    p7_provenance_error("P7 inherited verifier byte count overflow")
+                })?)
+                .ok_or_else(|| p7_provenance_error("P7 inherited verifier byte count overflow"))?;
+    }
+    let after = source.metadata().map_err(|source| Error::Io {
+        source,
+        stage: "p7_verifier_publish_restat_inherited_executable",
+    })?;
+    let sha256 = format!("{:x}", hasher.finalize());
+    let expected_sha256 = std::env::var("BM_P7_RETAINED_EXECUTABLE_SHA256").map_err(|_| {
+        p7_provenance_error("P7 verifier publisher is missing retained executable identity")
+    })?;
+    if copied != before.len()
+        || P7RegularFileFreshness::from_metadata(&before)
+            != P7RegularFileFreshness::from_metadata(&after)
+        || sha256 != expected_sha256
+        || !is_sha256(&sha256)
+    {
+        return Err(p7_provenance_error(
+            "P7 inherited verifier executable changed or differs from its sealed identity",
+        ));
+    }
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_restore_inherited_executable_offset",
+        })?;
+    Ok(crate::p7_secure_fs::P7ContentIdentity {
+        byte_len: copied,
+        sha256,
+    })
+}
+
+pub fn build_p7_verifier_release_manifest(
+    verifier_executable: &Path,
+) -> Result<P7VerifierReleaseManifest> {
+    p7_require_workspace_build_source_attestation()?;
+    if P7_OPERATOR_BUILD_PROFILE != "release" {
+        return Err(p7_provenance_error(
+            "P7 verifier release manifest can only be built by a release-profile verifier",
+        ));
+    }
+    let executable_file_name = verifier_executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| p7_provenance_error("P7 verifier executable name is not UTF-8"))?;
+    let executable = crate::p7_secure_fs::P7RetainedFile::open_executable(verifier_executable)
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_manifest_retain_executable",
+        })?;
+    let executable_sha256 = executable
+        .hash_once()
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_manifest_hash_executable",
+        })?
+        .sha256;
+    let mut build_features = p7_operator_build_features();
+    build_features.sort();
+    build_features.dedup();
+    Ok(P7VerifierReleaseManifest {
+        schema_version: P7_VERIFIER_RELEASE_MANIFEST_SCHEMA_VERSION.to_string(),
+        executable_file_name: executable_file_name.to_string(),
+        executable_sha256,
+        build_profile: P7_OPERATOR_BUILD_PROFILE.to_string(),
+        build_features,
+        verification_policy_contract: P7_VERIFICATION_POLICY_CONTRACT.to_string(),
+        verification_schema_version: P7_VERIFICATION_RECEIPT_SCHEMA_VERSION.to_string(),
+        source_anchor_sha256: P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT.to_string(),
+        frozen_anchor_sha256: P7_FROZEN_ANCHOR_SHA256.to_string(),
+        anchor_generator_receipt_sha256: P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256.to_string(),
+    })
+}
+
+fn p7_require_workspace_build_source_attestation() -> Result<()> {
+    p7_validate_build_source_attestation(P7_BUILD_SOURCE_ATTESTATION)
+}
+
+fn p7_validate_build_source_attestation(attestation: &str) -> Result<()> {
+    if attestation != P7_WORKSPACE_BUILD_SOURCE_ATTESTATION {
+        return Err(p7_provenance_error(
+            "P7 verifier release identity requires an attested workspace source build",
+        ));
+    }
+    Ok(())
+}
+
+fn p7_verifier_identity_for_executable_with_session(
+    current_executable: &Path,
+    inherited_executable: Option<File>,
+    session: &mut P7ArtifactReadSession,
+) -> Result<P7VerifierIdentity> {
+    if !current_executable.is_absolute() {
+        return Err(p7_provenance_error(
+            "P7 verifier executable locator must be absolute",
+        ));
+    }
+    let parent = current_executable
+        .parent()
+        .ok_or_else(|| p7_provenance_error("P7 operator executable has no owner directory"))?;
+    let root = current_executable
+        .ancestors()
+        .last()
+        .ok_or_else(|| p7_provenance_error("P7 operator executable has no filesystem root"))?;
+    if fs::canonicalize(parent).map_err(|source| Error::Io {
+        source,
+        stage: "p7_operator_canonicalize_release_owner",
+    })? != parent
+    {
+        return Err(p7_provenance_error(
+            "P7 verifier release owner must be canonical",
+        ));
+    }
+    let (executable_sha256, _) = if let Some(file) = inherited_executable {
+        let owner = session.owner_for(parent, root)?;
+        let (artifact, file) =
+            P7OpenedArtifact::from_open_file(current_executable, owner.as_ref(), file)?;
+        let (_, digest, bytes) = session.consume_opened(
+            artifact,
+            file,
+            owner,
+            None,
+            P7ArtifactReadKind::Operator,
+            |reader, _| {
+                std::io::copy(reader, &mut std::io::sink()).map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_verifier_hash_inherited_executable",
+                })?;
+                Ok(())
+            },
+        )?;
+        (digest, bytes)
+    } else {
+        session.read_raw(
+            current_executable,
+            parent,
+            root,
+            None,
+            P7ArtifactReadKind::Operator,
+        )?
+    };
+    let manifest_path = parent.join(P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME);
+    let (manifest, release_manifest_sha256) = session.read_json::<P7VerifierReleaseManifest>(
+        &manifest_path,
+        parent,
+        root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_verifier_release_manifest_parse",
+    )?;
+    let executable_file_name = current_executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| p7_provenance_error("P7 verifier executable name is not UTF-8"))?;
+    let content_address = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| p7_provenance_error("P7 verifier release owner has no content address"))?;
+    let mut expected_features = p7_operator_build_features();
+    expected_features.sort();
+    p7_validate_verifier_release_manifest(
+        &manifest,
+        executable_file_name,
+        &executable_sha256,
+        content_address,
+        P7_OPERATOR_BUILD_PROFILE,
+        &expected_features,
+        P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT,
+        &release_manifest_sha256,
+    )?;
+    Ok(p7_verifier_identity(
+        P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT,
+        &executable_sha256,
+        &manifest.build_profile,
+        manifest.build_features,
+        &release_manifest_sha256,
+        &manifest.source_anchor_sha256,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn p7_validate_verifier_release_manifest(
+    manifest: &P7VerifierReleaseManifest,
+    executable_file_name: &str,
+    executable_sha256: &str,
+    content_address: &str,
+    embedded_build_profile: &str,
+    expected_features: &[String],
+    embedded_source_anchor: &str,
+    release_manifest_sha256: &str,
+) -> Result<()> {
+    if manifest.schema_version != P7_VERIFIER_RELEASE_MANIFEST_SCHEMA_VERSION
+        || manifest.executable_file_name != executable_file_name
+        || manifest.executable_sha256 != executable_sha256
+        || manifest.build_profile != "release"
+        || embedded_build_profile != "release"
+        || manifest.build_features != expected_features
+        || manifest.verification_policy_contract != P7_VERIFICATION_POLICY_CONTRACT
+        || manifest.verification_schema_version != P7_VERIFICATION_RECEIPT_SCHEMA_VERSION
+        || manifest.source_anchor_sha256 != embedded_source_anchor
+        || manifest.frozen_anchor_sha256 != P7_FROZEN_ANCHOR_SHA256
+        || manifest.anchor_generator_receipt_sha256 != P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256
+        || !is_sha256(&manifest.frozen_anchor_sha256)
+        || !is_sha256(&manifest.anchor_generator_receipt_sha256)
+        || content_address != executable_sha256
+        || !is_sha256(release_manifest_sha256)
+    {
+        return Err(p7_provenance_error(
+            "P7 verifier release manifest, executable, profile, features, policy, or source anchor mismatch",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn p7_inherited_verifier_executable() -> Result<Option<File>> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let raw = std::env::var("BM_P7_RETAINED_EXECUTABLE_FD")
+        .map_err(|_| {
+            p7_provenance_error(
+                "P7 verifier must be launched from a retained executable descriptor",
+            )
+        })?
+        .parse::<i32>()
+        .map_err(|_| p7_provenance_error("P7 retained executable descriptor is invalid"))?;
+    // SAFETY: F_DUPFD_CLOEXEC validates raw and returns a new descriptor on success.
+    let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(Error::Io {
+            source: std::io::Error::last_os_error(),
+            stage: "p7_verifier_duplicate_inherited_executable",
+        });
+    }
+    // SAFETY: fcntl returned a new descriptor owned by this function.
+    let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    Ok(Some(File::from(owned)))
+}
+
+#[cfg(windows)]
+fn p7_inherited_verifier_executable() -> Result<Option<File>> {
+    Ok(None)
+}
+
+#[cfg(test)]
+fn p7_current_verifier_identity() -> P7VerifierIdentity {
+    p7_verifier_identity(
+        &"a".repeat(64),
+        &"b".repeat(64),
+        "release",
+        Vec::new(),
+        &"c".repeat(64),
+        &"a".repeat(64),
+    )
+}
+
+fn p7_verifier_identity_is_valid(identity: &P7VerifierIdentity) -> bool {
+    identity.schema_version == P7_VERIFIER_IDENTITY_SCHEMA_VERSION
+        && identity.verification_policy_contract == P7_VERIFICATION_POLICY_CONTRACT
+        && identity.verification_schema_version == P7_VERIFICATION_RECEIPT_SCHEMA_VERSION
+        && is_sha256(&identity.operator_build_fingerprint)
+        && is_sha256(&identity.operator_executable_sha256)
+        && identity.build_profile == "release"
+        && is_sha256(&identity.release_manifest_sha256)
+        && is_sha256(&identity.source_anchor_sha256)
+        && identity.source_anchor_sha256 == identity.operator_build_fingerprint
+        && identity
+            .build_features
+            .windows(2)
+            .all(|features| features[0] < features[1])
+        && is_sha256(&identity.verifier_digest)
+        && p7_json_digest(&P7VerifierIdentity {
+            verifier_digest: String::new(),
+            ..identity.clone()
+        })
+        .as_deref()
+            == Some(identity.verifier_digest.as_str())
+}
+
+fn p7_verification_receipt(
+    summaries: &[W4ExternalNoisyBenchmarkSummary],
+    verifier: &P7VerifierIdentity,
+) -> Option<P7VerificationReceipt> {
+    if summaries.is_empty()
+        || summaries.iter().any(|summary| {
+            !summary.operator_content_hash_verified
+                || summary.producer_identity_digest.is_none()
+                || summary.summary_sha256.is_none()
+        })
+    {
+        return None;
+    }
+    let mut cohort_entries = summaries
+        .iter()
+        .map(|summary| {
+            (
+                summary.suite.clone(),
+                summary.summary_sha256.clone().unwrap_or_default(),
+                summary.producer_identity_digest.clone().unwrap_or_default(),
+                summary
+                    .p7_provenance
+                    .as_ref()
+                    .map(|provenance| provenance.merged_detail_sha256.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    cohort_entries.sort();
+    p7_verification_receipt_for_cohort_entries(&cohort_entries, verifier)
+}
+
+fn p7_verification_receipt_for_cohort_entries(
+    cohort_entries: &[(String, String, String, String)],
+    verifier: &P7VerifierIdentity,
+) -> Option<P7VerificationReceipt> {
+    if !p7_verifier_identity_is_valid(verifier) {
+        return None;
+    }
+    let cohort_digest = p7_json_digest(&cohort_entries)?;
+    let verifier_digest = verifier.verifier_digest.clone();
+    let receipt_digest = p7_json_digest(&(
+        P7_VERIFICATION_RECEIPT_SCHEMA_VERSION,
+        cohort_digest.as_str(),
+        verifier_digest.as_str(),
+    ))?;
+    Some(P7VerificationReceipt {
+        schema_version: P7_VERIFICATION_RECEIPT_SCHEMA_VERSION.to_string(),
+        cohort_digest,
+        verifier_digest,
+        receipt_digest,
+    })
+}
+
+pub fn attach_p7_soul_regression_gate(
+    report: &mut W4ExternalNoisyWallReport,
+    soul_gate: P7SoulRegressionGateReport,
+) {
+    report
+        .blocked_reasons
+        .retain(|reason| reason != "p7_soul_regression_gate_missing");
+    if !soul_gate.passed {
+        report
+            .blocked_reasons
+            .push("p7_soul_regression_gate_failed".to_string());
+    }
+    report.p7_soul_regression_gate = soul_gate;
+    report.blocked_reasons.sort();
+    report.blocked_reasons.dedup();
+    report.benchmark_gate_passed = report.blocked_reasons.iter().all(|reason| {
+        matches!(
+            reason.as_str(),
+            "p7_runner_preflight_missing" | "p7_maximum_rss_evidence_missing"
+        )
+    });
+}
+
+pub fn attach_p7_verifier_performance(
+    report: &mut W4ExternalNoisyWallReport,
+    performance: P7VerifierPerformanceReport,
+) {
+    report.verifier_performance = performance;
+    report
+        .blocked_reasons
+        .retain(|reason| reason != "p7_verifier_performance_gate_failed");
+    if !report.verifier_performance.passed {
+        report
+            .blocked_reasons
+            .push("p7_verifier_performance_gate_failed".to_string());
+    }
+    report.blocked_reasons.sort();
+    report.blocked_reasons.dedup();
+}
+
+pub fn run_p7_soul_regression_gate(sdk_root: &Path) -> Result<P7SoulRegressionGateReport> {
+    let contracts: [(&str, &[&str]); 4] = [
+        (
+            "inspect",
+            &[
+                "test",
+                "--release",
+                "--locked",
+                "-p",
+                "bm-core",
+                "runtime::soul_kernel::tests::inspect_marks_bootstrap_empty_when_no_kernel_assets_exist",
+                "--",
+                "--exact",
+            ],
+        ),
+        (
+            "continuity",
+            &[
+                "test",
+                "--release",
+                "--locked",
+                "-p",
+                "bm-core",
+                "runtime::soul_kernel::tests::restore_runtime_bundle_repairs_missing_core_and_continuity",
+                "--",
+                "--exact",
+            ],
+        ),
+        (
+            "recovery",
+            &[
+                "test",
+                "--release",
+                "--locked",
+                "-p",
+                "bm-sdk",
+                "--test",
+                "runtime_lifecycle_contract",
+                "runtime_lifecycle_inspect_recover_and_close_are_sdk_level_operations",
+                "--",
+                "--exact",
+            ],
+        ),
+        (
+            "revision",
+            &[
+                "test",
+                "--release",
+                "--locked",
+                "-p",
+                "bm-sdk",
+                "--test",
+                "runtime_lifecycle_contract",
+                "runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically",
+                "--",
+                "--exact",
+            ],
+        ),
+    ];
+    let mut receipts = Vec::with_capacity(contracts.len());
+    let mut passed = BTreeMap::new();
+    for (contract, args) in contracts {
+        let output = p7_run_supervised(
+            Command::new("cargo").args(args).current_dir(sdk_root),
+            Duration::from_secs(30 * 60),
+            "p7_soul_regression_gate_execute",
+        )?;
+        let exit_code = output.status.code().unwrap_or(-1);
+        passed.insert(contract, output.succeeded());
+        receipts.push(P7SoulRegressionCommandReceipt {
+            contract: contract.to_string(),
+            argv: std::iter::once("cargo".to_string())
+                .chain(args.iter().map(|arg| (*arg).to_string()))
+                .collect(),
+            exit_code,
+            stdout_sha256: format!("{:x}", Sha256::digest(&output.stdout)),
+            stderr_sha256: format!("{:x}", Sha256::digest(&output.stderr)),
+        });
+    }
+    let inspect_contract_passed = passed.get("inspect").copied().unwrap_or(false);
+    let continuity_contract_passed = passed.get("continuity").copied().unwrap_or(false);
+    let recovery_contract_passed = passed.get("recovery").copied().unwrap_or(false);
+    let revision_contract_passed = passed.get("revision").copied().unwrap_or(false);
+    let mut blocked_reasons = Vec::new();
+    for (name, value) in [
+        ("inspect", inspect_contract_passed),
+        ("continuity", continuity_contract_passed),
+        ("recovery", recovery_contract_passed),
+        ("revision", revision_contract_passed),
+    ] {
+        if !value {
+            blocked_reasons.push(format!("soul_{name}_contract_failed"));
+        }
+    }
+    Ok(P7SoulRegressionGateReport {
+        schema_version: P7_SOUL_REGRESSION_GATE_SCHEMA_VERSION.to_string(),
+        inspect_contract_passed,
+        continuity_contract_passed,
+        recovery_contract_passed,
+        revision_contract_passed,
+        command_receipts: receipts,
+        passed: blocked_reasons.is_empty(),
+        blocked_reasons,
+    })
+}
+
+fn p7_run_supervised(
+    command: &mut Command,
+    timeout: Duration,
+    stage: &'static str,
+) -> Result<crate::p7_process::P7ProcessOutput> {
+    let output = run_p7_bounded_command(
+        command,
+        P7ProcessLimits {
+            stdout_bytes: P7_PROCESS_STDOUT_CAP_BYTES,
+            stderr_bytes: P7_PROCESS_STDERR_CAP_BYTES,
+            total_bytes: P7_PROCESS_TOTAL_CAP_BYTES,
+            timeout,
+        },
+    )
+    .map_err(|source| Error::Io { source, stage })?;
+    if output.termination != P7ProcessTermination::Exited {
+        return Err(p7_provenance_error(
+            "P7 supervised child exceeded its output or time budget",
+        ));
+    }
+    Ok(output)
+}
+
+fn p7_run_retained_executable(
+    executable: &Path,
+    args: &[&str],
+    stage: &'static str,
+) -> Result<crate::p7_process::P7ProcessOutput> {
+    let output = run_p7_bounded_retained_executable(
+        executable,
+        args,
+        P7ProcessLimits {
+            stdout_bytes: P7_MAX_CONTROL_JSON_BYTES,
+            stderr_bytes: P7_MAX_CONTROL_JSON_BYTES,
+            total_bytes: P7_MAX_CONTROL_JSON_BYTES,
+            timeout: Duration::from_secs(5 * 60),
+        },
+    )
+    .map_err(|source| Error::Io { source, stage })?;
+    if output.termination != P7ProcessTermination::Exited {
+        return Err(p7_preflight_error(
+            "P7 retained executable exceeded its output or time budget",
+        ));
+    }
+    Ok(output)
+}
+
+pub fn finalize_w4_external_noisy_release_report(
+    mut report: W4ExternalNoisyWallReport,
+    preflight: P7RunnerPreflightReport,
+    maximum_rss: P7MaximumRssEvidence,
+) -> Result<W4ExternalNoisyWallReport> {
+    let run_id = report
+        .run_id
+        .as_deref()
+        .ok_or_else(|| p7_provenance_error("P7 wall report has no run_id"))?;
+    let trusted_dataset = p7_trusted_dataset(P7_MAXIMUM_RSS_SUITE)
+        .ok_or_else(|| p7_provenance_error("trusted maximum RSS dataset is missing"))?;
+    if preflight.schema_version != P7_RUNNER_PREFLIGHT_SCHEMA_VERSION
+        || preflight.run_id != run_id
+        || !is_sha256(&preflight.gate_attestation_sha256)
+        || !is_sha256(&preflight.release_metadata_sha256)
+        || !is_sha256(&preflight.gate_source_fingerprint)
+        || preflight.gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        || maximum_rss.run_id != run_id
+        || maximum_rss.preflight != preflight
+        || maximum_rss.schema_version != P7_MAXIMUM_RSS_EVIDENCE_SCHEMA_VERSION
+        || !maximum_rss.completed
+        || maximum_rss.suite != P7_MAXIMUM_RSS_SUITE
+        || maximum_rss.dataset_file != trusted_dataset.file_name
+        || maximum_rss.dataset_sha256 != trusted_dataset.input_sha256
+        || maximum_rss.dataset_index != P7_MAXIMUM_RSS_DATASET_INDEX
+        || maximum_rss.question_index != P7_MAXIMUM_RSS_QUESTION_INDEX
+        || maximum_rss.rss_limit_bytes != P7_MAXIMUM_RSS_LIMIT_BYTES
+        || maximum_rss.rss_gate_passed
+            != (maximum_rss.maximum_rss_bytes <= maximum_rss.rss_limit_bytes)
+        || maximum_rss.measurement_child_exit_status != 0
+        || maximum_rss.measurement_elapsed_millis == 0
+        || maximum_rss.supervisor_receipt.schema_version != "p7_sealed_process_receipt_v1"
+        || maximum_rss.supervisor_receipt.maximum_rss_bytes != maximum_rss.maximum_rss_bytes
+        || maximum_rss
+            .supervisor_receipt
+            .sealed_executable_sha256
+            .as_deref()
+            != Some(maximum_rss.measured_executable_sha256.as_str())
+        || maximum_rss.measured_executable_canonical_path != preflight.executable_canonical_path
+        || maximum_rss.measured_executable_sha256 != preflight.executable_sha256
+        || ![
+            maximum_rss.question_sha256.as_str(),
+            maximum_rss.measurement_report_sha256.as_str(),
+            maximum_rss.measured_executable_sha256.as_str(),
+            maximum_rss.preflight_report_sha256.as_str(),
+            maximum_rss.runner_stdout_sha256.as_str(),
+            maximum_rss.runner_stderr_sha256.as_str(),
+            maximum_rss.detail_sha256.as_str(),
+            maximum_rss.summary_sha256.as_str(),
+        ]
+        .into_iter()
+        .all(is_sha256)
+        || !maximum_rss.preflight_validated_after_measurement
+    {
+        return Err(p7_provenance_error(
+            "maximum RSS evidence is not bound to the P7 release cohort",
+        ));
+    }
+    report.blocked_reasons.retain(|reason| {
+        reason != "p7_runner_preflight_missing" && reason != "p7_maximum_rss_evidence_missing"
+    });
+    if !report.benchmark_gate_passed && report.blocked_reasons.is_empty() {
+        report
+            .blocked_reasons
+            .push("p7_benchmark_gate_failed".to_string());
+    }
+    report.p7_preflight = Some(preflight);
+    report.p7_maximum_rss_attached = true;
+    report.p7_maximum_rss_within_limit = maximum_rss.rss_gate_passed;
+    if !maximum_rss.rss_gate_passed {
+        report
+            .blocked_reasons
+            .push("p7_maximum_rss_limit_exceeded".to_string());
+    }
+    report.p7_maximum_rss = Some(maximum_rss);
+    if !report.p7_soul_regression_gate.passed {
+        report
+            .blocked_reasons
+            .push("p7_soul_regression_gate_failed".to_string());
+    }
+    if report.verification_receipt.is_none() {
+        report
+            .blocked_reasons
+            .push("p7_verification_receipt_missing".to_string());
+    }
+    if !report.verifier_performance.passed {
+        report
+            .blocked_reasons
+            .push("p7_verifier_performance_gate_failed".to_string());
+    }
+    report.blocked_reasons.sort();
+    report.blocked_reasons.dedup();
+    report.release_gate_passed = report.benchmark_gate_passed && report.blocked_reasons.is_empty();
+    Ok(report)
 }
 
 pub fn w4_external_noisy_summary_with_provenance(
@@ -1388,12 +3964,21 @@ pub fn w4_external_noisy_summary_with_provenance(
         .p7_provenance
         .as_ref()
         .map(|provenance| provenance.runner_build_fingerprint.clone());
+    summary.no_gold_questions = summary.questions.saturating_sub(summary.evidence_questions);
     Ok(summary)
 }
 
-pub fn verify_w4_external_noisy_summary_files(
+#[allow(clippy::too_many_arguments)]
+fn verify_w4_external_noisy_summary(
     summary: &mut W4ExternalNoisyBenchmarkSummary,
     merged_summary_path: &Path,
+    benchmark_root: &Path,
+    parent: &Path,
+    runner_preflight: &P7RunnerPreflightReport,
+    runner_disk_identity: &P7RunnerDiskIdentity,
+    admission: &P7CohortAdmission,
+    admission_sha256: &str,
+    session: &mut P7ArtifactReadSession,
 ) -> Result<()> {
     summary.operator_content_hash_verified = false;
     let Some(provenance) = summary.p7_provenance.as_ref() else {
@@ -1412,27 +3997,24 @@ pub fn verify_w4_external_noisy_summary_files(
     {
         return Err(p7_provenance_error("unexpected merged summary file name"));
     }
-    let benchmark_root = p7_benchmark_root_for_run(merged_summary_path, &summary.run_id)?;
+    let expected_parent = benchmark_root.join("results/runs").join(&summary.run_id);
+    if parent != expected_parent || !parent.starts_with(benchmark_root) {
+        return Err(p7_provenance_error(
+            "merged summary escaped its canonical run cohort",
+        ));
+    }
     let trusted_dataset = p7_trusted_dataset(&summary.suite)
         .ok_or_else(|| p7_provenance_error("unknown release suite"))?;
-    let runner_preflight = preflight_p7_runner_release(&benchmark_root, &summary.run_id)?;
-    let runner_disk_identity = P7RunnerDiskIdentity {
-        runner_build_fingerprint: runner_preflight.runner_build_fingerprint,
-        runner_lock_fingerprint: runner_preflight.runner_lock_fingerprint,
-        executable_sha256: runner_preflight.executable_sha256,
-    };
-    validate_p7_runner_disk_provenance(provenance, &runner_disk_identity)?;
-    let trusted_runner = P7_TRUSTED_RUNNER_RELEASE
-        .ok_or_else(|| p7_provenance_error("trusted P7 runner release is not frozen"))?;
-    validate_p7_release_identity(
-        provenance,
-        trusted_dataset,
-        trusted_runner,
-        &runner_disk_identity.executable_sha256,
-    )?;
-    let parent = merged_summary_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    if provenance.schema_version != P7_MERGED_PROVENANCE_SCHEMA_VERSION
+        || provenance.cohort_admission_sha256 != admission_sha256
+        || admission.release != runner_preflight.published_release_identity()
+    {
+        return Err(p7_provenance_error(
+            "merged provenance does not bind the verified cohort admission",
+        ));
+    }
+    validate_p7_runner_disk_provenance(provenance, runner_disk_identity)?;
+    validate_p7_release_identity_against_disk(provenance, trusted_dataset, runner_disk_identity)?;
     let expectation = w4_external_suite_expectation(&summary.suite)
         .ok_or_else(|| p7_provenance_error("unknown release suite"))?;
     if expectation.shard_count != summary.shards.len()
@@ -1440,10 +4022,20 @@ pub fn verify_w4_external_noisy_summary_files(
     {
         return Err(p7_provenance_error("release shard count mismatch"));
     }
-    let dataset_path = benchmark_root.join("data").join(trusted_dataset.file_name);
-    let expected_dataset =
-        load_p7_dataset_expectation(&dataset_path, trusted_dataset, expectation.shard_count)?;
-    if expected_dataset.input_sha256 != provenance.input_sha256 {
+    let data_dir = benchmark_root.join("data");
+    p7_require_canonical_real_directory(&data_dir)?;
+    let dataset_path = data_dir.join(trusted_dataset.file_name);
+    let (expected_dataset, dataset_sha256, _) = session.read_with(
+        &dataset_path,
+        &data_dir,
+        benchmark_root,
+        Some(trusted_dataset.input_sha256),
+        P7ArtifactReadKind::Dataset,
+        |reader, _| load_p7_dataset_expectation(reader, trusted_dataset, expectation.shard_count),
+    )?;
+    if expected_dataset.input_sha256 != provenance.input_sha256
+        || expected_dataset.input_sha256 != dataset_sha256
+    {
         return Err(p7_provenance_error("input dataset digest mismatch"));
     }
 
@@ -1474,20 +4066,14 @@ pub fn verify_w4_external_noisy_summary_files(
             return Err(p7_provenance_error("unsafe or mismatched shard path"));
         }
         let shard_path = parent.join(shard_path_fragment);
-        let shard_bytes = fs::read(&shard_path).map_err(|source| Error::Io {
-            source,
-            stage: "p7_provenance_read_shard_summary",
-        })?;
-        if format!("{:x}", Sha256::digest(&shard_bytes)) != digest.summary_sha256 {
-            return Err(p7_provenance_error("shard summary digest mismatch"));
-        }
-        let shard_json =
-            serde_json::from_slice::<serde_json::Value>(&shard_bytes).map_err(|source| {
-                Error::Other {
-                    source: Box::new(source),
-                    stage: "p7_provenance_parse_shard_summary",
-                }
-            })?;
+        let (shard_json, _) = session.read_json::<serde_json::Value>(
+            &shard_path,
+            parent,
+            benchmark_root,
+            Some(&digest.summary_sha256),
+            P7ArtifactReadKind::Summary,
+            "p7_provenance_parse_shard_summary",
+        )?;
         if shard_json.get("suite").and_then(serde_json::Value::as_str)
             != Some(summary.suite.as_str())
             || shard_json
@@ -1516,47 +4102,29 @@ pub fn verify_w4_external_noisy_summary_files(
             return Err(p7_provenance_error("shard input dataset digest mismatch"));
         }
         accumulate_p7_shard_summary(&mut additive_aggregate, &shard_json)?;
-        let producer = shard_json
+        let producer_value = shard_json
             .get("producer")
             .ok_or_else(|| p7_provenance_error("shard summary is missing producer provenance"))?;
-        if producer.get("run_id").and_then(serde_json::Value::as_str)
-            != Some(summary.run_id.as_str())
-            || producer
-                .get("contract_version")
-                .and_then(serde_json::Value::as_str)
-                != Some(provenance.contract_version.as_str())
-            || producer
-                .get("sdk_report_schema_version")
-                .and_then(serde_json::Value::as_u64)
-                != Some(u64::from(provenance.sdk_report_schema_version))
-            || producer
-                .get("sdk_build_fingerprint")
-                .and_then(serde_json::Value::as_str)
-                != Some(provenance.sdk_build_fingerprint.as_str())
-            || producer
-                .get("runner_build_fingerprint")
-                .and_then(serde_json::Value::as_str)
-                != Some(provenance.runner_build_fingerprint.as_str())
-            || producer
-                .get("runner_lock_fingerprint")
-                .and_then(serde_json::Value::as_str)
-                != Some(provenance.runner_lock_fingerprint.as_str())
-            || producer
-                .get("executable_sha256")
-                .and_then(serde_json::Value::as_str)
-                != Some(provenance.executable_sha256.as_str())
-            || producer
-                .get("build_profile")
-                .and_then(serde_json::Value::as_str)
-                != Some(provenance.build_profile.as_str())
-            || producer
-                .get("input_sha256")
-                .and_then(serde_json::Value::as_str)
-                != Some(provenance.input_sha256.as_str())
-            || producer
-                .get("detail_sha256")
-                .and_then(serde_json::Value::as_str)
-                != Some(digest.detail_sha256.as_str())
+        let producer = p7_parse_recorded_shard_producer(producer_value)?;
+        if producer.schema_version != P7_SHARD_PRODUCER_PROVENANCE_SCHEMA_VERSION
+            || producer.execution_kind != P7ProducerExecutionKind::CohortShard
+            || producer.run_id != summary.run_id
+            || producer.contract_version != provenance.contract_version
+            || producer.sdk_report_schema_version != provenance.sdk_report_schema_version
+            || producer.sdk_build_fingerprint != provenance.sdk_build_fingerprint
+            || producer.runner_build_fingerprint != provenance.runner_build_fingerprint
+            || producer.runner_lock_fingerprint != provenance.runner_lock_fingerprint
+            || producer.executable_sha256 != provenance.executable_sha256
+            || producer.build_profile != provenance.build_profile
+            || producer.gate_attestation_sha256 != provenance.gate_attestation_sha256
+            || producer.release_metadata_sha256 != provenance.release_metadata_sha256
+            || producer.gate_source_fingerprint != provenance.gate_source_fingerprint
+            || producer.gate_source_manifest_sha256 != provenance.gate_source_manifest_sha256
+            || producer.gate_ids != provenance.gate_ids
+            || producer.cohort_admission_sha256 != provenance.cohort_admission_sha256
+            || producer.input_sha256 != provenance.input_sha256
+            || producer.detail_schema_version != provenance.detail_schema_version
+            || producer.detail_sha256 != digest.detail_sha256
         {
             return Err(p7_provenance_error("shard producer provenance mismatch"));
         }
@@ -1566,18 +4134,32 @@ pub fn verify_w4_external_noisy_summary_files(
             .strip_suffix(".summary.json")
             .map(|prefix| format!("{prefix}.jsonl"))
             .ok_or_else(|| p7_provenance_error("invalid shard summary file name"))?;
-        let shard_recomputed = validate_p7_detail_file(
-            &parent.join(detail_name),
-            &digest.detail_sha256,
-            P7DetailValidationContext {
-                suite: &summary.suite,
-                run_id: &summary.run_id,
-                expected_questions: &expected_dataset.questions_by_shard[shard_index],
-                expected_samples: expected_dataset.samples_by_shard[shard_index],
+        let detail_path = parent.join(detail_name);
+        let (shard_recomputed, detail_sha256, _) = session.read_with(
+            &detail_path,
+            parent,
+            benchmark_root,
+            Some(&digest.detail_sha256),
+            P7ArtifactReadKind::Detail,
+            |reader, _| {
+                validate_p7_detail_file(
+                    reader,
+                    &digest.detail_sha256,
+                    P7DetailValidationContext {
+                        suite: &summary.suite,
+                        run_id: &summary.run_id,
+                        detail_schema_version: &producer.detail_schema_version,
+                        expected_questions: &expected_dataset.questions_by_shard[shard_index],
+                        expected_samples: expected_dataset.samples_by_shard[shard_index],
+                    },
+                    &mut seen_question_ids,
+                    &mut seen_identities,
+                )
             },
-            &mut seen_question_ids,
-            &mut seen_identities,
         )?;
+        if detail_sha256 != digest.detail_sha256 {
+            return Err(p7_provenance_error("P7 detail digest mismatch"));
+        }
         validate_p7_shard_against_detail(&shard_json, &shard_recomputed)?;
         recomputed_aggregate.add_assign(&shard_recomputed)?;
         merged_detail_hasher.update(digest.detail_sha256.as_bytes());
@@ -1587,28 +4169,227 @@ pub fn verify_w4_external_noisy_summary_files(
         return Err(p7_provenance_error("merged detail digest mismatch"));
     }
     validate_p7_additive_merge(summary, &additive_aggregate)?;
+    summary.no_gold_questions = recomputed_aggregate
+        .questions
+        .saturating_sub(recomputed_aggregate.evidence_questions);
+    summary.facet_ablation = Some(recomputed_aggregate.facet_ablation.clone());
     validate_p7_summary_against_detail(summary, &recomputed_aggregate)?;
+    summary.producer_identity_digest = summary.p7_provenance.as_ref().and_then(|provenance| {
+        provenance
+            .producer_identity
+            .parse::<P7ProducerIdentity>()
+            .ok()
+            .map(|_| {
+                provenance
+                    .producer_identity
+                    .canonical_identity_sha256
+                    .clone()
+            })
+    });
     summary.operator_content_hash_verified = true;
     Ok(())
 }
 
-fn validate_p7_release_identity(
-    provenance: &W4ExternalNoisyP7Provenance,
+pub struct P7VerifiedWallInputContext {
+    summaries: Vec<W4ExternalNoisyBenchmarkSummary>,
+    preflight: P7RunnerPreflightReport,
+    maximum_rss: P7MaximumRssEvidence,
+    verifier_identity: P7VerifierIdentity,
+    session: P7ArtifactReadSession,
+}
+
+impl P7VerifiedWallInputContext {
+    pub fn summaries(&self) -> &[W4ExternalNoisyBenchmarkSummary] {
+        &self.summaries
+    }
+
+    pub fn verifier_identity(&self) -> &P7VerifierIdentity {
+        &self.verifier_identity
+    }
+
+    pub fn finish(
+        self,
+        elapsed: Duration,
+    ) -> Result<(
+        P7RunnerPreflightReport,
+        P7MaximumRssEvidence,
+        P7VerifierPerformanceReport,
+    )> {
+        self.session.verify_retained()?;
+        Ok((
+            self.preflight,
+            self.maximum_rss,
+            self.session.performance(elapsed),
+        ))
+    }
+}
+
+pub fn verify_p7_wall_input_context(
+    summary_paths: &[PathBuf],
+    preflight_report_path: &Path,
+) -> Result<P7VerifiedWallInputContext> {
+    if summary_paths.is_empty() {
+        return Err(p7_provenance_error(
+            "P7 wall requires at least one merged summary",
+        ));
+    }
+    let cohort_dir = preflight_report_path
+        .parent()
+        .ok_or_else(|| p7_provenance_error("P7 preflight report has no cohort owner"))?;
+    p7_require_canonical_real_directory(cohort_dir)?;
+    if preflight_report_path != cohort_dir.join("preflight-report.json") {
+        return Err(p7_provenance_error(
+            "P7 preflight path differs from the fixed cohort contract",
+        ));
+    }
+    let runs_dir = cohort_dir
+        .parent()
+        .ok_or_else(|| p7_provenance_error("P7 cohort has no runs owner"))?;
+    let results_dir = runs_dir
+        .parent()
+        .ok_or_else(|| p7_provenance_error("P7 cohort has no results owner"))?;
+    let benchmark_root = results_dir
+        .parent()
+        .ok_or_else(|| p7_provenance_error("P7 results owner has no benchmark root"))?;
+    if runs_dir.file_name().and_then(|name| name.to_str()) != Some("runs")
+        || results_dir.file_name().and_then(|name| name.to_str()) != Some("results")
+    {
+        return Err(p7_provenance_error(
+            "P7 cohort is not under results/runs/<run-id>",
+        ));
+    }
+    p7_require_canonical_real_directory(benchmark_root)?;
+
+    let mut session = P7ArtifactReadSession::default();
+    let mut summaries = Vec::with_capacity(summary_paths.len());
+    for path in summary_paths {
+        if path.parent() != Some(cohort_dir) {
+            return Err(p7_provenance_error(
+                "all merged summaries must share the preflight cohort owner",
+            ));
+        }
+        let (mut summary, summary_sha256) = session.read_json::<W4ExternalNoisyBenchmarkSummary>(
+            path,
+            cohort_dir,
+            benchmark_root,
+            None,
+            P7ArtifactReadKind::Summary,
+            "p7_wall_parse_merged_summary",
+        )?;
+        summary.summary_sha256 = Some(summary_sha256);
+        summary.runner_source_sha256 = summary
+            .p7_provenance
+            .as_ref()
+            .map(|provenance| provenance.runner_build_fingerprint.clone());
+        summary.no_gold_questions = summary.questions.saturating_sub(summary.evidence_questions);
+        summaries.push(summary);
+    }
+    let run_id = summaries
+        .first()
+        .map(|summary| summary.run_id.clone())
+        .ok_or_else(|| p7_provenance_error("P7 wall has no run_id"))?;
+    if !p7_valid_run_id(&run_id)
+        || cohort_dir.file_name().and_then(|name| name.to_str()) != Some(run_id.as_str())
+        || summaries.iter().any(|summary| summary.run_id != run_id)
+    {
+        return Err(p7_provenance_error("P7 wall cohort run_id mismatch"));
+    }
+
+    let maximum_rss_path = cohort_dir.join(P7_MAXIMUM_RSS_REPORT_FILE_NAME);
+    let cohort_evidence = verify_p7_wall_cohort_evidence_in_session(
+        benchmark_root,
+        cohort_dir,
+        &run_id,
+        preflight_report_path,
+        &maximum_rss_path,
+        &mut session,
+    )?;
+    if !cohort_evidence.maximum_rss.rss_gate_passed {
+        return Err(p7_provenance_error(
+            "P7 wall maximum RSS evidence is not admitted for this cohort",
+        ));
+    }
+
+    let admission_path = cohort_dir.join(P7_COHORT_ADMISSION_FILE_NAME);
+    let (admission, admission_sha256) = session.read_json::<P7CohortAdmission>(
+        &admission_path,
+        cohort_dir,
+        benchmark_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_wall_parse_cohort_admission",
+    )?;
+    validate_p7_cohort_admission_contract(
+        &admission,
+        &run_id,
+        &cohort_evidence.preflight_sha256,
+        &cohort_evidence.maximum_rss_sha256,
+        &cohort_evidence.preflight.published_release_identity(),
+    )?;
+
+    for (path, summary) in summary_paths.iter().zip(&mut summaries) {
+        verify_w4_external_noisy_summary(
+            summary,
+            path,
+            benchmark_root,
+            cohort_dir,
+            &cohort_evidence.preflight,
+            &cohort_evidence.runner_disk_identity,
+            &admission,
+            &admission_sha256,
+            &mut session,
+        )?;
+    }
+
+    let verifier_identity = p7_current_verifier_identity_with_session(&mut session)?;
+
+    Ok(P7VerifiedWallInputContext {
+        summaries,
+        preflight: cohort_evidence.preflight,
+        maximum_rss: cohort_evidence.maximum_rss,
+        verifier_identity,
+        session,
+    })
+}
+
+fn validate_p7_release_identity_against_disk(
+    provenance: &P7MergedProvenance,
     dataset: P7TrustedDataset,
-    runner: P7TrustedRunnerRelease,
-    actual_executable_sha256: &str,
+    runner: &P7RunnerDiskIdentity,
 ) -> Result<()> {
-    if provenance.contract_version != P7_CONTRACT_VERSION
+    let recorded = provenance.producer_identity.parse::<P7ProducerIdentity>()?;
+    if provenance.schema_version != P7_MERGED_PROVENANCE_SCHEMA_VERSION
+        || provenance.contract_version != P7_CONTRACT_VERSION
         || provenance.sdk_report_schema_version != MEMORY_RECALL_DELIVERY_SCHEMA_VERSION
         || provenance.sdk_build_fingerprint != P7_TRUSTED_SDK_BUILD_FINGERPRINT
         || provenance.runner_build_fingerprint != runner.runner_build_fingerprint
         || provenance.runner_lock_fingerprint != runner.runner_lock_fingerprint
         || provenance.executable_sha256 != runner.executable_sha256
-        || actual_executable_sha256 != runner.executable_sha256
-        || !is_sha256(actual_executable_sha256)
+        || provenance.gate_attestation_sha256 != runner.gate_attestation_sha256
+        || provenance.release_metadata_sha256 != runner.release_metadata_sha256
+        || provenance.gate_source_fingerprint != runner.gate_source_fingerprint
+        || provenance.gate_source_manifest_sha256 != runner.gate_source_manifest_sha256
+        || provenance.gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        || !is_sha256(&runner.executable_sha256)
+        || !is_sha256(&provenance.gate_attestation_sha256)
+        || !is_sha256(&provenance.gate_source_fingerprint)
+        || !is_sha256(&provenance.release_metadata_sha256)
+        || !is_sha256(&provenance.gate_source_manifest_sha256)
+        || !is_sha256(&provenance.cohort_admission_sha256)
         || provenance.build_profile != "release"
         || provenance.input_sha256 != dataset.input_sha256
+        || !p7_detail_schema_supported(&provenance.detail_schema_version)
         || !is_sha256(&provenance.merged_detail_sha256)
+        || recorded.schema_version != P7_PRODUCER_IDENTITY_SCHEMA_VERSION
+        || recorded.contract_version != provenance.contract_version
+        || recorded.sdk_report_schema_version != provenance.sdk_report_schema_version
+        || recorded.sdk_build_fingerprint != provenance.sdk_build_fingerprint
+        || recorded.runner_build_fingerprint != provenance.runner_build_fingerprint
+        || recorded.runner_lock_fingerprint != provenance.runner_lock_fingerprint
+        || recorded.executable_sha256 != provenance.executable_sha256
+        || recorded.build_profile != provenance.build_profile
+        || recorded.input_sha256 != provenance.input_sha256
+        || recorded.detail_schema_version != provenance.detail_schema_version
     {
         return Err(p7_provenance_error("untrusted P7 release provenance"));
     }
@@ -1616,18 +4397,58 @@ fn validate_p7_release_identity(
 }
 
 fn validate_p7_runner_disk_provenance(
-    provenance: &W4ExternalNoisyP7Provenance,
+    provenance: &P7MergedProvenance,
     disk: &P7RunnerDiskIdentity,
 ) -> Result<()> {
     if provenance.runner_build_fingerprint != disk.runner_build_fingerprint
         || provenance.runner_lock_fingerprint != disk.runner_lock_fingerprint
         || provenance.executable_sha256 != disk.executable_sha256
+        || provenance.gate_attestation_sha256 != disk.gate_attestation_sha256
+        || provenance.release_metadata_sha256 != disk.release_metadata_sha256
+        || provenance.gate_source_fingerprint != disk.gate_source_fingerprint
+        || provenance.gate_source_manifest_sha256 != disk.gate_source_manifest_sha256
+        || provenance.gate_ids != disk.gate_ids
         || !is_sha256(&disk.runner_build_fingerprint)
         || !is_sha256(&disk.runner_lock_fingerprint)
         || !is_sha256(&disk.executable_sha256)
+        || !is_sha256(&disk.gate_attestation_sha256)
+        || !is_sha256(&disk.release_metadata_sha256)
+        || !is_sha256(&disk.gate_source_fingerprint)
+        || !is_sha256(&disk.gate_source_manifest_sha256)
+        || disk.gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
     {
         return Err(p7_provenance_error(
-            "runner source, lock, or executable differs from producer provenance",
+            "runner source, executable, or governed release differs from producer provenance",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_p7_frozen_release_binding(
+    frozen: P7FrozenRunnerIdentity,
+    disk: &P7RunnerDiskIdentity,
+    fresh_gate_source_fingerprint: &str,
+) -> Result<()> {
+    if !is_sha256(frozen.runner_build_fingerprint)
+        || !is_sha256(frozen.runner_lock_fingerprint)
+        || !is_sha256(frozen.executable_sha256)
+        || !is_sha256(frozen.gate_attestation_sha256)
+        || !is_sha256(frozen.release_metadata_sha256)
+        || !is_sha256(frozen.gate_source_fingerprint)
+        || !is_sha256(frozen.gate_source_manifest_sha256)
+        || !is_sha256(fresh_gate_source_fingerprint)
+        || disk.runner_build_fingerprint != frozen.runner_build_fingerprint
+        || disk.runner_lock_fingerprint != frozen.runner_lock_fingerprint
+        || disk.executable_sha256 != frozen.executable_sha256
+        || disk.gate_attestation_sha256 != frozen.gate_attestation_sha256
+        || disk.release_metadata_sha256 != frozen.release_metadata_sha256
+        || disk.gate_source_fingerprint != frozen.gate_source_fingerprint
+        || disk.gate_source_manifest_sha256 != frozen.gate_source_manifest_sha256
+        || fresh_gate_source_fingerprint != frozen.gate_source_fingerprint
+        || disk.gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+    {
+        return Err(p7_preflight_error(
+            "P7 frozen runner, gate attestation, or fresh gate source identity drifted",
         ));
     }
     Ok(())
@@ -1644,22 +4465,6 @@ fn validate_p7_release_shard_full_run(shard: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-pub fn preflight_p7_runner_release(
-    benchmark_root: &Path,
-    run_id: &str,
-) -> Result<P7RunnerPreflightReport> {
-    if !p7_valid_run_id(run_id) {
-        return Err(p7_preflight_error("invalid or missing P7 run_id"));
-    }
-    let trusted = P7_TRUSTED_RUNNER_RELEASE
-        .ok_or_else(|| p7_preflight_error("trusted P7 runner release is not frozen"))?;
-    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| p7_preflight_error("bm-replay is not under the SDK workspace root"))?;
-    preflight_p7_runner_release_with_trusted(benchmark_root, sdk_root, trusted, run_id)
-}
-
 pub fn validate_p7_runner_preflight_report(
     benchmark_root: &Path,
     run_id: &str,
@@ -1670,49 +4475,1622 @@ pub fn validate_p7_runner_preflight_report(
             "P7 preflight report run_id differs from cohort",
         ));
     }
-    let fresh = preflight_p7_runner_release(benchmark_root, run_id)?;
-    if report != &fresh {
+    validate_p7_runner_preflight_report_against_disk(benchmark_root, run_id, report)
+}
+
+pub fn verify_p7_published_release_bundle_with_receipt(
+    benchmark_root: &Path,
+    sdk_root: &Path,
+    runner_source_root: &Path,
+    executable_sha256: &str,
+) -> Result<(P7VerifiedPublishedReleaseBundle, P7ArtifactLifecycleReceipt)> {
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_release_bundle_canonicalize_benchmark_root",
+    })?;
+    let canonical_sdk_root = fs::canonicalize(sdk_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_release_bundle_canonicalize_sdk_root",
+    })?;
+    let canonical_runner_source_root =
+        fs::canonicalize(runner_source_root).map_err(|source| Error::Io {
+            source,
+            stage: "p7_release_bundle_canonicalize_runner_source_root",
+        })?;
+    if canonical_root != benchmark_root
+        || canonical_sdk_root != sdk_root
+        || canonical_runner_source_root != runner_source_root
+    {
         return Err(p7_preflight_error(
-            "P7 preflight report differs from current trusted preflight",
+            "P7 release verifier roots must be canonical",
+        ));
+    }
+    let mut session = P7ArtifactReadSession::default();
+    let source = p7_release_gate_source_material_in_session(
+        &canonical_sdk_root,
+        &canonical_runner_source_root,
+        &mut session,
+        true,
+    )?;
+    let disk = p7_runner_disk_identity_for_release_sha_in_session(
+        &canonical_root,
+        executable_sha256,
+        &canonical_sdk_root,
+        &canonical_runner_source_root,
+        &source,
+        &mut session,
+    )?;
+    session.verify_retained()?;
+    let verified = P7VerifiedPublishedReleaseBundle {
+        identity: P7PublishedReleaseIdentity {
+            sdk_build_fingerprint: source.sdk_build_fingerprint,
+            runner_build_fingerprint: disk.runner_build_fingerprint,
+            runner_lock_fingerprint: disk.runner_lock_fingerprint,
+            executable_sha256: disk.executable_sha256,
+            build_profile: "release".to_string(),
+            gate_attestation_sha256: disk.gate_attestation_sha256,
+            release_metadata_sha256: disk.release_metadata_sha256,
+            gate_source_fingerprint: disk.gate_source_fingerprint,
+            gate_source_manifest_sha256: disk.gate_source_manifest_sha256,
+            gate_ids: disk.gate_ids,
+        },
+        executable_canonical_path: disk.executable_canonical_path,
+    };
+    let receipt = session.lifecycle_receipt("published_release_bundle");
+    Ok((verified, receipt))
+}
+
+pub fn verify_p7_preflight_artifact_with_receipt(
+    benchmark_root: &Path,
+    run_id: &str,
+) -> Result<(P7VerifiedPreflightArtifact, P7ArtifactLifecycleReceipt)> {
+    if !p7_valid_run_id(run_id) {
+        return Err(p7_preflight_error("P7 preflight run_id is invalid"));
+    }
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_preflight_artifact_canonicalize_root",
+    })?;
+    if canonical_root != benchmark_root {
+        return Err(p7_preflight_error(
+            "P7 preflight benchmark root must be canonical",
+        ));
+    }
+    let cohort_dir = canonical_root.join("results/runs").join(run_id);
+    let preflight_path = cohort_dir.join("preflight-report.json");
+    let mut session = P7ArtifactReadSession::default();
+    let (report, sha256) = session.read_json::<P7RunnerPreflightReport>(
+        &preflight_path,
+        &cohort_dir,
+        &canonical_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_preflight_artifact_parse",
+    )?;
+    validate_p7_producer_preflight_header(run_id, &report)?;
+    let disk = p7_runner_producer_disk_identity_with_reads(&canonical_root, &report, &mut session)?;
+    validate_p7_preflight_against_disk(&report, &disk)?;
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("preflight_artifact");
+    Ok((P7VerifiedPreflightArtifact { report, sha256 }, receipt))
+}
+
+fn validate_p7_producer_preflight_header(
+    run_id: &str,
+    report: &P7RunnerPreflightReport,
+) -> Result<()> {
+    if !p7_valid_run_id(run_id)
+        || report.schema_version != P7_RUNNER_PREFLIGHT_SCHEMA_VERSION
+        || report.run_id != run_id
+        || report.build_profile != "release"
+        || report.gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        || ![
+            report.sdk_build_fingerprint.as_str(),
+            report.runner_build_fingerprint.as_str(),
+            report.runner_lock_fingerprint.as_str(),
+            report.executable_sha256.as_str(),
+            report.gate_attestation_sha256.as_str(),
+            report.release_metadata_sha256.as_str(),
+            report.gate_source_fingerprint.as_str(),
+            report.gate_source_manifest_sha256.as_str(),
+        ]
+        .into_iter()
+        .all(is_sha256)
+    {
+        return Err(p7_preflight_error(
+            "P7 producer preflight report header is invalid",
         ));
     }
     Ok(())
 }
 
-fn preflight_p7_runner_release_with_trusted(
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+fn validate_p7_producer_preflight_report(
+    benchmark_root: &Path,
+    run_id: &str,
+    report: &P7RunnerPreflightReport,
+) -> Result<()> {
+    validate_p7_producer_preflight_header(run_id, report)?;
+    let mut session = P7ArtifactReadSession::default();
+    let disk = p7_runner_producer_disk_identity_with_reads(benchmark_root, report, &mut session)?;
+    validate_p7_preflight_against_disk(report, &disk)?;
+    session.verify_retained()
+}
+
+fn validate_p7_preflight_against_disk(
+    report: &P7RunnerPreflightReport,
+    disk: &P7RunnerDiskIdentity,
+) -> Result<()> {
+    if report.runner_build_fingerprint != disk.runner_build_fingerprint
+        || report.runner_lock_fingerprint != disk.runner_lock_fingerprint
+        || report.executable_sha256 != disk.executable_sha256
+        || report.executable_canonical_path != disk.executable_canonical_path.to_string_lossy()
+        || report.gate_attestation_sha256 != disk.gate_attestation_sha256
+        || report.release_metadata_sha256 != disk.release_metadata_sha256
+        || report.gate_source_fingerprint != disk.gate_source_fingerprint
+        || report.gate_source_manifest_sha256 != disk.gate_source_manifest_sha256
+        || report.gate_ids != disk.gate_ids
+    {
+        return Err(p7_preflight_error(
+            "P7 producer preflight differs from its immutable release bundle",
+        ));
+    }
+    let output = p7_run_retained_executable(
+        &disk.executable_canonical_path,
+        &["--print-build-identity"],
+        "p7_producer_execute_identity",
+    )?;
+    if !output.status.success() {
+        return Err(p7_preflight_error(
+            "P7 producer runner rejected --print-build-identity",
+        ));
+    }
+    let embedded =
+        serde_json::from_slice::<P7RunnerBuildIdentity>(&output.stdout).map_err(|source| {
+            Error::Other {
+                source: Box::new(source),
+                stage: "p7_producer_parse_identity",
+            }
+        })?;
+    if embedded.sdk_build_fingerprint != report.sdk_build_fingerprint
+        || embedded.runner_build_fingerprint != report.runner_build_fingerprint
+        || embedded.runner_lock_fingerprint != report.runner_lock_fingerprint
+        || embedded.executable_sha256 != report.executable_sha256
+        || embedded.build_profile != report.build_profile
+    {
+        return Err(p7_preflight_error(
+            "P7 producer embedded identity differs from its preflight report",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_p7_runner_preflight_report_with_frozen(
+    benchmark_root: &Path,
+    run_id: &str,
+    report: &P7RunnerPreflightReport,
+    frozen: P7FrozenRunnerIdentity,
+) -> Result<()> {
+    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| p7_preflight_error("bm-replay is not under the SDK workspace root"))?;
+    let fresh = preflight_p7_runner_release_with_frozen(benchmark_root, sdk_root, frozen, run_id)?;
+    if report != &fresh {
+        return Err(p7_preflight_error(
+            "P7 preflight report differs from current frozen producer release preflight",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_p7_runner_preflight_report_against_disk(
+    benchmark_root: &Path,
+    run_id: &str,
+    report: &P7RunnerPreflightReport,
+) -> Result<()> {
+    if !p7_valid_run_id(run_id)
+        || report.schema_version != P7_RUNNER_PREFLIGHT_SCHEMA_VERSION
+        || report.run_id != run_id
+        || report.build_profile != "release"
+        || report.gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        || ![
+            report.sdk_build_fingerprint.as_str(),
+            report.runner_build_fingerprint.as_str(),
+            report.runner_lock_fingerprint.as_str(),
+            report.executable_sha256.as_str(),
+            report.gate_attestation_sha256.as_str(),
+            report.release_metadata_sha256.as_str(),
+            report.gate_source_fingerprint.as_str(),
+        ]
+        .into_iter()
+        .all(is_sha256)
+    {
+        return Err(p7_preflight_error(
+            "P7 preflight report header or governed identity is invalid",
+        ));
+    }
+    p7_require_canonical_real_directory(benchmark_root)?;
+    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| p7_preflight_error("bm-replay is not under the SDK workspace root"))?;
+    let canonical_sdk_root = fs::canonicalize(sdk_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_runner_preflight_canonicalize_sdk_root",
+    })?;
+    p7_require_canonical_real_directory(&canonical_sdk_root)?;
+    let runner_root = benchmark_root.join("runner");
+    p7_require_canonical_real_directory(&runner_root)?;
+
+    let mut session = P7ArtifactReadSession::default();
+    let source = p7_release_gate_source_material_in_session(
+        &canonical_sdk_root,
+        &runner_root,
+        &mut session,
+        true,
+    )?;
+    let disk = p7_runner_disk_identity_for_release_sha_in_session(
+        benchmark_root,
+        &report.executable_sha256,
+        &canonical_sdk_root,
+        &runner_root,
+        &source,
+        &mut session,
+    )?;
+    if report.sdk_build_fingerprint != source.sdk_build_fingerprint
+        || report.sdk_build_fingerprint != P7_TRUSTED_SDK_BUILD_FINGERPRINT
+        || report.runner_build_fingerprint != disk.runner_build_fingerprint
+        || report.runner_lock_fingerprint != disk.runner_lock_fingerprint
+        || report.executable_sha256 != disk.executable_sha256
+        || report.executable_canonical_path != disk.executable_canonical_path.to_string_lossy()
+        || report.gate_attestation_sha256 != disk.gate_attestation_sha256
+        || report.release_metadata_sha256 != disk.release_metadata_sha256
+        || report.gate_source_fingerprint != disk.gate_source_fingerprint
+        || report.gate_source_fingerprint != source.manifest.source_fingerprint
+        || report.gate_ids != disk.gate_ids
+    {
+        return Err(p7_preflight_error(
+            "P7 preflight report differs from the current governed release on disk",
+        ));
+    }
+
+    let output = p7_run_retained_executable(
+        &disk.executable_canonical_path,
+        &["--print-build-identity"],
+        "p7_runner_preflight_execute_identity",
+    )?;
+    if !output.status.success() {
+        return Err(p7_preflight_error(
+            "governed runner rejected --print-build-identity",
+        ));
+    }
+    let embedded =
+        serde_json::from_slice::<P7RunnerBuildIdentity>(&output.stdout).map_err(|source| {
+            Error::Other {
+                source: Box::new(source),
+                stage: "p7_runner_preflight_parse_identity",
+            }
+        })?;
+    if embedded.sdk_build_fingerprint != report.sdk_build_fingerprint
+        || embedded.runner_build_fingerprint != report.runner_build_fingerprint
+        || embedded.runner_lock_fingerprint != report.runner_lock_fingerprint
+        || embedded.executable_sha256 != report.executable_sha256
+        || embedded.build_profile != report.build_profile
+    {
+        return Err(p7_preflight_error(
+            "P7 preflight report differs from the governed runner embedded identity",
+        ));
+    }
+    session.verify_retained()?;
+    Ok(())
+}
+
+pub fn verify_p7_maximum_rss_evidence(
+    benchmark_root: &Path,
+    run_id: &str,
+) -> Result<P7MaximumRssEvidence> {
+    Ok(verify_p7_maximum_rss_evidence_with_receipt(benchmark_root, run_id)?.0)
+}
+
+pub fn verify_p7_maximum_rss_evidence_with_receipt(
+    benchmark_root: &Path,
+    run_id: &str,
+) -> Result<(P7MaximumRssEvidence, P7ArtifactLifecycleReceipt)> {
+    let mut session = P7ArtifactReadSession::default();
+    let verified =
+        verify_p7_maximum_rss_evidence_in_session(benchmark_root, run_id, &mut session, None)?;
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("maximum_rss");
+    Ok((verified.evidence, receipt))
+}
+
+struct P7MaximumRssVerifiedMaterial {
+    evidence: P7MaximumRssEvidence,
+    runner_disk_identity: P7RunnerDiskIdentity,
+}
+
+fn verify_p7_maximum_rss_evidence_in_session(
+    benchmark_root: &Path,
+    run_id: &str,
+    session: &mut P7ArtifactReadSession,
+    preflight_material: Option<(P7RunnerPreflightReport, String)>,
+) -> Result<P7MaximumRssVerifiedMaterial> {
+    if !p7_valid_run_id(run_id) {
+        return Err(p7_provenance_error("invalid or missing P7 RSS run_id"));
+    }
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_maximum_rss_canonicalize_benchmark_root",
+    })?;
+    if canonical_root != benchmark_root {
+        return Err(p7_provenance_error(
+            "P7 RSS benchmark root must be canonical",
+        ));
+    }
+    p7_require_canonical_real_directory(&canonical_root)?;
+    let cohort_dir = canonical_root.join("results/runs").join(run_id);
+    let canonical_cohort = fs::canonicalize(&cohort_dir).map_err(|source| Error::Io {
+        source,
+        stage: "p7_maximum_rss_canonicalize_cohort",
+    })?;
+    if canonical_cohort != cohort_dir
+        || canonical_cohort != canonical_root.join("results/runs").join(run_id)
+        || !canonical_cohort.starts_with(&canonical_root)
+    {
+        return Err(p7_provenance_error(
+            "P7 RSS cohort must not traverse symlinks",
+        ));
+    }
+    p7_require_canonical_real_directory(&canonical_cohort)?;
+
+    let dataset = p7_trusted_dataset(P7_MAXIMUM_RSS_SUITE)
+        .ok_or_else(|| p7_provenance_error("trusted maximum RSS dataset is missing"))?;
+    let data_dir = canonical_root.join("data");
+    p7_require_canonical_real_directory(&data_dir)?;
+    let dataset_path = data_dir.join(dataset.file_name);
+    let preflight_path = cohort_dir.join("preflight-report.json");
+    let measurement_path = cohort_dir.join(P7_MAXIMUM_RSS_MEASUREMENT_FILE_NAME);
+    let runner_stdout_path = cohort_dir.join("runner.stdout.log");
+    let runner_stderr_path = cohort_dir.join("runner.stderr.log");
+    let detail_path = cohort_dir.join(format!("{P7_MAXIMUM_RSS_ARTIFACT_STEM}.jsonl"));
+    let summary_path = cohort_dir.join(format!("{P7_MAXIMUM_RSS_ARTIFACT_STEM}.summary.json"));
+    let (preflight, preflight_sha256) = match preflight_material {
+        Some(material) => material,
+        None => session.read_json::<P7RunnerPreflightReport>(
+            &preflight_path,
+            &cohort_dir,
+            &canonical_root,
+            None,
+            P7ArtifactReadKind::Control,
+            "p7_maximum_rss_parse_preflight",
+        )?,
+    };
+    if preflight.run_id != run_id {
+        return Err(p7_provenance_error(
+            "P7 RSS preflight run_id differs from cohort",
+        ));
+    }
+    let (measurement, measurement_sha256) = session.read_json::<P7MaximumRssMeasurementReport>(
+        &measurement_path,
+        &cohort_dir,
+        &canonical_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_maximum_rss_parse_measurement",
+    )?;
+    validate_p7_maximum_rss_measurement_contract(
+        &measurement,
+        &canonical_root,
+        run_id,
+        &preflight,
+    )?;
+    if measurement.runner_stdout.byte_len > P7_MAX_RSS_STDOUT_BYTES
+        || measurement.runner_stderr.byte_len > P7_MAX_RSS_STDERR_BYTES
+    {
+        return Err(p7_provenance_error(
+            "P7 RSS stdout or stderr exceeds its hard read budget",
+        ));
+    }
+
+    let (expected_dataset, dataset_sha256, input_bytes) = session.read_with(
+        &dataset_path,
+        &data_dir,
+        &canonical_root,
+        Some(dataset.input_sha256),
+        P7ArtifactReadKind::Dataset,
+        |reader, _| load_p7_dataset_expectation(reader, dataset, 1),
+    )?;
+    if expected_dataset.input_sha256 != dataset_sha256 {
+        return Err(p7_provenance_error(
+            "trusted RSS dataset changed while being consumed",
+        ));
+    }
+    let expected_question = expected_dataset
+        .questions_by_shard
+        .first()
+        .and_then(|questions| questions.first())
+        .cloned()
+        .ok_or_else(|| p7_provenance_error("trusted RSS question is missing"))?;
+    if expected_question.dataset_index != P7_MAXIMUM_RSS_DATASET_INDEX
+        || expected_question.question_index != P7_MAXIMUM_RSS_QUESTION_INDEX
+    {
+        return Err(p7_provenance_error(
+            "trusted RSS question coordinates drifted",
+        ));
+    }
+
+    let (summary, summary_sha256) = session.read_json::<serde_json::Value>(
+        &summary_path,
+        &cohort_dir,
+        &canonical_root,
+        None,
+        P7ArtifactReadKind::Summary,
+        "p7_maximum_rss_parse_summary",
+    )?;
+    let producer = p7_parse_recorded_shard_producer(
+        summary
+            .get("producer")
+            .ok_or_else(|| p7_provenance_error("P7 RSS summary producer is missing"))?,
+    )?;
+
+    let expected_detail_sha256 = producer.detail_sha256.clone();
+    let (detail_aggregate, detail_sha256, _) = session.read_with(
+        &detail_path,
+        &cohort_dir,
+        &canonical_root,
+        Some(&expected_detail_sha256),
+        P7ArtifactReadKind::Detail,
+        |reader, _| {
+            validate_p7_detail_file(
+                reader,
+                &expected_detail_sha256,
+                P7DetailValidationContext {
+                    suite: P7_MAXIMUM_RSS_SUITE,
+                    run_id,
+                    detail_schema_version: &producer.detail_schema_version,
+                    expected_questions: std::slice::from_ref(&expected_question),
+                    expected_samples: 1,
+                },
+                &mut BTreeSet::new(),
+                &mut BTreeSet::new(),
+            )
+        },
+    )?;
+
+    validate_p7_maximum_rss_summary_contract(
+        &summary,
+        run_id,
+        dataset,
+        &dataset_path,
+        input_bytes,
+        &detail_path,
+        &summary_path,
+        &detail_sha256,
+        &preflight,
+    )?;
+    validate_p7_shard_against_detail(&summary, &detail_aggregate)?;
+
+    let (runner_stdout_sha256, runner_stdout_bytes) = session.read_raw(
+        &runner_stdout_path,
+        &cohort_dir,
+        &canonical_root,
+        Some(&measurement.runner_stdout.sha256),
+        P7ArtifactReadKind::Control,
+    )?;
+    if runner_stdout_bytes == 0 {
+        return Err(p7_provenance_error("P7 RSS runner stdout is empty"));
+    }
+    let runner_stdout_artifact = &session
+        .retained
+        .last()
+        .ok_or_else(|| p7_provenance_error("P7 RSS stdout was not retained"))?
+        .artifact;
+    validate_p7_measured_artifact_identity(&measurement.runner_stdout, runner_stdout_artifact)?;
+    let (runner_stderr_sha256, _) = session.read_raw(
+        &runner_stderr_path,
+        &cohort_dir,
+        &canonical_root,
+        Some(&measurement.runner_stderr.sha256),
+        P7ArtifactReadKind::Control,
+    )?;
+    let runner_stderr_artifact = &session
+        .retained
+        .last()
+        .ok_or_else(|| p7_provenance_error("P7 RSS stderr was not retained"))?
+        .artifact;
+    validate_p7_measured_artifact_identity(&measurement.runner_stderr, runner_stderr_artifact)?;
+    let maximum_rss_bytes = measurement.maximum_rss_bytes;
+
+    validate_p7_producer_preflight_header(run_id, &preflight)?;
+    let runner_disk =
+        p7_runner_producer_disk_identity_with_reads(&canonical_root, &preflight, session)?;
+    validate_p7_preflight_against_disk(&preflight, &runner_disk)?;
+
+    let evidence = P7MaximumRssEvidence {
+        schema_version: P7_MAXIMUM_RSS_EVIDENCE_SCHEMA_VERSION.to_string(),
+        completed: true,
+        rss_gate_passed: maximum_rss_bytes <= P7_MAXIMUM_RSS_LIMIT_BYTES,
+        run_id: run_id.to_string(),
+        suite: P7_MAXIMUM_RSS_SUITE.to_string(),
+        dataset_file: dataset.file_name.to_string(),
+        dataset_sha256: expected_dataset.input_sha256,
+        input_bytes,
+        dataset_index: expected_question.dataset_index,
+        question_index: expected_question.question_index,
+        question_id: expected_question.question_id,
+        question_sha256: format!(
+            "{:x}",
+            Sha256::digest(expected_question.question.as_bytes())
+        ),
+        maximum_rss_bytes,
+        rss_limit_bytes: P7_MAXIMUM_RSS_LIMIT_BYTES,
+        measurement_report_sha256: measurement_sha256,
+        measurement_child_exit_status: measurement.child_exit_status,
+        measurement_elapsed_millis: measurement.supervisor_receipt.elapsed_millis,
+        supervisor_receipt: measurement.supervisor_receipt,
+        measured_executable_canonical_path: measurement.child_executable_canonical_path,
+        measured_executable_sha256: measurement.child_executable_sha256,
+        preflight_report_sha256: preflight_sha256,
+        runner_stdout_sha256,
+        runner_stderr_sha256,
+        detail_sha256,
+        summary_sha256,
+        preflight_validated_after_measurement: true,
+        preflight,
+    };
+    Ok(P7MaximumRssVerifiedMaterial {
+        evidence,
+        runner_disk_identity: runner_disk,
+    })
+}
+
+struct P7WallCohortEvidenceMaterial {
+    preflight: P7RunnerPreflightReport,
+    preflight_sha256: String,
+    maximum_rss: P7MaximumRssEvidence,
+    maximum_rss_sha256: String,
+    runner_disk_identity: P7RunnerDiskIdentity,
+}
+
+fn verify_p7_wall_cohort_evidence_in_session(
+    benchmark_root: &Path,
+    cohort_dir: &Path,
+    run_id: &str,
+    preflight_report_path: &Path,
+    maximum_rss_report_path: &Path,
+    session: &mut P7ArtifactReadSession,
+) -> Result<P7WallCohortEvidenceMaterial> {
+    if !p7_valid_run_id(run_id) {
+        return Err(p7_provenance_error("invalid or missing P7 wall run_id"));
+    }
+    p7_require_canonical_real_directory(benchmark_root)?;
+    p7_require_canonical_real_directory(cohort_dir)?;
+    let expected_cohort = benchmark_root.join("results/runs").join(run_id);
+    if cohort_dir != expected_cohort || !cohort_dir.starts_with(benchmark_root) {
+        return Err(p7_provenance_error(
+            "P7 wall cohort escaped the canonical benchmark root",
+        ));
+    }
+    let expected_preflight = cohort_dir.join("preflight-report.json");
+    let expected_maximum_rss = cohort_dir.join(P7_MAXIMUM_RSS_REPORT_FILE_NAME);
+    if preflight_report_path != expected_preflight
+        || maximum_rss_report_path != expected_maximum_rss
+    {
+        return Err(p7_provenance_error(
+            "P7 wall evidence paths differ from the fixed cohort contract",
+        ));
+    }
+
+    let (preflight, preflight_sha256) = session.read_json::<P7RunnerPreflightReport>(
+        preflight_report_path,
+        cohort_dir,
+        benchmark_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_wall_parse_preflight_report",
+    )?;
+    let (maximum_rss, maximum_rss_sha256) = session.read_json::<P7MaximumRssEvidence>(
+        maximum_rss_report_path,
+        cohort_dir,
+        benchmark_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_wall_parse_maximum_rss_report",
+    )?;
+    let fresh_maximum_rss = verify_p7_maximum_rss_evidence_in_session(
+        benchmark_root,
+        run_id,
+        session,
+        Some((preflight.clone(), preflight_sha256.clone())),
+    )?;
+    if maximum_rss != fresh_maximum_rss.evidence {
+        return Err(p7_provenance_error(
+            "P7 wall maximum RSS report differs from current evidence",
+        ));
+    }
+    Ok(P7WallCohortEvidenceMaterial {
+        preflight,
+        preflight_sha256,
+        maximum_rss,
+        maximum_rss_sha256,
+        runner_disk_identity: fresh_maximum_rss.runner_disk_identity,
+    })
+}
+
+pub fn verify_p7_wall_cohort_evidence_with_receipt(
+    benchmark_root: &Path,
+    run_id: &str,
+) -> Result<(P7VerifiedWallCohortEvidence, P7ArtifactLifecycleReceipt)> {
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_wall_evidence_canonicalize_root",
+    })?;
+    if canonical_root != benchmark_root {
+        return Err(p7_provenance_error(
+            "P7 wall evidence benchmark root must be canonical",
+        ));
+    }
+    let cohort_dir = canonical_root.join("results/runs").join(run_id);
+    let preflight_path = cohort_dir.join("preflight-report.json");
+    let maximum_rss_path = cohort_dir.join(P7_MAXIMUM_RSS_REPORT_FILE_NAME);
+    let mut session = P7ArtifactReadSession::default();
+    let material = verify_p7_wall_cohort_evidence_in_session(
+        &canonical_root,
+        &cohort_dir,
+        run_id,
+        &preflight_path,
+        &maximum_rss_path,
+        &mut session,
+    )?;
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("wall_cohort_evidence");
+    Ok((
+        P7VerifiedWallCohortEvidence {
+            preflight: material.preflight,
+            preflight_sha256: material.preflight_sha256,
+            maximum_rss: material.maximum_rss,
+            maximum_rss_sha256: material.maximum_rss_sha256,
+        },
+        receipt,
+    ))
+}
+
+pub fn verify_p7_cohort_admission(
+    benchmark_root: &Path,
+    run_id: &str,
+) -> Result<(P7CohortAdmission, String)> {
+    let (admission, digest, _) = verify_p7_cohort_admission_with_receipt(benchmark_root, run_id)?;
+    Ok((admission, digest))
+}
+
+pub fn verify_p7_cohort_admission_with_receipt(
+    benchmark_root: &Path,
+    run_id: &str,
+) -> Result<(P7CohortAdmission, String, P7ArtifactLifecycleReceipt)> {
+    let mut session = P7ArtifactReadSession::default();
+    let (admission, digest) =
+        verify_p7_cohort_admission_in_session(benchmark_root, run_id, &mut session)?;
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("cohort_admission");
+    Ok((admission, digest, receipt))
+}
+
+fn verify_p7_cohort_admission_in_session(
+    benchmark_root: &Path,
+    run_id: &str,
+    session: &mut P7ArtifactReadSession,
+) -> Result<(P7CohortAdmission, String)> {
+    if !p7_valid_run_id(run_id) {
+        return Err(p7_provenance_error("invalid P7 cohort admission run_id"));
+    }
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_admission_canonicalize_benchmark_root",
+    })?;
+    if canonical_root != benchmark_root {
+        return Err(p7_provenance_error(
+            "P7 admission benchmark root must be canonical",
+        ));
+    }
+    let cohort_dir = canonical_root.join("results/runs").join(run_id);
+    p7_require_canonical_real_directory(&cohort_dir)?;
+    let preflight_path = cohort_dir.join("preflight-report.json");
+    let maximum_rss_path = cohort_dir.join(P7_MAXIMUM_RSS_REPORT_FILE_NAME);
+    let cohort = verify_p7_wall_cohort_evidence_in_session(
+        &canonical_root,
+        &cohort_dir,
+        run_id,
+        &preflight_path,
+        &maximum_rss_path,
+        session,
+    )?;
+    if !cohort.maximum_rss.rss_gate_passed {
+        return Err(p7_provenance_error(
+            "P7 cohort admission requires a passing maximum RSS gate",
+        ));
+    }
+
+    let admission_path = cohort_dir.join(P7_COHORT_ADMISSION_FILE_NAME);
+    let (admission, admission_sha256) = session.read_json::<P7CohortAdmission>(
+        &admission_path,
+        &cohort_dir,
+        &canonical_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_admission_parse",
+    )?;
+    validate_p7_cohort_admission_contract(
+        &admission,
+        run_id,
+        &cohort.preflight_sha256,
+        &cohort.maximum_rss_sha256,
+        &cohort.preflight.published_release_identity(),
+    )?;
+    Ok((admission, admission_sha256))
+}
+
+pub fn verify_p7_shard_bundle_with_receipt(
+    benchmark_root: &Path,
+    expectation: &P7ShardBundleExpectation,
+) -> Result<(P7ShardBundleState, P7ArtifactLifecycleReceipt)> {
+    if !p7_valid_run_id(&expectation.run_id)
+        || p7_trusted_dataset(&expectation.suite).is_none()
+        || expectation.shard_total == 0
+        || expectation.shard_index >= expectation.shard_total
+    {
+        return Err(p7_provenance_error(
+            "P7 shard bundle expectation is invalid",
+        ));
+    }
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_shard_bundle_canonicalize_root",
+    })?;
+    if canonical_root != benchmark_root {
+        return Err(p7_provenance_error(
+            "P7 shard bundle benchmark root must be canonical",
+        ));
+    }
+    let cohort_dir = canonical_root
+        .join("results/runs")
+        .join(&expectation.run_id);
+    let stem = format!(
+        "{}.shard-{}-of-{}",
+        expectation.suite, expectation.shard_index, expectation.shard_total
+    );
+    let summary_name = format!("{stem}.summary.json");
+    let detail_name = format!("{stem}.jsonl");
+    let commit_name = format!("{stem}.commit.json");
+    let summary_path = cohort_dir.join(&summary_name);
+    let detail_path = cohort_dir.join(&detail_name);
+    let commit_path = cohort_dir.join(&commit_name);
+    let mut session = P7ArtifactReadSession::default();
+    let commit = session.try_read_json::<P7ShardBundleCommit>(
+        &commit_path,
+        &cohort_dir,
+        &canonical_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_shard_bundle_parse_commit",
+    )?;
+    if commit.is_none() {
+        let summary_present = session
+            .try_read_with(
+                &summary_path,
+                &cohort_dir,
+                &canonical_root,
+                None,
+                P7ArtifactReadKind::Summary,
+                |reader, _| {
+                    std::io::copy(reader, &mut std::io::sink()).map_err(|source| Error::Io {
+                        source,
+                        stage: "p7_shard_bundle_probe_uncommitted_summary",
+                    })
+                },
+            )?
+            .is_some();
+        let detail_present = session
+            .try_read_with(
+                &detail_path,
+                &cohort_dir,
+                &canonical_root,
+                None,
+                P7ArtifactReadKind::Detail,
+                |reader, _| {
+                    std::io::copy(reader, &mut std::io::sink()).map_err(|source| Error::Io {
+                        source,
+                        stage: "p7_shard_bundle_probe_uncommitted_detail",
+                    })
+                },
+            )?
+            .is_some();
+        session.verify_retained()?;
+        let receipt = session.lifecycle_receipt("shard_bundle_uncommitted_probe");
+        let state = if summary_present || detail_present {
+            P7ShardBundleState::Uncommitted(P7UncommittedShardBundle {
+                summary_present,
+                detail_present,
+            })
+        } else {
+            P7ShardBundleState::Absent
+        };
+        return Ok((state, receipt));
+    }
+    let (commit, _) = commit.expect("checked committed shard bundle");
+    if commit.schema_version != P7_SHARD_BUNDLE_COMMIT_SCHEMA_VERSION
+        || commit.run_id != expectation.run_id
+        || commit.suite != expectation.suite
+        || commit.shard_index != expectation.shard_index
+        || commit.shard_total != expectation.shard_total
+        || commit.summary_file != summary_name
+        || commit.detail_file != detail_name
+        || !is_sha256(&commit.summary_sha256)
+        || !is_sha256(&commit.detail_sha256)
+        || !is_sha256(&commit.producer_identity_sha256)
+    {
+        return Err(p7_provenance_error(
+            "P7 shard bundle commit manifest is invalid",
+        ));
+    }
+    let summary = session.try_read_with(
+        &summary_path,
+        &cohort_dir,
+        &canonical_root,
+        Some(&commit.summary_sha256),
+        P7ArtifactReadKind::Summary,
+        |reader, admitted_len| {
+            if admitted_len > P7_MAX_CONTROL_JSON_BYTES {
+                return Err(p7_provenance_error(
+                    "P7 shard summary exceeds its bounded parse limit",
+                ));
+            }
+            serde_json::from_reader::<_, serde_json::Value>(reader).map_err(|source| Error::Other {
+                source: Box::new(source),
+                stage: "p7_shard_bundle_parse_summary",
+            })
+        },
+    )?;
+    let detail = session.try_read_with(
+        &detail_path,
+        &cohort_dir,
+        &canonical_root,
+        Some(&commit.detail_sha256),
+        P7ArtifactReadKind::Detail,
+        |reader, _| {
+            let mut reader = BufReader::with_capacity(P7_FINGERPRINT_READ_BUFFER_BYTES, reader);
+            let mut line = Vec::new();
+            let mut rows = 0_u64;
+            loop {
+                if p7_read_bounded_line(&mut reader, &mut line, P7_MAX_DETAIL_LINE_BYTES)? == 0 {
+                    break;
+                }
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                if line.is_empty() {
+                    return Err(p7_provenance_error(
+                        "P7 shard detail contains an empty JSONL row",
+                    ));
+                }
+                serde_json::from_slice::<serde_json::Value>(&line).map_err(|source| {
+                    Error::Other {
+                        source: Box::new(source),
+                        stage: "p7_shard_bundle_parse_detail_row",
+                    }
+                })?;
+                rows = rows
+                    .checked_add(1)
+                    .ok_or_else(|| p7_provenance_error("P7 shard detail row count overflow"))?;
+            }
+            Ok(rows)
+        },
+    )?;
+
+    let state = match (summary, detail) {
+        (None, None) | (Some(_), None) | (None, Some(_)) => {
+            return Err(p7_provenance_error(
+                "P7 committed shard bundle is incomplete",
+            ));
+        }
+        (
+            Some((summary, summary_sha256, summary_bytes)),
+            Some((detail_rows, detail_sha256, detail_bytes)),
+        ) => {
+            let dataset = p7_trusted_dataset(&expectation.suite)
+                .ok_or_else(|| p7_provenance_error("P7 shard bundle trusted dataset is missing"))?;
+            let data_dir = canonical_root.join("data");
+            let dataset_path = data_dir.join(dataset.file_name);
+            let (input_sha256, input_bytes) = session.read_raw(
+                &dataset_path,
+                &data_dir,
+                &canonical_root,
+                Some(dataset.input_sha256),
+                P7ArtifactReadKind::Dataset,
+            )?;
+            validate_p7_verified_shard_summary(
+                &summary,
+                &summary_name,
+                &detail_name,
+                detail_rows,
+                &detail_sha256,
+                dataset.file_name,
+                input_bytes,
+                &input_sha256,
+                expectation,
+            )?;
+            let recorded = serde_json::from_value::<P7RecordedProducerIdentity>(
+                summary
+                    .get("producer")
+                    .ok_or_else(|| p7_provenance_error("P7 shard summary producer is missing"))?
+                    .clone(),
+            )
+            .map_err(|source| Error::Other {
+                source: Box::new(source),
+                stage: "p7_shard_bundle_commit_parse_producer_envelope",
+            })?;
+            if summary_sha256 != commit.summary_sha256
+                || detail_sha256 != commit.detail_sha256
+                || summary_bytes != commit.summary_bytes
+                || detail_bytes != commit.detail_bytes
+                || recorded.canonical_identity_sha256 != commit.producer_identity_sha256
+            {
+                return Err(p7_provenance_error(
+                    "P7 shard bundle content differs from its commit manifest",
+                ));
+            }
+            P7ShardBundleState::Complete(P7VerifiedShardBundle {
+                summary,
+                summary_sha256,
+                detail_sha256,
+                detail_rows,
+            })
+        }
+    };
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("shard_bundle");
+    Ok((state, receipt))
+}
+
+pub fn verify_p7_shard_set_with_receipt(
+    benchmark_root: &Path,
+    expectations: &[P7ShardBundleExpectation],
+) -> Result<(Vec<P7VerifiedShardBundle>, P7ArtifactLifecycleReceipt)> {
+    let first = expectations
+        .first()
+        .ok_or_else(|| p7_provenance_error("P7 shard set must not be empty"))?;
+    if !p7_valid_run_id(&first.run_id)
+        || first.shard_total != expectations.len()
+        || expectations.iter().enumerate().any(|(index, expectation)| {
+            expectation.run_id != first.run_id
+                || expectation.suite != first.suite
+                || expectation.shard_total != first.shard_total
+                || expectation.shard_index != index
+                || expectation.build != first.build
+                || expectation.release != first.release
+                || expectation.execution_kind != first.execution_kind
+                || expectation.cohort_admission_sha256 != first.cohort_admission_sha256
+        })
+    {
+        return Err(p7_provenance_error(
+            "P7 shard set coordinates or producer identity are not globally exact",
+        ));
+    }
+    let dataset = p7_trusted_dataset(&first.suite)
+        .ok_or_else(|| p7_provenance_error("P7 shard set trusted dataset is missing"))?;
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_shard_set_canonicalize_root",
+    })?;
+    if canonical_root != benchmark_root {
+        return Err(p7_provenance_error(
+            "P7 shard set benchmark root must be canonical",
+        ));
+    }
+    let cohort_dir = canonical_root.join("results/runs").join(&first.run_id);
+    let data_dir = canonical_root.join("data");
+    let dataset_path = data_dir.join(dataset.file_name);
+    let mut session = P7ArtifactReadSession::default();
+    let (input_sha256, input_bytes) = session.read_raw(
+        &dataset_path,
+        &data_dir,
+        &canonical_root,
+        Some(dataset.input_sha256),
+        P7ArtifactReadKind::Dataset,
+    )?;
+    let mut bundles = Vec::with_capacity(expectations.len());
+    for expectation in expectations {
+        bundles.push(verify_p7_committed_shard_in_session(
+            &canonical_root,
+            &cohort_dir,
+            dataset.file_name,
+            input_bytes,
+            &input_sha256,
+            expectation,
+            &mut session,
+        )?);
+    }
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("shard_set");
+    Ok((bundles, receipt))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_p7_committed_shard_in_session(
+    canonical_root: &Path,
+    cohort_dir: &Path,
+    dataset_file_name: &str,
+    input_bytes: u64,
+    input_sha256: &str,
+    expectation: &P7ShardBundleExpectation,
+    session: &mut P7ArtifactReadSession,
+) -> Result<P7VerifiedShardBundle> {
+    let stem = format!(
+        "{}.shard-{}-of-{}",
+        expectation.suite, expectation.shard_index, expectation.shard_total
+    );
+    let summary_name = format!("{stem}.summary.json");
+    let detail_name = format!("{stem}.jsonl");
+    let commit_name = format!("{stem}.commit.json");
+    let (commit, _) = session.read_json::<P7ShardBundleCommit>(
+        &cohort_dir.join(commit_name),
+        cohort_dir,
+        canonical_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_shard_set_parse_commit",
+    )?;
+    if commit.schema_version != P7_SHARD_BUNDLE_COMMIT_SCHEMA_VERSION
+        || commit.run_id != expectation.run_id
+        || commit.suite != expectation.suite
+        || commit.shard_index != expectation.shard_index
+        || commit.shard_total != expectation.shard_total
+        || commit.summary_file != summary_name
+        || commit.detail_file != detail_name
+        || !is_sha256(&commit.summary_sha256)
+        || !is_sha256(&commit.detail_sha256)
+        || !is_sha256(&commit.producer_identity_sha256)
+    {
+        return Err(p7_provenance_error(
+            "P7 shard set commit manifest is invalid",
+        ));
+    }
+    let (summary, summary_sha256, summary_bytes) = session.read_with(
+        &cohort_dir.join(&summary_name),
+        cohort_dir,
+        canonical_root,
+        Some(&commit.summary_sha256),
+        P7ArtifactReadKind::Summary,
+        |reader, admitted_len| {
+            if admitted_len > P7_MAX_CONTROL_JSON_BYTES {
+                return Err(p7_provenance_error(
+                    "P7 shard set summary exceeds its parse cap",
+                ));
+            }
+            serde_json::from_reader::<_, serde_json::Value>(reader).map_err(|source| Error::Other {
+                source: Box::new(source),
+                stage: "p7_shard_set_parse_summary",
+            })
+        },
+    )?;
+    let (detail_rows, detail_sha256, detail_bytes) = session.read_with(
+        &cohort_dir.join(&detail_name),
+        cohort_dir,
+        canonical_root,
+        Some(&commit.detail_sha256),
+        P7ArtifactReadKind::Detail,
+        |reader, _| {
+            let mut reader = BufReader::with_capacity(P7_FINGERPRINT_READ_BUFFER_BYTES, reader);
+            let mut line = Vec::new();
+            let mut rows = 0_u64;
+            while p7_read_bounded_line(&mut reader, &mut line, P7_MAX_DETAIL_LINE_BYTES)? != 0 {
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                if line.is_empty() {
+                    return Err(p7_provenance_error(
+                        "P7 shard set detail contains an empty JSONL row",
+                    ));
+                }
+                serde_json::from_slice::<serde_json::Value>(&line).map_err(|source| {
+                    Error::Other {
+                        source: Box::new(source),
+                        stage: "p7_shard_set_parse_detail_row",
+                    }
+                })?;
+                rows = rows
+                    .checked_add(1)
+                    .ok_or_else(|| p7_provenance_error("P7 shard set row count overflow"))?;
+            }
+            Ok(rows)
+        },
+    )?;
+    validate_p7_verified_shard_summary(
+        &summary,
+        &summary_name,
+        &detail_name,
+        detail_rows,
+        &detail_sha256,
+        dataset_file_name,
+        input_bytes,
+        input_sha256,
+        expectation,
+    )?;
+    let recorded = serde_json::from_value::<P7RecordedProducerIdentity>(
+        summary
+            .get("producer")
+            .ok_or_else(|| p7_provenance_error("P7 shard set producer is missing"))?
+            .clone(),
+    )
+    .map_err(|source| Error::Other {
+        source: Box::new(source),
+        stage: "p7_shard_set_parse_producer_envelope",
+    })?;
+    if summary_sha256 != commit.summary_sha256
+        || detail_sha256 != commit.detail_sha256
+        || summary_bytes != commit.summary_bytes
+        || detail_bytes != commit.detail_bytes
+        || recorded.canonical_identity_sha256 != commit.producer_identity_sha256
+    {
+        return Err(p7_provenance_error(
+            "P7 shard set bundle differs from its commit manifest",
+        ));
+    }
+    Ok(P7VerifiedShardBundle {
+        summary,
+        summary_sha256,
+        detail_sha256,
+        detail_rows,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_p7_verified_shard_summary(
+    summary: &serde_json::Value,
+    summary_name: &str,
+    detail_name: &str,
+    detail_rows: u64,
+    detail_sha256: &str,
+    dataset_file_name: &str,
+    input_bytes: u64,
+    input_sha256: &str,
+    expectation: &P7ShardBundleExpectation,
+) -> Result<()> {
+    let producer = p7_parse_recorded_shard_producer(
+        summary
+            .get("producer")
+            .ok_or_else(|| p7_provenance_error("P7 shard summary is missing producer"))?,
+    )?;
+    let expected_limit =
+        serde_json::to_value(expectation.limit).map_err(|source| Error::Other {
+            source: Box::new(source),
+            stage: "p7_shard_bundle_encode_limit",
+        })?;
+    let expected_question_limit =
+        serde_json::to_value(expectation.question_limit).map_err(|source| Error::Other {
+            source: Box::new(source),
+            stage: "p7_shard_bundle_encode_question_limit",
+        })?;
+    let expected_question_index =
+        serde_json::to_value(expectation.question_index).map_err(|source| Error::Other {
+            source: Box::new(source),
+            stage: "p7_shard_bundle_encode_question_index",
+        })?;
+    let expected_input_file = format!("data/{dataset_file_name}");
+    if summary
+        .get("completed")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || summary.get("run_id").and_then(serde_json::Value::as_str)
+            != Some(expectation.run_id.as_str())
+        || summary.get("suite").and_then(serde_json::Value::as_str)
+            != Some(expectation.suite.as_str())
+        || summary
+            .get("shard_index")
+            .and_then(serde_json::Value::as_u64)
+            != Some(expectation.shard_index as u64)
+        || summary
+            .get("shard_total")
+            .and_then(serde_json::Value::as_u64)
+            != Some(expectation.shard_total as u64)
+        || summary.get("limit") != Some(&expected_limit)
+        || summary.get("question_limit") != Some(&expected_question_limit)
+        || summary.get("question_index") != Some(&expected_question_index)
+        || summary
+            .get("input_file")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_input_file.as_str())
+        || summary
+            .get("input_bytes")
+            .and_then(serde_json::Value::as_u64)
+            != Some(input_bytes)
+        || summary
+            .get("input_sha256")
+            .and_then(serde_json::Value::as_str)
+            != Some(input_sha256)
+        || summary
+            .get("detail_file")
+            .and_then(serde_json::Value::as_str)
+            != Some(detail_name)
+        || summary
+            .get("summary_file")
+            .and_then(serde_json::Value::as_str)
+            != Some(summary_name)
+        || summary.get("questions").and_then(serde_json::Value::as_u64) != Some(detail_rows)
+    {
+        return Err(p7_provenance_error(
+            "P7 completed shard bundle coordinates or row count mismatch",
+        ));
+    }
+    let release = &expectation.release;
+    let build = &expectation.build;
+    if producer.schema_version != P7_SHARD_PRODUCER_PROVENANCE_SCHEMA_VERSION
+        || producer.execution_kind != expectation.execution_kind
+        || producer.run_id != expectation.run_id
+        || producer.contract_version != P7_CONTRACT_VERSION
+        || producer.sdk_report_schema_version != MEMORY_RECALL_DELIVERY_SCHEMA_VERSION
+        || producer.sdk_build_fingerprint != build.sdk_build_fingerprint
+        || producer.runner_build_fingerprint != build.runner_build_fingerprint
+        || producer.runner_lock_fingerprint != build.runner_lock_fingerprint
+        || producer.executable_sha256 != build.executable_sha256
+        || producer.build_profile != build.build_profile
+        || producer.gate_attestation_sha256 != release.gate_attestation_sha256
+        || producer.release_metadata_sha256 != release.release_metadata_sha256
+        || producer.gate_source_fingerprint != release.gate_source_fingerprint
+        || producer.gate_source_manifest_sha256 != release.gate_source_manifest_sha256
+        || producer.gate_ids != release.gate_ids
+        || producer.cohort_admission_sha256 != expectation.cohort_admission_sha256
+        || producer.input_sha256 != input_sha256
+        || producer.detail_schema_version != P7_DETAIL_SCHEMA_VERSION
+        || producer.detail_sha256 != detail_sha256
+    {
+        return Err(p7_provenance_error(
+            "P7 completed shard producer or detail binding mismatch",
+        ));
+    }
+    Ok(())
+}
+
+pub fn verify_p7_merged_resume_with_receipt(
+    benchmark_root: &Path,
+    run_id: &str,
+    suite: &str,
+    expected: &serde_json::Value,
+) -> Result<(
+    Option<(serde_json::Value, String)>,
+    P7ArtifactLifecycleReceipt,
+)> {
+    if !p7_valid_run_id(run_id) || p7_trusted_dataset(suite).is_none() {
+        return Err(p7_provenance_error(
+            "P7 merged resume coordinates are invalid",
+        ));
+    }
+    let canonical_root = fs::canonicalize(benchmark_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_merged_resume_canonicalize_root",
+    })?;
+    if canonical_root != benchmark_root {
+        return Err(p7_provenance_error(
+            "P7 merged resume benchmark root must be canonical",
+        ));
+    }
+    let cohort_dir = canonical_root.join("results/runs").join(run_id);
+    let summary_name = format!("{suite}.merged.summary.json");
+    let merged_path = cohort_dir.join(&summary_name);
+    let commit_path = cohort_dir.join(format!("{suite}.merged.commit.json"));
+    let mut session = P7ArtifactReadSession::default();
+    let Some((commit, _)) = session.try_read_json::<P7MergedBundleCommit>(
+        &commit_path,
+        &cohort_dir,
+        &canonical_root,
+        None,
+        P7ArtifactReadKind::Control,
+        "p7_merged_resume_parse_commit",
+    )?
+    else {
+        session.verify_retained()?;
+        let receipt = session.lifecycle_receipt("merged_resume_uncommitted");
+        return Ok((None, receipt));
+    };
+    if commit.schema_version != P7_MERGED_BUNDLE_COMMIT_SCHEMA_VERSION
+        || commit.run_id != run_id
+        || commit.suite != suite
+        || commit.summary_file != summary_name
+        || !is_sha256(&commit.summary_sha256)
+    {
+        return Err(p7_provenance_error("P7 merged commit manifest is invalid"));
+    }
+    let material = session
+        .try_read_with(
+            &merged_path,
+            &cohort_dir,
+            &canonical_root,
+            Some(&commit.summary_sha256),
+            P7ArtifactReadKind::Summary,
+            |reader, admitted_len| {
+                if admitted_len > P7_MAX_CONTROL_JSON_BYTES {
+                    return Err(p7_provenance_error(
+                        "P7 merged summary exceeds its parse cap",
+                    ));
+                }
+                serde_json::from_reader::<_, serde_json::Value>(reader).map_err(|source| {
+                    Error::Other {
+                        source: Box::new(source),
+                        stage: "p7_merged_resume_parse",
+                    }
+                })
+            },
+        )?
+        .ok_or_else(|| p7_provenance_error("P7 committed merged summary is missing"))?;
+    let material_mismatch = {
+        let (existing, digest, bytes) = &material;
+        existing != expected || digest != &commit.summary_sha256 || *bytes != commit.summary_bytes
+    };
+    if material_mismatch {
+        return Err(p7_provenance_error(
+            "P7 immutable merged summary differs from validated shards",
+        ));
+    }
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("merged_resume");
+    let (value, digest, _) = material;
+    Ok((Some((value, digest)), receipt))
+}
+
+fn p7_expected_maximum_rss_child_args(benchmark_root: &Path, run_id: &str) -> Vec<String> {
+    [
+        "--root".to_string(),
+        benchmark_root.to_string_lossy().into_owned(),
+        "--run-id".to_string(),
+        run_id.to_string(),
+        "--suite".to_string(),
+        P7_MAXIMUM_RSS_SUITE.to_string(),
+        "--shard-index".to_string(),
+        "0".to_string(),
+        "--shard-total".to_string(),
+        "1".to_string(),
+        "--limit".to_string(),
+        "1".to_string(),
+        "--question-index".to_string(),
+        P7_MAXIMUM_RSS_QUESTION_INDEX.to_string(),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn validate_p7_maximum_rss_measurement_contract(
+    measurement: &P7MaximumRssMeasurementReport,
+    benchmark_root: &Path,
+    run_id: &str,
+    preflight: &P7RunnerPreflightReport,
+) -> Result<()> {
+    if measurement.schema_version != P7_MAXIMUM_RSS_MEASUREMENT_SCHEMA_VERSION
+        || measurement.run_id != run_id
+        || measurement.child_exit_status != 0
+        || measurement.child_executable_canonical_path != preflight.executable_canonical_path
+        || measurement.child_executable_sha256 != preflight.executable_sha256
+        || !is_sha256(&measurement.child_executable_sha256)
+        || measurement.child_args != p7_expected_maximum_rss_child_args(benchmark_root, run_id)
+        || measurement.maximum_rss_bytes == 0
+        || measurement.supervisor_receipt.schema_version != "p7_sealed_process_receipt_v1"
+        || measurement.supervisor_receipt.maximum_rss_bytes != measurement.maximum_rss_bytes
+        || measurement
+            .supervisor_receipt
+            .sealed_executable_sha256
+            .as_deref()
+            != Some(measurement.child_executable_sha256.as_str())
+        || measurement.supervisor_receipt.pid == 0
+        || measurement.supervisor_receipt.process_group <= 0
+        || !is_sha256(&measurement.runner_stdout.sha256)
+        || !is_sha256(&measurement.runner_stderr.sha256)
+    {
+        return Err(p7_provenance_error(
+            "P7 maximum RSS measurement contract mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_p7_measured_artifact_identity(
+    recorded: &P7MeasuredArtifactIdentity,
+    actual: &P7OpenedArtifact,
+) -> Result<()> {
+    if recorded.byte_len != actual.freshness.len || recorded.sha256 != actual.sha256 {
+        return Err(p7_provenance_error(
+            "P7 RSS retained-FD artifact identity differs from the published path",
+        ));
+    }
+    #[cfg(unix)]
+    if recorded.device != actual.freshness.device || recorded.inode != actual.freshness.inode {
+        return Err(p7_provenance_error(
+            "P7 RSS retained-FD device or inode differs from the published path",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_p7_maximum_rss_summary_contract(
+    summary: &serde_json::Value,
+    run_id: &str,
+    dataset: P7TrustedDataset,
+    input_path: &Path,
+    input_bytes: u64,
+    detail_path: &Path,
+    summary_path: &Path,
+    detail_sha256: &str,
+    preflight: &P7RunnerPreflightReport,
+) -> Result<()> {
+    let producer_value = summary
+        .get("producer")
+        .ok_or_else(|| p7_provenance_error("P7 RSS summary producer is missing"))?;
+    let producer = p7_parse_recorded_shard_producer(producer_value)?;
+    let elapsed_secs = summary
+        .get("elapsed_secs")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| p7_provenance_error("P7 RSS elapsed time missing"))?;
+    if p7_required_str(summary, "run_id", "P7 RSS summary run_id missing")? != run_id
+        || p7_required_str(summary, "suite", "P7 RSS summary suite missing")?
+            != P7_MAXIMUM_RSS_SUITE
+        || p7_required_usize(summary, "shard_index", "P7 RSS shard index missing")? != 0
+        || p7_required_usize(summary, "shard_total", "P7 RSS shard total missing")? != 1
+        || p7_required_usize(summary, "samples", "P7 RSS sample count missing")? != 1
+        || p7_required_usize(summary, "questions", "P7 RSS question count missing")? != 1
+        || p7_required_usize(summary, "write_errors", "P7 RSS write error count missing")? != 0
+        || p7_required_usize(
+            summary,
+            "recall_errors",
+            "P7 RSS recall error count missing",
+        )? != 0
+        || p7_required_usize(summary, "limit", "P7 RSS limit missing")? != 1
+        || !summary
+            .get("question_limit")
+            .is_some_and(serde_json::Value::is_null)
+        || p7_required_usize(summary, "question_index", "P7 RSS question index missing")?
+            != P7_MAXIMUM_RSS_QUESTION_INDEX
+        || !p7_required_bool(summary, "completed", "P7 RSS completion flag missing")?
+        || p7_required_str(summary, "input_file", "P7 RSS input path missing")?
+            != input_path.to_str().unwrap_or("")
+        || summary
+            .get("input_bytes")
+            .and_then(serde_json::Value::as_u64)
+            != Some(input_bytes)
+        || p7_required_str(summary, "input_sha256", "P7 RSS input digest missing")?
+            != dataset.input_sha256
+        || p7_required_str(summary, "detail_file", "P7 RSS detail path missing")?
+            != detail_path.to_str().unwrap_or("")
+        || p7_required_str(summary, "summary_file", "P7 RSS summary path missing")?
+            != summary_path.to_str().unwrap_or("")
+        || !elapsed_secs.is_finite()
+        || elapsed_secs <= 0.0
+        || producer.schema_version != P7_SHARD_PRODUCER_PROVENANCE_SCHEMA_VERSION
+        || producer.execution_kind != P7ProducerExecutionKind::MaximumRssDiagnostic
+        || producer.run_id != run_id
+        || producer.contract_version != P7_CONTRACT_VERSION
+        || producer.sdk_report_schema_version != MEMORY_RECALL_DELIVERY_SCHEMA_VERSION
+        || producer.sdk_build_fingerprint != preflight.sdk_build_fingerprint
+        || producer.runner_build_fingerprint != preflight.runner_build_fingerprint
+        || producer.runner_lock_fingerprint != preflight.runner_lock_fingerprint
+        || producer.executable_sha256 != preflight.executable_sha256
+        || producer.gate_attestation_sha256 != preflight.gate_attestation_sha256
+        || producer.release_metadata_sha256 != preflight.release_metadata_sha256
+        || producer.gate_source_fingerprint != preflight.gate_source_fingerprint
+        || producer.gate_source_manifest_sha256 != preflight.gate_source_manifest_sha256
+        || producer.gate_ids != preflight.gate_ids
+        || producer.build_profile != "release"
+        || !producer.cohort_admission_sha256.is_empty()
+        || producer.input_sha256 != dataset.input_sha256
+        || !p7_detail_schema_supported(&producer.detail_schema_version)
+        || producer.detail_sha256 != detail_sha256
+    {
+        return Err(p7_provenance_error(
+            "P7 maximum RSS summary contract mismatch",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+fn p7_require_regular_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| Error::Io {
+        source,
+        stage: "p7_maximum_rss_stat_artifact",
+    })?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(p7_provenance_error(
+            "P7 RSS evidence path must be a regular file",
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|source| Error::Io {
+        source,
+        stage: "p7_maximum_rss_canonicalize_artifact",
+    })?;
+    if canonical != path {
+        return Err(p7_provenance_error(
+            "P7 RSS evidence path must not traverse symlinks",
+        ));
+    }
+    Ok(())
+}
+
+fn p7_require_canonical_real_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| Error::Io {
+        source,
+        stage: "p7_provenance_stat_owner_directory",
+    })?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(p7_provenance_error(
+            "P7 evidence owner must be a real directory",
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|source| Error::Io {
+        source,
+        stage: "p7_provenance_canonicalize_owner_directory",
+    })?;
+    if canonical != path {
+        return Err(p7_provenance_error(
+            "P7 evidence owner directory must be canonical",
+        ));
+    }
+    Ok(())
+}
+
+pub fn preflight_p7_runner_release_with_frozen(
     benchmark_root: &Path,
     sdk_root: &Path,
-    trusted: P7TrustedRunnerRelease,
+    frozen: P7FrozenRunnerIdentity,
     run_id: &str,
 ) -> Result<P7RunnerPreflightReport> {
-    let sdk_inputs = p7_fingerprint_inputs(sdk_root, &P7_SDK_BUILD_INPUTS)?;
-    let sdk_build_fingerprint = p7_fingerprint_files_with_contract(
+    Ok(preflight_p7_runner_release_with_frozen_and_receipt(
+        benchmark_root,
         sdk_root,
-        &sdk_inputs,
-        P7_SDK_BUILD_FINGERPRINT_CONTRACT,
+        frozen,
+        run_id,
+    )?
+    .0)
+}
+
+pub fn preflight_p7_runner_release_with_frozen_and_receipt(
+    benchmark_root: &Path,
+    sdk_root: &Path,
+    frozen: P7FrozenRunnerIdentity,
+    run_id: &str,
+) -> Result<(P7RunnerPreflightReport, P7ArtifactLifecycleReceipt)> {
+    p7_require_canonical_real_directory(benchmark_root)?;
+    let sdk_root = fs::canonicalize(sdk_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_runner_preflight_canonicalize_sdk_root",
+    })?;
+    p7_require_canonical_real_directory(&sdk_root)?;
+    let runner_root = benchmark_root.join("runner");
+    p7_require_canonical_real_directory(&runner_root)?;
+    let mut session = P7ArtifactReadSession::default();
+    let source =
+        p7_release_gate_source_material_in_session(&sdk_root, &runner_root, &mut session, true)?;
+    let sdk_build_fingerprint = source.sdk_build_fingerprint.clone();
+    let disk = p7_runner_disk_identity_for_release_sha_in_session(
+        benchmark_root,
+        frozen.executable_sha256,
+        &sdk_root,
+        &runner_root,
+        &source,
+        &mut session,
     )?;
-    let disk = p7_runner_disk_identity_at_root(benchmark_root)?;
+    validate_p7_frozen_release_binding(frozen, &disk, &source.manifest.source_fingerprint)?;
     if sdk_build_fingerprint != P7_TRUSTED_SDK_BUILD_FINGERPRINT
-        || disk.runner_build_fingerprint != trusted.runner_build_fingerprint
-        || disk.runner_lock_fingerprint != trusted.runner_lock_fingerprint
-        || disk.executable_sha256 != trusted.executable_sha256
         || !is_sha256(&sdk_build_fingerprint)
-        || !is_sha256(&disk.runner_build_fingerprint)
-        || !is_sha256(&disk.runner_lock_fingerprint)
-        || !is_sha256(&disk.executable_sha256)
     {
         return Err(p7_preflight_error(
             "P7 SDK or frozen runner disk identity drifted",
         ));
     }
-    let executable = benchmark_root.join(P7_RUNNER_RELEASE_BINARY);
-    let output = Command::new(&executable)
-        .arg("--print-build-identity")
-        .output()
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_runner_preflight_execute_identity",
-        })?;
+    let output = p7_run_retained_executable(
+        &disk.executable_canonical_path,
+        &["--print-build-identity"],
+        "p7_runner_preflight_execute_identity",
+    )?;
     if !output.status.success() {
         return Err(p7_preflight_error(
             "frozen runner rejected --print-build-identity",
@@ -1739,16 +6117,32 @@ fn preflight_p7_runner_release_with_trusted(
             "P7 SDK, runner source, lock, profile, or executable identity drifted",
         ));
     }
-    Ok(P7RunnerPreflightReport {
+    session.verify_retained()?;
+    let executable_canonical_path = disk
+        .executable_canonical_path
+        .to_str()
+        .ok_or_else(|| p7_preflight_error("P7 runner canonical path is not valid UTF-8"))?
+        .to_string();
+    let report = P7RunnerPreflightReport {
+        schema_version: P7_RUNNER_PREFLIGHT_SCHEMA_VERSION.to_string(),
         run_id: run_id.to_string(),
         sdk_build_fingerprint,
         runner_build_fingerprint: disk.runner_build_fingerprint,
         runner_lock_fingerprint: disk.runner_lock_fingerprint,
         executable_sha256: disk.executable_sha256,
+        executable_canonical_path,
+        gate_attestation_sha256: disk.gate_attestation_sha256,
+        release_metadata_sha256: disk.release_metadata_sha256,
+        gate_source_fingerprint: disk.gate_source_fingerprint,
+        gate_source_manifest_sha256: disk.gate_source_manifest_sha256,
+        gate_ids: disk.gate_ids,
         build_profile: embedded.build_profile,
-    })
+    };
+    let receipt = session.lifecycle_receipt("release_preflight");
+    Ok((report, receipt))
 }
 
+#[cfg(test)]
 fn p7_benchmark_root_for_run(merged_summary_path: &Path, run_id: &str) -> Result<PathBuf> {
     if !p7_valid_run_id(run_id) {
         return Err(p7_provenance_error("invalid or missing P7 run_id"));
@@ -1785,17 +6179,544 @@ fn p7_valid_run_id(run_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn p7_runner_disk_identity_at_root(benchmark_root: &Path) -> Result<P7RunnerDiskIdentity> {
-    let runner_root = benchmark_root.join("runner");
-    let runner_inputs = p7_fingerprint_inputs(&runner_root, &P7_RUNNER_BUILD_INPUTS)?;
+fn p7_runner_release_executable_path(
+    benchmark_root: &Path,
+    executable_sha256: &str,
+) -> Result<PathBuf> {
+    if !is_sha256(executable_sha256) {
+        return Err(p7_preflight_error(
+            "frozen P7 runner executable digest is invalid",
+        ));
+    }
+    Ok(benchmark_root
+        .join("runner")
+        .join(P7_RUNNER_RELEASES_DIR)
+        .join(executable_sha256)
+        .join(P7_RUNNER_RELEASE_FILE_NAME))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct P7ReleaseGateSpec {
+    gate_id: &'static str,
+    owner_root: String,
+    argv: Vec<String>,
+}
+
+pub fn p7_release_gate_plan() -> P7ReleaseGatePlan {
+    let commands: [(P7ReleaseGateOwner, &[&str]); 12] = [
+        (
+            P7ReleaseGateOwner::AgentMemory,
+            &["cargo", "fmt", "--all", "--", "--check"],
+        ),
+        (
+            P7ReleaseGateOwner::AgentMemory,
+            &["cargo", "check", "--locked", "--workspace", "--all-targets"],
+        ),
+        (
+            P7ReleaseGateOwner::AgentMemory,
+            &[
+                "cargo",
+                "clippy",
+                "--locked",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ),
+        (
+            P7ReleaseGateOwner::AgentMemory,
+            &["cargo", "test", "--locked", "--workspace"],
+        ),
+        (
+            P7ReleaseGateOwner::AgentMemory,
+            &["bash", "scripts/check_memory_write_transaction_contract.sh"],
+        ),
+        (
+            P7ReleaseGateOwner::AgentMemory,
+            &["bash", "scripts/check_next_gen_memory_plan.sh"],
+        ),
+        (
+            P7ReleaseGateOwner::ExternalRunner,
+            &["cargo", "fmt", "--", "--check"],
+        ),
+        (
+            P7ReleaseGateOwner::ExternalRunner,
+            &["cargo", "test", "--locked"],
+        ),
+        (
+            P7ReleaseGateOwner::ExternalRunner,
+            &[
+                "cargo",
+                "clippy",
+                "--locked",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ),
+        (
+            P7ReleaseGateOwner::ExternalRunner,
+            &[
+                "bash",
+                "-n",
+                "run_full_p7_wall.sh",
+                "run_p7_max_rss.sh",
+                "tests/run_full_p7_wall_fake_runner_test.sh",
+                "tests/run_p7_max_rss_fake_runner_test.sh",
+            ],
+        ),
+        (
+            P7ReleaseGateOwner::ExternalRunner,
+            &["bash", "tests/run_full_p7_wall_fake_runner_test.sh"],
+        ),
+        (
+            P7ReleaseGateOwner::ExternalRunner,
+            &["bash", "tests/run_p7_max_rss_fake_runner_test.sh"],
+        ),
+    ];
+    let steps = P7_REQUIRED_RELEASE_GATE_IDS
+        .into_iter()
+        .zip(commands)
+        .enumerate()
+        .map(|(index, (gate_id, (owner, argv)))| P7ReleaseGatePlanStep {
+            ordinal: u8::try_from(index + 1).expect("P7 gate count fits u8"),
+            gate_id: gate_id.to_string(),
+            owner,
+            argv: argv.iter().map(|arg| (*arg).to_string()).collect(),
+        })
+        .collect::<Vec<_>>();
+    let mut plan = P7ReleaseGatePlan {
+        schema_version: P7_RELEASE_GATE_PLAN_SCHEMA_VERSION.to_string(),
+        orchestrator_contract: P7_RELEASE_GATE_ORCHESTRATOR_CONTRACT.to_string(),
+        producer_identity_contract: P7_PRODUCER_IDENTITY_SCHEMA_VERSION.to_string(),
+        verifier_identity_contract: P7_VERIFIER_IDENTITY_SCHEMA_VERSION.to_string(),
+        steps,
+        plan_sha256: String::new(),
+    };
+    plan.plan_sha256 = p7_release_gate_plan_sha256(&plan);
+    plan
+}
+
+fn p7_release_gate_plan_sha256(plan: &P7ReleaseGatePlan) -> String {
+    let mut canonical = plan.clone();
+    canonical.plan_sha256.clear();
+    let body = serde_json::to_vec(&canonical).expect("P7 release gate plan is serializable");
+    format!("{:x}", Sha256::digest(body))
+}
+
+pub fn verify_p7_release_gate_plan(plan: &P7ReleaseGatePlan) -> Result<()> {
+    if plan != &p7_release_gate_plan() || plan.plan_sha256 != p7_release_gate_plan_sha256(plan) {
+        return Err(p7_preflight_error(
+            "P7 release gate plan differs from bm-replay authority",
+        ));
+    }
+    Ok(())
+}
+
+fn p7_required_release_gate_specs(
+    sdk_root: &Path,
+    runner_root: &Path,
+) -> Result<Vec<P7ReleaseGateSpec>> {
+    p7_require_canonical_real_directory(sdk_root)?;
+    p7_require_canonical_real_directory(runner_root)?;
+    let sdk_owner = sdk_root
+        .to_str()
+        .ok_or_else(|| p7_preflight_error("P7 SDK gate owner path is not valid UTF-8"))?;
+    let runner_owner = runner_root
+        .to_str()
+        .ok_or_else(|| p7_preflight_error("P7 runner gate owner path is not valid UTF-8"))?;
+    Ok(p7_release_gate_plan()
+        .steps
+        .into_iter()
+        .map(|step| P7ReleaseGateSpec {
+            gate_id: P7_REQUIRED_RELEASE_GATE_IDS[usize::from(step.ordinal - 1)],
+            owner_root: match step.owner {
+                P7ReleaseGateOwner::AgentMemory => sdk_owner,
+                P7ReleaseGateOwner::ExternalRunner => runner_owner,
+            }
+            .to_string(),
+            argv: step.argv,
+        })
+        .collect())
+}
+
+fn validate_p7_release_gate_attestation(
+    attestation: &P7ReleaseGateAttestation,
+    expected_identity: &P7RunnerBuildIdentity,
+    sdk_root: &Path,
+    runner_root: &Path,
+) -> Result<()> {
+    if attestation.schema_version != P7_RELEASE_GATE_ATTESTATION_SCHEMA_VERSION
+        || attestation.orchestrator_contract != P7_RELEASE_GATE_ORCHESTRATOR_CONTRACT
+        || verify_p7_release_gate_plan(&attestation.plan).is_err()
+        || &attestation.identity != expected_identity
+        || !is_sha256(&attestation.source_fingerprint)
+        || !is_sha256(&attestation.source_manifest_sha256)
+        || p7_release_gate_environment_sha256(&attestation.environment.variables)?
+            != attestation.environment.sha256
+        || !is_sha256(&attestation.environment.sha256)
+    {
+        return Err(p7_preflight_error(
+            "P7 release gate attestation header or identity mismatch",
+        ));
+    }
+    let specs = p7_required_release_gate_specs(sdk_root, runner_root)?;
+    let tools = attestation
+        .tools
+        .iter()
+        .map(|tool| (tool.logical_name.as_str(), tool))
+        .collect::<BTreeMap<_, _>>();
+    if attestation.gates.len() != specs.len()
+        || tools.len() != 2
+        || !tools.contains_key("cargo")
+        || !tools.contains_key("bash")
+        || !p7_release_gate_environment_is_whitelisted(&attestation.environment.variables)
+    {
+        return Err(p7_preflight_error(
+            "P7 release gate attestation does not cover the fixed gate set",
+        ));
+    }
+    for tool in tools.values() {
+        if !Path::new(&tool.canonical_path).is_absolute()
+            || !is_sha256(&tool.sha256)
+            || tool.version.trim().is_empty()
+        {
+            return Err(p7_preflight_error(
+                "P7 release gate tool identity is invalid",
+            ));
+        }
+    }
+    for (receipt, spec) in attestation.gates.iter().zip(specs) {
+        let logical_program = spec
+            .argv
+            .first()
+            .ok_or_else(|| p7_preflight_error("P7 release gate argv is empty"))?;
+        let tool = tools
+            .get(logical_program.as_str())
+            .ok_or_else(|| p7_preflight_error("P7 release gate tool is unattested"))?;
+        let expected_argv = std::iter::once(tool.canonical_path.clone())
+            .chain(spec.argv.into_iter().skip(1))
+            .collect::<Vec<_>>();
+        if receipt.gate_id != spec.gate_id
+            || receipt.owner_root != spec.owner_root
+            || receipt.argv != expected_argv
+            || receipt.tool_sha256 != tool.sha256
+            || receipt.environment_sha256 != attestation.environment.sha256
+            || receipt.exit_code != 0
+            || !is_sha256(&receipt.stdout_sha256)
+            || !is_sha256(&receipt.stderr_sha256)
+            || receipt.source_fingerprint_after != attestation.source_fingerprint
+        {
+            return Err(p7_preflight_error(
+                "P7 release gate attestation receipt mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn p7_release_gate_environment_is_whitelisted(variables: &BTreeMap<String, String>) -> bool {
+    const REQUIRED: [&str; 5] = [
+        "CARGO_NET_OFFLINE",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "RUST_BACKTRACE",
+    ];
+    const OPTIONAL: [&str; 6] = [
+        "CARGO_HOME",
+        "HOME",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "RUSTUP_HOME",
+        "SDKROOT",
+        "TMPDIR",
+    ];
+    REQUIRED.into_iter().all(|key| variables.contains_key(key))
+        && variables
+            .keys()
+            .all(|key| REQUIRED.contains(&key.as_str()) || OPTIONAL.contains(&key.as_str()))
+        && variables.get("CARGO_NET_OFFLINE").map(String::as_str) == Some("true")
+        && variables.get("LANG").map(String::as_str) == Some("C")
+        && variables.get("LC_ALL").map(String::as_str) == Some("C")
+        && variables.get("RUST_BACKTRACE").map(String::as_str) == Some("0")
+}
+
+fn p7_release_gate_environment_sha256(variables: &BTreeMap<String, String>) -> Result<String> {
+    let mut hasher = Sha256::new();
+    p7_hash_fingerprint_field(&mut hasher, b"beetle-memory:p7:release-gate-environment:v1")?;
+    hasher.update(
+        u64::try_from(variables.len())
+            .map_err(|_| p7_preflight_error("P7 release gate environment is too large"))?
+            .to_le_bytes(),
+    );
+    for (key, value) in variables {
+        p7_hash_fingerprint_field(&mut hasher, key.as_bytes())?;
+        p7_hash_fingerprint_field(&mut hasher, value.as_bytes())?;
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn p7_runner_producer_disk_identity_with_reads(
+    benchmark_root: &Path,
+    preflight: &P7RunnerPreflightReport,
+    session: &mut P7ArtifactReadSession,
+) -> Result<P7RunnerDiskIdentity> {
+    p7_require_canonical_real_directory(benchmark_root)?;
+    let expected_executable_path =
+        p7_runner_release_executable_path(benchmark_root, &preflight.executable_sha256)?;
+    let expected_parent = expected_executable_path
+        .parent()
+        .ok_or_else(|| p7_preflight_error("P7 producer release path has no parent"))?;
+    p7_require_canonical_real_directory(expected_parent)?;
+    let attestation_path = expected_parent.join(P7_RELEASE_GATE_ATTESTATION_FILE_NAME);
+    let metadata_path = expected_parent.join(P7_RELEASE_METADATA_FILE_NAME);
+    let source_manifest_path = expected_parent.join(P7_RELEASE_GATE_SOURCE_MANIFEST_FILE_NAME);
+
+    let (executable_sha256, _) = session.read_raw(
+        &expected_executable_path,
+        expected_parent,
+        benchmark_root,
+        Some(&preflight.executable_sha256),
+        P7ArtifactReadKind::Release,
+    )?;
+    let (attestation, attestation_sha256) = session.read_json::<P7ReleaseGateAttestation>(
+        &attestation_path,
+        expected_parent,
+        benchmark_root,
+        Some(&preflight.gate_attestation_sha256),
+        P7ArtifactReadKind::Release,
+        "p7_producer_parse_gate_attestation",
+    )?;
+    let (metadata, metadata_sha256) = session.read_json::<P7ReleaseMetadata>(
+        &metadata_path,
+        expected_parent,
+        benchmark_root,
+        Some(&preflight.release_metadata_sha256),
+        P7ArtifactReadKind::Release,
+        "p7_producer_parse_release_metadata",
+    )?;
+    let (source_manifest, source_manifest_sha256) = session.read_json::<P7ReleaseSourceManifest>(
+        &source_manifest_path,
+        expected_parent,
+        benchmark_root,
+        Some(&preflight.gate_source_manifest_sha256),
+        P7ArtifactReadKind::Release,
+        "p7_producer_parse_source_manifest",
+    )?;
+    let gate_ids = attestation
+        .gates
+        .iter()
+        .map(|gate| gate.gate_id.clone())
+        .collect::<Vec<_>>();
+    if metadata.schema_version != P7_RELEASE_METADATA_SCHEMA_VERSION
+        || attestation.schema_version != P7_RELEASE_GATE_ATTESTATION_SCHEMA_VERSION
+        || source_manifest.schema_version != P7_RELEASE_GATE_SOURCE_MANIFEST_SCHEMA_VERSION
+        || metadata.identity != attestation.identity
+        || metadata.identity.executable_sha256 != executable_sha256
+        || metadata.identity.build_profile != "release"
+        || metadata.canonical_executable_path != expected_executable_path.to_string_lossy()
+        || metadata.gate_attestation_sha256 != attestation_sha256
+        || metadata.gate_source_manifest_sha256 != source_manifest_sha256
+        || attestation.source_manifest_sha256 != source_manifest_sha256
+        || metadata.gate_source_fingerprint != attestation.source_fingerprint
+        || metadata.gate_source_fingerprint != source_manifest.source_fingerprint
+        || metadata.gate_ids != gate_ids
+        || gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        || attestation.gates.iter().any(|gate| gate.exit_code != 0)
+    {
+        return Err(p7_preflight_error(
+            "P7 immutable producer release governance is inconsistent",
+        ));
+    }
     Ok(P7RunnerDiskIdentity {
-        runner_build_fingerprint: p7_fingerprint_files_with_contract(
-            &runner_root,
-            &runner_inputs,
-            P7_RUNNER_BUILD_FINGERPRINT_CONTRACT,
-        )?,
-        runner_lock_fingerprint: p7_sha256_file(&runner_root.join("Cargo.lock"))?,
-        executable_sha256: p7_sha256_file(&benchmark_root.join(P7_RUNNER_RELEASE_BINARY))?,
+        runner_build_fingerprint: metadata.identity.runner_build_fingerprint,
+        runner_lock_fingerprint: metadata.identity.runner_lock_fingerprint,
+        executable_sha256: metadata.identity.executable_sha256,
+        executable_canonical_path: expected_executable_path,
+        gate_attestation_sha256: attestation_sha256,
+        release_metadata_sha256: metadata_sha256,
+        gate_source_fingerprint: metadata.gate_source_fingerprint,
+        gate_source_manifest_sha256: source_manifest_sha256,
+        gate_ids,
+    })
+}
+
+#[cfg(test)]
+fn p7_runner_disk_identity_for_release_sha(
+    benchmark_root: &Path,
+    executable_sha256: &str,
+) -> Result<P7RunnerDiskIdentity> {
+    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| p7_preflight_error("bm-replay is not under the SDK workspace root"))?;
+    let canonical_sdk_root = fs::canonicalize(sdk_root).map_err(|source| Error::Io {
+        source,
+        stage: "p7_runner_preflight_canonicalize_sdk_root",
+    })?;
+    let runner_root = benchmark_root.join("runner");
+    let mut session = P7ArtifactReadSession::default();
+    let source = p7_release_gate_source_material_in_session(
+        &canonical_sdk_root,
+        &runner_root,
+        &mut session,
+        true,
+    )?;
+    let disk = p7_runner_disk_identity_for_release_sha_in_session(
+        benchmark_root,
+        executable_sha256,
+        &canonical_sdk_root,
+        &runner_root,
+        &source,
+        &mut session,
+    )?;
+    session.verify_retained()?;
+    Ok(disk)
+}
+
+fn p7_runner_disk_identity_for_release_sha_in_session(
+    benchmark_root: &Path,
+    executable_sha256: &str,
+    canonical_sdk_root: &Path,
+    canonical_runner_source_root: &Path,
+    source: &P7ReleaseGateSourceMaterial,
+    session: &mut P7ArtifactReadSession,
+) -> Result<P7RunnerDiskIdentity> {
+    p7_require_canonical_real_directory(benchmark_root)?;
+    let runner_root = benchmark_root.join("runner");
+    p7_require_canonical_real_directory(&runner_root)?;
+    let expected_executable_path =
+        p7_runner_release_executable_path(benchmark_root, executable_sha256)?;
+    let expected_parent = expected_executable_path
+        .parent()
+        .ok_or_else(|| p7_preflight_error("frozen P7 runner path has no parent"))?;
+    p7_require_canonical_real_directory(expected_parent)?;
+    let canonical_runner_root = runner_root.clone();
+    let canonical_expected_parent =
+        fs::canonicalize(expected_parent).map_err(|source| Error::Io {
+            source,
+            stage: "p7_runner_preflight_canonicalize_frozen_executable_parent",
+        })?;
+    let expected_release_parent = canonical_runner_root
+        .join(P7_RUNNER_RELEASES_DIR)
+        .join(executable_sha256);
+    if canonical_expected_parent != expected_release_parent {
+        return Err(p7_preflight_error(
+            "frozen P7 runner release directory is not the content-addressed owner path",
+        ));
+    }
+    let attestation_path = expected_parent.join(P7_RELEASE_GATE_ATTESTATION_FILE_NAME);
+    let metadata_path = expected_parent.join(P7_RELEASE_METADATA_FILE_NAME);
+    let source_manifest_path = expected_parent.join(P7_RELEASE_GATE_SOURCE_MANIFEST_FILE_NAME);
+    let (actual_executable_sha256, _) = session.read_raw(
+        &expected_executable_path,
+        expected_parent,
+        benchmark_root,
+        Some(executable_sha256),
+        P7ArtifactReadKind::Release,
+    )?;
+    let (attestation, attestation_sha256) = session.read_json::<P7ReleaseGateAttestation>(
+        &attestation_path,
+        expected_parent,
+        benchmark_root,
+        None,
+        P7ArtifactReadKind::Release,
+        "p7_runner_preflight_parse_release_gate_attestation",
+    )?;
+    let (metadata, metadata_sha256) = session.read_json::<P7ReleaseMetadata>(
+        &metadata_path,
+        expected_parent,
+        benchmark_root,
+        None,
+        P7ArtifactReadKind::Release,
+        "p7_runner_preflight_parse_release_metadata",
+    )?;
+    let (source_manifest, source_manifest_sha256) = session.read_json::<P7ReleaseSourceManifest>(
+        &source_manifest_path,
+        expected_parent,
+        benchmark_root,
+        None,
+        P7ArtifactReadKind::Release,
+        "p7_runner_preflight_parse_release_source_manifest",
+    )?;
+    #[cfg(unix)]
+    if fs::symlink_metadata(&expected_executable_path)
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_runner_preflight_stat_frozen_executable_mode",
+        })?
+        .mode()
+        & 0o111
+        == 0
+    {
+        return Err(p7_preflight_error(
+            "frozen P7 runner release is not executable",
+        ));
+    }
+    let executable_canonical_path = expected_executable_path.clone();
+    if executable_canonical_path != canonical_expected_parent.join(P7_RUNNER_RELEASE_FILE_NAME) {
+        return Err(p7_preflight_error(
+            "frozen P7 runner executable escaped its content-addressed release path",
+        ));
+    }
+    let runner_build_fingerprint = source.runner_build_fingerprint.clone();
+    let runner_lock_fingerprint = source.runner_lock_fingerprint.clone();
+    let expected_identity = P7RunnerBuildIdentity {
+        sdk_build_fingerprint: P7_TRUSTED_SDK_BUILD_FINGERPRINT.to_string(),
+        runner_build_fingerprint: runner_build_fingerprint.clone(),
+        runner_lock_fingerprint: runner_lock_fingerprint.clone(),
+        executable_sha256: actual_executable_sha256.clone(),
+        build_profile: "release".to_string(),
+    };
+    validate_p7_release_gate_attestation(
+        &attestation,
+        &expected_identity,
+        canonical_sdk_root,
+        canonical_runner_source_root,
+    )?;
+    let attested_gate_ids = attestation
+        .gates
+        .iter()
+        .map(|gate| gate.gate_id.clone())
+        .collect::<Vec<_>>();
+    let required_gate_ids = P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec();
+    let executable_path = executable_canonical_path
+        .to_str()
+        .ok_or_else(|| p7_preflight_error("P7 runner canonical path is not valid UTF-8"))?;
+    if metadata.schema_version != P7_RELEASE_METADATA_SCHEMA_VERSION
+        || metadata.canonical_executable_path != executable_path
+        || metadata.identity != expected_identity
+        || metadata.identity != attestation.identity
+        || metadata.gate_attestation_sha256 != attestation_sha256
+        || !is_sha256(&metadata.gate_attestation_sha256)
+        || metadata.gate_source_fingerprint != attestation.source_fingerprint
+        || metadata.gate_source_fingerprint != source_manifest.source_fingerprint
+        || !is_sha256(&metadata.gate_source_fingerprint)
+        || source_manifest.schema_version != P7_RELEASE_GATE_SOURCE_MANIFEST_SCHEMA_VERSION
+        || source_manifest.fingerprint_contract != P7_RELEASE_GATE_SOURCE_FINGERPRINT_CONTRACT
+        || source_manifest != source.manifest
+        || attestation.source_manifest_sha256 != source_manifest_sha256
+        || metadata.gate_source_manifest_sha256 != source_manifest_sha256
+        || metadata.gate_ids != required_gate_ids
+        || metadata.gate_ids != attested_gate_ids
+    {
+        return Err(p7_preflight_error(
+            "P7 release metadata does not bind the exact governed release",
+        ));
+    }
+    Ok(P7RunnerDiskIdentity {
+        runner_build_fingerprint,
+        runner_lock_fingerprint,
+        executable_sha256: actual_executable_sha256,
+        executable_canonical_path,
+        gate_attestation_sha256: attestation_sha256,
+        release_metadata_sha256: metadata_sha256,
+        gate_source_fingerprint: attestation.source_fingerprint,
+        gate_source_manifest_sha256: source_manifest_sha256,
+        gate_ids: attested_gate_ids,
     })
 }
 
@@ -1807,6 +6728,414 @@ fn p7_fingerprint_inputs(root: &Path, relatives: &[&str]) -> Result<Vec<PathBuf>
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+#[cfg(test)]
+fn p7_operator_build_inputs(root: &Path) -> Result<Vec<PathBuf>> {
+    p7_fingerprint_inputs(root, &P7_OPERATOR_BUILD_INPUTS)
+}
+
+pub fn p7_release_gate_source_fingerprint(sdk_root: &Path, runner_root: &Path) -> Result<String> {
+    Ok(p7_release_gate_source_manifest(sdk_root, runner_root)?.source_fingerprint)
+}
+
+pub fn p7_release_gate_source_manifest(
+    sdk_root: &Path,
+    runner_root: &Path,
+) -> Result<P7ReleaseSourceManifest> {
+    Ok(p7_release_gate_source_manifest_with_receipt(sdk_root, runner_root)?.0)
+}
+
+pub fn p7_producer_semantic_source_manifest(
+    sdk_root: &Path,
+    runner_root: &Path,
+) -> Result<P7ReleaseSourceManifest> {
+    let broad = p7_release_gate_source_manifest(sdk_root, runner_root)?;
+    let entries = broad
+        .entries
+        .into_iter()
+        .filter(|entry| {
+            let inputs = if entry.owner == "agent-memory" {
+                &P7_PRODUCER_SEMANTIC_AGENT_MEMORY_INPUTS[..]
+            } else if entry.owner == "external-runner" {
+                &P7_PRODUCER_SEMANTIC_RUNNER_INPUTS[..]
+            } else {
+                return false;
+            };
+            inputs
+                .iter()
+                .any(|input| p7_manifest_input_contains(input, &entry.relative_path))
+        })
+        .collect::<Vec<_>>();
+    p7_source_manifest_from_entries(
+        entries,
+        P7_PRODUCER_SEMANTIC_SOURCE_MANIFEST_SCHEMA_VERSION,
+        P7_PRODUCER_SEMANTIC_SOURCE_FINGERPRINT_CONTRACT,
+    )
+}
+
+fn p7_manifest_input_contains(input: &str, relative_path: &str) -> bool {
+    input == "."
+        || relative_path == input
+        || relative_path
+            .strip_prefix(input)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+pub fn p7_release_gate_source_manifest_with_receipt(
+    sdk_root: &Path,
+    runner_root: &Path,
+) -> Result<(P7ReleaseSourceManifest, P7ArtifactLifecycleReceipt)> {
+    let mut session = P7ArtifactReadSession::default();
+    let material =
+        p7_release_gate_source_material_in_session(sdk_root, runner_root, &mut session, false)?;
+    session.verify_retained()?;
+    let receipt = session.lifecycle_receipt("release_source_manifest");
+    Ok((material.manifest, receipt))
+}
+
+struct P7ReleaseGateSourceMaterial {
+    manifest: P7ReleaseSourceManifest,
+    sdk_build_fingerprint: String,
+    runner_build_fingerprint: String,
+    runner_lock_fingerprint: String,
+}
+
+fn p7_release_gate_source_material_in_session(
+    sdk_root: &Path,
+    runner_root: &Path,
+    session: &mut P7ArtifactReadSession,
+    include_build_fingerprints: bool,
+) -> Result<P7ReleaseGateSourceMaterial> {
+    p7_require_canonical_real_directory(sdk_root)?;
+    p7_require_canonical_real_directory(runner_root)?;
+    let sdk_files = p7_release_gate_fingerprint_inputs(
+        sdk_root,
+        &P7_AGENT_MEMORY_RELEASE_GATE_SOURCE_INPUTS,
+        &[P7_FROZEN_RUNNER_IDENTITY_RELATIVE_PATH],
+        &P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES,
+    )?;
+    let runner_files = p7_release_gate_fingerprint_inputs(
+        runner_root,
+        &P7_RUNNER_RELEASE_GATE_SOURCE_INPUTS,
+        &[],
+        &P7_RUNNER_RELEASE_GATE_EXCLUDED_DIRECTORIES,
+    )?;
+    let source_file_count = sdk_files
+        .len()
+        .checked_add(runner_files.len())
+        .ok_or_else(|| p7_preflight_error("P7 release source file count overflow"))?;
+    if source_file_count > P7_MAX_RELEASE_SOURCE_FILES {
+        return Err(p7_preflight_error(
+            "P7 release source exceeds its bounded file count",
+        ));
+    }
+    let sdk_build_inputs = if include_build_fingerprints {
+        p7_fingerprint_inputs(sdk_root, &P7_SDK_BUILD_INPUTS)?
+    } else {
+        Vec::new()
+    };
+    let runner_build_inputs = if include_build_fingerprints {
+        p7_fingerprint_inputs(runner_root, &P7_RUNNER_BUILD_INPUTS)?
+    } else {
+        Vec::new()
+    };
+    let sdk_build_set = sdk_build_inputs.iter().cloned().collect::<BTreeSet<_>>();
+    let runner_build_set = runner_build_inputs.iter().cloned().collect::<BTreeSet<_>>();
+    let mut sdk_build_hasher = Sha256::new();
+    let mut runner_build_hasher = Sha256::new();
+    if include_build_fingerprints {
+        p7_hash_fingerprint_field(
+            &mut sdk_build_hasher,
+            P7_SDK_BUILD_FINGERPRINT_CONTRACT.as_bytes(),
+        )?;
+        sdk_build_hasher.update(
+            u64::try_from(sdk_build_inputs.len())
+                .map_err(|_| p7_preflight_error("P7 SDK build input count overflow"))?
+                .to_le_bytes(),
+        );
+        p7_hash_fingerprint_field(
+            &mut runner_build_hasher,
+            P7_RUNNER_BUILD_FINGERPRINT_CONTRACT.as_bytes(),
+        )?;
+        runner_build_hasher.update(
+            u64::try_from(runner_build_inputs.len())
+                .map_err(|_| p7_preflight_error("P7 runner build input count overflow"))?
+                .to_le_bytes(),
+        );
+    }
+    let mut entries = Vec::with_capacity(sdk_files.len() + runner_files.len());
+    let mut runner_lock_fingerprint = String::new();
+    let sdk_excluded_files = [P7_FROZEN_RUNNER_IDENTITY_RELATIVE_PATH];
+    let runner_excluded_files: [&str; 0] = [];
+    for (owner, root, files, excluded_files, excluded_directories) in [
+        (
+            "agent-memory",
+            sdk_root,
+            sdk_files,
+            &sdk_excluded_files[..],
+            &P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES[..],
+        ),
+        (
+            "external-runner",
+            runner_root,
+            runner_files,
+            &runner_excluded_files[..],
+            &P7_RUNNER_RELEASE_GATE_EXCLUDED_DIRECTORIES[..],
+        ),
+    ] {
+        for file in files {
+            let relative = file.strip_prefix(root).map_err(|_| {
+                p7_preflight_error("release gate source input escaped its canonical root")
+            })?;
+            let metadata = fs::symlink_metadata(&file).map_err(|source| Error::Io {
+                source,
+                stage: "p7_preflight_stat_release_gate_manifest_entry",
+            })?;
+            let build_hasher = if owner == "agent-memory" && sdk_build_set.contains(&file) {
+                Some(&mut sdk_build_hasher)
+            } else if owner == "external-runner" && runner_build_set.contains(&file) {
+                Some(&mut runner_build_hasher)
+            } else {
+                None
+            };
+            let (entry_kind, byte_len, sha256) = if metadata.file_type().is_symlink() {
+                if build_hasher.is_some() {
+                    return Err(p7_preflight_error(
+                        "P7 build fingerprint inputs must not be symbolic links",
+                    ));
+                }
+                let target = fs::read_link(&file).map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_preflight_read_release_gate_symlink",
+                })?;
+                let canonical_target = fs::canonicalize(&file).map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_preflight_canonicalize_release_gate_symlink",
+                })?;
+                if !canonical_target.starts_with(root)
+                    || p7_release_gate_source_path_is_excluded(
+                        root,
+                        &canonical_target,
+                        excluded_files,
+                        excluded_directories,
+                    )?
+                    || fs::read_link(&file).map_err(|source| Error::Io {
+                        source,
+                        stage: "p7_preflight_reread_release_gate_symlink",
+                    })? != target
+                    || P7RegularFileFreshness::from_metadata(&fs::symlink_metadata(&file).map_err(
+                        |source| Error::Io {
+                            source,
+                            stage: "p7_preflight_restat_release_gate_symlink",
+                        },
+                    )?) != P7RegularFileFreshness::from_metadata(&metadata)
+                {
+                    return Err(p7_preflight_error(
+                        "P7 release gate symlink escaped its owner or changed during capture",
+                    ));
+                }
+                let target_bytes = target.as_os_str().as_encoded_bytes();
+                (
+                    P7ReleaseSourceManifestEntryKind::SymbolicLink,
+                    u64::try_from(target_bytes.len()).map_err(|_| {
+                        p7_preflight_error("P7 release gate symlink target is too large")
+                    })?,
+                    format!("{:x}", Sha256::digest(target_bytes)),
+                )
+            } else {
+                let parent = file.parent().ok_or_else(|| {
+                    p7_preflight_error("release gate source file has no owner directory")
+                })?;
+                let (sha256, byte_len) = if let Some(hasher) = build_hasher {
+                    p7_hash_fingerprint_field(hasher, relative.to_string_lossy().as_bytes())?;
+                    let (_, sha256, byte_len) = session.read_with(
+                        &file,
+                        parent,
+                        root,
+                        None,
+                        P7ArtifactReadKind::Release,
+                        |reader, expected_len| {
+                            p7_hash_fingerprint_reader(hasher, expected_len, reader)
+                        },
+                    )?;
+                    (sha256, byte_len)
+                } else {
+                    session.read_raw(&file, parent, root, None, P7ArtifactReadKind::Release)?
+                };
+                if owner == "external-runner" && relative == Path::new("Cargo.lock") {
+                    runner_lock_fingerprint = sha256.clone();
+                }
+                (
+                    P7ReleaseSourceManifestEntryKind::RegularFile,
+                    byte_len,
+                    sha256,
+                )
+            };
+            entries.push(P7ReleaseSourceManifestEntry {
+                owner: owner.to_string(),
+                relative_path: relative.to_string_lossy().into_owned(),
+                entry_kind,
+                byte_len,
+                sha256,
+            });
+        }
+    }
+    let manifest = p7_source_manifest_from_entries(
+        entries,
+        P7_RELEASE_GATE_SOURCE_MANIFEST_SCHEMA_VERSION,
+        P7_RELEASE_GATE_SOURCE_FINGERPRINT_CONTRACT,
+    )?;
+    if include_build_fingerprints && !is_sha256(&runner_lock_fingerprint) {
+        return Err(p7_preflight_error(
+            "P7 runner Cargo.lock is missing from release gate source inputs",
+        ));
+    }
+    Ok(P7ReleaseGateSourceMaterial {
+        manifest,
+        sdk_build_fingerprint: if include_build_fingerprints {
+            format!("{:x}", sdk_build_hasher.finalize())
+        } else {
+            String::new()
+        },
+        runner_build_fingerprint: if include_build_fingerprints {
+            format!("{:x}", runner_build_hasher.finalize())
+        } else {
+            String::new()
+        },
+        runner_lock_fingerprint,
+    })
+}
+
+fn p7_source_manifest_from_entries(
+    mut entries: Vec<P7ReleaseSourceManifestEntry>,
+    schema_version: &str,
+    fingerprint_contract: &str,
+) -> Result<P7ReleaseSourceManifest> {
+    entries.sort_by(|left, right| {
+        (&left.owner, &left.relative_path).cmp(&(&right.owner, &right.relative_path))
+    });
+    let mut hasher = Sha256::new();
+    p7_hash_fingerprint_field(&mut hasher, fingerprint_contract.as_bytes())?;
+    hasher.update(
+        u64::try_from(entries.len())
+            .map_err(|_| p7_preflight_error("release gate source input count overflow"))?
+            .to_le_bytes(),
+    );
+    for entry in &entries {
+        p7_hash_fingerprint_field(&mut hasher, entry.owner.as_bytes())?;
+        p7_hash_fingerprint_field(&mut hasher, entry.relative_path.as_bytes())?;
+        p7_hash_fingerprint_field(
+            &mut hasher,
+            match entry.entry_kind {
+                P7ReleaseSourceManifestEntryKind::RegularFile => b"regular_file",
+                P7ReleaseSourceManifestEntryKind::SymbolicLink => b"symbolic_link",
+            },
+        )?;
+        hasher.update(entry.byte_len.to_le_bytes());
+        p7_hash_fingerprint_field(&mut hasher, entry.sha256.as_bytes())?;
+    }
+    Ok(P7ReleaseSourceManifest {
+        schema_version: schema_version.to_string(),
+        fingerprint_contract: fingerprint_contract.to_string(),
+        source_fingerprint: format!("{:x}", hasher.finalize()),
+        entries,
+    })
+}
+
+fn p7_release_gate_fingerprint_inputs(
+    root: &Path,
+    relatives: &[&str],
+    excluded_relative_files: &[&str],
+    excluded_relative_directories: &[&str],
+) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for relative in relatives {
+        p7_collect_release_gate_source_files(
+            root,
+            &root.join(relative),
+            excluded_relative_files,
+            excluded_relative_directories,
+            &mut files,
+        )?;
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn p7_collect_release_gate_source_files(
+    root: &Path,
+    path: &Path,
+    excluded_relative_files: &[&str],
+    excluded_relative_directories: &[&str],
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if p7_release_gate_source_path_is_excluded(
+        root,
+        path,
+        excluded_relative_files,
+        excluded_relative_directories,
+    )? {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|source| Error::Io {
+        source,
+        stage: "p7_preflight_stat_release_gate_source",
+    })?;
+    if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        files.push(path.to_path_buf());
+        return Ok(());
+    }
+    if !metadata.file_type().is_dir() {
+        return Err(p7_preflight_error(
+            "P7 release gate source input must be a regular file or directory",
+        ));
+    }
+    let mut entries = fs::read_dir(path)
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_preflight_read_release_gate_source_directory",
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_preflight_read_release_gate_source_directory",
+        })?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        p7_collect_release_gate_source_files(
+            root,
+            &entry.path(),
+            excluded_relative_files,
+            excluded_relative_directories,
+            files,
+        )?;
+    }
+    Ok(())
+}
+
+fn p7_release_gate_source_path_is_excluded(
+    root: &Path,
+    path: &Path,
+    excluded_relative_files: &[&str],
+    excluded_relative_directories: &[&str],
+) -> Result<bool> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| p7_preflight_error("release gate source input escaped its canonical root"))?;
+    Ok(excluded_relative_files
+        .iter()
+        .any(|excluded| relative == Path::new(excluded))
+        || excluded_relative_directories
+            .iter()
+            .any(|excluded| relative == Path::new(excluded) || relative.starts_with(excluded))
+        || relative.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| P7_RELEASE_GATE_EXCLUDED_DIRECTORY_NAMES.contains(&name))
+        }))
 }
 
 fn p7_collect_regular_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -1836,6 +7165,7 @@ fn p7_collect_regular_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()>
     Ok(())
 }
 
+#[cfg(test)]
 fn p7_fingerprint_files_with_contract(
     root: &Path,
     files: &[PathBuf],
@@ -1851,13 +7181,58 @@ fn p7_fingerprint_files_with_contract(
             .strip_prefix(root)
             .map_err(|_| p7_provenance_error("build input is outside the fingerprint root"))?;
         p7_hash_fingerprint_field(&mut hasher, relative.to_string_lossy().as_bytes())?;
-        let content = fs::read(file).map_err(|source| Error::Io {
+        p7_hash_fingerprint_file(&mut hasher, file)?;
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+fn p7_hash_fingerprint_file(hasher: &mut Sha256, path: &Path) -> Result<()> {
+    let file = File::open(path).map_err(|source| Error::Io {
+        source,
+        stage: "p7_provenance_open_runner_build_input",
+    })?;
+    let expected_len = file
+        .metadata()
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_provenance_stat_runner_build_input",
+        })?
+        .len();
+    let mut reader = BufReader::with_capacity(P7_FINGERPRINT_READ_BUFFER_BYTES, file);
+    p7_hash_fingerprint_reader(hasher, expected_len, &mut reader)
+}
+
+fn p7_hash_fingerprint_reader<R: Read + ?Sized>(
+    hasher: &mut Sha256,
+    expected_len: u64,
+    reader: &mut R,
+) -> Result<()> {
+    hasher.update(expected_len.to_le_bytes());
+    let mut actual_len = 0_u64;
+    let mut buffer = [0_u8; P7_FINGERPRINT_READ_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|source| Error::Io {
             source,
             stage: "p7_provenance_hash_runner_build_input",
         })?;
-        p7_hash_fingerprint_field(&mut hasher, &content)?;
+        if read == 0 {
+            break;
+        }
+        actual_len = actual_len
+            .checked_add(
+                u64::try_from(read)
+                    .map_err(|_| p7_provenance_error("runner build input length overflow"))?,
+            )
+            .ok_or_else(|| p7_provenance_error("runner build input length overflow"))?;
+        hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    if actual_len != expected_len {
+        return Err(p7_provenance_error(
+            "runner build input changed while fingerprinting",
+        ));
+    }
+    Ok(())
 }
 
 fn p7_hash_fingerprint_field(hasher: &mut Sha256, value: &[u8]) -> Result<()> {
@@ -1868,12 +7243,17 @@ fn p7_hash_fingerprint_field(hasher: &mut Sha256, value: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn p7_sha256_file(path: &Path) -> Result<String> {
-    let file = File::open(path).map_err(|source| Error::Io {
+    let mut file = File::open(path).map_err(|source| Error::Io {
         source,
         stage: "p7_provenance_read_runner_release_binary",
     })?;
-    let mut reader = BufReader::new(file);
+    p7_sha256_reader(&mut file)
+}
+
+#[cfg(test)]
+fn p7_sha256_reader(reader: &mut impl Read) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -1906,14 +7286,10 @@ struct P7ExpectedDataset {
 }
 
 fn load_p7_dataset_expectation(
-    path: &Path,
+    file: impl Read,
     dataset: P7TrustedDataset,
     shard_count: usize,
 ) -> Result<P7ExpectedDataset> {
-    let file = File::open(path).map_err(|source| Error::Io {
-        source,
-        stage: "p7_provenance_open_input_dataset",
-    })?;
     let mut stream = P7JsonArrayObjectStream::new(file);
     let mut samples_by_shard = vec![0_usize; shard_count];
     let mut questions_by_shard = vec![Vec::new(); shard_count];
@@ -1935,7 +7311,7 @@ fn load_p7_dataset_expectation(
         }
         dataset_index = dataset_index.saturating_add(1);
     }
-    let input_sha256 = stream.finish_sha256()?;
+    let (input_sha256, _) = stream.finish()?;
     if input_sha256 != dataset.input_sha256 {
         return Err(p7_provenance_error("trusted input dataset bytes changed"));
     }
@@ -1999,6 +7375,7 @@ fn p7_longmemeval_expected_question(
 struct P7HashingReader<R> {
     inner: R,
     hasher: Sha256,
+    bytes_read: u64,
 }
 
 impl<R> P7HashingReader<R> {
@@ -2006,11 +7383,12 @@ impl<R> P7HashingReader<R> {
         Self {
             inner,
             hasher: Sha256::new(),
+            bytes_read: 0,
         }
     }
 
-    fn finish_sha256(self) -> String {
-        format!("{:x}", self.hasher.finalize())
+    fn finish(self) -> (String, u64) {
+        (format!("{:x}", self.hasher.finalize()), self.bytes_read)
     }
 }
 
@@ -2018,22 +7396,34 @@ impl<R: Read> Read for P7HashingReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
         self.hasher.update(&buffer[..read]);
+        self.bytes_read = self.bytes_read.checked_add(read as u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "P7 artifact bytes-read overflow",
+            )
+        })?;
         Ok(read)
     }
 }
 
-struct P7JsonArrayObjectStream {
-    reader: BufReader<P7HashingReader<File>>,
+struct P7JsonArrayObjectStream<R> {
+    reader: BufReader<P7HashingReader<R>>,
     started: bool,
     finished: bool,
+    max_object_bytes: usize,
 }
 
-impl P7JsonArrayObjectStream {
-    fn new(file: File) -> Self {
+impl<R: Read> P7JsonArrayObjectStream<R> {
+    fn new(file: R) -> Self {
+        Self::with_object_limit(file, P7_MAX_DATASET_OBJECT_BYTES)
+    }
+
+    fn with_object_limit(file: R, max_object_bytes: usize) -> Self {
         Self {
             reader: BufReader::new(P7HashingReader::new(file)),
             started: false,
             finished: false,
+            max_object_bytes,
         }
     }
 
@@ -2079,6 +7469,11 @@ impl P7JsonArrayObjectStream {
             if self.read_byte(&mut byte)? == 0 {
                 return Err(p7_provenance_error("unexpected EOF inside dataset object"));
             }
+            if bytes.len() >= self.max_object_bytes {
+                return Err(p7_provenance_error(
+                    "input dataset object exceeds its allocation ceiling",
+                ));
+            }
             let current = byte[0];
             bytes.push(current);
             if in_string {
@@ -2106,21 +7501,30 @@ impl P7JsonArrayObjectStream {
             })
     }
 
-    fn finish_sha256(mut self) -> Result<String> {
+    fn finish(mut self) -> Result<(String, u64)> {
         if !self.finished {
             return Err(p7_provenance_error("input dataset was not fully consumed"));
         }
-        let mut trailing = Vec::new();
-        self.reader
-            .read_to_end(&mut trailing)
-            .map_err(|source| Error::Io {
-                source,
-                stage: "p7_provenance_hash_input_dataset",
-            })?;
-        if trailing.iter().any(|byte| !byte.is_ascii_whitespace()) {
-            return Err(p7_provenance_error("input dataset has trailing content"));
+        let mut trailing = [0_u8; P7_FINGERPRINT_READ_BUFFER_BYTES];
+        loop {
+            let read = self
+                .reader
+                .read(&mut trailing)
+                .map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_provenance_hash_input_dataset",
+                })?;
+            if read == 0 {
+                break;
+            }
+            if trailing[..read]
+                .iter()
+                .any(|byte| !byte.is_ascii_whitespace())
+            {
+                return Err(p7_provenance_error("input dataset has trailing content"));
+            }
         }
-        Ok(self.reader.into_inner().finish_sha256())
+        Ok(self.reader.into_inner().finish())
     }
 
     fn read_byte(&mut self, byte: &mut [u8; 1]) -> Result<usize> {
@@ -2224,6 +7628,7 @@ struct P7DetailAggregate {
     p7_loss_ledger: W4ExternalNoisyP7LossDiagnostics,
     p7_production_delivery: W4ExternalNoisyP7ProductionDeliveryDiagnostics,
     source_signature_counts: BTreeMap<String, usize>,
+    streamed_bytes_read: u64,
 }
 
 impl P7DetailAggregate {
@@ -2237,6 +7642,10 @@ impl P7DetailAggregate {
         self.all_evidence_hit = self.all_evidence_hit.saturating_add(other.all_evidence_hit);
         self.write_errors = self.write_errors.saturating_add(other.write_errors);
         self.recall_errors = self.recall_errors.saturating_add(other.recall_errors);
+        self.streamed_bytes_read = self
+            .streamed_bytes_read
+            .checked_add(other.streamed_bytes_read)
+            .ok_or_else(|| p7_provenance_error("P7 detail bytes-read overflow"))?;
         add_stage_hit_counts(&mut self.stage_hit_counts, &other.stage_hit_counts);
         add_index_diagnostics(&mut self.index_diagnostics, &other.index_diagnostics);
         add_w41_diagnostics(&mut self.w4_1_diagnostics, &other.w4_1_diagnostics);
@@ -2262,38 +7671,36 @@ impl P7DetailAggregate {
 struct P7DetailValidationContext<'a> {
     suite: &'a str,
     run_id: &'a str,
+    detail_schema_version: &'a str,
     expected_questions: &'a [P7ExpectedQuestionIdentity],
     expected_samples: usize,
 }
 
 fn validate_p7_detail_file(
-    path: &Path,
+    file: impl Read,
     expected_sha256: &str,
     context: P7DetailValidationContext<'_>,
     seen_question_ids: &mut BTreeSet<String>,
     seen_identities: &mut BTreeSet<(String, usize, usize, String)>,
 ) -> Result<P7DetailAggregate> {
-    let file = File::open(path).map_err(|source| Error::Io {
-        source,
-        stage: "p7_provenance_read_shard_detail",
-    })?;
+    if !p7_detail_schema_supported(context.detail_schema_version) {
+        return Err(p7_provenance_error(
+            "producer detail schema is not supported by this verifier",
+        ));
+    }
     let mut reader = BufReader::new(P7HashingReader::new(file));
     let mut aggregate = P7DetailAggregate {
         samples: context.expected_samples,
         ..P7DetailAggregate::default()
     };
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut row_index = 0_usize;
     loop {
-        line.clear();
-        let read = reader.read_line(&mut line).map_err(|source| Error::Io {
-            source,
-            stage: "p7_provenance_read_detail_row",
-        })?;
+        let read = p7_read_bounded_line(&mut reader, &mut line, P7_MAX_DETAIL_LINE_BYTES)?;
         if read == 0 {
             break;
         }
-        if line.trim().is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
         let expected = context
@@ -2301,10 +7708,17 @@ fn validate_p7_detail_file(
             .get(row_index)
             .ok_or_else(|| p7_provenance_error("detail contains an unexpected question"))?;
         let row =
-            serde_json::from_str::<serde_json::Value>(&line).map_err(|source| Error::Other {
+            serde_json::from_slice::<serde_json::Value>(&line).map_err(|source| Error::Other {
                 source: Box::new(source),
                 stage: "p7_provenance_parse_detail_row",
             })?;
+        if p7_required_str(&row, "schema_version", "detail schema version missing")?
+            != context.detail_schema_version
+        {
+            return Err(p7_provenance_error(
+                "detail row schema differs from producer provenance",
+            ));
+        }
         validate_p7_detail_identity(
             &row,
             context.suite,
@@ -2319,11 +7733,47 @@ fn validate_p7_detail_file(
     if row_index != context.expected_questions.len() {
         return Err(p7_provenance_error("detail row count mismatch"));
     }
-    let actual_sha256 = reader.into_inner().finish_sha256();
+    let (actual_sha256, streamed_bytes_read) = reader.into_inner().finish();
     if actual_sha256 != expected_sha256 {
         return Err(p7_provenance_error("shard detail digest mismatch"));
     }
+    aggregate.streamed_bytes_read = streamed_bytes_read;
     Ok(aggregate)
+}
+
+fn p7_read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    max_line_bytes: usize,
+) -> Result<usize> {
+    line.clear();
+    loop {
+        let available = reader.fill_buf().map_err(|source| Error::Io {
+            source,
+            stage: "p7_provenance_read_detail_row",
+        })?;
+        if available.is_empty() {
+            return Ok(line.len());
+        }
+        let chunk_len = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        let next_line_len = line
+            .len()
+            .checked_add(chunk_len)
+            .ok_or_else(|| p7_provenance_error("P7 detail row length overflow"))?;
+        if next_line_len > max_line_bytes {
+            return Err(p7_provenance_error(
+                "P7 detail row exceeds the bounded line contract",
+            ));
+        }
+        line.extend_from_slice(&available[..chunk_len]);
+        reader.consume(chunk_len);
+        if line.last() == Some(&b'\n') {
+            return Ok(line.len());
+        }
+    }
 }
 
 fn validate_p7_detail_identity(
@@ -2385,12 +7835,29 @@ fn accumulate_p7_detail_row(
     expected: &P7ExpectedQuestionIdentity,
 ) -> Result<()> {
     validate_p7_no_external_locators(row)?;
+    let question_evaluation = P7QuestionEvaluationContract::from_canonical_gold_count(
+        p7_canonical_groups(&expected.gold_sources).len(),
+    );
+    let claimed = row
+        .get("question_evaluation")
+        .ok_or_else(|| p7_provenance_error("detail question evaluation contract missing"))?;
+    let claimed = serde_json::from_value::<P7QuestionEvaluationContract>(claimed.clone()).map_err(
+        |source| Error::Other {
+            source: Box::new(source),
+            stage: "p7_provenance_parse_question_evaluation",
+        },
+    )?;
+    if claimed != question_evaluation {
+        return Err(p7_provenance_error(
+            "detail question evaluation contract mismatch",
+        ));
+    }
+    validate_p7_no_gold_ablation(row, question_evaluation.is_evidence_question())?;
     for field in [
         "index_diagnostics",
         "graph_index_report",
         "facet_index_report",
         "stage_diagnostics",
-        "ablation_report",
         "p7_loss_ledger",
         "eval_delivery_report",
         "final_projection_delivery_report",
@@ -2405,7 +7872,7 @@ fn accumulate_p7_detail_row(
     }
     validate_p7_stage_candidate_reports(row)?;
     aggregate.questions = aggregate.questions.saturating_add(1);
-    if !expected.gold_sources.is_empty() {
+    if question_evaluation.is_evidence_question() {
         aggregate.evidence_questions = aggregate.evidence_questions.saturating_add(1);
     }
     aggregate.write_errors = aggregate.write_errors.saturating_add(usize::from(
@@ -2442,9 +7909,43 @@ fn accumulate_p7_detail_row(
     accumulate_p7_stage_hits(aggregate, row, expected)?;
     accumulate_p7_index_diagnostics(aggregate, row)?;
     accumulate_p7_w41_diagnostics(aggregate, row, expected)?;
-    accumulate_p7_ablation(aggregate, row, expected)?;
+    if question_evaluation.is_evidence_question() {
+        accumulate_p7_ablation(aggregate, row, expected)?;
+    }
     accumulate_p7_loss(aggregate, row, expected)?;
     accumulate_p7_production_delivery(aggregate, row)?;
+    Ok(())
+}
+
+fn validate_p7_no_gold_ablation(row: &serde_json::Value, is_evidence_question: bool) -> Result<()> {
+    if is_evidence_question {
+        return Ok(());
+    }
+    let report = row
+        .get("ablation_report")
+        .ok_or_else(|| p7_provenance_error("SDK ablation applicability missing"))?;
+    let valid_no_gold_contract =
+        p7_required_str(report, "method", "no-gold SDK ablation method missing")?
+            == P7_ABLATION_METHOD
+            && p7_row_string_array(report, "required_slices")?.is_empty()
+            && p7_required_array(report, "slices", "no-gold SDK ablation slices missing")?
+                .is_empty()
+            && !p7_required_bool(
+                report,
+                "delivery_contribution_proven",
+                "no-gold SDK ablation contribution flag missing",
+            )?
+            && p7_required_usize(
+                report,
+                "render_growth",
+                "no-gold SDK ablation render growth missing",
+            )? == 0
+            && p7_row_string_array(report, "blocked_reasons")?.is_empty();
+    if !valid_no_gold_contract {
+        return Err(p7_provenance_error(
+            "no-gold SDK ablation report is not the exact not-applicable contract",
+        ));
+    }
     Ok(())
 }
 
@@ -2536,16 +8037,18 @@ fn accumulate_p7_stage_hits(
         }
     }
     let canonical_groups = p7_canonical_groups(&expected.gold_sources);
-    let expected_question_type = if canonical_groups.len() >= 2 {
-        "multi_gold"
-    } else {
-        "single_gold"
+    let expected_question_type = match canonical_groups.len() {
+        0 => "no_gold",
+        1 => "single_gold",
+        _ => "multi_gold",
     };
-    if row
-        .get("stage_diagnostics")
-        .and_then(|diagnostics| diagnostics.get("question_type"))
-        .and_then(serde_json::Value::as_str)
-        != Some(expected_question_type)
+    let typed_question_contract_present = row.get("question_evaluation").is_some();
+    if (!canonical_groups.is_empty() || typed_question_contract_present)
+        && row
+            .get("stage_diagnostics")
+            .and_then(|diagnostics| diagnostics.get("question_type"))
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_question_type)
     {
         return Err(p7_provenance_error("detail question type mismatch"));
     }
@@ -2871,10 +8374,10 @@ fn accumulate_p7_w41_diagnostics(
         .get("stage_diagnostics")
         .ok_or_else(|| p7_provenance_error("stage diagnostics missing"))?;
     let gold_groups = p7_canonical_groups(&expected.gold_sources);
-    let question_type = if gold_groups.len() >= 2 {
-        "multi_gold"
-    } else {
-        "single_gold"
+    let question_type = match gold_groups.len() {
+        0 => "no_gold",
+        1 => "single_gold",
+        _ => "multi_gold",
     };
     let diagnostic_gold = p7_string_array(
         diagnostics
@@ -2889,7 +8392,7 @@ fn accumulate_p7_w41_diagnostics(
         || p7_required_str(diagnostics, "question_type", "W4.1 question type missing")?
             != question_type
         || p7_required_usize(diagnostics, "evidence_count", "W4.1 evidence count missing")?
-            != expected.gold_sources.len()
+            != gold_groups.len()
         || p7_canonical_groups(&diagnostic_gold) != gold_groups
     {
         return Err(p7_provenance_error("W4.1 detail identity mismatch"));
@@ -3066,7 +8569,7 @@ fn accumulate_p7_w41_diagnostics(
     p7_increment(&mut w41.question_type_counts, question_type, 1);
     p7_increment(
         &mut w41.evidence_count_buckets,
-        p7_evidence_count_bucket(expected.gold_sources.len()),
+        p7_evidence_count_bucket(gold_groups.len()),
         1,
     );
     let signature = p7_stage_candidates(row, "source")?
@@ -3210,7 +8713,7 @@ fn accumulate_p7_ablation(
         p7_increment(&mut diagnostics.blocked_reason_counts, &reason, 1);
     }
     let gold_groups = p7_canonical_groups(&expected.gold_sources);
-    let evidence_index = p7_candidate_evidence_array(
+    let evidence_index = p7_authoritative_evidence_index(
         row.get("evidence_ref_index")
             .ok_or_else(|| p7_provenance_error("SDK safe evidence index missing"))?,
     )?;
@@ -3242,23 +8745,17 @@ fn accumulate_p7_ablation(
                 "ablation baseline candidates differ from raw SDK stage candidates",
             ));
         }
-        for candidates in [&off_selected, &off_rendered] {
-            for candidate in candidates {
-                if evidence_by_candidate.get(&candidate.candidate_id)
-                    != Some(
-                        &candidate
-                            .canonical_evidence_groups
-                            .iter()
-                            .cloned()
-                            .collect::<BTreeSet<_>>(),
-                    )
-                {
-                    return Err(p7_provenance_error(
-                        "ablation off-run candidate differs from the safe evidence index",
-                    ));
-                }
-            }
-        }
+        p7_require_full_candidate_bindings(&evidence_by_candidate, &off_selected)?;
+        p7_require_rendered_candidate_bindings(
+            &evidence_by_candidate,
+            &p7_candidate_evidence_map(&baseline_selected),
+            &baseline_rendered,
+        )?;
+        p7_require_rendered_candidate_bindings(
+            &evidence_by_candidate,
+            &p7_candidate_evidence_map(&off_selected),
+            &off_rendered,
+        )?;
         for (field, candidates) in [
             ("baseline_selected_candidate_ids", &baseline_selected),
             ("off_run_selected_candidate_ids", &off_selected),
@@ -3628,6 +9125,31 @@ fn accumulate_p7_loss(
             "SDK loss ledger does not match independently recomputed eval stages",
         ));
     }
+    let expanded_candidates = p7_stage_candidates(row, "expanded")?;
+    let reranked_candidates = p7_stage_candidates(row, "reranked")?;
+    let selected_candidates = p7_stage_candidates(row, "eval_selected")?;
+    let rendered_candidates = p7_stage_candidates(row, "eval_rendered")?;
+    let eval_delivery = row
+        .get("eval_delivery_report")
+        .ok_or_else(|| p7_provenance_error("eval delivery report missing"))?;
+    validate_p7_loss_entries(
+        claimed_expanded,
+        &expanded_selected_loss,
+        &expanded_candidates,
+        &reranked_candidates,
+        &selected_candidates,
+        &rendered_candidates,
+        eval_delivery,
+    )?;
+    validate_p7_loss_entries(
+        claimed_eval_rendered,
+        &eval_selected_rendered_loss,
+        &expanded_candidates,
+        &reranked_candidates,
+        &selected_candidates,
+        &rendered_candidates,
+        eval_delivery,
+    )?;
     let diagnostics = &mut aggregate.p7_loss_ledger;
     diagnostics.questions_with_loss_ledger += 1;
     diagnostics.expanded_hit_selected_miss_questions +=
@@ -3856,13 +9378,20 @@ fn accumulate_p7_production_delivery(
         "private_raw_candidate_count",
         "privacy private raw count missing",
     )?;
+    let privacy_passed = p7_required_bool(privacy, "passed", "privacy pass flag missing")?;
+    let privacy_failures = p7_row_string_array(privacy, "failures")?;
+    if privacy_passed != (private_raw == 0 && privacy_failures.is_empty()) {
+        return Err(p7_provenance_error(
+            "privacy pass flag contradicts validator failures or private raw candidates",
+        ));
+    }
     diagnostics.raw_soul_private_material_count = diagnostics
         .raw_soul_private_material_count
         .saturating_add(private_raw);
-    if !p7_required_bool(privacy, "passed", "privacy pass flag missing")? {
+    if !privacy_passed {
         diagnostics.privacy_leak_count += 1;
     }
-    for failure in p7_row_string_array(privacy, "failures")? {
+    for failure in privacy_failures {
         if failure.contains("cross_subject") {
             diagnostics.cross_subject_leak_count += 1;
         }
@@ -3875,6 +9404,11 @@ fn accumulate_p7_production_delivery(
         "rendered_capsules",
         "final rendered capsules missing",
     )? {
+        validate_p7_safe_source_locator_view(
+            capsule
+                .get("source_locator_view")
+                .ok_or_else(|| p7_provenance_error("capsule source locator view missing"))?,
+        )?;
         let redaction = p7_required_str(
             capsule,
             "redaction_state",
@@ -3885,21 +9419,32 @@ fn accumulate_p7_production_delivery(
             "shared_fact_surface_allowed",
             "capsule shared fact surface eligibility missing",
         )?;
-        let redacted_reference_exposed = p7_required_array(
+        let evidence_views = p7_required_array(
             capsule,
             "evidence_ref_views",
             "capsule evidence ref views missing",
-        )?
-        .iter()
-        .any(|view| {
-            view.get("visibility").and_then(serde_json::Value::as_str) == Some("redacted")
-                && !view.get("reference").is_none_or(serde_json::Value::is_null)
-        });
+        )?;
+        let mut safe_references = Vec::new();
+        for view in evidence_views {
+            if let Some(reference) = validate_p7_safe_evidence_ref_view(view)? {
+                safe_references.push(reference);
+            }
+        }
+        let visible_references = p7_row_string_array(capsule, "visible_evidence_refs")?;
+        let safe_groups = p7_canonical_groups(&safe_references);
+        let visible_groups = p7_canonical_groups(&visible_references);
+        if safe_references.len() != safe_groups.len()
+            || visible_references.len() != visible_groups.len()
+            || safe_groups != visible_groups
+        {
+            return Err(p7_provenance_error(
+                "capsule visible evidence refs differ from safe locator views",
+            ));
+        }
         if matches!(
             redaction,
             "private_garden" | "soul_private" | "operator_diagnostic"
         ) || (shared_fact_surface_allowed && redaction != "public_runtime")
-            || redacted_reference_exposed
         {
             diagnostics.privacy_leak_count += 1;
         }
@@ -3913,10 +9458,129 @@ fn accumulate_p7_production_delivery(
     Ok(())
 }
 
+fn parse_p7_safe_locator_view(view: &serde_json::Value) -> Result<P7SafeLocatorView> {
+    serde_json::from_value::<P7SafeLocatorView>(view.clone()).map_err(|source| Error::Other {
+        source: Box::new(source),
+        stage: "p7_provenance_parse_safe_locator_view",
+    })
+}
+
+fn validate_p7_safe_source_locator_view(view: &serde_json::Value) -> Result<Option<String>> {
+    let typed = parse_p7_safe_locator_view(view)?;
+    validate_p7_safe_locator_reason(&typed)?;
+    match typed.visibility {
+        P7SafeLocatorVisibility::GovernedOpaque => {
+            let reference = typed.reference.0.ok_or_else(|| {
+                p7_provenance_error("opaque capsule source locator reference missing")
+            })?;
+            let physical_key = reference
+                .strip_prefix("opaque:governed-source:")
+                .ok_or_else(|| p7_provenance_error("capsule source locator is not scoped"))?;
+            if !valid_p7_scoped_governed_source_key(physical_key) {
+                return Err(p7_provenance_error(
+                    "capsule source locator governed key is invalid",
+                ));
+            }
+            Ok(Some(reference))
+        }
+        P7SafeLocatorVisibility::Redacted => validate_p7_redacted_locator(typed),
+    }
+}
+
+fn validate_p7_safe_evidence_ref_view(view: &serde_json::Value) -> Result<Option<String>> {
+    let typed = parse_p7_safe_locator_view(view)?;
+    validate_p7_safe_locator_reason(&typed)?;
+    match typed.visibility {
+        P7SafeLocatorVisibility::GovernedOpaque => {
+            let reference = typed
+                .reference
+                .0
+                .ok_or_else(|| p7_provenance_error("opaque capsule evidence reference missing"))?;
+            let digest = reference
+                .strip_prefix("opaque:evidence:")
+                .ok_or_else(|| p7_provenance_error("capsule evidence reference is not opaque"))?;
+            if !valid_p7_hex_digest(digest) {
+                return Err(p7_provenance_error(
+                    "capsule evidence reference opaque digest is invalid",
+                ));
+            }
+            Ok(Some(reference))
+        }
+        P7SafeLocatorVisibility::Redacted => validate_p7_redacted_locator(typed),
+    }
+}
+
+fn validate_p7_safe_locator_reason(typed: &P7SafeLocatorView) -> Result<()> {
+    if typed.reason.trim().is_empty() {
+        return Err(p7_provenance_error(
+            "capsule source locator reason is empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_p7_redacted_locator(typed: P7SafeLocatorView) -> Result<Option<String>> {
+    if typed.reference.0.is_some() {
+        return Err(p7_provenance_error(
+            "redacted capsule source locator exposed a reference",
+        ));
+    }
+    Ok(None)
+}
+
+fn valid_p7_scoped_governed_source_key(physical_key: &str) -> bool {
+    let Some(rest) = physical_key.strip_prefix("scope:") else {
+        return false;
+    };
+    let Some((scope_digest, suffix)) = rest.split_once(':') else {
+        return false;
+    };
+    if !valid_p7_hex_digest(scope_digest) {
+        return false;
+    }
+    if suffix == "evidence_source_ref" {
+        return true;
+    }
+    let Some(owner_digest) = suffix.strip_prefix("owner:") else {
+        return false;
+    };
+    valid_p7_hex_digest(owner_digest)
+}
+
+fn valid_p7_hex_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_p7_sdk_projection_delivery_manifest(
     manifest: &serde_json::Value,
     final_delivery: &serde_json::Value,
 ) -> Result<()> {
+    let object = manifest
+        .as_object()
+        .ok_or_else(|| p7_provenance_error("SDK projection delivery manifest is not an object"))?;
+    let expected_fields = [
+        "schema_version",
+        "system_memory_block_sha256",
+        "capsule_entries",
+        "governed_block_entries",
+        "prompt_visible_entries",
+        "deterministic_envelope_sha256",
+        "exact_render_match",
+        "candidate_receipts",
+        "integrity_failures",
+    ];
+    if object.len() != expected_fields.len()
+        || expected_fields
+            .iter()
+            .any(|field| !object.contains_key(*field))
+    {
+        return Err(p7_provenance_error(
+            "SDK projection delivery manifest contains an unexpected or missing field",
+        ));
+    }
     if p7_required_usize(
         manifest,
         "schema_version",
@@ -3960,7 +9624,7 @@ fn validate_p7_sdk_projection_delivery_manifest(
         .collect::<Result<BTreeSet<_>>>()?;
     let manifest_candidate_ids = capsule_entries
         .iter()
-        .map(|(candidate_id, _)| candidate_id.clone())
+        .map(|(_, candidate_id, _)| candidate_id.clone())
         .collect::<BTreeSet<_>>();
     if final_candidate_ids.len() != final_capsules.len()
         || manifest_candidate_ids.len() != capsule_entries.len()
@@ -3985,10 +9649,19 @@ fn validate_p7_sdk_projection_delivery_manifest(
     let receipt_entries = p7_projection_manifest_receipt_set(manifest)?;
     let receipt_candidate_ids = receipt_entries
         .iter()
-        .map(|(candidate_id, _)| candidate_id.clone())
+        .map(|(_, candidate_id, _)| candidate_id.clone())
+        .collect::<BTreeSet<_>>();
+    let capsule_owner_candidates = capsule_entries
+        .iter()
+        .map(|(owner_token, candidate_id, _)| (owner_token.clone(), candidate_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let receipt_owner_candidates = receipt_entries
+        .iter()
+        .map(|(owner_token, candidate_id, _)| (owner_token.clone(), candidate_id.clone()))
         .collect::<BTreeSet<_>>();
     if receipt_candidate_ids.len() != receipt_entries.len()
         || receipt_candidate_ids != final_candidate_ids
+        || receipt_owner_candidates != capsule_owner_candidates
     {
         return Err(p7_provenance_error(
             "SDK projection renderer receipts are not bidirectionally exact",
@@ -4115,7 +9788,7 @@ fn validate_p7_runner_projection_digest_observation(
 fn p7_projection_observation_entry_set(
     observation: &serde_json::Value,
     field: &str,
-) -> Result<BTreeSet<(String, String)>> {
+) -> Result<BTreeSet<(String, String, String)>> {
     let entries = p7_required_array(
         observation,
         field,
@@ -4126,7 +9799,8 @@ fn p7_projection_observation_entry_set(
         let object = entry.as_object().ok_or_else(|| {
             p7_provenance_error("runner projection digest entry is not an object")
         })?;
-        if object.len() != 2
+        if object.len() != 3
+            || !object.contains_key("owner_identity_token")
             || !object.contains_key("candidate_id")
             || !object.contains_key("content_sha256")
         {
@@ -4139,13 +9813,21 @@ fn p7_projection_observation_entry_set(
             "candidate_id",
             "runner projection digest candidate id missing",
         )?;
+        let owner_identity_token = p7_projection_owner_identity_token(
+            entry,
+            "runner projection owner identity token missing or invalid",
+        )?;
         let content_sha256 = p7_required_str(
             entry,
             "content_sha256",
             "runner projection content digest missing",
         )?;
         if !is_sha256(content_sha256)
-            || !entry_set.insert((candidate_id.to_string(), content_sha256.to_string()))
+            || !entry_set.insert((
+                owner_identity_token.to_string(),
+                candidate_id.to_string(),
+                content_sha256.to_string(),
+            ))
         {
             return Err(p7_provenance_error(
                 "runner projection digest entries are invalid or duplicated",
@@ -4157,7 +9839,7 @@ fn p7_projection_observation_entry_set(
 
 fn p7_projection_observation_receipt_set(
     observation: &serde_json::Value,
-) -> Result<BTreeSet<(String, String)>> {
+) -> Result<BTreeSet<(String, String, String)>> {
     let entries = p7_required_array(
         observation,
         "candidate_receipts",
@@ -4168,7 +9850,8 @@ fn p7_projection_observation_receipt_set(
         let object = entry.as_object().ok_or_else(|| {
             p7_provenance_error("runner projection renderer receipt is not an object")
         })?;
-        if object.len() != 2
+        if object.len() != 3
+            || !object.contains_key("owner_identity_token")
             || !object.contains_key("candidate_id")
             || !object.contains_key("source_block_sha256")
         {
@@ -4181,13 +9864,21 @@ fn p7_projection_observation_receipt_set(
             "candidate_id",
             "runner projection renderer receipt candidate id missing",
         )?;
+        let owner_identity_token = p7_projection_owner_identity_token(
+            entry,
+            "runner projection renderer owner identity token missing or invalid",
+        )?;
         let source_block_sha256 = p7_required_str(
             entry,
             "source_block_sha256",
             "runner projection renderer source block digest missing",
         )?;
         if !is_sha256(source_block_sha256)
-            || !entry_set.insert((candidate_id.to_string(), source_block_sha256.to_string()))
+            || !entry_set.insert((
+                owner_identity_token.to_string(),
+                candidate_id.to_string(),
+                source_block_sha256.to_string(),
+            ))
         {
             return Err(p7_provenance_error(
                 "runner projection renderer receipts are invalid or duplicated",
@@ -4199,7 +9890,7 @@ fn p7_projection_observation_receipt_set(
 
 fn p7_projection_manifest_receipt_set(
     manifest: &serde_json::Value,
-) -> Result<BTreeSet<(String, String)>> {
+) -> Result<BTreeSet<(String, String, String)>> {
     let entries = p7_required_array(
         manifest,
         "candidate_receipts",
@@ -4207,10 +9898,26 @@ fn p7_projection_manifest_receipt_set(
     )?;
     let mut entry_set = BTreeSet::new();
     for entry in entries {
+        let object = entry.as_object().ok_or_else(|| {
+            p7_provenance_error("SDK projection renderer receipt is not an object")
+        })?;
+        if object.len() != 3
+            || !object.contains_key("owner_identity_token")
+            || !object.contains_key("candidate_id")
+            || !object.contains_key("source_block_sha256")
+        {
+            return Err(p7_provenance_error(
+                "SDK projection renderer receipt contains raw or unexpected data",
+            ));
+        }
         let candidate_id = p7_required_str(
             entry,
             "candidate_id",
             "SDK projection renderer receipt candidate id missing",
+        )?;
+        let owner_identity_token = p7_projection_owner_identity_token(
+            entry,
+            "SDK projection renderer owner identity token missing or invalid",
         )?;
         let source_block_sha256 = p7_required_str(
             entry,
@@ -4218,7 +9925,11 @@ fn p7_projection_manifest_receipt_set(
             "SDK projection renderer source block digest missing",
         )?;
         if !is_sha256(source_block_sha256)
-            || !entry_set.insert((candidate_id.to_string(), source_block_sha256.to_string()))
+            || !entry_set.insert((
+                owner_identity_token.to_string(),
+                candidate_id.to_string(),
+                source_block_sha256.to_string(),
+            ))
         {
             return Err(p7_provenance_error(
                 "SDK projection renderer receipts are invalid or duplicated",
@@ -4237,7 +9948,7 @@ fn p7_projection_manifest_entry_set(
     manifest: &serde_json::Value,
     field: &str,
     duplicate_error: &'static str,
-) -> Result<BTreeSet<(String, String)>> {
+) -> Result<BTreeSet<(String, String, String)>> {
     let entries = p7_required_array(
         manifest,
         field,
@@ -4245,10 +9956,26 @@ fn p7_projection_manifest_entry_set(
     )?;
     let mut entry_set = BTreeSet::new();
     for entry in entries {
+        let object = entry.as_object().ok_or_else(|| {
+            p7_provenance_error("SDK projection delivery manifest entry is not an object")
+        })?;
+        if object.len() != 3
+            || !object.contains_key("owner_identity_token")
+            || !object.contains_key("candidate_id")
+            || !object.contains_key("content_sha256")
+        {
+            return Err(p7_provenance_error(
+                "SDK projection delivery manifest entry contains raw or unexpected data",
+            ));
+        }
         let candidate_id = p7_required_str(
             entry,
             "candidate_id",
             "SDK projection delivery candidate id missing",
+        )?;
+        let owner_identity_token = p7_projection_owner_identity_token(
+            entry,
+            "SDK projection delivery owner identity token missing or invalid",
         )?;
         let content_sha256 = p7_required_str(
             entry,
@@ -4260,7 +9987,11 @@ fn p7_projection_manifest_entry_set(
                 "SDK projection delivery manifest contains an invalid content digest",
             ));
         }
-        if !entry_set.insert((candidate_id.to_string(), content_sha256.to_string())) {
+        if !entry_set.insert((
+            owner_identity_token.to_string(),
+            candidate_id.to_string(),
+            content_sha256.to_string(),
+        )) {
             return Err(p7_provenance_error(duplicate_error));
         }
     }
@@ -4268,6 +9999,24 @@ fn p7_projection_manifest_entry_set(
         return Err(p7_provenance_error(duplicate_error));
     }
     Ok(entry_set)
+}
+
+fn p7_projection_owner_identity_token<'a>(
+    entry: &'a serde_json::Value,
+    error: &'static str,
+) -> Result<&'a str> {
+    let token = p7_required_str(entry, "owner_identity_token", error)?;
+    let digest = token
+        .strip_prefix(P7_PROJECTION_OWNER_IDENTITY_TOKEN_PREFIX)
+        .ok_or_else(|| p7_provenance_error(error))?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(p7_provenance_error(error));
+    }
+    Ok(token)
 }
 
 fn validate_p7_shard_against_detail(
@@ -4320,10 +10069,6 @@ fn validate_p7_detail_metrics(
         (
             "w4_1_diagnostics",
             serde_json::to_value(&aggregate.w4_1_diagnostics),
-        ),
-        (
-            "facet_ablation",
-            serde_json::to_value(&aggregate.facet_ablation),
         ),
         (
             "p7_loss_ledger",
@@ -4630,6 +10375,184 @@ fn p7_loss_entry_groups(entries: &[serde_json::Value]) -> Result<BTreeSet<String
     Ok(groups)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct P7LossCandidateMatch {
+    candidate_id: String,
+    rank: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct P7LossCandidateReason {
+    candidate_id: String,
+    drop_reason: String,
+}
+
+fn validate_p7_loss_entries(
+    entries: &[serde_json::Value],
+    expected_groups: &BTreeSet<String>,
+    expanded: &[P7CandidateEvidence],
+    reranked: &[P7CandidateEvidence],
+    selected: &[P7CandidateEvidence],
+    rendered: &[P7CandidateEvidence],
+    delivery: &serde_json::Value,
+) -> Result<()> {
+    let mut entries_by_group = BTreeMap::new();
+    for entry in entries {
+        let group = p7_required_str(
+            entry,
+            "canonical_evidence_group",
+            "P7 loss entry canonical evidence group missing",
+        )?;
+        if entries_by_group.insert(group.to_string(), entry).is_some() {
+            return Err(p7_provenance_error(
+                "P7 loss ledger contains duplicate canonical evidence groups",
+            ));
+        }
+    }
+    for group in expected_groups {
+        let entry = entries_by_group
+            .get(group)
+            .ok_or_else(|| p7_provenance_error("P7 loss ledger entry missing"))?;
+        let expanded_matches = p7_expected_loss_matches(group, expanded);
+        let reranked_matches = p7_expected_loss_matches(group, reranked);
+        let selected_matches = p7_expected_loss_matches(group, selected);
+        let rendered_matches = p7_expected_loss_matches(group, rendered);
+        if p7_claimed_loss_matches(entry, "expanded_matches")? != expanded_matches
+            || p7_claimed_loss_matches(entry, "reranked_matches")? != reranked_matches
+            || p7_claimed_loss_matches(entry, "selected_matches")? != selected_matches
+            || p7_claimed_loss_matches(entry, "rendered_matches")? != rendered_matches
+        {
+            return Err(p7_provenance_error(
+                "P7 loss ledger candidate matches or ranks disagree with SDK stages",
+            ));
+        }
+        let expected_selection_losses = p7_expected_loss_reasons(
+            delivery,
+            "selection_decisions",
+            "selected",
+            &expanded_matches,
+        )?;
+        let expected_render_losses =
+            p7_expected_loss_reasons(delivery, "render_decisions", "rendered", &selected_matches)?;
+        if p7_claimed_loss_reasons(entry, "selection_losses")? != expected_selection_losses
+            || p7_claimed_loss_reasons(entry, "render_losses")? != expected_render_losses
+        {
+            return Err(p7_provenance_error(
+                "P7 loss ledger candidate-bound drop reasons disagree with delivery decisions",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn p7_expected_loss_matches(
+    group: &str,
+    candidates: &[P7CandidateEvidence],
+) -> Vec<P7LossCandidateMatch> {
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate
+                .canonical_evidence_groups
+                .iter()
+                .any(|candidate_group| candidate_group == group)
+        })
+        .map(|(index, candidate)| P7LossCandidateMatch {
+            candidate_id: candidate.candidate_id.clone(),
+            rank: index + 1,
+        })
+        .collect()
+}
+
+fn p7_claimed_loss_matches(
+    entry: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<P7LossCandidateMatch>> {
+    p7_required_array(entry, field, "P7 loss stage matches missing")?
+        .iter()
+        .map(|item| {
+            Ok(P7LossCandidateMatch {
+                candidate_id: p7_required_str(
+                    item,
+                    "candidate_id",
+                    "P7 loss match candidate id missing",
+                )?
+                .to_string(),
+                rank: p7_required_usize(item, "rank", "P7 loss match rank missing")?,
+            })
+        })
+        .collect()
+}
+
+fn p7_expected_loss_reasons(
+    delivery: &serde_json::Value,
+    decisions_field: &str,
+    accepted_field: &str,
+    upstream_matches: &[P7LossCandidateMatch],
+) -> Result<Vec<P7LossCandidateReason>> {
+    let mut decisions = BTreeMap::new();
+    for decision in p7_required_array(delivery, decisions_field, "P7 delivery decisions missing")? {
+        let candidate_id = p7_required_str(
+            decision,
+            "candidate_id",
+            "P7 delivery decision candidate id missing",
+        )?;
+        if decisions
+            .insert(candidate_id.to_string(), decision)
+            .is_some()
+        {
+            return Err(p7_provenance_error(
+                "P7 delivery decisions contain duplicate candidate ids",
+            ));
+        }
+    }
+    let mut losses = Vec::new();
+    for candidate in upstream_matches {
+        let Some(decision) = decisions.get(&candidate.candidate_id) else {
+            continue;
+        };
+        if p7_required_bool(
+            decision,
+            accepted_field,
+            "P7 delivery decision acceptance flag missing",
+        )? {
+            continue;
+        }
+        if let Some(reason) = decision
+            .get("drop_reason")
+            .and_then(serde_json::Value::as_str)
+        {
+            losses.push(P7LossCandidateReason {
+                candidate_id: candidate.candidate_id.clone(),
+                drop_reason: reason.to_string(),
+            });
+        }
+    }
+    Ok(losses)
+}
+
+fn p7_claimed_loss_reasons(
+    entry: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<P7LossCandidateReason>> {
+    p7_required_array(entry, field, "P7 candidate-bound losses missing")?
+        .iter()
+        .map(|item| {
+            Ok(P7LossCandidateReason {
+                candidate_id: p7_required_str(
+                    item,
+                    "candidate_id",
+                    "P7 loss candidate id missing",
+                )?
+                .to_string(),
+                drop_reason: p7_required_str(item, "drop_reason", "P7 loss drop reason missing")?
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 fn p7_gold_group_hit_count(gold_groups: &BTreeSet<String>, refs: &[String]) -> usize {
     let actual_groups = p7_canonical_groups(refs);
@@ -4673,6 +10596,9 @@ fn p7_candidate_evidence_array(value: &serde_json::Value) -> Result<Vec<P7Candid
     for entry in entries {
         let candidate_id =
             p7_required_str(entry, "candidate_id", "SDK candidate report id missing")?;
+        if candidate_id.trim().is_empty() {
+            return Err(p7_provenance_error("SDK candidate report id is empty"));
+        }
         if !seen_candidate_ids.insert(candidate_id.to_string()) {
             return Err(p7_provenance_error("SDK candidate report id is duplicated"));
         }
@@ -4681,7 +10607,9 @@ fn p7_candidate_evidence_array(value: &serde_json::Value) -> Result<Vec<P7Candid
             .iter()
             .map(|group| bm_core::memory::canonical_recall_evidence_group(group))
             .collect::<BTreeSet<_>>();
+        let ordered_groups = groups.iter().cloned().collect::<Vec<_>>();
         if groups.len() != raw_groups.len()
+            || raw_groups != ordered_groups
             || raw_groups
                 .iter()
                 .any(|group| group != &bm_core::memory::canonical_recall_evidence_group(group))
@@ -4694,6 +10622,19 @@ fn p7_candidate_evidence_array(value: &serde_json::Value) -> Result<Vec<P7Candid
             candidate_id: candidate_id.to_string(),
             canonical_evidence_groups: groups.into_iter().collect(),
         });
+    }
+    Ok(candidates)
+}
+
+fn p7_authoritative_evidence_index(value: &serde_json::Value) -> Result<Vec<P7CandidateEvidence>> {
+    let candidates = p7_candidate_evidence_array(value)?;
+    if candidates
+        .windows(2)
+        .any(|window| window[0].candidate_id >= window[1].candidate_id)
+    {
+        return Err(p7_provenance_error(
+            "SDK authoritative evidence index is not sorted by candidate id",
+        ));
     }
     Ok(candidates)
 }
@@ -4714,6 +10655,89 @@ fn p7_candidate_evidence_map(
             )
         })
         .collect()
+}
+
+fn p7_require_full_candidate_bindings(
+    evidence_by_candidate: &BTreeMap<String, BTreeSet<String>>,
+    candidates: &[P7CandidateEvidence],
+) -> Result<()> {
+    for candidate in candidates {
+        let groups = candidate
+            .canonical_evidence_groups
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if groups.is_empty() {
+            return Err(p7_provenance_error(
+                "selected candidate authoritative evidence binding is empty",
+            ));
+        }
+        if evidence_by_candidate.get(&candidate.candidate_id) != Some(&groups) {
+            return Err(p7_provenance_error(
+                "selected candidate differs from the report-wide authoritative evidence index",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn p7_require_candidate_binding_subsets(
+    evidence_by_candidate: &BTreeMap<String, BTreeSet<String>>,
+    candidates: &[P7CandidateEvidence],
+) -> Result<()> {
+    for candidate in candidates {
+        let groups = candidate
+            .canonical_evidence_groups
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let Some(authoritative_groups) = evidence_by_candidate.get(&candidate.candidate_id) else {
+            return Err(p7_provenance_error(
+                "stage candidate is absent from the report-wide authoritative evidence index",
+            ));
+        };
+        if !groups.is_subset(authoritative_groups) {
+            return Err(p7_provenance_error(
+                "stage candidate evidence exceeds its report-wide authoritative binding",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn p7_require_rendered_candidate_bindings(
+    evidence_by_candidate: &BTreeMap<String, BTreeSet<String>>,
+    selected_by_candidate: &BTreeMap<String, BTreeSet<String>>,
+    candidates: &[P7CandidateEvidence],
+) -> Result<()> {
+    for candidate in candidates {
+        let groups = candidate
+            .canonical_evidence_groups
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if groups.is_empty() {
+            return Err(p7_provenance_error(
+                "rendered candidate evidence binding is empty",
+            ));
+        }
+        let Some(authoritative_groups) = evidence_by_candidate.get(&candidate.candidate_id) else {
+            return Err(p7_provenance_error(
+                "rendered candidate is absent from the report-wide authoritative evidence index",
+            ));
+        };
+        let Some(selected_groups) = selected_by_candidate.get(&candidate.candidate_id) else {
+            return Err(p7_provenance_error(
+                "rendered candidate is absent from the corresponding selected surface",
+            ));
+        };
+        if !groups.is_subset(authoritative_groups) || !groups.is_subset(selected_groups) {
+            return Err(p7_provenance_error(
+                "rendered candidate evidence exceeds its authoritative selected binding",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn p7_affected_ablation_candidate_ids(
@@ -4750,34 +10774,27 @@ fn p7_matched_gold_group_set(
 }
 
 fn validate_p7_stage_candidate_reports(row: &serde_json::Value) -> Result<()> {
-    let evidence_index = p7_candidate_evidence_array(
+    let evidence_index = p7_authoritative_evidence_index(
         row.get("evidence_ref_index")
             .ok_or_else(|| p7_provenance_error("SDK safe evidence index missing"))?,
     )?;
     let evidence_by_candidate = p7_candidate_evidence_map(&evidence_index);
-    for field in [
-        "source",
-        "expanded",
-        "reranked",
-        "eval_selected",
-        "eval_rendered",
-    ] {
-        for candidate in p7_stage_candidates(row, field)? {
-            if evidence_by_candidate.get(&candidate.candidate_id)
-                != Some(
-                    &candidate
-                        .canonical_evidence_groups
-                        .iter()
-                        .cloned()
-                        .collect::<BTreeSet<_>>(),
-                )
-            {
-                return Err(p7_provenance_error(
-                    "SDK stage candidate differs from the safe evidence index",
-                ));
-            }
-        }
+    for field in ["source", "expanded", "reranked"] {
+        p7_require_candidate_binding_subsets(
+            &evidence_by_candidate,
+            &p7_stage_candidates(row, field)?,
+        )?;
     }
+    p7_require_full_candidate_bindings(
+        &evidence_by_candidate,
+        &p7_stage_candidates(row, "eval_selected")?,
+    )?;
+    let eval_selected = p7_candidate_evidence_map(&p7_stage_candidates(row, "eval_selected")?);
+    p7_require_rendered_candidate_bindings(
+        &evidence_by_candidate,
+        &eval_selected,
+        &p7_stage_candidates(row, "eval_rendered")?,
+    )?;
 
     let eval_delivery = row
         .get("eval_delivery_report")
@@ -5340,6 +11357,7 @@ mod p7_operator_unit_tests {
             "facet_failure_count": 0
         });
         serde_json::json!({
+            "schema_version": P7_DETAIL_SCHEMA_VERSION,
             "suite": "test_suite",
             "run_id": "test-run",
             "case_id": expected.case_id,
@@ -5347,6 +11365,8 @@ mod p7_operator_unit_tests {
             "question_index": expected.question_index,
             "question_id": expected.question_id,
             "question": expected.question,
+            "question_evaluation": P7QuestionEvaluationContract::from_canonical_gold_count(2),
+            "metrics": {},
             "gold_sources": [first_group.clone(), second_group.clone()],
             "selected_sources": [first_group.clone(), second_group.clone()],
             "projection_selected_sources": [first_group.clone(), second_group.clone()],
@@ -5424,6 +11444,35 @@ mod p7_operator_unit_tests {
         })
     }
 
+    fn no_gold_detail_row(expected: &P7ExpectedQuestionIdentity) -> serde_json::Value {
+        let mut row = detail_row(expected);
+        let empty_stage_matrix = serde_json::json!([
+            {"stage": "source", "evidence_refs": []},
+            {"stage": "expanded", "evidence_refs": []},
+            {"stage": "reranked", "evidence_refs": []},
+            {"stage": "selected", "evidence_refs": []},
+            {"stage": "rendered", "evidence_refs": []}
+        ]);
+        row["question_evaluation"] =
+            serde_json::to_value(P7QuestionEvaluationContract::from_canonical_gold_count(0))
+                .expect("serialize no-gold question contract");
+        row["gold_sources"] = serde_json::json!([]);
+        row["ablation_report"]["slices"] = serde_json::json!([]);
+        row["ablation_report"]["required_slices"] = serde_json::json!([]);
+        row["ablation_report"]["delivery_contribution_proven"] = serde_json::json!(false);
+        row["any_evidence_hit"] = serde_json::json!(false);
+        row["all_evidence_hit"] = serde_json::json!(false);
+        row["stage_diagnostics"]["question_type"] = serde_json::json!("no_gold");
+        row["stage_diagnostics"]["evidence_count"] = serde_json::json!(0);
+        row["stage_diagnostics"]["gold_evidence_refs"] = serde_json::json!([]);
+        row["stage_diagnostics"]["first_any_hit_stage"] = serde_json::Value::Null;
+        row["stage_diagnostics"]["first_all_hit_stage"] = serde_json::Value::Null;
+        row["stage_diagnostics"]["matched_gold_by_stage"] = empty_stage_matrix.clone();
+        row["stage_diagnostics"]["missing_gold_by_stage"] = empty_stage_matrix;
+        row["stage_diagnostics"]["gold_rank_by_stage"] = serde_json::json!([]);
+        row
+    }
+
     fn ablation_slice(name: &str) -> serde_json::Value {
         let first_group = bm_core::memory::canonical_recall_evidence_group("external_eval:D1:1");
         let second_group = bm_core::memory::canonical_recall_evidence_group("external_eval:D2:1");
@@ -5484,6 +11533,18 @@ mod p7_operator_unit_tests {
     fn delivery_report() -> serde_json::Value {
         let first_group = bm_core::memory::canonical_recall_evidence_group("external_eval:D1:1");
         let second_group = bm_core::memory::canonical_recall_evidence_group("external_eval:D2:1");
+        let first_opaque_reference = format!("opaque:evidence:{}", "a".repeat(64));
+        let second_opaque_reference = format!("opaque:evidence:{}", "b".repeat(64));
+        let first_visible_group =
+            p7_canonical_groups(std::slice::from_ref(&first_opaque_reference))
+                .into_iter()
+                .next()
+                .expect("canonical first visible group");
+        let second_visible_group =
+            p7_canonical_groups(std::slice::from_ref(&second_opaque_reference))
+                .into_iter()
+                .next()
+                .expect("canonical second visible group");
         serde_json::json!({
             "schema_version": MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
             "owner": "sdk_recall_delivery",
@@ -5509,20 +11570,20 @@ mod p7_operator_unit_tests {
             "rendered_capsules": [
                 {
                     "candidate_id": "candidate-1",
-                    "evidence_ref_views": [],
-                    "visible_evidence_refs": [first_group.clone()],
+                    "evidence_ref_views": [{"visibility": "governed_opaque", "reference": first_opaque_reference, "reason": "evidence_ref_governed_opaque"}],
+                    "visible_evidence_refs": [first_visible_group],
                     "canonical_evidence_groups": [first_group],
-                    "source_locator_view": {},
+                    "source_locator_view": {"visibility": "governed_opaque", "reference": format!("opaque:governed-source:scope:{}:evidence_source_ref", "a".repeat(64)), "reason": "source_locator_governed_opaque"},
                     "redaction_state": "public_runtime",
                     "shared_fact_surface_allowed": true,
                     "rendered_chars": 10
                 },
                 {
                     "candidate_id": "candidate-2",
-                    "evidence_ref_views": [],
-                    "visible_evidence_refs": [second_group.clone()],
+                    "evidence_ref_views": [{"visibility": "governed_opaque", "reference": second_opaque_reference, "reason": "evidence_ref_governed_opaque"}],
+                    "visible_evidence_refs": [second_visible_group],
                     "canonical_evidence_groups": [second_group],
-                    "source_locator_view": {},
+                    "source_locator_view": {"visibility": "governed_opaque", "reference": format!("opaque:governed-source:scope:{}:evidence_source_ref", "b".repeat(64)), "reason": "source_locator_governed_opaque"},
                     "redaction_state": "public_runtime",
                     "shared_fact_surface_allowed": true,
                     "rendered_chars": 10
@@ -5545,20 +11606,20 @@ mod p7_operator_unit_tests {
             "deterministic_envelope_sha256": "4".repeat(64),
             "exact_render_match": true,
             "capsule_entries": [
-                {"candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
-                {"candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
             ],
             "governed_block_entries": [
-                {"candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
-                {"candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
             ],
             "prompt_visible_entries": [
-                {"candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
-                {"candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
             ],
             "candidate_receipts": [
-                {"candidate_id": "candidate-1", "source_block_sha256": "5".repeat(64)},
-                {"candidate_id": "candidate-2", "source_block_sha256": "6".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "source_block_sha256": "5".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "source_block_sha256": "6".repeat(64)}
             ],
             "integrity_failures": []
         })
@@ -5566,26 +11627,33 @@ mod p7_operator_unit_tests {
 
     fn projection_delivery_observation() -> serde_json::Value {
         serde_json::json!({
-            "schema_version": "p7_runner_projection_digest_observation_v1",
+            "schema_version": P7_RUNNER_PROJECTION_DIGEST_OBSERVATION_SCHEMA_VERSION,
             "system_memory_block_sha256": "3".repeat(64),
             "runtime_envelope_sha256": "4".repeat(64),
             "capsule_entries": [
-                {"candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
-                {"candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
             ],
             "governed_block_entries": [
-                {"candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
-                {"candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
             ],
             "prompt_visible_entries": [
-                {"candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
-                {"candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "content_sha256": "1".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "content_sha256": "2".repeat(64)}
             ],
             "candidate_receipts": [
-                {"candidate_id": "candidate-1", "source_block_sha256": "5".repeat(64)},
-                {"candidate_id": "candidate-2", "source_block_sha256": "6".repeat(64)}
+                {"owner_identity_token": projection_owner_identity_token('7'), "candidate_id": "candidate-1", "source_block_sha256": "5".repeat(64)},
+                {"owner_identity_token": projection_owner_identity_token('8'), "candidate_id": "candidate-2", "source_block_sha256": "6".repeat(64)}
             ]
         })
+    }
+
+    fn projection_owner_identity_token(digest_digit: char) -> String {
+        format!(
+            "{P7_PROJECTION_OWNER_IDENTITY_TOKEN_PREFIX}{}",
+            digest_digit.to_string().repeat(64)
+        )
     }
 
     fn remove_projection_manifest_entry(row: &mut serde_json::Value, index: usize) {
@@ -5635,12 +11703,14 @@ mod p7_operator_unit_tests {
         name: &str,
     ) -> Result<P7DetailAggregate> {
         let (path, digest) = write_detail(rows, name);
+        let mut file = File::open(&path).expect("open detail fixture");
         let result = validate_p7_detail_file(
-            &path,
+            &mut file,
             &digest,
             P7DetailValidationContext {
                 suite: "test_suite",
                 run_id: "test-run",
+                detail_schema_version: P7_DETAIL_SCHEMA_VERSION,
                 expected_questions: expected,
                 expected_samples: 1,
             },
@@ -5649,6 +11719,649 @@ mod p7_operator_unit_tests {
         );
         let _ = fs::remove_file(path);
         result
+    }
+
+    #[test]
+    fn detail_line_reader_accepts_max_and_rejects_max_plus_one_during_read() {
+        let mut accepted = BufReader::new(std::io::Cursor::new(b"1234567\n".to_vec()));
+        let mut line = Vec::new();
+        assert_eq!(
+            p7_read_bounded_line(&mut accepted, &mut line, 8).expect("exact line bound"),
+            8
+        );
+        assert_eq!(line, b"1234567\n");
+
+        let mut rejected = BufReader::new(std::io::Cursor::new(b"12345678\n".to_vec()));
+        assert!(p7_read_bounded_line(&mut rejected, &mut line, 8).is_err());
+        assert!(
+            line.len() <= 8,
+            "reader must reject before growing past the bound"
+        );
+    }
+
+    #[test]
+    fn detail_metadata_admission_accepts_individual_exact_and_rejects_plus_one() {
+        let mut exact = P7ArtifactReadLedger::default();
+        exact
+            .admit(
+                Path::new("/detail-exact"),
+                P7_MAX_DETAIL_ARTIFACT_BYTES,
+                P7ArtifactReadKind::Detail,
+            )
+            .expect("individual detail exact boundary");
+
+        let mut plus_one = P7ArtifactReadLedger::default();
+        assert!(plus_one
+            .admit(
+                Path::new("/detail-plus-one"),
+                P7_MAX_DETAIL_ARTIFACT_BYTES + 1,
+                P7ArtifactReadKind::Detail,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn detail_metadata_admission_accepts_all_detail_exact_and_rejects_plus_one() {
+        let mut exact = P7ArtifactReadLedger::default();
+        for index in 0..4 {
+            exact
+                .admit(
+                    Path::new(match index {
+                        0 => "/detail-0",
+                        1 => "/detail-1",
+                        2 => "/detail-2",
+                        _ => "/detail-3",
+                    }),
+                    P7_MAX_DETAIL_ARTIFACT_BYTES,
+                    P7ArtifactReadKind::Detail,
+                )
+                .expect("all-detail exact boundary");
+        }
+        assert_eq!(
+            exact.admitted_detail_bytes,
+            P7_MAX_ALL_DETAIL_ARTIFACT_BYTES
+        );
+        assert!(exact
+            .admit(Path::new("/detail-plus-one"), 1, P7ArtifactReadKind::Detail,)
+            .is_err());
+    }
+
+    #[test]
+    fn global_metadata_admission_is_one_ten_gib_cohort_budget() {
+        let mut exact = P7ArtifactReadLedger::default();
+        exact
+            .admit(
+                Path::new("/cohort-exact"),
+                P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES,
+                P7ArtifactReadKind::Control,
+            )
+            .expect("global exact boundary");
+
+        let mut plus_one = P7ArtifactReadLedger::default();
+        assert!(plus_one
+            .admit(
+                Path::new("/cohort-plus-one"),
+                P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES + 1,
+                P7ArtifactReadKind::Control,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn shared_artifact_evidence_allows_only_one_full_read_pass() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-shared-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("shared read root");
+        let path = root.join("preflight.json");
+        fs::write(&path, b"{\"run_id\":\"run-1\"}\n").expect("shared evidence fixture");
+        let mut session = P7ArtifactReadSession::default();
+        session
+            .read_json::<serde_json::Value>(
+                &path,
+                &root,
+                &root,
+                None,
+                P7ArtifactReadKind::Control,
+                "p7_test_parse_shared_evidence",
+            )
+            .expect("first shared evidence full read");
+        assert!(session
+            .read_json::<serde_json::Value>(
+                &path,
+                &root,
+                &root,
+                None,
+                P7ArtifactReadKind::Control,
+                "p7_test_reparse_shared_evidence",
+            )
+            .is_err());
+        let performance = session.ledger.performance(Duration::ZERO);
+        assert_eq!(performance.unique_artifact_count, 1);
+        assert_eq!(performance.full_read_pass_count, 1);
+        assert_eq!(
+            performance.admitted_artifact_bytes,
+            performance.artifact_bytes_read
+        );
+        assert_eq!(performance.detail_artifact_bytes_read, 0);
+        assert_eq!(performance.duplicate_artifact_count, 1);
+        assert!(!performance.passed);
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn eight_shard_read_session_streams_dataset_once_and_each_bundle_artifact_once() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-eight-shard-session-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let data_dir = root.join("data");
+        let cohort_dir = root.join("results/runs/run-8");
+        fs::create_dir_all(&data_dir).expect("eight-shard data dir");
+        fs::create_dir_all(&cohort_dir).expect("eight-shard cohort dir");
+        let dataset = data_dir.join("dataset.json");
+        fs::write(&dataset, b"{\"dataset\":\"shared\"}\n").expect("shared dataset");
+
+        let mut session = P7ArtifactReadSession::default();
+        session
+            .read_raw(
+                &dataset,
+                &data_dir,
+                &root,
+                None,
+                P7ArtifactReadKind::Dataset,
+            )
+            .expect("single shared dataset stream");
+        for shard_index in 0..8 {
+            for (suffix, kind) in [
+                ("commit.json", P7ArtifactReadKind::Control),
+                ("summary.json", P7ArtifactReadKind::Summary),
+                ("jsonl", P7ArtifactReadKind::Detail),
+            ] {
+                let path = cohort_dir.join(format!("locomo.shard-{shard_index}-of-8.{suffix}"));
+                fs::write(&path, format!("shard={shard_index};kind={suffix}\n"))
+                    .expect("shard artifact");
+                session
+                    .read_raw(&path, &cohort_dir, &root, None, kind)
+                    .expect("single shard artifact stream");
+            }
+        }
+
+        session.verify_retained().expect("retained artifact set");
+        let receipt = session.lifecycle_receipt("eight_shard_fixture");
+        assert_eq!(receipt.unique_artifact_count, 25);
+        assert_eq!(receipt.full_read_pass_count, 25);
+        assert_eq!(receipt.duplicate_artifact_count, 0);
+        assert!(receipt.detail_artifact_bytes_read > 0);
+        assert!(receipt.passed);
+        drop(session);
+        fs::remove_dir_all(root).expect("remove eight-shard fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_session_rejects_hard_link_alias_before_second_full_read() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-hard-link-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("hard-link read root");
+        let first = root.join("first.json");
+        let alias = root.join("alias.json");
+        fs::write(
+            &first,
+            br#"{"run_id":"run-1"}
+"#,
+        )
+        .expect("hard-link fixture");
+        fs::hard_link(&first, &alias).expect("hard-link alias");
+
+        let mut session = P7ArtifactReadSession::default();
+        session
+            .read_json::<serde_json::Value>(
+                &first,
+                &root,
+                &root,
+                None,
+                P7ArtifactReadKind::Control,
+                "p7_test_parse_hard_link_source",
+            )
+            .expect("first physical artifact read");
+        assert!(session
+            .read_json::<serde_json::Value>(
+                &alias,
+                &root,
+                &root,
+                None,
+                P7ArtifactReadKind::Control,
+                "p7_test_parse_hard_link_alias",
+            )
+            .is_err());
+        let performance = session.performance(Duration::ZERO);
+        assert_eq!(performance.unique_artifact_count, 1);
+        assert_eq!(performance.full_read_pass_count, 1);
+        assert_eq!(performance.duplicate_artifact_count, 1);
+        assert!(!performance.passed);
+
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_session_rejects_same_path_and_noncanonical_alias_before_second_full_read() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-path-alias-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("path alias read root");
+        let path = root.join("artifact.json");
+        fs::write(&path, b"{}\n").expect("path alias fixture");
+
+        let mut session = P7ArtifactReadSession::default();
+        session
+            .read_raw(&path, &root, &root, None, P7ArtifactReadKind::Control)
+            .expect("first path read");
+        assert!(session
+            .read_raw(&path, &root, &root, None, P7ArtifactReadKind::Control)
+            .is_err());
+        let noncanonical = root.join(".").join("artifact.json");
+        assert!(session
+            .read_raw(
+                &noncanonical,
+                &root,
+                &root,
+                None,
+                P7ArtifactReadKind::Control,
+            )
+            .is_err());
+        let performance = session.performance(Duration::ZERO);
+        assert_eq!(performance.unique_artifact_count, 1);
+        assert_eq!(performance.full_read_pass_count, 1);
+        assert_eq!(performance.duplicate_artifact_count, 2);
+
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_session_rejects_artifact_modified_during_streaming() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-stream-mutation-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("stream mutation root");
+        let path = root.join("artifact.bin");
+        fs::write(&path, b"stable bytes\n").expect("stream mutation fixture");
+
+        let mut session = P7ArtifactReadSession::default();
+        let result = session.read_with(
+            &path,
+            &root,
+            &root,
+            None,
+            P7ArtifactReadKind::Control,
+            |reader, _| {
+                let mut first = [0_u8; 1];
+                reader.read_exact(&mut first).map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_test_read_before_stream_mutation",
+                })?;
+                fs::write(&path, b"changed bytes with a different length\n").map_err(|source| {
+                    Error::Io {
+                        source,
+                        stage: "p7_test_mutate_streamed_artifact",
+                    }
+                })?;
+                std::io::copy(reader, &mut std::io::sink()).map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_test_finish_mutated_stream",
+                })?;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_operator_rejects_non_retained_test_process_launch() {
+        let mut session = P7ArtifactReadSession::default();
+        assert!(p7_current_verifier_identity_with_session(&mut session).is_err());
+        assert_eq!(session.performance(Duration::ZERO).full_read_pass_count, 0);
+    }
+
+    #[test]
+    fn retained_session_rejects_same_byte_current_path_file_id_replacement() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!(
+                "bm-p7-retained-path-replacement-{}",
+                std::process::id()
+            ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("replacement test root");
+        let path = root.join("artifact.bin");
+        let replacement = root.join("replacement.bin");
+        fs::write(&path, b"stable\n").expect("initial artifact");
+        fs::write(&replacement, b"stable\n").expect("same-byte replacement");
+
+        let mut session = P7ArtifactReadSession::default();
+        session
+            .read_raw(&path, &root, &root, None, P7ArtifactReadKind::Control)
+            .expect("initial retained read");
+        let retained_identity = session.retained[0].artifact.identity.clone();
+
+        fs::remove_file(&path).expect("unlink retained path");
+        fs::rename(&replacement, &path).expect("install same-byte replacement");
+        let current_owner = P7RetainedDirectoryOwner::open_root(&root)
+            .expect("open replacement owner without following reparse points");
+        let current = current_owner
+            .open_existing_file("artifact.bin")
+            .expect("open replacement without following reparse points");
+        assert_ne!(
+            p7_platform_file_identity(&current).expect("replacement file identity"),
+            retained_identity
+        );
+        assert!(session.verify_retained().is_err());
+
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_session_rejects_parent_directory_replacement() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-retained-parent-swap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("results/runs/run-1")).expect("retained cohort path");
+        let cohort = root.join("results/runs/run-1");
+        let artifact = cohort.join("artifact.json");
+        fs::write(&artifact, b"{}\n").expect("retained parent artifact");
+
+        let mut session = P7ArtifactReadSession::default();
+        session
+            .read_json::<serde_json::Value>(
+                &artifact,
+                &cohort,
+                &root,
+                None,
+                P7ArtifactReadKind::Control,
+                "p7_test_parent_swap_parse",
+            )
+            .expect("initial retained parent read");
+
+        let displaced = root.join("results/runs/run-1.displaced");
+        fs::rename(&cohort, &displaced).expect("displace retained cohort directory");
+        fs::create_dir(&cohort).expect("install replacement cohort directory");
+        fs::write(cohort.join("artifact.json"), b"{}\n").expect("replacement artifact");
+        assert!(session.verify_retained().is_err());
+
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retained_session_accepts_exact_length_and_rejects_one_byte_growth() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-retained-growth-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("growth test root");
+        let exact = root.join("exact.bin");
+        fs::write(&exact, b"exact").expect("exact fixture");
+        let mut exact_session = P7ArtifactReadSession::default();
+        exact_session
+            .read_raw(&exact, &root, &root, None, P7ArtifactReadKind::Control)
+            .expect("exact admitted length");
+        exact_session
+            .verify_retained()
+            .expect("exact retained file");
+
+        let growing = root.join("growing.bin");
+        fs::write(&growing, b"exact").expect("growth fixture");
+        let mut growth_session = P7ArtifactReadSession::default();
+        let result = growth_session.read_with(
+            &growing,
+            &root,
+            &root,
+            None,
+            P7ArtifactReadKind::Control,
+            |reader, admitted_len| {
+                let mut admitted = vec![0_u8; admitted_len as usize];
+                reader
+                    .read_exact(&mut admitted)
+                    .map_err(|source| Error::Io {
+                        source,
+                        stage: "p7_test_read_admitted_growth_bytes",
+                    })?;
+                let mut writer =
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&growing)
+                        .map_err(|source| Error::Io {
+                            source,
+                            stage: "p7_test_open_growth_writer",
+                        })?;
+                use std::io::Write as _;
+                writer.write_all(b"+").map_err(|source| Error::Io {
+                    source,
+                    stage: "p7_test_append_growth_byte",
+                })?;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+
+        drop(exact_session);
+        drop(growth_session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_shard_expectation(run_id: &str) -> P7ShardBundleExpectation {
+        P7ShardBundleExpectation {
+            run_id: run_id.to_string(),
+            suite: "locomo".to_string(),
+            shard_index: 0,
+            shard_total: 1,
+            limit: None,
+            question_limit: None,
+            question_index: None,
+            build: P7RunnerBuildIdentity {
+                sdk_build_fingerprint: "1".repeat(64),
+                runner_build_fingerprint: "2".repeat(64),
+                runner_lock_fingerprint: "3".repeat(64),
+                executable_sha256: "4".repeat(64),
+                build_profile: "release".to_string(),
+            },
+            release: P7PublishedReleaseIdentity {
+                gate_attestation_sha256: "5".repeat(64),
+                release_metadata_sha256: "6".repeat(64),
+                gate_source_fingerprint: "7".repeat(64),
+                gate_source_manifest_sha256: "8".repeat(64),
+                gate_ids: P7_REQUIRED_RELEASE_GATE_IDS
+                    .iter()
+                    .map(|gate| (*gate).to_string())
+                    .collect(),
+                ..P7PublishedReleaseIdentity::default()
+            },
+            execution_kind: P7ProducerExecutionKind::CohortShard,
+            cohort_admission_sha256: "9".repeat(64),
+        }
+    }
+
+    #[test]
+    fn shard_bundle_owner_classifies_absent_and_uncommitted_partial_pair() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-shard-partial-pair-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cohort = root.join("results/runs/run-1");
+        fs::create_dir_all(&cohort).expect("partial pair cohort");
+        let expectation = test_shard_expectation("run-1");
+        assert!(matches!(
+            verify_p7_shard_bundle_with_receipt(&root, &expectation)
+                .expect("absent shard bundle")
+                .0,
+            P7ShardBundleState::Absent
+        ));
+
+        fs::write(cohort.join("locomo.shard-0-of-1.summary.json"), b"{}\n")
+            .expect("partial summary");
+        assert!(matches!(
+            verify_p7_shard_bundle_with_receipt(&root, &expectation)
+                .expect("uncommitted summary")
+                .0,
+            P7ShardBundleState::Uncommitted(P7UncommittedShardBundle {
+                summary_present: true,
+                detail_present: false,
+            })
+        ));
+        fs::remove_file(cohort.join("locomo.shard-0-of-1.summary.json"))
+            .expect("remove partial summary fixture");
+        fs::write(cohort.join("locomo.shard-0-of-1.jsonl"), b"{}\n").expect("partial detail");
+        assert!(matches!(
+            verify_p7_shard_bundle_with_receipt(&root, &expectation)
+                .expect("uncommitted detail")
+                .0,
+            P7ShardBundleState::Uncommitted(P7UncommittedShardBundle {
+                summary_present: false,
+                detail_present: true,
+            })
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn merged_resume_rejects_giant_json_before_parse_allocation() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-merged-giant-json-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cohort = root.join("results/runs/run-1");
+        fs::create_dir_all(&cohort).expect("giant merged cohort");
+        let merged = cohort.join("locomo.merged.summary.json");
+        let file = File::create(&merged).expect("giant merged fixture");
+        file.set_len(P7_MAX_CONTROL_JSON_BYTES + 1)
+            .expect("sparse giant merged fixture");
+        assert!(verify_p7_merged_resume_with_receipt(
+            &root,
+            "run-1",
+            "locomo",
+            &serde_json::json!({}),
+        )
+        .expect("uncommitted giant summary is ignored")
+        .0
+        .is_none());
+
+        let commit = P7MergedBundleCommit {
+            schema_version: P7_MERGED_BUNDLE_COMMIT_SCHEMA_VERSION.to_string(),
+            run_id: "run-1".to_string(),
+            suite: "locomo".to_string(),
+            summary_file: "locomo.merged.summary.json".to_string(),
+            summary_bytes: P7_MAX_CONTROL_JSON_BYTES + 1,
+            summary_sha256: "a".repeat(64),
+        };
+        fs::write(
+            cohort.join("locomo.merged.commit.json"),
+            serde_json::to_vec(&commit).expect("serialize merged commit"),
+        )
+        .expect("publish merged commit fixture");
+        assert!(verify_p7_merged_resume_with_receipt(
+            &root,
+            "run-1",
+            "locomo",
+            &serde_json::json!({}),
+        )
+        .is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_session_rejects_current_path_symlink_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!("bm-p7-retained-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("symlink replacement root");
+        let path = root.join("artifact.bin");
+        let replacement = root.join("replacement.bin");
+        fs::write(&path, b"stable\n").expect("initial artifact");
+        fs::write(&replacement, b"stable\n").expect("replacement target");
+
+        let mut session = P7ArtifactReadSession::default();
+        session
+            .read_raw(&path, &root, &root, None, P7ArtifactReadKind::Control)
+            .expect("initial retained read");
+        fs::remove_file(&path).expect("unlink retained path");
+        symlink(&replacement, &path).expect("install symlink replacement");
+        assert!(session.verify_retained().is_err());
+
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn final_wall_fresh_rss_revalidation_rejects_post_admission_evidence_replacement() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!(
+                "bm-p7-post-admission-rss-replacement-{}",
+                std::process::id()
+            ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("RSS replacement root");
+        let admission = root.join(P7_COHORT_ADMISSION_FILE_NAME);
+        fs::write(&admission, b"admitted\n").expect("admission fixture");
+
+        for artifact_name in [
+            P7_MAXIMUM_RSS_MEASUREMENT_FILE_NAME,
+            "trusted-dataset.json",
+            "maximum-rss-detail.jsonl",
+            "runner.stdout.log",
+            "runner.time.log",
+        ] {
+            let artifact = root.join(artifact_name);
+            let original = format!("original-{artifact_name}\n");
+            fs::write(&artifact, original.as_bytes()).expect("original RSS evidence");
+            let expected_sha256 = format!("{:x}", Sha256::digest(original.as_bytes()));
+
+            let mut admission_session = P7ArtifactReadSession::default();
+            admission_session
+                .read_raw(&admission, &root, &root, None, P7ArtifactReadKind::Control)
+                .expect("cohort admission read");
+            admission_session
+                .verify_retained()
+                .expect("admission remained stable");
+
+            fs::write(&artifact, format!("replaced-{artifact_name}\n"))
+                .expect("replace admitted RSS evidence");
+            let mut final_wall_session = P7ArtifactReadSession::default();
+            assert!(
+                final_wall_session
+                    .read_raw(
+                        &artifact,
+                        &root,
+                        &root,
+                        Some(&expected_sha256),
+                        P7ArtifactReadKind::Control,
+                    )
+                    .is_err(),
+                "final wall accepted replaced {artifact_name} after admission"
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5675,6 +12388,141 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
+    fn no_gold_question_is_typed_not_applicable_and_excluded_from_evidence_metrics() {
+        let mut expected = expected_question("q-no-gold", 0);
+        expected.gold_sources.clear();
+        let row = no_gold_detail_row(&expected);
+
+        let aggregate = verify_rows(&[row], &[expected], "no-gold")
+            .expect("typed no-gold detail should verify without ablation");
+
+        assert_eq!(aggregate.questions, 1);
+        assert_eq!(aggregate.evidence_questions, 0);
+        assert_eq!(aggregate.any_evidence_hit, 0);
+        assert_eq!(aggregate.all_evidence_hit, 0);
+        assert_eq!(aggregate.facet_ablation.questions_with_ablation_report, 0);
+        assert_eq!(
+            aggregate
+                .w4_1_diagnostics
+                .question_type_counts
+                .get("no_gold"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn no_gold_question_rejects_ablation_and_missing_typed_contract() {
+        let mut expected = expected_question("q-no-gold-invalid", 0);
+        expected.gold_sources.clear();
+
+        let mut with_ablation = no_gold_detail_row(&expected);
+        with_ablation["ablation_report"] = serde_json::json!({});
+        assert!(verify_rows(
+            &[with_ablation],
+            std::slice::from_ref(&expected),
+            "no-gold-with-ablation"
+        )
+        .is_err());
+
+        let mut missing_contract = no_gold_detail_row(&expected);
+        missing_contract
+            .as_object_mut()
+            .expect("detail object")
+            .remove("question_evaluation");
+        assert!(verify_rows(&[missing_contract], &[expected], "no-gold-missing-contract").is_err());
+    }
+
+    #[test]
+    fn no_gold_question_rejects_each_contradictory_ablation_claim() {
+        let mut expected = expected_question("q-no-gold-contradiction", 0);
+        expected.gold_sources.clear();
+
+        for (field, value) in [
+            ("required_slices", serde_json::json!(["facet_off"])),
+            ("delivery_contribution_proven", serde_json::json!(true)),
+            ("render_growth", serde_json::json!(1)),
+            ("blocked_reasons", serde_json::json!(["unexpected"])),
+        ] {
+            let mut row = no_gold_detail_row(&expected);
+            row["ablation_report"][field] = value;
+            assert!(
+                verify_rows(
+                    std::slice::from_ref(&row),
+                    std::slice::from_ref(&expected),
+                    field
+                )
+                .is_err(),
+                "no-gold contract accepted contradictory {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_recomputation_rejects_raw_capsule_source_locator_view() {
+        let expected = expected_question("q-raw-locator", 0);
+        let mut row = detail_row(&expected);
+        row["final_projection_delivery_report"]["rendered_capsules"][0]["source_locator_view"] = serde_json::json!({
+            "visibility": "governed_opaque",
+            "reference": "external_eval:D1:1",
+            "reason": "source_locator_governed_opaque"
+        });
+
+        assert!(verify_rows(&[row], &[expected], "raw-capsule-locator").is_err());
+    }
+
+    #[test]
+    fn detail_recomputation_rejects_url_evidence_locator_view() {
+        let expected = expected_question("q-url-evidence-locator", 0);
+        let mut row = detail_row(&expected);
+        row["final_projection_delivery_report"]["rendered_capsules"][0]["evidence_ref_views"][0]
+            ["reference"] = serde_json::json!("https://example.test/raw");
+
+        assert!(verify_rows(&[row], &[expected], "url-evidence-locator").is_err());
+    }
+
+    #[test]
+    fn detail_recomputation_rejects_absolute_path_evidence_locator_view() {
+        let expected = expected_question("q-path-evidence-locator", 0);
+        let mut row = detail_row(&expected);
+        row["final_projection_delivery_report"]["rendered_capsules"][0]["evidence_ref_views"][0]
+            ["reference"] = serde_json::json!("/private/raw/evidence");
+
+        assert!(verify_rows(&[row], &[expected], "path-evidence-locator").is_err());
+    }
+
+    #[test]
+    fn detail_recomputation_rejects_forged_evidence_visibility() {
+        let expected = expected_question("q-forged-evidence-visibility", 0);
+        let mut row = detail_row(&expected);
+        row["final_projection_delivery_report"]["rendered_capsules"][0]["evidence_ref_views"][0]
+            ["visibility"] = serde_json::json!("public_citation");
+
+        assert!(verify_rows(&[row], &[expected], "forged-evidence-visibility").is_err());
+    }
+
+    #[test]
+    fn detail_recomputation_rejects_missing_locator_reference_field() {
+        let expected = expected_question("q-missing-locator-reference", 0);
+        let mut row = detail_row(&expected);
+        row["final_projection_delivery_report"]["rendered_capsules"][0]["evidence_ref_views"][0]
+            .as_object_mut()
+            .expect("typed evidence locator view")
+            .remove("reference");
+
+        assert!(verify_rows(&[row], &[expected], "missing-locator-reference").is_err());
+    }
+
+    #[test]
+    fn detail_recomputation_requires_visible_refs_to_match_safe_views_exactly() {
+        let expected = expected_question("q-visible-ref-mismatch", 0);
+        let mut row = detail_row(&expected);
+        row["final_projection_delivery_report"]["rendered_capsules"][0]["visible_evidence_refs"] =
+            serde_json::json!([]);
+
+        assert!(verify_rows(&[row], &[expected], "visible-ref-mismatch").is_err());
+    }
+
+    #[test]
     fn detail_recomputation_rejects_cross_subject_shared_fact_eligibility() {
         let expected = expected_question("q-1", 0);
         let mut row = detail_row(&expected);
@@ -5685,6 +12533,17 @@ mod p7_operator_unit_tests {
             .expect("privacy violation must remain measurable for the release gate");
 
         assert_eq!(aggregate.p7_production_delivery.privacy_leak_count, 1);
+    }
+
+    #[test]
+    fn detail_recomputation_rejects_privacy_pass_with_validator_failures() {
+        let expected = expected_question("q-privacy-validator-failure", 0);
+        let mut row = detail_row(&expected);
+        row["privacy_report"]["passed"] = serde_json::json!(true);
+        row["privacy_report"]["private_raw_candidate_count"] = serde_json::json!(0);
+        row["privacy_report"]["failures"] = serde_json::json!(["redaction_failed"]);
+
+        assert!(verify_rows(&[row], &[expected], "privacy-validator-failure").is_err());
     }
 
     #[test]
@@ -5804,6 +12663,28 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
+    fn detail_recomputation_counts_canonical_gold_groups_not_raw_duplicates() {
+        let mut expected = expected_question("q-1", 0);
+        expected.gold_sources = vec!["D1:1".to_string(), "D1:1".to_string(), "D2:1".to_string()];
+        let row = detail_row(&expected);
+
+        let aggregate = verify_rows(&[row], &[expected], "duplicate-gold-locator")
+            .expect("duplicate raw locators must collapse to canonical gold groups");
+
+        assert_eq!(
+            aggregate.w4_1_diagnostics.evidence_count_buckets.get("2_3"),
+            Some(&1)
+        );
+        assert_eq!(
+            aggregate
+                .w4_1_diagnostics
+                .question_type_counts
+                .get("multi_gold"),
+            Some(&1)
+        );
+    }
+
+    #[test]
     fn detail_recomputation_rejects_forged_multi_gold_refs() {
         let expected = expected_question("q-1", 0);
         let mut row = detail_row(&expected);
@@ -5811,6 +12692,100 @@ mod p7_operator_unit_tests {
             serde_json::json!(["external_eval:D1:1", "external_eval:D2:1"]);
 
         assert!(verify_rows(&[row], &[expected], "multi-gold-forgery").is_err());
+    }
+
+    #[test]
+    fn ablation_accepts_governed_off_run_candidate_in_report_wide_evidence_index() {
+        let expected = expected_question("q-1", 0);
+        let mut row = detail_row(&expected);
+        let first_group = bm_core::memory::canonical_recall_evidence_group("external_eval:D1:1");
+        let second_group = bm_core::memory::canonical_recall_evidence_group("external_eval:D2:1");
+        let mut full_groups = vec![first_group.clone(), second_group.clone()];
+        full_groups.sort();
+        let slice = &mut row["ablation_report"]["slices"][0];
+        let off_run_selected = serde_json::json!([{
+            "candidate_id": "candidate-off-run",
+            "canonical_evidence_groups": full_groups.clone()
+        }]);
+        let off_run_rendered = serde_json::json!([{
+            "candidate_id": "candidate-off-run",
+            "canonical_evidence_groups": [first_group.clone()]
+        }]);
+        slice["off_run_selected_candidate_ids"] = serde_json::json!(["candidate-off-run"]);
+        slice["off_run_rendered_candidate_ids"] = serde_json::json!(["candidate-off-run"]);
+        slice["off_run_selected_candidates"] = off_run_selected;
+        slice["off_run_rendered_candidates"] = off_run_rendered;
+        slice["off_run_selected_evidence_refs"] =
+            serde_json::json!([first_group.clone(), second_group.clone()]);
+        slice["off_run_rendered_evidence_refs"] = serde_json::json!([first_group.clone()]);
+        slice["delivery_affected_candidate_ids"] =
+            serde_json::json!(["candidate-1", "candidate-2", "candidate-off-run"]);
+        slice["delivery_affected_candidate_count"] = serde_json::json!(3);
+        slice["sdk_delivery_affected_candidate_count_claim"] = serde_json::json!(3);
+        row["evidence_ref_index"]
+            .as_array_mut()
+            .expect("evidence index")
+            .push(serde_json::json!({
+                "candidate_id": "candidate-off-run",
+                "canonical_evidence_groups": full_groups
+            }));
+
+        verify_rows(&[row], &[expected], "off-run-report-wide-index")
+            .expect("report-wide evidence index must include governed off-run candidates");
+    }
+
+    #[test]
+    fn ablation_rejects_off_run_candidate_missing_from_report_wide_evidence_index() {
+        let expected = expected_question("q-1", 0);
+        let mut row = detail_row(&expected);
+        let first_group = bm_core::memory::canonical_recall_evidence_group("external_eval:D1:1");
+        let slice = &mut row["ablation_report"]["slices"][0];
+        let off_run_candidate = serde_json::json!([{
+            "candidate_id": "candidate-off-run",
+            "canonical_evidence_groups": [first_group]
+        }]);
+        slice["off_run_selected_candidate_ids"] = serde_json::json!(["candidate-off-run"]);
+        slice["off_run_rendered_candidate_ids"] = serde_json::json!(["candidate-off-run"]);
+        slice["off_run_selected_candidates"] = off_run_candidate.clone();
+        slice["off_run_rendered_candidates"] = off_run_candidate;
+        slice["delivery_affected_candidate_ids"] =
+            serde_json::json!(["candidate-1", "candidate-2", "candidate-off-run"]);
+        slice["delivery_affected_candidate_count"] = serde_json::json!(3);
+        slice["sdk_delivery_affected_candidate_count_claim"] = serde_json::json!(3);
+
+        assert!(verify_rows(&[row], &[expected], "off-run-index-missing").is_err());
+    }
+
+    #[test]
+    fn authoritative_evidence_index_rejects_reordered_or_empty_candidate_ids() {
+        let expected = expected_question("q-1", 0);
+        let mut reordered = detail_row(&expected);
+        reordered["evidence_ref_index"]
+            .as_array_mut()
+            .expect("evidence index")
+            .reverse();
+        assert!(verify_rows(
+            &[reordered],
+            std::slice::from_ref(&expected),
+            "reordered-evidence-index"
+        )
+        .is_err());
+
+        let mut empty_id = detail_row(&expected);
+        empty_id["evidence_ref_index"][0]["candidate_id"] = serde_json::json!("");
+        assert!(verify_rows(&[empty_id], &[expected], "empty-evidence-index-id").is_err());
+    }
+
+    #[test]
+    fn ablation_rejects_empty_selected_evidence_binding() {
+        let expected = expected_question("q-1", 0);
+        let mut row = detail_row(&expected);
+        let slice = &mut row["ablation_report"]["slices"][0];
+        slice["off_run_selected_candidates"][0]["canonical_evidence_groups"] =
+            serde_json::json!([]);
+        slice["off_run_selected_evidence_refs"] = serde_json::json!([]);
+
+        assert!(verify_rows(&[row], &[expected], "empty-selected-evidence").is_err());
     }
 
     #[test]
@@ -5860,6 +12835,73 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
+    fn loss_recomputation_rejects_forged_candidate_rank_and_drop_reason() {
+        let group = bm_core::memory::canonical_recall_evidence_group("external_eval:D1:1");
+        let expanded = vec![P7CandidateEvidence {
+            candidate_id: "candidate-1".to_string(),
+            canonical_evidence_groups: vec![group.clone()],
+        }];
+        let expected_groups = BTreeSet::from([group.clone()]);
+        let delivery = serde_json::json!({
+            "selection_decisions": [{
+                "candidate_id": "candidate-1",
+                "selected": false,
+                "drop_reason": "ProfileBudgetExhausted"
+            }],
+            "render_decisions": []
+        });
+        let valid_entry = serde_json::json!({
+            "canonical_evidence_group": group,
+            "expanded_matches": [{"candidate_id": "candidate-1", "rank": 1}],
+            "reranked_matches": [{"candidate_id": "candidate-1", "rank": 1}],
+            "selected_matches": [],
+            "rendered_matches": [],
+            "selection_losses": [{
+                "candidate_id": "candidate-1",
+                "drop_reason": "ProfileBudgetExhausted"
+            }],
+            "render_losses": []
+        });
+        assert!(validate_p7_loss_entries(
+            std::slice::from_ref(&valid_entry),
+            &expected_groups,
+            &expanded,
+            &expanded,
+            &[],
+            &[],
+            &delivery,
+        )
+        .is_ok());
+
+        let mut forged_rank = valid_entry.clone();
+        forged_rank["expanded_matches"][0]["rank"] = serde_json::json!(2);
+        assert!(validate_p7_loss_entries(
+            &[forged_rank],
+            &expected_groups,
+            &expanded,
+            &expanded,
+            &[],
+            &[],
+            &delivery,
+        )
+        .is_err());
+
+        let mut forged_reason = valid_entry;
+        forged_reason["selection_losses"][0]["drop_reason"] =
+            serde_json::json!("DuplicateEvidenceGroup");
+        assert!(validate_p7_loss_entries(
+            &[forged_reason],
+            &expected_groups,
+            &expanded,
+            &expanded,
+            &[],
+            &[],
+            &delivery,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn detail_recomputation_rejects_one_candidate_claiming_two_gold_groups() {
         let expected = expected_question("q-1", 0);
         let mut row = detail_row(&expected);
@@ -5879,7 +12921,7 @@ mod p7_operator_unit_tests {
             "evidence_ref_views": [],
             "visible_evidence_refs": [],
             "canonical_evidence_groups": [first_group.clone(), second_group.clone()],
-            "source_locator_view": {},
+            "source_locator_view": {"visibility": "governed_opaque", "reference": format!("opaque:governed-source:scope:{}:evidence_source_ref", "c".repeat(64)), "reason": "source_locator_governed_opaque"},
             "redaction_state": "public_runtime",
             "shared_fact_surface_allowed": true,
             "rendered_chars": 20
@@ -5936,7 +12978,7 @@ mod p7_operator_unit_tests {
             "evidence_ref_views": [],
             "visible_evidence_refs": [],
             "canonical_evidence_groups": [first_group, second_group],
-            "source_locator_view": {},
+            "source_locator_view": {"visibility": "governed_opaque", "reference": format!("opaque:governed-source:scope:{}:evidence_source_ref", "d".repeat(64)), "reason": "source_locator_governed_opaque"},
             "redaction_state": "public_runtime",
             "shared_fact_surface_allowed": true,
             "rendered_chars": 20
@@ -5983,15 +13025,15 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
-    fn canonical_exact_group_does_not_expand_one_composite_locator_into_two_golds() {
+    fn canonical_exact_group_does_not_parse_composite_external_locator() {
         let gold = vec!["D1:1".to_string(), "D2:1".to_string()];
         let composite = vec!["external_eval:D1:1|D2:1".to_string()];
 
-        assert!(p7_any_gold_hit(&gold, &composite));
+        assert!(!p7_any_gold_hit(&gold, &composite));
         assert!(!p7_all_gold_hit(&gold, &composite));
         assert_eq!(
             p7_gold_group_hit_count(&p7_canonical_groups(&gold), &composite),
-            1
+            0
         );
     }
 
@@ -6498,6 +13540,905 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
+    fn release_source_exclusions_never_hide_domain_source_directories() {
+        let root = Path::new("/workspace");
+        for relative in [
+            "crates/core/src/memory/mod.rs",
+            "crates/core/src/skills/mod.rs",
+            "crates/replay/src/results/mod.rs",
+        ] {
+            assert!(
+                !p7_release_gate_source_path_is_excluded(root, &root.join(relative), &[], &[])
+                    .expect("domain source exclusion decision"),
+                "domain source must remain release-governed: {relative}"
+            );
+        }
+        assert!(p7_release_gate_source_path_is_excluded(
+            root,
+            &root.join("target/release/operator"),
+            &[],
+            &[],
+        )
+        .expect("build output exclusion decision"));
+        for relative in [
+            "memory/store.db",
+            "results/run.json",
+            "crates/sdk/memory/store.db",
+        ] {
+            assert!(
+                p7_release_gate_source_path_is_excluded(
+                    root,
+                    &root.join(relative),
+                    &[],
+                    &P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES,
+                )
+                .expect("owner output exclusion decision"),
+                "owner output must remain outside release source: {relative}"
+            );
+        }
+        assert!(!p7_release_gate_source_path_is_excluded(
+            root,
+            &root.join("skills/beetle-memory-development/SKILL.md"),
+            &[],
+            &P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES,
+        )
+        .expect("tracked skill source exclusion decision"));
+    }
+
+    #[test]
+    fn compiled_operator_fingerprint_matches_independent_disk_recomputation() {
+        let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("SDK workspace root");
+        let inputs = p7_operator_build_inputs(sdk_root).expect("operator build inputs");
+        let disk = p7_fingerprint_files_with_contract(
+            sdk_root,
+            &inputs,
+            P7_OPERATOR_BUILD_FINGERPRINT_CONTRACT,
+        )
+        .expect("operator disk fingerprint");
+
+        assert_eq!(disk, P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT);
+    }
+
+    #[test]
+    fn verifier_identity_requires_release_profile_and_bound_manifest_fields() {
+        let identity = p7_current_verifier_identity();
+
+        assert!(p7_verifier_identity_is_valid(&identity));
+        assert_eq!(identity.build_profile, "release");
+        assert!(is_sha256(&identity.operator_executable_sha256));
+        assert!(is_sha256(&identity.release_manifest_sha256));
+        assert_eq!(
+            identity.source_anchor_sha256,
+            identity.operator_build_fingerprint
+        );
+    }
+
+    fn p7_gate_source_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let canonical_temp = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
+        let root = canonical_temp.join(format!("bm-p7-gate-source-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let sdk_root = root.join("agent-memory");
+        let runner_root = root.join("runner");
+        fs::create_dir_all(sdk_root.join("crates/core/src")).expect("core source owner");
+        fs::create_dir_all(sdk_root.join("crates/sdk/src")).expect("SDK runtime source owner");
+        fs::create_dir_all(sdk_root.join("crates/replay/src")).expect("SDK source owner");
+        fs::create_dir_all(sdk_root.join("crates/replay/src/bin/bm-w4-external-noisy-wall"))
+            .expect("operator-private frozen owner");
+        fs::create_dir_all(sdk_root.join("apps/desktop/src-tauri"))
+            .expect("desktop workspace owner");
+        fs::create_dir_all(sdk_root.join("dev-docs")).expect("development truth owner");
+        fs::create_dir_all(sdk_root.join("scripts")).expect("SDK scripts owner");
+        fs::create_dir_all(runner_root.join("src")).expect("runner source owner");
+        fs::create_dir_all(runner_root.join("tests")).expect("runner tests owner");
+        for (path, bytes) in [
+            (sdk_root.join("Cargo.toml"), b"sdk-manifest\n".as_slice()),
+            (sdk_root.join("Cargo.lock"), b"sdk-lock\n".as_slice()),
+            (
+                sdk_root.join("crates/core/Cargo.toml"),
+                b"core-manifest\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/core/src/lib.rs"),
+                b"pub fn core() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/sdk/Cargo.toml"),
+                b"runtime-manifest\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/sdk/src/lib.rs"),
+                b"pub fn sdk() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/Cargo.toml"),
+                b"replay-manifest\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/build.rs"),
+                b"fn main() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/lib.rs"),
+                b"pub fn replay() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/bench.rs"),
+                b"pub fn benchmark() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/fixture.rs"),
+                b"pub fn fixture() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/harness.rs"),
+                b"pub fn harness() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/p7_process.rs"),
+                b"pub fn process() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/p7_secure_fs.rs"),
+                b"pub fn secure_fs() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/runner.rs"),
+                b"pub fn runner() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join(P7_FROZEN_RUNNER_IDENTITY_RELATIVE_PATH),
+                b"frozen-v1\n".as_slice(),
+            ),
+            (
+                sdk_root.join("scripts/check_w4_external_noisy_wall_operator.sh"),
+                b"operator-gate-v1\n".as_slice(),
+            ),
+            (
+                sdk_root.join("scripts/check_w4_external_noisy_wall_preflight.sh"),
+                b"preflight-gate-v1\n".as_slice(),
+            ),
+            (
+                sdk_root.join("scripts/check_memory_write_transaction_contract.sh"),
+                b"transaction-gate-v1\n".as_slice(),
+            ),
+            (
+                sdk_root.join("scripts/check_next_gen_memory_plan.sh"),
+                b"next-gen-gate-v1\n".as_slice(),
+            ),
+            (
+                runner_root.join("Cargo.toml"),
+                b"runner-manifest\n".as_slice(),
+            ),
+            (runner_root.join("Cargo.lock"), b"runner-lock\n".as_slice()),
+            (runner_root.join("build.rs"), b"fn main() {}\n".as_slice()),
+            (
+                runner_root.join("src/main.rs"),
+                b"fn main() {}\n".as_slice(),
+            ),
+            (
+                runner_root.join("run_full_p7_wall.sh"),
+                b"wall-v1\n".as_slice(),
+            ),
+            (
+                runner_root.join("run_p7_max_rss.sh"),
+                b"rss-v1\n".as_slice(),
+            ),
+            (
+                runner_root.join("tests/run_full_p7_wall_fake_runner_test.sh"),
+                b"wall-test-v1\n".as_slice(),
+            ),
+            (
+                runner_root.join("tests/run_p7_max_rss_fake_runner_test.sh"),
+                b"rss-test-v1\n".as_slice(),
+            ),
+        ] {
+            fs::write(path, bytes).expect("gate source fixture");
+        }
+        for relative in [
+            "README.md",
+            "governed-memory-facet-index-plan.md",
+            "inhabited-subject-projection-refactor-plan.md",
+            "long-term-memory-control-surface-plan.md",
+            "memory-write-transaction-plan.md",
+            "multi-subject-memory-space-plan.md",
+            "next-gen-soul-memory-roadmap.md",
+            "replay-sandbox-plan.md",
+            "runtime-budget-refactor-plan.md",
+            "sdk-host-integration-readiness-plan.md",
+            "soul-and-subject-memory-boundary.md",
+            "temporal-memory-graph-plan.md",
+        ] {
+            fs::write(sdk_root.join("dev-docs").join(relative), b"truth-v1\n")
+                .expect("producer truth fixture");
+        }
+        (root, sdk_root, runner_root)
+    }
+
+    #[test]
+    fn broad_gate_manifest_and_producer_semantic_manifest_have_independent_inputs() {
+        let (root, sdk_root, runner_root) = p7_gate_source_fixture("exclusions");
+        let broad = || {
+            p7_release_gate_source_manifest(&sdk_root, &runner_root)
+                .expect("broad gate source manifest")
+                .source_fingerprint
+        };
+        let semantic = || {
+            p7_producer_semantic_source_manifest(&sdk_root, &runner_root)
+                .expect("producer semantic source manifest")
+                .source_fingerprint
+        };
+        let baseline_broad = broad();
+        let baseline_semantic = semantic();
+
+        fs::write(
+            sdk_root.join(P7_FROZEN_RUNNER_IDENTITY_RELATIVE_PATH),
+            b"frozen-v2\n",
+        )
+        .expect("change frozen release anchor");
+        for excluded in [
+            sdk_root.join("results/report"),
+            runner_root.join("target/noise"),
+            runner_root.join("releases/frozen-runner"),
+            runner_root.join(".git/index"),
+        ] {
+            fs::create_dir_all(excluded.parent().expect("excluded parent"))
+                .expect("excluded directory");
+            fs::write(excluded, b"excluded\n").expect("excluded fixture");
+        }
+        assert_eq!(
+            broad(),
+            baseline_broad,
+            "frozen/output/VCS artifacts are not release gate inputs"
+        );
+        assert_eq!(semantic(), baseline_semantic);
+
+        fs::write(
+            sdk_root.join("crates/core/src/lib.rs"),
+            b"pub fn core_v2() {}\n",
+        )
+        .expect("change explicit core source");
+        assert_ne!(
+            broad(),
+            baseline_broad,
+            "every explicit production source owner must be gate source"
+        );
+        assert_ne!(
+            semantic(),
+            baseline_semantic,
+            "core source must bind producer semantics"
+        );
+        fs::write(
+            sdk_root.join("crates/core/src/lib.rs"),
+            b"pub fn core() {}\n",
+        )
+        .expect("restore core source");
+        fs::create_dir_all(sdk_root.join("dev-docs")).expect("unrelated docs owner");
+        fs::write(
+            sdk_root.join("dev-docs/governed-memory-facet-index-plan.md"),
+            b"p7-truth-v2\n",
+        )
+        .expect("write producer truth source");
+        assert_ne!(
+            broad(),
+            baseline_broad,
+            "broad release identity must bind truth consumed by its gates"
+        );
+        assert_eq!(
+            semantic(),
+            baseline_semantic,
+            "truth-source review must not expand producer executable semantics"
+        );
+        fs::write(
+            sdk_root.join("dev-docs/governed-memory-facet-index-plan.md"),
+            b"truth-v1\n",
+        )
+        .expect("restore producer truth source");
+
+        fs::write(
+            sdk_root.join("crates/replay/src/bench.rs"),
+            b"pub fn benchmark_v2() {}\n",
+        )
+        .expect("change neighboring replay source");
+        let replay_source_broad = broad();
+        let replay_source_semantic = semantic();
+        assert_ne!(
+            replay_source_broad, baseline_broad,
+            "producer source identity must bind the bm-replay code linked into the runner"
+        );
+        assert_ne!(replay_source_semantic, baseline_semantic);
+
+        fs::create_dir_all(sdk_root.join("crates/replay/src/docs"))
+            .expect("included nested docs owner");
+        fs::write(
+            sdk_root.join("crates/replay/src/docs/gate-note"),
+            b"included\n",
+        )
+        .expect("included nested docs source");
+        let nested_docs_broad = broad();
+        let nested_docs_semantic = semantic();
+        assert_ne!(nested_docs_broad, replay_source_broad);
+        assert_eq!(
+            nested_docs_semantic, replay_source_semantic,
+            "arbitrary neighboring files must not enter the minimal producer manifest"
+        );
+
+        fs::write(
+            sdk_root.join("scripts/check_w4_external_noisy_wall_operator.sh"),
+            b"operator-gate-v2\n",
+        )
+        .expect("change SDK gate source");
+        let operator_broad = broad();
+        let operator_semantic = semantic();
+        assert_ne!(operator_broad, nested_docs_broad);
+        assert_eq!(
+            operator_semantic, nested_docs_semantic,
+            "producer semantics must not bind verifier orchestration"
+        );
+        fs::write(
+            sdk_root.join("scripts/check_next_gen_memory_plan.sh"),
+            b"next-gen-gate-v2\n",
+        )
+        .expect("change producer contract gate source");
+        let contract_broad = broad();
+        let contract_semantic = semantic();
+        assert_ne!(contract_broad, operator_broad);
+        assert_eq!(contract_semantic, operator_semantic);
+        fs::write(
+            runner_root.join("tests/run_full_p7_wall_fake_runner_test.sh"),
+            b"wall-test-v2\n",
+        )
+        .expect("change runner test source");
+        assert_ne!(
+            broad(),
+            contract_broad,
+            "broad gate manifest must bind the test it executes"
+        );
+        assert_eq!(semantic(), contract_semantic);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_library_does_not_compile_the_frozen_runner_anchor() {
+        let replay_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let library = fs::read_to_string(replay_root.join("src/lib.rs"))
+            .expect("read bm-replay library owner");
+
+        assert!(
+            !library.contains("mod p7_frozen_runner_identity"),
+            "the shared bm-replay library must be stateless so the measured runner cannot embed its own frozen SHA"
+        );
+    }
+
+    #[test]
+    fn legacy_merged_provenance_without_admission_is_rejected() {
+        let legacy = serde_json::json!({
+            "run_id": "run-1",
+            "contract_version": P7_CONTRACT_VERSION,
+            "sdk_report_schema_version": MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+            "sdk_build_fingerprint": "1".repeat(64),
+            "runner_build_fingerprint": "2".repeat(64),
+            "runner_lock_fingerprint": "3".repeat(64),
+            "executable_sha256": "4".repeat(64),
+            "gate_attestation_sha256": "5".repeat(64),
+            "gate_source_fingerprint": "6".repeat(64),
+            "gate_ids": P7_REQUIRED_RELEASE_GATE_IDS,
+            "build_profile": "release",
+            "input_sha256": "7".repeat(64),
+            "merged_detail_sha256": "8".repeat(64),
+            "ordered_shard_digest_manifest": []
+        });
+
+        assert!(
+            serde_json::from_value::<P7MergedProvenance>(legacy).is_err(),
+            "old merged provenance without an immutable cohort admission must fail closed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_gate_source_fingerprint_rejects_symlinks_that_escape_the_owner() {
+        use std::os::unix::fs::symlink;
+
+        let (root, sdk_root, runner_root) = p7_gate_source_fixture("symlink");
+        let outside = root.join("outside.sh");
+        fs::write(&outside, b"outside\n").expect("outside source");
+        symlink(&outside, sdk_root.join("crates/core/src/symlink.rs")).expect("source symlink");
+
+        assert!(p7_release_gate_source_fingerprint(&sdk_root, &runner_root).is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_gate_source_manifest_binds_an_internal_symlink_and_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let (root, sdk_root, runner_root) = p7_gate_source_fixture("internal-symlink");
+        let target = sdk_root.join("crates/core/src/tool_real.rs");
+        let link = sdk_root.join("crates/core/src/tool_link.rs");
+        fs::write(&target, b"tool-v1\n").expect("internal symlink target");
+        symlink("tool_real.rs", &link).expect("internal source symlink");
+
+        let (manifest, receipt) =
+            p7_release_gate_source_manifest_with_receipt(&sdk_root, &runner_root)
+                .expect("internal symlink manifest");
+        let regular_entries = manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.entry_kind == P7ReleaseSourceManifestEntryKind::RegularFile)
+            .collect::<Vec<_>>();
+        assert_eq!(receipt.unique_artifact_count, regular_entries.len() as u64);
+        assert_eq!(receipt.full_read_pass_count, receipt.unique_artifact_count);
+        assert_eq!(
+            receipt.artifact_bytes_read,
+            regular_entries
+                .iter()
+                .map(|entry| entry.byte_len)
+                .sum::<u64>()
+        );
+        assert_eq!(receipt.admitted_artifact_bytes, receipt.artifact_bytes_read);
+        assert_eq!(receipt.duplicate_artifact_count, 0);
+        assert!(receipt.passed);
+        assert!(manifest.entries.iter().any(|entry| {
+            entry.owner == "agent-memory"
+                && entry.relative_path == "crates/core/src/tool_link.rs"
+                && entry.entry_kind == P7ReleaseSourceManifestEntryKind::SymbolicLink
+        }));
+        let baseline = manifest.source_fingerprint;
+
+        fs::write(&target, b"tool-v2\n").expect("change internal symlink target");
+        assert_ne!(
+            p7_release_gate_source_fingerprint(&sdk_root, &runner_root)
+                .expect("changed internal symlink target fingerprint"),
+            baseline,
+            "the manifest must bind the content consumed through an internal symlink"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_gate_source_manifest_rejects_a_symlink_into_an_excluded_directory() {
+        use std::os::unix::fs::symlink;
+
+        let (root, sdk_root, runner_root) = p7_gate_source_fixture("excluded-symlink-target");
+        fs::create_dir_all(sdk_root.join("target")).expect("excluded target directory");
+        fs::write(sdk_root.join("target/tool.sh"), b"unattested\n")
+            .expect("excluded symlink target");
+        symlink(
+            "../../../target/tool.sh",
+            sdk_root.join("crates/core/src/tool_link.rs"),
+        )
+        .expect("symlink into excluded source");
+
+        assert!(
+            p7_release_gate_source_manifest(&sdk_root, &runner_root).is_err(),
+            "an included gate input must not reach content omitted from the source manifest"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maximum_rss_evidence_rejects_legacy_schema_without_measurement_contract() {
+        let legacy = serde_json::json!({
+            "schema_version": "p7_maximum_rss_evidence_v1",
+            "completed": true,
+            "rss_gate_passed": true,
+            "run_id": "rss-run",
+            "suite": P7_MAXIMUM_RSS_SUITE,
+            "dataset_file": "longmemeval_m_cleaned.json",
+            "dataset_sha256": "1".repeat(64),
+            "input_bytes": 1,
+            "dataset_index": 0,
+            "question_index": 0,
+            "question_id": "q0",
+            "question_sha256": "2".repeat(64),
+            "maximum_rss_bytes": 1,
+            "rss_limit_bytes": P7_MAXIMUM_RSS_LIMIT_BYTES,
+            "preflight_report_sha256": "3".repeat(64),
+            "runner_stdout_sha256": "4".repeat(64),
+            "legacy_counter_sha256": "5".repeat(64),
+            "detail_sha256": "6".repeat(64),
+            "summary_sha256": "7".repeat(64),
+            "preflight_validated_after_measurement": true,
+            "preflight": {
+                "run_id": "rss-run",
+                "sdk_build_fingerprint": "8".repeat(64),
+                "runner_build_fingerprint": "b".repeat(64),
+                "runner_lock_fingerprint": "c".repeat(64),
+                "executable_sha256": "d".repeat(64),
+                "executable_canonical_path": "/tmp/runner",
+                "build_profile": "release"
+            }
+        });
+
+        assert!(serde_json::from_value::<P7MaximumRssEvidence>(legacy).is_err());
+    }
+
+    #[test]
+    fn maximum_rss_measurement_contract_rejects_failed_child_and_receipt_drift() {
+        let benchmark_root = Path::new("/tmp/p7-rss-contract");
+        let preflight = P7RunnerPreflightReport {
+            schema_version: P7_RUNNER_PREFLIGHT_SCHEMA_VERSION.to_string(),
+            run_id: "rss-run".to_string(),
+            sdk_build_fingerprint: "a".repeat(64),
+            runner_build_fingerprint: "d".repeat(64),
+            runner_lock_fingerprint: "e".repeat(64),
+            executable_sha256: "f".repeat(64),
+            executable_canonical_path: "/tmp/runner".to_string(),
+            gate_attestation_sha256: "1".repeat(64),
+            release_metadata_sha256: "2".repeat(64),
+            gate_source_fingerprint: "3".repeat(64),
+            gate_source_manifest_sha256: "4".repeat(64),
+            gate_ids: P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+            build_profile: "release".to_string(),
+        };
+        let mut measurement = P7MaximumRssMeasurementReport {
+            schema_version: P7_MAXIMUM_RSS_MEASUREMENT_SCHEMA_VERSION.to_string(),
+            run_id: "rss-run".to_string(),
+            child_exit_status: 0,
+            child_executable_canonical_path: preflight.executable_canonical_path.clone(),
+            child_executable_sha256: preflight.executable_sha256.clone(),
+            child_args: p7_expected_maximum_rss_child_args(benchmark_root, "rss-run"),
+            maximum_rss_bytes: 1024,
+            supervisor_receipt: crate::p7_process::P7ProcessReceipt {
+                schema_version: "p7_sealed_process_receipt_v1".to_string(),
+                sealed_executable_sha256: Some(preflight.executable_sha256.clone()),
+                pid: 42,
+                process_group: 42,
+                maximum_rss_bytes: 1024,
+                elapsed_millis: 1_000,
+            },
+            runner_stdout: P7MeasuredArtifactIdentity {
+                device: 1,
+                inode: 2,
+                byte_len: 3,
+                sha256: "4".repeat(64),
+            },
+            runner_stderr: P7MeasuredArtifactIdentity {
+                device: 1,
+                inode: 3,
+                byte_len: 4,
+                sha256: "5".repeat(64),
+            },
+        };
+
+        validate_p7_maximum_rss_measurement_contract(
+            &measurement,
+            benchmark_root,
+            "rss-run",
+            &preflight,
+        )
+        .expect("exact successful measurement contract");
+
+        measurement.child_exit_status = 9;
+        assert!(validate_p7_maximum_rss_measurement_contract(
+            &measurement,
+            benchmark_root,
+            "rss-run",
+            &preflight,
+        )
+        .is_err());
+        measurement.child_exit_status = 0;
+        measurement.supervisor_receipt.sealed_executable_sha256 = Some("2".repeat(64));
+        assert!(validate_p7_maximum_rss_measurement_contract(
+            &measurement,
+            benchmark_root,
+            "rss-run",
+            &preflight,
+        )
+        .is_err());
+        measurement.supervisor_receipt.sealed_executable_sha256 =
+            Some(preflight.executable_sha256.clone());
+        measurement.child_executable_sha256 = "3".repeat(64);
+        assert!(validate_p7_maximum_rss_measurement_contract(
+            &measurement,
+            benchmark_root,
+            "rss-run",
+            &preflight,
+        )
+        .is_err());
+        measurement.child_executable_sha256 = preflight.executable_sha256.clone();
+        measurement.child_args.pop();
+        assert!(validate_p7_maximum_rss_measurement_contract(
+            &measurement,
+            benchmark_root,
+            "rss-run",
+            &preflight,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn artifact_snapshot_rejects_same_bytes_file_identity_replacement() {
+        let temp_root = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
+        let root = temp_root.join(format!("bm-p7-artifact-snapshot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("artifact root");
+        let path = root.join("artifact.json");
+        fs::write(&path, b"stable\n").expect("initial artifact");
+        let snapshot = P7RegularArtifactSnapshot::capture(&path, &root, &root)
+            .expect("initial regular snapshot");
+        let replacement = root.join("replacement.json");
+        fs::write(&replacement, b"stable\n").expect("same-byte replacement");
+        fs::rename(&replacement, &path).expect("replace artifact inode");
+
+        assert!(snapshot.verify_unchanged().is_err());
+
+        let digest_snapshot =
+            P7RegularArtifactSnapshot::capture(&path, &root, &root).expect("replacement snapshot");
+        fs::write(&path, b"changed\n").expect("change artifact bytes");
+        assert!(digest_snapshot.verify_unchanged().is_err());
+
+        let outside = temp_root.join(format!("bm-p7-artifact-outside-{}", std::process::id()));
+        fs::write(&outside, b"outside\n").expect("outside artifact");
+        assert!(P7RegularArtifactSnapshot::capture(&outside, &temp_root, &root).is_err());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_contract_rejects_a_file_beneath_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("bm-p7-parent-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let real = root.join("real");
+        let alias = root.join("alias");
+        fs::create_dir_all(&real).expect("real parent");
+        fs::write(real.join("artifact.json"), b"{}\n").expect("artifact");
+        symlink(&real, &alias).expect("parent symlink");
+
+        assert!(p7_require_regular_file(&alias.join("artifact.json")).is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maximum_rss_summary_binds_trusted_dataset_and_frozen_preflight() {
+        let root = Path::new("/tmp/p7-rss-contract");
+        let input_path = root.join("data/longmemeval_m_cleaned.json");
+        let detail_path = root.join(
+            "results/runs/rss-run/longmemeval_m_cleaned.shard-0-of-1.limit-1.question-index-0.jsonl",
+        );
+        let summary_path = root.join(
+            "results/runs/rss-run/longmemeval_m_cleaned.shard-0-of-1.limit-1.question-index-0.summary.json",
+        );
+        let dataset = p7_trusted_dataset(P7_MAXIMUM_RSS_SUITE).expect("trusted m_cleaned");
+        let preflight = P7RunnerPreflightReport {
+            schema_version: P7_RUNNER_PREFLIGHT_SCHEMA_VERSION.to_string(),
+            run_id: "rss-run".to_string(),
+            sdk_build_fingerprint: "a".repeat(64),
+            runner_build_fingerprint: "d".repeat(64),
+            runner_lock_fingerprint: "e".repeat(64),
+            executable_sha256: "f".repeat(64),
+            executable_canonical_path: "/tmp/runner".to_string(),
+            gate_attestation_sha256: "1".repeat(64),
+            release_metadata_sha256: "2".repeat(64),
+            gate_source_fingerprint: "3".repeat(64),
+            gate_source_manifest_sha256: "4".repeat(64),
+            gate_ids: P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+            build_profile: "release".to_string(),
+        };
+        let detail_sha256 = "1".repeat(64);
+        let mut summary = serde_json::json!({
+            "run_id": "rss-run",
+            "suite": P7_MAXIMUM_RSS_SUITE,
+            "shard_index": 0,
+            "shard_total": 1,
+            "samples": 1,
+            "questions": 1,
+            "write_errors": 0,
+            "recall_errors": 0,
+            "limit": 1,
+            "question_limit": null,
+            "question_index": 0,
+            "completed": true,
+            "elapsed_secs": 1.0,
+            "input_file": input_path.to_string_lossy(),
+            "input_bytes": 123,
+            "input_sha256": dataset.input_sha256,
+            "detail_file": detail_path.to_string_lossy(),
+            "summary_file": summary_path.to_string_lossy(),
+            "producer": {
+                "schema_version": P7_SHARD_PRODUCER_PROVENANCE_SCHEMA_VERSION,
+                "execution_kind": "maximum_rss_diagnostic",
+                "run_id": "rss-run",
+                "contract_version": P7_CONTRACT_VERSION,
+                "sdk_report_schema_version": MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+                "sdk_build_fingerprint": preflight.sdk_build_fingerprint,
+                "runner_build_fingerprint": preflight.runner_build_fingerprint,
+                "runner_lock_fingerprint": preflight.runner_lock_fingerprint,
+                "executable_sha256": preflight.executable_sha256,
+                "gate_attestation_sha256": preflight.gate_attestation_sha256,
+                "release_metadata_sha256": preflight.release_metadata_sha256,
+                "gate_source_fingerprint": preflight.gate_source_fingerprint,
+                "gate_source_manifest_sha256": preflight.gate_source_manifest_sha256,
+                "gate_ids": preflight.gate_ids,
+                "cohort_admission_sha256": "",
+                "build_profile": "release",
+                "input_sha256": dataset.input_sha256,
+                "detail_schema_version": P7_DETAIL_SCHEMA_VERSION,
+                "detail_sha256": detail_sha256,
+            }
+        });
+        let producer =
+            serde_json::from_value::<P7ShardProducerProvenance>(summary["producer"].take())
+                .expect("typed RSS producer fixture");
+        summary["producer"] = serde_json::to_value(
+            P7RecordedProducerIdentity::record(&producer).expect("record RSS producer fixture"),
+        )
+        .expect("serialize recorded RSS producer fixture");
+
+        validate_p7_maximum_rss_summary_contract(
+            &summary,
+            "rss-run",
+            dataset,
+            &input_path,
+            123,
+            &detail_path,
+            &summary_path,
+            &detail_sha256,
+            &preflight,
+        )
+        .expect("fully bound RSS summary");
+
+        summary["input_sha256"] = serde_json::json!("9".repeat(64));
+        assert!(validate_p7_maximum_rss_summary_contract(
+            &summary,
+            "rss-run",
+            dataset,
+            &input_path,
+            123,
+            &detail_path,
+            &summary_path,
+            &detail_sha256,
+            &preflight,
+        )
+        .is_err());
+        summary["input_sha256"] = serde_json::json!(dataset.input_sha256);
+        summary["producer"]["executable_sha256"] = serde_json::json!("8".repeat(64));
+        assert!(validate_p7_maximum_rss_summary_contract(
+            &summary,
+            "rss-run",
+            dataset,
+            &input_path,
+            123,
+            &detail_path,
+            &summary_path,
+            &detail_sha256,
+            &preflight,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn wall_release_report_requires_preflight_and_maximum_rss_evidence() {
+        let report = evaluate_w4_external_noisy_wall(&[]);
+
+        assert!(!report.release_gate_passed);
+        assert!(report
+            .blocked_reasons
+            .contains(&"p7_runner_preflight_missing".to_string()));
+        assert!(report
+            .blocked_reasons
+            .contains(&"p7_maximum_rss_evidence_missing".to_string()));
+    }
+
+    #[test]
+    fn release_finalizer_cannot_promote_a_failed_benchmark_gate() {
+        let run_id = "rss-run";
+        let preflight = P7RunnerPreflightReport {
+            schema_version: P7_RUNNER_PREFLIGHT_SCHEMA_VERSION.to_string(),
+            run_id: run_id.to_string(),
+            sdk_build_fingerprint: "a".repeat(64),
+            runner_build_fingerprint: "d".repeat(64),
+            runner_lock_fingerprint: "e".repeat(64),
+            executable_sha256: "f".repeat(64),
+            executable_canonical_path: "/tmp/runner".to_string(),
+            gate_attestation_sha256: "1".repeat(64),
+            release_metadata_sha256: "2".repeat(64),
+            gate_source_fingerprint: "3".repeat(64),
+            gate_source_manifest_sha256: "4".repeat(64),
+            gate_ids: P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+            build_profile: "release".to_string(),
+        };
+        let dataset = p7_trusted_dataset(P7_MAXIMUM_RSS_SUITE).expect("trusted m_cleaned");
+        let maximum_rss = P7MaximumRssEvidence {
+            schema_version: P7_MAXIMUM_RSS_EVIDENCE_SCHEMA_VERSION.to_string(),
+            completed: true,
+            rss_gate_passed: true,
+            run_id: run_id.to_string(),
+            suite: P7_MAXIMUM_RSS_SUITE.to_string(),
+            dataset_file: dataset.file_name.to_string(),
+            dataset_sha256: dataset.input_sha256.to_string(),
+            input_bytes: 1,
+            dataset_index: P7_MAXIMUM_RSS_DATASET_INDEX,
+            question_index: P7_MAXIMUM_RSS_QUESTION_INDEX,
+            question_id: "q0".to_string(),
+            question_sha256: "1".repeat(64),
+            maximum_rss_bytes: 1,
+            rss_limit_bytes: P7_MAXIMUM_RSS_LIMIT_BYTES,
+            measurement_report_sha256: "7".repeat(64),
+            measurement_child_exit_status: 0,
+            measurement_elapsed_millis: 1_000,
+            supervisor_receipt: crate::p7_process::P7ProcessReceipt {
+                schema_version: "p7_sealed_process_receipt_v1".to_string(),
+                sealed_executable_sha256: Some(preflight.executable_sha256.clone()),
+                pid: 42,
+                process_group: 42,
+                maximum_rss_bytes: 1,
+                elapsed_millis: 1_000,
+            },
+            measured_executable_canonical_path: preflight.executable_canonical_path.clone(),
+            measured_executable_sha256: preflight.executable_sha256.clone(),
+            preflight_report_sha256: "2".repeat(64),
+            runner_stdout_sha256: "3".repeat(64),
+            runner_stderr_sha256: "4".repeat(64),
+            detail_sha256: "5".repeat(64),
+            summary_sha256: "6".repeat(64),
+            preflight_validated_after_measurement: true,
+            preflight: preflight.clone(),
+        };
+        let report = W4ExternalNoisyWallReport {
+            benchmark_gate_passed: false,
+            run_id: Some(run_id.to_string()),
+            blocked_reasons: vec![
+                "p7_runner_preflight_missing".to_string(),
+                "p7_maximum_rss_evidence_missing".to_string(),
+            ],
+            ..W4ExternalNoisyWallReport::default()
+        };
+
+        let finalized = finalize_w4_external_noisy_release_report(
+            report,
+            preflight.clone(),
+            maximum_rss.clone(),
+        )
+        .expect("evidence binds to the cohort");
+
+        assert!(!finalized.release_gate_passed);
+        assert!(finalized
+            .blocked_reasons
+            .contains(&"p7_benchmark_gate_failed".to_string()));
+
+        let mut over_limit = P7MaximumRssEvidence {
+            rss_gate_passed: false,
+            maximum_rss_bytes: P7_MAXIMUM_RSS_LIMIT_BYTES + 1,
+            ..maximum_rss
+        };
+        over_limit.supervisor_receipt.maximum_rss_bytes = over_limit.maximum_rss_bytes;
+        let benchmark_passed = W4ExternalNoisyWallReport {
+            benchmark_gate_passed: true,
+            run_id: Some(run_id.to_string()),
+            blocked_reasons: vec![
+                "p7_runner_preflight_missing".to_string(),
+                "p7_maximum_rss_evidence_missing".to_string(),
+            ],
+            ..W4ExternalNoisyWallReport::default()
+        };
+        let over_limit_report =
+            finalize_w4_external_noisy_release_report(benchmark_passed, preflight, over_limit)
+                .expect("over-limit evidence remains a valid diagnostic report");
+        assert!(!over_limit_report.release_gate_passed);
+        assert!(over_limit_report.p7_maximum_rss_attached);
+        assert!(!over_limit_report.p7_maximum_rss_within_limit);
+        assert!(over_limit_report
+            .blocked_reasons
+            .contains(&"p7_maximum_rss_limit_exceeded".to_string()));
+    }
+
+    #[test]
     fn merged_summary_path_is_bound_to_results_runs_cohort() {
         let root = std::env::temp_dir().join(format!("bm-p7-run-path-{}", std::process::id()));
         let valid = root
@@ -6576,6 +14517,28 @@ mod p7_operator_unit_tests {
             &[duplicate_capsule],
             std::slice::from_ref(&expected),
             "projection-token-duplicate"
+        )
+        .is_err());
+
+        let mut missing_owner_token = detail_row(&expected);
+        missing_owner_token["sdk_projection_delivery_manifest"]["capsule_entries"][0]
+            .as_object_mut()
+            .expect("SDK capsule digest entry")
+            .remove("owner_identity_token");
+        assert!(verify_rows(
+            &[missing_owner_token],
+            std::slice::from_ref(&expected),
+            "projection-sdk-manifest-missing-owner-token"
+        )
+        .is_err());
+
+        let mut raw_owner_ref = detail_row(&expected);
+        raw_owner_ref["sdk_projection_delivery_manifest"]["capsule_entries"][0]["owner_ref"] =
+            serde_json::json!({"owner_plane": "long_term", "owner_id": "private-owner-id"});
+        assert!(verify_rows(
+            &[raw_owner_ref],
+            std::slice::from_ref(&expected),
+            "projection-sdk-manifest-raw-owner-ref"
         )
         .is_err());
 
@@ -6663,6 +14626,28 @@ mod p7_operator_unit_tests {
         )
         .is_err());
 
+        let mut legacy_observation = detail_row(&expected);
+        legacy_observation["runner_projection_digest_observation"]["schema_version"] =
+            serde_json::json!("p7_runner_projection_digest_observation_v1");
+        assert!(verify_rows(
+            &[legacy_observation],
+            std::slice::from_ref(&expected),
+            "projection-runner-observation-legacy-schema"
+        )
+        .is_err());
+
+        let mut missing_owner_token = detail_row(&expected);
+        missing_owner_token["runner_projection_digest_observation"]["capsule_entries"][0]
+            .as_object_mut()
+            .expect("runner capsule digest entry")
+            .remove("owner_identity_token");
+        assert!(verify_rows(
+            &[missing_owner_token],
+            std::slice::from_ref(&expected),
+            "projection-runner-observation-missing-owner-token"
+        )
+        .is_err());
+
         let mut raw_observation = detail_row(&expected);
         raw_observation["runner_projection_digest_observation"]["raw_content"] =
             serde_json::json!("private capsule content");
@@ -6672,6 +14657,27 @@ mod p7_operator_unit_tests {
             "projection-runner-observation-raw-content"
         )
         .is_err());
+    }
+
+    #[test]
+    fn detail_recomputation_rejects_projection_owner_ref_mismatch() {
+        let manifest = projection_delivery_manifest();
+        let observation = projection_delivery_observation();
+
+        validate_p7_runner_projection_digest_observation(&observation, &manifest)
+            .expect("matching independently observed owner identity tokens must verify");
+
+        for field in [
+            "capsule_entries",
+            "governed_block_entries",
+            "prompt_visible_entries",
+            "candidate_receipts",
+        ] {
+            let mut drifted = observation.clone();
+            drifted[field][0]["owner_identity_token"] =
+                serde_json::json!(projection_owner_identity_token('9'));
+            assert!(validate_p7_runner_projection_digest_observation(&drifted, &manifest).is_err());
+        }
     }
 
     #[test]
@@ -6754,21 +14760,29 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
-    fn release_identity_accepts_only_the_supplied_trust_anchor() {
+    fn release_identity_accepts_only_the_exact_governed_disk_identity() {
         let dataset = P7TrustedDataset {
             suite: "test_suite",
             file_name: "test.json",
             input_sha256: "1f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
         };
-        let runner = P7TrustedRunnerRelease {
+        let runner = P7FrozenRunnerIdentity {
             runner_build_fingerprint:
                 "2f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
             runner_lock_fingerprint:
                 "3f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
             executable_sha256: "4f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            gate_attestation_sha256:
+                "6f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            release_metadata_sha256:
+                "8f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            gate_source_fingerprint:
+                "7f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            gate_source_manifest_sha256:
+                "9f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
         };
-        let mut provenance = W4ExternalNoisyP7Provenance {
-            run_id: "test-run".to_string(),
+        let producer_identity = P7ProducerIdentity {
+            schema_version: P7_PRODUCER_IDENTITY_SCHEMA_VERSION.to_string(),
             contract_version: P7_CONTRACT_VERSION.to_string(),
             sdk_report_schema_version: MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
             sdk_build_fingerprint: P7_TRUSTED_SDK_BUILD_FINGERPRINT.to_string(),
@@ -6777,26 +14791,106 @@ mod p7_operator_unit_tests {
             executable_sha256: runner.executable_sha256.to_string(),
             build_profile: "release".to_string(),
             input_sha256: dataset.input_sha256.to_string(),
+            detail_schema_version: P7_DETAIL_SCHEMA_VERSION.to_string(),
+        };
+        let mut provenance = P7MergedProvenance {
+            schema_version: P7_MERGED_PROVENANCE_SCHEMA_VERSION.to_string(),
+            run_id: "test-run".to_string(),
+            contract_version: P7_CONTRACT_VERSION.to_string(),
+            sdk_report_schema_version: MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+            sdk_build_fingerprint: P7_TRUSTED_SDK_BUILD_FINGERPRINT.to_string(),
+            runner_build_fingerprint: runner.runner_build_fingerprint.to_string(),
+            runner_lock_fingerprint: runner.runner_lock_fingerprint.to_string(),
+            executable_sha256: runner.executable_sha256.to_string(),
+            gate_attestation_sha256: runner.gate_attestation_sha256.to_string(),
+            release_metadata_sha256: runner.release_metadata_sha256.to_string(),
+            gate_source_fingerprint: runner.gate_source_fingerprint.to_string(),
+            gate_source_manifest_sha256: runner.gate_source_manifest_sha256.to_string(),
+            gate_ids: P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+            cohort_admission_sha256: "a".repeat(64),
+            build_profile: "release".to_string(),
+            input_sha256: dataset.input_sha256.to_string(),
+            detail_schema_version: P7_DETAIL_SCHEMA_VERSION.to_string(),
+            producer_identity: P7RecordedProducerIdentity::record(&producer_identity)
+                .expect("record producer identity"),
             merged_detail_sha256: "5".repeat(64),
             ordered_shard_digest_manifest: Vec::new(),
         };
+        let disk = P7RunnerDiskIdentity {
+            runner_build_fingerprint: runner.runner_build_fingerprint.to_string(),
+            runner_lock_fingerprint: runner.runner_lock_fingerprint.to_string(),
+            executable_sha256: runner.executable_sha256.to_string(),
+            executable_canonical_path: PathBuf::from("/tmp/frozen-runner"),
+            gate_attestation_sha256: runner.gate_attestation_sha256.to_string(),
+            release_metadata_sha256: runner.release_metadata_sha256.to_string(),
+            gate_source_fingerprint: runner.gate_source_fingerprint.to_string(),
+            gate_source_manifest_sha256: runner.gate_source_manifest_sha256.to_string(),
+            gate_ids: P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+        };
 
-        assert!(validate_p7_release_identity(
-            &provenance,
-            dataset,
-            runner,
-            runner.executable_sha256,
-        )
-        .is_ok());
+        assert!(validate_p7_release_identity_against_disk(&provenance, dataset, &disk).is_ok());
+        let mut executable_drift = disk.clone();
+        executable_drift.executable_sha256 = "6".repeat(64);
         assert!(
-            validate_p7_release_identity(&provenance, dataset, runner, &"6".repeat(64)).is_err()
+            validate_p7_release_identity_against_disk(&provenance, dataset, &executable_drift,)
+                .is_err()
         );
+        provenance.gate_attestation_sha256 = "8".repeat(64);
+        assert!(validate_p7_release_identity_against_disk(&provenance, dataset, &disk).is_err());
+        provenance.gate_attestation_sha256 = runner.gate_attestation_sha256.to_string();
+        provenance.gate_source_fingerprint = "9".repeat(64);
+        assert!(validate_p7_release_identity_against_disk(&provenance, dataset, &disk).is_err());
+        provenance.gate_source_fingerprint = runner.gate_source_fingerprint.to_string();
         provenance.runner_build_fingerprint = "6".repeat(64);
-        assert!(validate_p7_release_identity(
-            &provenance,
-            dataset,
-            runner,
-            runner.executable_sha256,
+        assert!(validate_p7_release_identity_against_disk(&provenance, dataset, &disk).is_err());
+    }
+
+    #[test]
+    fn frozen_release_binding_rejects_attestation_source_and_gate_set_drift() {
+        let frozen = P7FrozenRunnerIdentity {
+            runner_build_fingerprint:
+                "2f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            runner_lock_fingerprint:
+                "3f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            executable_sha256: "4f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            gate_attestation_sha256:
+                "6f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            release_metadata_sha256:
+                "8f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            gate_source_fingerprint:
+                "7f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+            gate_source_manifest_sha256:
+                "9f3d4f4c5e6a708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+        };
+        let disk = P7RunnerDiskIdentity {
+            runner_build_fingerprint: frozen.runner_build_fingerprint.to_string(),
+            runner_lock_fingerprint: frozen.runner_lock_fingerprint.to_string(),
+            executable_sha256: frozen.executable_sha256.to_string(),
+            executable_canonical_path: PathBuf::from("/tmp/frozen-runner"),
+            gate_attestation_sha256: frozen.gate_attestation_sha256.to_string(),
+            release_metadata_sha256: frozen.release_metadata_sha256.to_string(),
+            gate_source_fingerprint: frozen.gate_source_fingerprint.to_string(),
+            gate_source_manifest_sha256: frozen.gate_source_manifest_sha256.to_string(),
+            gate_ids: P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+        };
+
+        validate_p7_frozen_release_binding(frozen, &disk, frozen.gate_source_fingerprint)
+            .expect("exact frozen release binding");
+        assert!(validate_p7_frozen_release_binding(frozen, &disk, &"9".repeat(64)).is_err());
+        let mut attestation_drift = disk.clone();
+        attestation_drift.gate_attestation_sha256 = "a".repeat(64);
+        assert!(validate_p7_frozen_release_binding(
+            frozen,
+            &attestation_drift,
+            frozen.gate_source_fingerprint,
+        )
+        .is_err());
+        let mut gate_drift = disk;
+        gate_drift.gate_ids.swap(0, 1);
+        assert!(validate_p7_frozen_release_binding(
+            frozen,
+            &gate_drift,
+            frozen.gate_source_fingerprint,
         )
         .is_err());
     }
@@ -6808,6 +14902,7 @@ mod p7_operator_unit_tests {
             "runner_build_fingerprint": "b".repeat(64),
             "runner_lock_fingerprint": "c".repeat(64),
             "executable_sha256": "d".repeat(64),
+            "executable_canonical_path": "/tmp/frozen-runner",
             "build_profile": "release"
         });
 
@@ -6815,37 +14910,514 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
-    fn runner_disk_identity_tracks_exact_build_inputs_lock_and_executable() {
-        let root =
-            std::env::temp_dir().join(format!("bm-p7-runner-identity-{}", std::process::id()));
+    fn p7_preflight_report_rejects_legacy_release_identity_schema() {
+        let legacy = serde_json::json!({
+            "run_id": "test-run",
+            "sdk_build_fingerprint": "a".repeat(64),
+            "runner_build_fingerprint": "d".repeat(64),
+            "runner_lock_fingerprint": "e".repeat(64),
+            "executable_sha256": "f".repeat(64),
+            "executable_canonical_path": "/tmp/frozen-runner",
+            "build_profile": "release"
+        });
+
+        assert!(serde_json::from_value::<P7RunnerPreflightReport>(legacy).is_err());
+    }
+
+    #[test]
+    fn p7_provenance_rejects_legacy_release_identity_schema() {
+        let legacy = serde_json::json!({
+            "run_id": "test-run",
+            "contract_version": P7_CONTRACT_VERSION,
+            "sdk_report_schema_version": MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+            "sdk_build_fingerprint": "a".repeat(64),
+            "runner_build_fingerprint": "b".repeat(64),
+            "runner_lock_fingerprint": "c".repeat(64),
+            "executable_sha256": "d".repeat(64),
+            "build_profile": "release",
+            "input_sha256": "e".repeat(64),
+            "merged_detail_sha256": "f".repeat(64),
+            "ordered_shard_digest_manifest": []
+        });
+
+        assert!(serde_json::from_value::<P7MergedProvenance>(legacy).is_err());
+    }
+
+    #[test]
+    fn p7_preflight_report_requires_canonical_runner_path() {
+        let report = serde_json::json!({
+            "run_id": "test-run",
+            "sdk_build_fingerprint": "a".repeat(64),
+            "runner_build_fingerprint": "b".repeat(64),
+            "runner_lock_fingerprint": "c".repeat(64),
+            "executable_sha256": "d".repeat(64),
+            "build_profile": "release"
+        });
+
+        assert!(serde_json::from_value::<P7RunnerPreflightReport>(report).is_err());
+    }
+
+    #[test]
+    fn p7_preflight_report_rejects_verifier_identity_fields() {
+        let mut report = serde_json::json!({
+            "schema_version": P7_RUNNER_PREFLIGHT_SCHEMA_VERSION,
+            "run_id": "test-run",
+            "sdk_build_fingerprint": "a".repeat(64),
+            "runner_build_fingerprint": "b".repeat(64),
+            "runner_lock_fingerprint": "c".repeat(64),
+            "executable_sha256": "d".repeat(64),
+            "executable_canonical_path": "/tmp/frozen-runner",
+            "gate_attestation_sha256": "e".repeat(64),
+            "release_metadata_sha256": "f".repeat(64),
+            "gate_source_fingerprint": "1".repeat(64),
+            "gate_source_manifest_sha256": "2".repeat(64),
+            "gate_ids": P7_REQUIRED_RELEASE_GATE_IDS,
+            "build_profile": "release"
+        });
+        serde_json::from_value::<P7RunnerPreflightReport>(report.clone())
+            .expect("producer-only preflight shape");
+        report["operator_build_fingerprint"] = serde_json::json!("e".repeat(64));
+        report["orchestration_fingerprint"] = serde_json::json!("f".repeat(64));
+        assert!(serde_json::from_value::<P7RunnerPreflightReport>(report).is_err());
+    }
+
+    struct P7TestReleaseBundle {
+        root: PathBuf,
+        executable_sha256: String,
+        attestation_path: PathBuf,
+        metadata_path: PathBuf,
+        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
+        source_manifest_path: PathBuf,
+        attestation: P7ReleaseGateAttestation,
+        metadata: P7ReleaseMetadata,
+        source_manifest: P7ReleaseSourceManifest,
+    }
+
+    fn p7_test_json_bytes<T: Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec_pretty(value).expect("serialize release fixture");
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn p7_test_gate_receipts(
+        sdk_root: &Path,
+        runner_root: &Path,
+        source_fingerprint: &str,
+        tools: &[P7ReleaseToolIdentity],
+        environment_sha256: &str,
+    ) -> Vec<P7ReleaseGateReceipt> {
+        p7_required_release_gate_specs(sdk_root, runner_root)
+            .expect("fixture production gate specs")
+            .into_iter()
+            .map(|spec| {
+                let logical_name = spec.argv.first().expect("fixture gate argv");
+                let tool = tools
+                    .iter()
+                    .find(|tool| tool.logical_name == *logical_name)
+                    .expect("fixture gate tool");
+                P7ReleaseGateReceipt {
+                    gate_id: spec.gate_id.to_string(),
+                    owner_root: spec.owner_root,
+                    argv: std::iter::once(tool.canonical_path.clone())
+                        .chain(spec.argv.into_iter().skip(1))
+                        .collect(),
+                    tool_sha256: tool.sha256.clone(),
+                    environment_sha256: environment_sha256.to_string(),
+                    exit_code: 0,
+                    stdout_sha256: "a".repeat(64),
+                    stderr_sha256: "b".repeat(64),
+                    source_fingerprint_after: source_fingerprint.to_string(),
+                }
+            })
+            .collect()
+    }
+
+    fn p7_test_gate_execution_identity(
+    ) -> (Vec<P7ReleaseToolIdentity>, P7ReleaseEnvironmentAttestation) {
+        let cargo = fs::canonicalize(env!("CARGO")).expect("canonical cargo");
+        let bash = fs::canonicalize("/bin/bash").expect("canonical bash");
+        let tools = [("bash", bash), ("cargo", cargo)]
+            .into_iter()
+            .map(|(logical_name, path)| P7ReleaseToolIdentity {
+                logical_name: logical_name.to_string(),
+                canonical_path: path.to_string_lossy().into_owned(),
+                sha256: p7_sha256_file(&path).expect("fixture tool digest"),
+                version: "fixture-version".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let variables = BTreeMap::from([
+            ("CARGO_NET_OFFLINE".to_string(), "true".to_string()),
+            ("LANG".to_string(), "C".to_string()),
+            ("LC_ALL".to_string(), "C".to_string()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("RUST_BACKTRACE".to_string(), "0".to_string()),
+        ]);
+        let sha256 =
+            p7_release_gate_environment_sha256(&variables).expect("fixture environment digest");
+        (tools, P7ReleaseEnvironmentAttestation { variables, sha256 })
+    }
+
+    fn p7_test_release_bundle(label: &str) -> P7TestReleaseBundle {
+        let canonical_temp = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
+        let root = canonical_temp.join(format!(
+            "bm-p7-release-bundle-{label}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
-        let runner = root.join("runner");
-        fs::create_dir_all(runner.join("src")).expect("runner src");
-        fs::create_dir_all(runner.join("target/release")).expect("runner release target");
-        fs::write(runner.join("Cargo.toml"), b"[package]\nname='fixture'\n")
-            .expect("runner manifest");
-        fs::write(runner.join("Cargo.lock"), b"lock-v1\n").expect("runner lock");
-        fs::write(runner.join("build.rs"), b"fn main() {}\n").expect("runner build script");
-        fs::write(runner.join("src/main.rs"), b"fn main() {}\n").expect("runner source");
-        fs::write(
-            runner.join("target/release/beetle-memory-external-bench-runner"),
-            b"binary-v1\n",
+        let runner_root = root.join("runner");
+        fs::create_dir_all(runner_root.join("src")).expect("runner source owner");
+        fs::create_dir_all(runner_root.join("tests")).expect("runner test owner");
+        for (path, bytes) in [
+            (
+                runner_root.join("Cargo.toml"),
+                b"runner-manifest\n".as_slice(),
+            ),
+            (runner_root.join("Cargo.lock"), b"runner-lock\n".as_slice()),
+            (runner_root.join("build.rs"), b"fn main() {}\n".as_slice()),
+            (
+                runner_root.join("src/main.rs"),
+                b"fn main() {}\n".as_slice(),
+            ),
+            (
+                runner_root.join("run_full_p7_wall.sh"),
+                b"wall-v1\n".as_slice(),
+            ),
+            (
+                runner_root.join("run_p7_max_rss.sh"),
+                b"rss-v1\n".as_slice(),
+            ),
+            (
+                runner_root.join("tests/run_full_p7_wall_fake_runner_test.sh"),
+                b"wall-test-v1\n".as_slice(),
+            ),
+            (
+                runner_root.join("tests/run_p7_max_rss_fake_runner_test.sh"),
+                b"rss-test-v1\n".as_slice(),
+            ),
+        ] {
+            fs::write(path, bytes).expect("runner release fixture");
+        }
+        let executable_bytes = b"release-executable-v1\n";
+        let executable_sha256 = format!("{:x}", Sha256::digest(executable_bytes));
+        let executable = p7_runner_release_executable_path(&root, &executable_sha256)
+            .expect("content-addressed release path");
+        let release_dir = executable.parent().expect("release owner");
+        fs::create_dir_all(release_dir).expect("release owner directory");
+        fs::write(&executable, executable_bytes).expect("release executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable)
+                .expect("release executable metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).expect("release executable mode");
+        }
+        let runner_inputs =
+            p7_fingerprint_inputs(&runner_root, &P7_RUNNER_BUILD_INPUTS).expect("runner inputs");
+        let identity = P7RunnerBuildIdentity {
+            sdk_build_fingerprint: P7_TRUSTED_SDK_BUILD_FINGERPRINT.to_string(),
+            runner_build_fingerprint: p7_fingerprint_files_with_contract(
+                &runner_root,
+                &runner_inputs,
+                P7_RUNNER_BUILD_FINGERPRINT_CONTRACT,
+            )
+            .expect("runner build fingerprint"),
+            runner_lock_fingerprint: p7_sha256_file(&runner_root.join("Cargo.lock"))
+                .expect("runner lock fingerprint"),
+            executable_sha256: executable_sha256.clone(),
+            build_profile: "release".to_string(),
+        };
+        let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(|path| fs::canonicalize(path).ok())
+            .expect("canonical SDK root");
+        let canonical_runner_root = fs::canonicalize(&runner_root).expect("canonical runner root");
+        let source_manifest = p7_release_gate_source_manifest(&sdk_root, &canonical_runner_root)
+            .expect("fixture release source manifest");
+        let source_fingerprint = source_manifest.source_fingerprint.clone();
+        let source_manifest_path = release_dir.join(P7_RELEASE_GATE_SOURCE_MANIFEST_FILE_NAME);
+        let source_manifest_bytes = p7_test_json_bytes(&source_manifest);
+        fs::write(&source_manifest_path, &source_manifest_bytes).expect("release source manifest");
+        let source_manifest_sha256 = format!("{:x}", Sha256::digest(&source_manifest_bytes));
+        let (tools, environment) = p7_test_gate_execution_identity();
+        let attestation = P7ReleaseGateAttestation {
+            schema_version: P7_RELEASE_GATE_ATTESTATION_SCHEMA_VERSION.to_string(),
+            orchestrator_contract: P7_RELEASE_GATE_ORCHESTRATOR_CONTRACT.to_string(),
+            plan: p7_release_gate_plan(),
+            identity: identity.clone(),
+            source_fingerprint: source_fingerprint.clone(),
+            source_manifest_sha256: source_manifest_sha256.clone(),
+            gates: p7_test_gate_receipts(
+                &sdk_root,
+                &canonical_runner_root,
+                &source_fingerprint,
+                &tools,
+                &environment.sha256,
+            ),
+            tools,
+            environment,
+        };
+        let attestation_path = release_dir.join(P7_RELEASE_GATE_ATTESTATION_FILE_NAME);
+        let attestation_bytes = p7_test_json_bytes(&attestation);
+        fs::write(&attestation_path, &attestation_bytes).expect("release attestation");
+        let metadata = P7ReleaseMetadata {
+            schema_version: P7_RELEASE_METADATA_SCHEMA_VERSION.to_string(),
+            canonical_executable_path: executable.to_string_lossy().into_owned(),
+            identity,
+            gate_attestation_sha256: format!("{:x}", Sha256::digest(&attestation_bytes)),
+            gate_source_fingerprint: source_fingerprint,
+            gate_source_manifest_sha256: source_manifest_sha256,
+            gate_ids: P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+        };
+        let metadata_path = release_dir.join(P7_RELEASE_METADATA_FILE_NAME);
+        fs::write(&metadata_path, p7_test_json_bytes(&metadata)).expect("release metadata");
+        P7TestReleaseBundle {
+            root,
+            executable_sha256,
+            attestation_path,
+            metadata_path,
+            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
+            source_manifest_path,
+            attestation,
+            metadata,
+            source_manifest,
+        }
+    }
+
+    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    fn p7_test_write_release_governance(bundle: &mut P7TestReleaseBundle) {
+        let release_dir =
+            p7_runner_release_executable_path(&bundle.root, &bundle.executable_sha256)
+                .expect("test release path")
+                .parent()
+                .expect("test release owner")
+                .to_path_buf();
+        bundle.attestation_path = release_dir.join(P7_RELEASE_GATE_ATTESTATION_FILE_NAME);
+        bundle.metadata_path = release_dir.join(P7_RELEASE_METADATA_FILE_NAME);
+        bundle.source_manifest_path = release_dir.join(P7_RELEASE_GATE_SOURCE_MANIFEST_FILE_NAME);
+        let source_manifest_bytes = p7_test_json_bytes(&bundle.source_manifest);
+        fs::write(&bundle.source_manifest_path, &source_manifest_bytes)
+            .expect("write test release source manifest");
+        let source_manifest_sha256 = format!("{:x}", Sha256::digest(&source_manifest_bytes));
+        bundle.attestation.source_manifest_sha256 = source_manifest_sha256.clone();
+        let attestation_bytes = p7_test_json_bytes(&bundle.attestation);
+        fs::write(&bundle.attestation_path, &attestation_bytes)
+            .expect("write test release attestation");
+        bundle.metadata.identity = bundle.attestation.identity.clone();
+        bundle.metadata.canonical_executable_path = release_dir
+            .join(P7_RUNNER_RELEASE_FILE_NAME)
+            .to_string_lossy()
+            .into_owned();
+        bundle.metadata.gate_attestation_sha256 =
+            format!("{:x}", Sha256::digest(&attestation_bytes));
+        bundle.metadata.gate_source_fingerprint = bundle.attestation.source_fingerprint.clone();
+        bundle.metadata.gate_source_manifest_sha256 = source_manifest_sha256;
+        bundle.metadata.gate_ids = bundle
+            .attestation
+            .gates
+            .iter()
+            .map(|gate| gate.gate_id.clone())
+            .collect();
+        fs::write(&bundle.metadata_path, p7_test_json_bytes(&bundle.metadata))
+            .expect("write test release metadata");
+    }
+
+    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    fn p7_test_republish_executable(bundle: &mut P7TestReleaseBundle, bytes: &[u8]) {
+        bundle.executable_sha256 = format!("{:x}", Sha256::digest(bytes));
+        let executable = p7_runner_release_executable_path(&bundle.root, &bundle.executable_sha256)
+            .expect("republished executable path");
+        fs::create_dir_all(executable.parent().expect("republished release owner"))
+            .expect("republished release owner");
+        fs::write(&executable, bytes).expect("republished executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable)
+                .expect("republished executable metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).expect("republished executable mode");
+        }
+        bundle.attestation.identity.executable_sha256 = bundle.executable_sha256.clone();
+        p7_test_write_release_governance(bundle);
+    }
+
+    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    fn p7_test_rebind_gate_source(bundle: &mut P7TestReleaseBundle, source_fingerprint: &str) {
+        bundle.attestation.source_fingerprint = source_fingerprint.to_string();
+        bundle.source_manifest.source_fingerprint = source_fingerprint.to_string();
+        for receipt in &mut bundle.attestation.gates {
+            receipt.source_fingerprint_after = source_fingerprint.to_string();
+        }
+        p7_test_write_release_governance(bundle);
+    }
+
+    #[test]
+    fn runner_disk_identity_requires_exact_release_governance_bundle() {
+        let bundle = p7_test_release_bundle("valid");
+        let disk = p7_runner_disk_identity_for_release_sha(&bundle.root, &bundle.executable_sha256)
+            .expect("valid release governance bundle");
+
+        assert_eq!(
+            disk.gate_attestation_sha256,
+            bundle.metadata.gate_attestation_sha256
+        );
+        assert_eq!(
+            disk.gate_source_fingerprint,
+            bundle.source_manifest.source_fingerprint
+        );
+        assert_eq!(
+            disk.gate_ids,
+            P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        );
+        assert!(is_sha256(&disk.release_metadata_sha256));
+
+        let _ = fs::remove_dir_all(bundle.root);
+    }
+
+    #[test]
+    fn public_release_bundle_verifier_uses_explicit_source_locator_and_one_session() {
+        let bundle = p7_test_release_bundle("public-verifier");
+        let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(|path| fs::canonicalize(path).ok())
+            .expect("canonical SDK root");
+        let runner_source_root =
+            fs::canonicalize(bundle.root.join("runner")).expect("canonical runner source root");
+        let (verified, receipt) = verify_p7_published_release_bundle_with_receipt(
+            &bundle.root,
+            &sdk_root,
+            &runner_source_root,
+            &bundle.executable_sha256,
         )
-        .expect("runner executable");
-        let original = p7_runner_disk_identity_at_root(&root).expect("initial runner identity");
+        .expect("public retained release verifier");
+
         assert_eq!(
-            original.runner_build_fingerprint,
-            "786c4a5f4d6d141bbb063b41347b3082031c4ef98b67b9fc7a7367b689c4db74"
+            verified.identity.runner_build_fingerprint,
+            bundle.metadata.identity.runner_build_fingerprint
         );
         assert_eq!(
-            original.runner_lock_fingerprint,
-            format!("{:x}", Sha256::digest(b"lock-v1\n"))
+            verified.identity.runner_lock_fingerprint,
+            bundle.metadata.identity.runner_lock_fingerprint
         );
-        let producer = W4ExternalNoisyP7Provenance {
+        assert_eq!(
+            verified.identity.executable_sha256,
+            bundle.metadata.identity.executable_sha256
+        );
+        assert_eq!(
+            verified.identity.gate_attestation_sha256,
+            bundle.metadata.gate_attestation_sha256
+        );
+        assert_eq!(
+            verified.executable_canonical_path,
+            p7_runner_release_executable_path(&bundle.root, &bundle.executable_sha256)
+                .expect("expected release executable")
+        );
+        assert!(receipt.passed);
+        assert_eq!(receipt.unique_artifact_count, receipt.full_read_pass_count);
+        assert_eq!(receipt.duplicate_artifact_count, 0);
+
+        let _ = fs::remove_dir_all(bundle.root);
+    }
+
+    #[test]
+    fn runner_disk_identity_rejects_metadata_and_gate_receipt_tampering() {
+        let mut metadata_bundle = p7_test_release_bundle("metadata-tamper");
+        metadata_bundle.metadata.gate_ids.swap(0, 1);
+        fs::write(
+            &metadata_bundle.metadata_path,
+            p7_test_json_bytes(&metadata_bundle.metadata),
+        )
+        .expect("tampered release metadata");
+        assert!(p7_runner_disk_identity_for_release_sha(
+            &metadata_bundle.root,
+            &metadata_bundle.executable_sha256,
+        )
+        .is_err());
+
+        let mut identity_bundle = p7_test_release_bundle("identity-tamper");
+        identity_bundle.metadata.identity.runner_lock_fingerprint = "9".repeat(64);
+        fs::write(
+            &identity_bundle.metadata_path,
+            p7_test_json_bytes(&identity_bundle.metadata),
+        )
+        .expect("tampered release identity");
+        assert!(p7_runner_disk_identity_for_release_sha(
+            &identity_bundle.root,
+            &identity_bundle.executable_sha256,
+        )
+        .is_err());
+
+        let mut receipt_bundle = p7_test_release_bundle("receipt-tamper");
+        receipt_bundle.attestation.gates[0].exit_code = 9;
+        let attestation_bytes = p7_test_json_bytes(&receipt_bundle.attestation);
+        fs::write(&receipt_bundle.attestation_path, &attestation_bytes)
+            .expect("tampered release attestation");
+        receipt_bundle.metadata.gate_attestation_sha256 =
+            format!("{:x}", Sha256::digest(&attestation_bytes));
+        fs::write(
+            &receipt_bundle.metadata_path,
+            p7_test_json_bytes(&receipt_bundle.metadata),
+        )
+        .expect("metadata rebound to failed receipt");
+        assert!(p7_runner_disk_identity_for_release_sha(
+            &receipt_bundle.root,
+            &receipt_bundle.executable_sha256,
+        )
+        .is_err());
+
+        let _ = fs::remove_dir_all(metadata_bundle.root);
+        let _ = fs::remove_dir_all(identity_bundle.root);
+        let _ = fs::remove_dir_all(receipt_bundle.root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_disk_identity_rejects_symlinked_release_governance_file() {
+        use std::os::unix::fs::symlink;
+
+        let bundle = p7_test_release_bundle("attestation-symlink");
+        let replacement = bundle.root.join("attestation-copy.json");
+        fs::rename(&bundle.attestation_path, &replacement).expect("move attestation");
+        symlink(&replacement, &bundle.attestation_path).expect("symlink attestation");
+
+        assert!(
+            p7_runner_disk_identity_for_release_sha(&bundle.root, &bundle.executable_sha256,)
+                .is_err()
+        );
+
+        let _ = fs::remove_dir_all(bundle.root);
+    }
+
+    #[test]
+    fn runner_disk_identity_tracks_exact_build_inputs_lock_and_executable() {
+        let bundle = p7_test_release_bundle("identity-drift");
+        let root = bundle.root;
+        let executable_sha256 = bundle.executable_sha256;
+        let runner = root.join("runner");
+        let executable = p7_runner_release_executable_path(&root, &executable_sha256)
+            .expect("content-addressed runner path");
+        let original = p7_runner_disk_identity_for_release_sha(&root, &executable_sha256)
+            .expect("initial runner identity");
+        let producer = P7MergedProvenance {
             runner_build_fingerprint: original.runner_build_fingerprint.clone(),
             runner_lock_fingerprint: original.runner_lock_fingerprint.clone(),
             executable_sha256: original.executable_sha256.clone(),
-            ..W4ExternalNoisyP7Provenance::default()
+            gate_attestation_sha256: original.gate_attestation_sha256.clone(),
+            release_metadata_sha256: original.release_metadata_sha256.clone(),
+            gate_source_fingerprint: original.gate_source_fingerprint.clone(),
+            gate_source_manifest_sha256: original.gate_source_manifest_sha256.clone(),
+            gate_ids: original.gate_ids.clone(),
+            ..P7MergedProvenance::default()
         };
         validate_p7_runner_disk_provenance(&producer, &original)
             .expect("producer must match the exact runner bytes");
@@ -6853,7 +15425,8 @@ mod p7_operator_unit_tests {
         fs::create_dir_all(runner.join("target/debug")).expect("debug target");
         fs::write(runner.join("target/debug/noise"), b"not a build input").expect("target noise");
         assert_eq!(
-            p7_runner_disk_identity_at_root(&root).expect("identity after target noise"),
+            p7_runner_disk_identity_for_release_sha(&root, &executable_sha256)
+                .expect("identity after target noise"),
             original
         );
 
@@ -6862,38 +15435,61 @@ mod p7_operator_unit_tests {
             b"fn main() { println!(\"v2\"); }\n",
         )
         .expect("changed runner source");
-        let source_changed = p7_runner_disk_identity_at_root(&root).expect("source identity");
-        assert_ne!(
-            source_changed.runner_build_fingerprint,
-            original.runner_build_fingerprint
-        );
-        assert_eq!(
-            source_changed.runner_lock_fingerprint,
-            original.runner_lock_fingerprint
-        );
-        assert_eq!(source_changed.executable_sha256, original.executable_sha256);
-        assert!(validate_p7_runner_disk_provenance(&producer, &source_changed).is_err());
+        assert!(p7_runner_disk_identity_for_release_sha(&root, &executable_sha256).is_err());
 
-        fs::write(runner.join("Cargo.lock"), b"lock-v2\n").expect("changed runner lock");
-        let lock_changed = p7_runner_disk_identity_at_root(&root).expect("lock identity");
-        assert_ne!(
-            lock_changed.runner_build_fingerprint,
-            source_changed.runner_build_fingerprint
-        );
-        assert_ne!(
-            lock_changed.runner_lock_fingerprint,
-            source_changed.runner_lock_fingerprint
-        );
+        fs::write(runner.join("src/main.rs"), b"fn main() {}\n").expect("restore runner source");
+        fs::write(runner.join("Cargo.lock"), b"runner-lock-v2\n").expect("changed runner lock");
+        assert!(p7_runner_disk_identity_for_release_sha(&root, &executable_sha256).is_err());
+        fs::write(runner.join("Cargo.lock"), b"runner-lock\n").expect("restore runner lock");
+        fs::write(&executable, b"binary-v2\n").expect("replace release bytes");
+        assert!(p7_runner_disk_identity_for_release_sha(&root, &executable_sha256).is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runner_build_fingerprint_streams_each_length_prefixed_file() {
+        struct BoundedReader {
+            inner: std::io::Cursor<Vec<u8>>,
+            largest_buffer: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+
+        impl Read for BoundedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.largest_buffer
+                    .set(self.largest_buffer.get().max(buffer.len()));
+                self.inner.read(buffer)
+            }
+        }
+
+        let content = (0..(64 * 1024 * 3 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let largest_buffer = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut reader = BoundedReader {
+            inner: std::io::Cursor::new(content.clone()),
+            largest_buffer: largest_buffer.clone(),
+        };
+        let mut actual = Sha256::new();
+        p7_hash_fingerprint_reader(&mut actual, content.len() as u64, &mut reader)
+            .expect("streamed fingerprint field");
+
+        let mut expected = Sha256::new();
+        expected.update((content.len() as u64).to_le_bytes());
+        expected.update(&content);
+        assert_eq!(
+            format!("{:x}", actual.finalize()),
+            format!("{:x}", expected.finalize())
+        );
+        assert!(largest_buffer.get() <= 64 * 1024);
     }
 
     #[cfg(unix)]
     #[test]
-    fn runner_preflight_rejects_stale_embedded_executable_identity() {
+    fn runner_preflight_never_executes_target_release_instead_of_content_addressed_release() {
         use std::os::unix::fs::PermissionsExt;
 
         let root =
-            std::env::temp_dir().join(format!("bm-p7-stale-identity-{}", std::process::id()));
+            std::env::temp_dir().join(format!("bm-p7-alternate-executable-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let runner = root.join("runner");
         fs::create_dir_all(runner.join("src")).expect("runner src");
@@ -6903,43 +15499,44 @@ mod p7_operator_unit_tests {
         fs::write(runner.join("Cargo.lock"), b"lock-v1\n").expect("runner lock");
         fs::write(runner.join("build.rs"), b"fn main() {}\n").expect("runner build script");
         fs::write(runner.join("src/main.rs"), b"fn main() {}\n").expect("runner source");
-        let inputs =
-            p7_fingerprint_inputs(&runner, &P7_RUNNER_BUILD_INPUTS).expect("runner build inputs");
-        let runner_build = p7_fingerprint_files_with_contract(
-            &runner,
-            &inputs,
-            P7_RUNNER_BUILD_FINGERPRINT_CONTRACT,
-        )
-        .expect("runner build fingerprint");
-        let runner_lock = p7_sha256_file(&runner.join("Cargo.lock")).expect("runner lock digest");
-        let marker = root.join("identity-command-executed");
-        let executable = runner.join("target/release/beetle-memory-external-bench-runner");
+        fs::write(runner.join("run_full_p7_wall.sh"), b"wall\n").expect("wall script");
+        fs::write(runner.join("run_p7_max_rss.sh"), b"rss\n").expect("RSS script");
+        let marker = root.join("target-release-executed");
+        let alternate = runner.join("target/release/beetle-memory-external-bench-runner");
         fs::write(
-            &executable,
-            format!(
-                "#!/bin/sh\n: > '{}'\nprintf '%s\\n' '{{\"sdk_build_fingerprint\":\"{}\",\"runner_build_fingerprint\":\"{}\",\"runner_lock_fingerprint\":\"{}\",\"build_profile\":\"release\",\"executable_sha256\":\"{}\"}}'\n",
-                marker.display(),
-                P7_TRUSTED_SDK_BUILD_FINGERPRINT,
-                runner_build,
-                runner_lock,
-                "0".repeat(64),
-            ),
+            &alternate,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
         )
-        .expect("stale identity executable");
-        let mut permissions = fs::metadata(&executable)
-            .expect("runner metadata")
+        .expect("alternate executable");
+        let mut permissions = fs::metadata(&alternate)
+            .expect("alternate executable metadata")
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&executable, permissions).expect("runner executable permissions");
-        let disk = p7_runner_disk_identity_at_root(&root).expect("runner disk identity");
-        let trusted = P7TrustedRunnerRelease {
+        fs::set_permissions(&alternate, permissions).expect("alternate executable permissions");
+
+        let executable_sha256 = p7_sha256_file(&alternate).expect("target executable digest");
+        let runner_inputs =
+            p7_fingerprint_inputs(&runner, &P7_RUNNER_BUILD_INPUTS).expect("runner build inputs");
+        let frozen = P7FrozenRunnerIdentity {
             runner_build_fingerprint: Box::leak(
-                disk.runner_build_fingerprint.clone().into_boxed_str(),
+                p7_fingerprint_files_with_contract(
+                    &runner,
+                    &runner_inputs,
+                    P7_RUNNER_BUILD_FINGERPRINT_CONTRACT,
+                )
+                .expect("runner build fingerprint")
+                .into_boxed_str(),
             ),
             runner_lock_fingerprint: Box::leak(
-                disk.runner_lock_fingerprint.clone().into_boxed_str(),
+                p7_sha256_file(&runner.join("Cargo.lock"))
+                    .expect("runner lock fingerprint")
+                    .into_boxed_str(),
             ),
-            executable_sha256: Box::leak(disk.executable_sha256.into_boxed_str()),
+            executable_sha256: Box::leak(executable_sha256.into_boxed_str()),
+            gate_attestation_sha256: Box::leak("1".repeat(64).into_boxed_str()),
+            release_metadata_sha256: Box::leak("3".repeat(64).into_boxed_str()),
+            gate_source_fingerprint: Box::leak("2".repeat(64).into_boxed_str()),
+            gate_source_manifest_sha256: Box::leak("4".repeat(64).into_boxed_str()),
         };
         let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -6947,9 +15544,98 @@ mod p7_operator_unit_tests {
             .expect("SDK root");
 
         assert!(
-            preflight_p7_runner_release_with_trusted(&root, sdk_root, trusted, "test-run").is_err()
+            preflight_p7_runner_release_with_frozen(&root, sdk_root, frozen, "test-run").is_err()
         );
-        assert!(marker.is_file(), "trusted runner identity was not executed");
+        assert!(
+            !marker.exists(),
+            "target/release must never be executed as the frozen runner"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_preflight_rejects_a_symlinked_frozen_executable() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("bm-p7-symlinked-runner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let runner = root.join("runner");
+        fs::create_dir_all(runner.join("src")).expect("runner src");
+        fs::write(runner.join("Cargo.toml"), b"[package]\nname='fixture'\n")
+            .expect("runner manifest");
+        fs::write(runner.join("Cargo.lock"), b"lock-v1\n").expect("runner lock");
+        fs::write(runner.join("build.rs"), b"fn main() {}\n").expect("runner build script");
+        fs::write(runner.join("src/main.rs"), b"fn main() {}\n").expect("runner source");
+
+        let alternate = root.join("alternate-runner");
+        fs::write(&alternate, b"alternate executable bytes\n").expect("alternate executable");
+        let executable_sha256 = p7_sha256_file(&alternate).expect("alternate digest");
+        let executable = p7_runner_release_executable_path(&root, &executable_sha256)
+            .expect("content-addressed runner path");
+        fs::create_dir_all(executable.parent().expect("release parent"))
+            .expect("release directory");
+        symlink(&alternate, &executable).expect("symlinked frozen executable");
+
+        assert!(p7_runner_disk_identity_for_release_sha(&root, &executable_sha256).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runner_preflight_rejects_stale_embedded_executable_identity() {
+        let mut bundle = p7_test_release_bundle("stale-embedded-identity");
+        let root = bundle.root.clone();
+        let identity = bundle.attestation.identity.clone();
+        let marker = root.join("identity-command-executed");
+        let executable_body = format!(
+            "#!/bin/sh\n: > '{}'\nprintf '%s\\n' '{{\"sdk_build_fingerprint\":\"{}\",\"runner_build_fingerprint\":\"{}\",\"runner_lock_fingerprint\":\"{}\",\"build_profile\":\"release\",\"executable_sha256\":\"{}\"}}'\n",
+            marker.display(),
+            identity.sdk_build_fingerprint,
+            identity.runner_build_fingerprint,
+            identity.runner_lock_fingerprint,
+            "0".repeat(64),
+        );
+        p7_test_republish_executable(&mut bundle, executable_body.as_bytes());
+        let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(|path| fs::canonicalize(path).ok())
+            .expect("canonical SDK root");
+        let fresh_gate_source = p7_release_gate_source_fingerprint(&sdk_root, &root.join("runner"))
+            .expect("fresh gate source fingerprint");
+        p7_test_rebind_gate_source(&mut bundle, &fresh_gate_source);
+        let disk = p7_runner_disk_identity_for_release_sha(&root, &bundle.executable_sha256)
+            .expect("runner disk identity");
+        let frozen = P7FrozenRunnerIdentity {
+            runner_build_fingerprint: Box::leak(
+                disk.runner_build_fingerprint.clone().into_boxed_str(),
+            ),
+            runner_lock_fingerprint: Box::leak(
+                disk.runner_lock_fingerprint.clone().into_boxed_str(),
+            ),
+            executable_sha256: Box::leak(disk.executable_sha256.clone().into_boxed_str()),
+            gate_attestation_sha256: Box::leak(
+                disk.gate_attestation_sha256.clone().into_boxed_str(),
+            ),
+            release_metadata_sha256: Box::leak(
+                disk.release_metadata_sha256.clone().into_boxed_str(),
+            ),
+            gate_source_fingerprint: Box::leak(
+                disk.gate_source_fingerprint.clone().into_boxed_str(),
+            ),
+            gate_source_manifest_sha256: Box::leak(
+                disk.gate_source_manifest_sha256.clone().into_boxed_str(),
+            ),
+        };
+
+        let error = preflight_p7_runner_release_with_frozen(&root, &sdk_root, frozen, "test-run")
+            .expect_err("stale embedded identity must fail closed");
+        assert!(
+            marker.is_file(),
+            "frozen runner identity was not executed: {error:?}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -6967,12 +15653,245 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
-    fn trusted_runner_anchor_is_structurally_valid_when_frozen() {
-        if let Some(anchor) = P7_TRUSTED_RUNNER_RELEASE {
-            assert!(is_sha256(anchor.runner_build_fingerprint));
-            assert!(is_sha256(anchor.runner_lock_fingerprint));
-            assert!(is_sha256(anchor.executable_sha256));
+    fn frozen_runner_identity_contract_is_structurally_valid() {
+        let identity = P7FrozenRunnerIdentity {
+            runner_build_fingerprint:
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            runner_lock_fingerprint:
+                "2222222222222222222222222222222222222222222222222222222222222222",
+            executable_sha256: "3333333333333333333333333333333333333333333333333333333333333333",
+            gate_attestation_sha256:
+                "4444444444444444444444444444444444444444444444444444444444444444",
+            release_metadata_sha256:
+                "6666666666666666666666666666666666666666666666666666666666666666",
+            gate_source_fingerprint:
+                "5555555555555555555555555555555555555555555555555555555555555555",
+            gate_source_manifest_sha256:
+                "7777777777777777777777777777777777777777777777777777777777777777",
+        };
+        assert!(is_sha256(identity.runner_build_fingerprint));
+        assert!(is_sha256(identity.runner_lock_fingerprint));
+        assert!(is_sha256(identity.executable_sha256));
+        assert!(is_sha256(identity.gate_attestation_sha256));
+        assert!(is_sha256(identity.release_metadata_sha256));
+        assert!(is_sha256(identity.gate_source_fingerprint));
+        assert!(is_sha256(identity.gate_source_manifest_sha256));
+    }
+
+    #[test]
+    fn producer_identity_preserves_recorded_detail_schema_without_verifier_backfill() {
+        let provenance = P7MergedProvenance {
+            detail_schema_version: "p7_question_detail_fixture_v0".to_string(),
+            producer_identity: P7RecordedProducerIdentity::record(&P7ProducerIdentity {
+                detail_schema_version: "p7_question_detail_fixture_v0".to_string(),
+                ..P7ProducerIdentity {
+                    schema_version: P7_PRODUCER_IDENTITY_SCHEMA_VERSION.to_string(),
+                    contract_version: String::new(),
+                    sdk_report_schema_version: 0,
+                    sdk_build_fingerprint: String::new(),
+                    runner_build_fingerprint: String::new(),
+                    runner_lock_fingerprint: String::new(),
+                    executable_sha256: String::new(),
+                    build_profile: String::new(),
+                    input_sha256: String::new(),
+                    detail_schema_version: String::new(),
+                }
+            })
+            .expect("record fixture producer identity"),
+            ..P7MergedProvenance::default()
+        };
+
+        assert_eq!(
+            p7_producer_identity(&provenance)
+                .expect("recorded producer identity")
+                .detail_schema_version,
+            "p7_question_detail_fixture_v0"
+        );
+    }
+
+    #[test]
+    fn recorded_producer_identity_rejects_digest_tamper_and_noncanonical_original() {
+        let mut recorded = P7RecordedProducerIdentity::record(&serde_json::json!({
+            "a": 1,
+            "b": 2,
+        }))
+        .expect("record producer identity fixture");
+        recorded.canonical_identity_sha256 = "0".repeat(64);
+        assert!(recorded.parse::<serde_json::Value>().is_err());
+
+        let noncanonical = r#"{"b":2,"a":1}"#.to_string();
+        let recorded = P7RecordedProducerIdentity {
+            schema_version: P7_RECORDED_PRODUCER_IDENTITY_SCHEMA_VERSION.to_string(),
+            canonical_identity_sha256: format!("{:x}", Sha256::digest(noncanonical.as_bytes())),
+            canonical_identity: noncanonical,
+        };
+        assert!(recorded.parse::<serde_json::Value>().is_err());
+    }
+
+    #[test]
+    fn verifier_release_manifest_binds_release_profile_content_address_and_source_anchor() {
+        let executable_sha256 = "1".repeat(64);
+        let source_anchor = "2".repeat(64);
+        let manifest_sha256 = "3".repeat(64);
+        let features = vec!["alpha".to_string(), "beta".to_string()];
+        let manifest = P7VerifierReleaseManifest {
+            schema_version: P7_VERIFIER_RELEASE_MANIFEST_SCHEMA_VERSION.to_string(),
+            executable_file_name: "bm-w4-external-noisy-wall".to_string(),
+            executable_sha256: executable_sha256.clone(),
+            build_profile: "release".to_string(),
+            build_features: features.clone(),
+            verification_policy_contract: P7_VERIFICATION_POLICY_CONTRACT.to_string(),
+            verification_schema_version: P7_VERIFICATION_RECEIPT_SCHEMA_VERSION.to_string(),
+            source_anchor_sha256: source_anchor.clone(),
+            frozen_anchor_sha256: P7_FROZEN_ANCHOR_SHA256.to_string(),
+            anchor_generator_receipt_sha256: P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256.to_string(),
+        };
+        p7_validate_verifier_release_manifest(
+            &manifest,
+            "bm-w4-external-noisy-wall",
+            &executable_sha256,
+            &executable_sha256,
+            "release",
+            &features,
+            &source_anchor,
+            &manifest_sha256,
+        )
+        .expect("exact verifier release manifest");
+
+        for tampered in [
+            P7VerifierReleaseManifest {
+                build_profile: "debug".to_string(),
+                ..manifest.clone()
+            },
+            P7VerifierReleaseManifest {
+                source_anchor_sha256: "4".repeat(64),
+                ..manifest.clone()
+            },
+            P7VerifierReleaseManifest {
+                build_features: vec!["beta".to_string(), "alpha".to_string()],
+                ..manifest.clone()
+            },
+        ] {
+            assert!(p7_validate_verifier_release_manifest(
+                &tampered,
+                "bm-w4-external-noisy-wall",
+                &executable_sha256,
+                &executable_sha256,
+                "release",
+                &features,
+                &source_anchor,
+                &manifest_sha256,
+            )
+            .is_err());
         }
+        assert!(p7_validate_verifier_release_manifest(
+            &manifest,
+            "bm-w4-external-noisy-wall",
+            &executable_sha256,
+            &"9".repeat(64),
+            "release",
+            &features,
+            &source_anchor,
+            &manifest_sha256,
+        )
+        .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v1_immutable_producer_cohort_passes_full_preflight_under_v2_verifier() {
+        let mut bundle = p7_test_release_bundle("v1-producer-v2-verifier");
+        let release_identity = bundle.attestation.identity.clone();
+        let executable_body = format!(
+            "#!/bin/sh\nsha=${{BM_P7_RETAINED_EXECUTABLE_SHA256:?}}\nprintf '%s\\n' '{{\"sdk_build_fingerprint\":\"{}\",\"runner_build_fingerprint\":\"{}\",\"runner_lock_fingerprint\":\"{}\",\"executable_sha256\":\"'\"$sha\"'\",\"build_profile\":\"release\"}}'\n",
+            release_identity.sdk_build_fingerprint,
+            release_identity.runner_build_fingerprint,
+            release_identity.runner_lock_fingerprint,
+        );
+        p7_test_republish_executable(&mut bundle, executable_body.as_bytes());
+        let disk = p7_runner_disk_identity_for_release_sha(&bundle.root, &bundle.executable_sha256)
+            .expect("immutable V1 producer release");
+        let preflight = P7RunnerPreflightReport {
+            schema_version: P7_RUNNER_PREFLIGHT_SCHEMA_VERSION.to_string(),
+            run_id: "test-run".to_string(),
+            sdk_build_fingerprint: bundle.attestation.identity.sdk_build_fingerprint.clone(),
+            runner_build_fingerprint: disk.runner_build_fingerprint.clone(),
+            runner_lock_fingerprint: disk.runner_lock_fingerprint.clone(),
+            executable_sha256: disk.executable_sha256.clone(),
+            executable_canonical_path: disk
+                .executable_canonical_path
+                .to_string_lossy()
+                .into_owned(),
+            gate_attestation_sha256: disk.gate_attestation_sha256.clone(),
+            release_metadata_sha256: disk.release_metadata_sha256.clone(),
+            gate_source_fingerprint: disk.gate_source_fingerprint.clone(),
+            gate_source_manifest_sha256: disk.gate_source_manifest_sha256.clone(),
+            gate_ids: disk.gate_ids.clone(),
+            build_profile: "release".to_string(),
+        };
+        validate_p7_producer_preflight_report(&bundle.root, "test-run", &preflight)
+            .expect("V2 operator must validate the immutable producer preflight");
+        let preflight_bytes = serde_json::to_vec(&preflight).expect("producer preflight bytes");
+        assert!(!preflight_bytes
+            .windows(b"operator_build_fingerprint".len())
+            .any(|window| window == b"operator_build_fingerprint"));
+        assert!(!preflight_bytes
+            .windows(b"orchestration_fingerprint".len())
+            .any(|window| window == b"orchestration_fingerprint"));
+
+        let producer = P7ProducerIdentity {
+            schema_version: P7_PRODUCER_IDENTITY_SCHEMA_VERSION.to_string(),
+            contract_version: P7_CONTRACT_VERSION.to_string(),
+            sdk_report_schema_version: MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+            sdk_build_fingerprint: "1".repeat(64),
+            runner_build_fingerprint: "2".repeat(64),
+            runner_lock_fingerprint: "3".repeat(64),
+            executable_sha256: "4".repeat(64),
+            build_profile: "release".to_string(),
+            input_sha256: "5".repeat(64),
+            detail_schema_version: P7_DETAIL_SCHEMA_VERSION.to_string(),
+        };
+        let producer_digest = p7_json_digest(&producer).expect("producer digest");
+        let cohort_entries = vec![(
+            "locomo".to_string(),
+            "6".repeat(64),
+            producer_digest.clone(),
+            "7".repeat(64),
+        )];
+        let first_verifier = p7_verifier_identity(
+            &"8".repeat(64),
+            &"a".repeat(64),
+            "release",
+            vec!["producer-v1".to_string()],
+            &"c".repeat(64),
+            &"8".repeat(64),
+        );
+        let next_verifier = p7_verifier_identity(
+            &"9".repeat(64),
+            &"b".repeat(64),
+            "release",
+            vec![
+                "strict-locator-v2".to_string(),
+                "typed-applicability-v2".to_string(),
+            ],
+            &"d".repeat(64),
+            &"9".repeat(64),
+        );
+
+        let first = p7_verification_receipt_for_cohort_entries(&cohort_entries, &first_verifier)
+            .expect("first verification receipt");
+        let next = p7_verification_receipt_for_cohort_entries(&cohort_entries, &next_verifier)
+            .expect("next verification receipt");
+
+        assert_eq!(first.cohort_digest, next.cohort_digest);
+        assert_eq!(cohort_entries[0].2, producer_digest);
+        assert_ne!(first.verifier_digest, next.verifier_digest);
+        assert_ne!(first.receipt_digest, next.receipt_digest);
+        assert_eq!(
+            serde_json::to_vec(&preflight).expect("unchanged producer preflight"),
+            preflight_bytes
+        );
+        let _ = fs::remove_dir_all(bundle.root);
     }
 
     #[test]
@@ -6986,14 +15905,63 @@ mod p7_operator_unit_tests {
             input_sha256: "84c317644a0265265c91c7e13510dc5cd36c6634532904ee1484f2dbbc26bc00",
         };
 
+        let mut file = File::open(&path).expect("open dataset fixture");
         let expected =
-            load_p7_dataset_expectation(&path, dataset, 1).expect("dataset should verify");
+            load_p7_dataset_expectation(&mut file, dataset, 1).expect("dataset should verify");
         assert_eq!(expected.samples_by_shard, vec![1]);
         assert_eq!(expected.questions_by_shard[0][0].question_id, "q-1");
 
         fs::write(&path, [bytes.as_slice(), b"\n"].concat()).expect("tamper dataset bytes");
-        assert!(load_p7_dataset_expectation(&path, dataset, 1).is_err());
+        let mut tampered = File::open(&path).expect("reopen tampered dataset fixture");
+        assert!(load_p7_dataset_expectation(&mut tampered, dataset, 1).is_err());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dataset_stream_enforces_object_allocation_ceiling_before_growth() {
+        fn fixture(object_bytes: usize) -> Vec<u8> {
+            let prefix = br#"{"padding":""#;
+            let suffix = br#""}"#;
+            let padding = object_bytes
+                .checked_sub(prefix.len() + suffix.len())
+                .expect("object ceiling must fit JSON framing");
+            let mut bytes = Vec::with_capacity(object_bytes + 2);
+            bytes.push(b'[');
+            bytes.extend_from_slice(prefix);
+            bytes.extend(std::iter::repeat_n(b'a', padding));
+            bytes.extend_from_slice(suffix);
+            bytes.push(b']');
+            bytes
+        }
+
+        const LIMIT: usize = 64;
+        let mut exact =
+            P7JsonArrayObjectStream::with_object_limit(std::io::Cursor::new(fixture(LIMIT)), LIMIT);
+        assert!(exact
+            .next_object()
+            .expect("exact-boundary object")
+            .is_some());
+        assert!(exact.next_object().expect("array terminator").is_none());
+        exact.finish().expect("exact-boundary stream");
+
+        let mut plus_one = P7JsonArrayObjectStream::with_object_limit(
+            std::io::Cursor::new(fixture(LIMIT + 1)),
+            LIMIT,
+        );
+        assert!(plus_one.next_object().is_err());
+    }
+
+    #[test]
+    fn packaged_build_cannot_issue_a_p7_verifier_release_identity() {
+        p7_validate_build_source_attestation(P7_WORKSPACE_BUILD_SOURCE_ATTESTATION)
+            .expect("workspace source attestation");
+
+        let error = p7_validate_build_source_attestation("packaged_unattested")
+            .expect_err("packaged source must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("requires an attested workspace source build"));
     }
 }
 
@@ -7036,6 +16004,10 @@ fn w4_external_noisy_suite_report(
         summary.samples == expected.samples
             && summary.questions == expected.questions
             && summary.evidence_questions == expected.evidence_questions
+            && summary.questions
+                == summary
+                    .evidence_questions
+                    .saturating_add(summary.no_gold_questions)
     });
     let baseline = w4_external_suite_baseline(&summary.suite);
     let regressed_against_baseline = baseline.is_some_and(|baseline| {
@@ -7060,6 +16032,7 @@ fn w4_external_noisy_suite_report(
         samples: summary.samples,
         questions: summary.questions,
         evidence_questions: summary.evidence_questions,
+        no_gold_questions: summary.no_gold_questions,
         any_evidence_hit: summary.any_evidence_hit,
         all_evidence_hit: summary.all_evidence_hit,
         write_errors: summary.write_errors,
@@ -7128,26 +16101,26 @@ fn w4_external_facet_ablation_covers_summary(summary: &W4ExternalNoisyBenchmarkS
     let Some(diagnostics) = summary.facet_ablation.as_ref() else {
         return false;
     };
-    diagnostics.questions_with_ablation_report == summary.questions
+    diagnostics.questions_with_ablation_report == summary.evidence_questions
         && diagnostics
             .method_counts
             .get(P7_ABLATION_METHOD)
             .copied()
             .unwrap_or(0)
-            == summary.questions
+            == summary.evidence_questions
         && P7_REQUIRED_ABLATION_SLICES.iter().all(|slice| {
             diagnostics
                 .required_slice_counts
                 .get(*slice)
                 .copied()
                 .unwrap_or(0)
-                == summary.questions
+                == summary.evidence_questions
                 && diagnostics
                     .report_available_slice_counts
                     .get(*slice)
                     .copied()
                     .unwrap_or(0)
-                    == summary.questions
+                    == summary.evidence_questions
         })
 }
 
@@ -7250,7 +16223,7 @@ fn p7_production_delivery_covers_summary(summary: &W4ExternalNoisyBenchmarkSumma
         })
 }
 
-fn p7_production_delivery_has_no_privacy_or_soul_regression(
+fn p7_production_delivery_has_no_privacy_regression(
     summary: &W4ExternalNoisyBenchmarkSummary,
 ) -> bool {
     summary
@@ -7271,19 +16244,20 @@ fn p7_provenance_valid_for_summary(summary: &W4ExternalNoisyBenchmarkSummary) ->
     let Some(dataset) = p7_trusted_dataset(&summary.suite) else {
         return false;
     };
-    let Some(runner_release) = P7_TRUSTED_RUNNER_RELEASE else {
-        return false;
-    };
     if provenance.contract_version != P7_CONTRACT_VERSION
         || !p7_valid_run_id(&summary.run_id)
         || provenance.run_id != summary.run_id
         || provenance.sdk_report_schema_version != MEMORY_RECALL_DELIVERY_SCHEMA_VERSION
         || provenance.sdk_build_fingerprint != P7_TRUSTED_SDK_BUILD_FINGERPRINT
-        || provenance.runner_build_fingerprint != runner_release.runner_build_fingerprint
-        || provenance.runner_lock_fingerprint != runner_release.runner_lock_fingerprint
-        || provenance.executable_sha256 != runner_release.executable_sha256
+        || !is_sha256(&provenance.runner_build_fingerprint)
+        || !is_sha256(&provenance.runner_lock_fingerprint)
+        || !is_sha256(&provenance.executable_sha256)
+        || provenance.gate_ids != P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec()
+        || !is_sha256(&provenance.gate_attestation_sha256)
+        || !is_sha256(&provenance.gate_source_fingerprint)
         || provenance.build_profile != "release"
         || provenance.input_sha256 != dataset.input_sha256
+        || !p7_detail_schema_supported(&provenance.detail_schema_version)
         || !is_sha256(&provenance.merged_detail_sha256)
         || !summary.summary_sha256.as_deref().is_some_and(is_sha256)
         || summary.runner_source_sha256.as_deref()

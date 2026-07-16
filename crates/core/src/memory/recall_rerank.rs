@@ -346,6 +346,7 @@ mod tests {
                 .map(|(idx, (score, selected, reason))| RecallCandidate {
                     plane,
                     candidate_id: format!("{}-{idx}", plane.label()),
+                    owner_ref: None,
                     title: format!("{}-{idx}", plane.label()),
                     excerpt: String::new(),
                     citation: (plane == RecallPlane::Archive).then(|| "archive:1".to_string()),

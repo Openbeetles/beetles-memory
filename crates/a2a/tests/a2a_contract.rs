@@ -19,7 +19,27 @@ fn a2a_bridge_never_carries_executor_or_tool_permissions() {
 
 #[test]
 fn bridge_messages_are_memory_report_or_request_only() {
-    let operations: Vec<_> = bridge_message_specs()
+    let messages = bridge_message_specs();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.name)
+            .collect::<Vec<_>>(),
+        vec![
+            "peer_capability",
+            "memory_write_candidate",
+            "memory_recall_request",
+            "memory_projection_request",
+            "memory_long_term_list_request",
+            "memory_long_term_detail_request",
+            "memory_long_term_mutation_request",
+            "memory_long_term_policy_request",
+            "memory_transcript_attr_write_request",
+            "memory_report",
+            "runtime_lifecycle_event",
+        ]
+    );
+    let operations: Vec<_> = messages
         .iter()
         .filter_map(|message| message.operation)
         .collect();

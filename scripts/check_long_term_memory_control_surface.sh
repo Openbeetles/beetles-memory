@@ -90,23 +90,23 @@ if rg -n "$forbidden_control_mutation_surface" crates/core/src/platform crates/s
   exit 1
 fi
 
-cargo test -p bm-core --test long_term_memory_control_contract
-cargo test -p bm-store-contract-tests --test long_term_memory_control_store_contract
-cargo test -p bm-sdk --features nonproduction-replay-harness --test public_surface
-cargo test -p bm-sdk --features nonproduction-replay-harness --test capability_catalog
-cargo test -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshot_shape
-cargo test -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshots
-cargo test -p bm-sdk --features nonproduction-replay-harness --test long_term_memory_control_contract
-cargo test -p bm-adapter --test contract
-cargo test -p bm-http --test http_contract
-cargo test -p bm-mcp --test mcp_contract
-cargo test -p bm-wss --test wss_contract
-cargo test -p bm-a2a --test a2a_contract
-cargo test -p bm-cli --test cli_contract
-cargo test -p bm-http --features server-std --test http_runtime_contract
-cargo test -p bm-mcp --features server-stdio --test mcp_runtime_contract
-cargo test -p bm-wss --features server-std --test wss_runtime_contract
-cargo test -p bm-a2a --features bridge-http --test a2a_runtime_contract
+cargo test --locked -p bm-core --test long_term_memory_control_contract
+cargo test --locked -p bm-store-contract-tests --test long_term_memory_control_store_contract
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test public_surface
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test capability_catalog
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshot_shape
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshots
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test long_term_memory_control_contract
+cargo test --locked -p bm-adapter --test contract
+cargo test --locked -p bm-http --test http_contract
+cargo test --locked -p bm-mcp --test mcp_contract
+cargo test --locked -p bm-wss --test wss_contract
+cargo test --locked -p bm-a2a --test a2a_contract
+cargo test --locked -p bm-cli --test cli_contract
+cargo test --locked -p bm-http --features server-std --test http_runtime_contract
+cargo test --locked -p bm-mcp --features server-stdio --test mcp_runtime_contract
+cargo test --locked -p bm-wss --features server-std --test wss_runtime_contract
+cargo test --locked -p bm-a2a --features bridge-http --test a2a_runtime_contract
 
 bash scripts/emit_platform_capability_snapshots.sh --check
 bash -n "$0"

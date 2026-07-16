@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "temporal-update-w4-eval-recall-persistent-graph-full",
   "class": "temporal_update",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "runtime_replay",
   "description": "W4 eval recall reports source, expanded, selected, rendered, and evidence metrics after persistent graph expansion.",

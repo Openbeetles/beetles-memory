@@ -1,11 +1,11 @@
 use bm_adapter::{AdapterCommand, AdapterOperation};
 use bm_entry::{
-    EntryAuthConfig, EntryAuthDecision, EntryIdentity, EntryIdempotencyConfig, EntryRuntime,
-    EntryRuntimeConfig, EntryScope, EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryLocalTransport, EntryRuntime,
+    EntryRuntimeConfig, EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryWriteRequest,
-    ProfileId, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendKind,
+    ProfileId, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 fn main() -> bm_sdk::Result<()> {
@@ -13,7 +13,6 @@ fn main() -> bm_sdk::Result<()> {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     let runtime = EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::LinuxDeviceStandaloneMemory,
         identity: EntryIdentity {
             agent_id: "device-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -22,11 +21,8 @@ fn main() -> bm_sdk::Result<()> {
             channel: "device".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::File,
-            data_path: Some(root),
-            fsync: false,
-        },
+        store: StoreBackendConfig::file(root, ProfileId::LinuxDeviceStandaloneMemory)?
+            .with_fsync(false),
         transports: EntryTransportConfig::all_enabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 64 },
@@ -35,7 +31,7 @@ fn main() -> bm_sdk::Result<()> {
     })?;
 
     runtime.handle(
-        context(AdapterOperation::Write, "idem-linux-write"),
+        context(&runtime, AdapterOperation::Write, "idem-linux-write"),
         AdapterCommand::Write(MemoryWriteRequest::Procedural {
             writes: vec![RuntimeSkillWrite {
                 name: "runtime_skill__device_entry_guard".to_string(),
@@ -52,7 +48,7 @@ fn main() -> bm_sdk::Result<()> {
         }),
     )?;
     let recall = runtime.handle(
-        context(AdapterOperation::Recall, "idem-linux-recall"),
+        context(&runtime, AdapterOperation::Recall, "idem-linux-recall"),
         AdapterCommand::Recall(MemoryRecallRequest {
             query: "device entry".to_string(),
             limit: 4,
@@ -65,18 +61,22 @@ fn main() -> bm_sdk::Result<()> {
     Ok(())
 }
 
-fn context(operation: AdapterOperation, idempotency_key: &str) -> EntryTransportContext {
-    EntryTransportContext {
-        request_id: format!("linux-device-{operation:?}"),
-        transport: bm_adapter::TransportKind::Cli,
-        mode: bm_adapter::TransportMode::InProcess,
+fn context(
+    runtime: &EntryRuntime,
+    operation: AdapterOperation,
+    idempotency_key: &str,
+) -> EntryTransportContext {
+    EntryTransportContext::new(
+        format!("linux-device-{operation:?}"),
+        bm_adapter::TransportKind::Cli,
+        bm_adapter::TransportMode::InProcess,
         operation,
-        source_id: "linux-device".to_string(),
-        source_kind: "local_cli".to_string(),
-        idempotency_key: idempotency_key.to_string(),
-        audit_id: format!("audit-linux-device-{operation:?}"),
-        auth: EntryAuthDecision::authenticated("local", "operator"),
-    }
+        "linux-device",
+        "local_cli",
+        idempotency_key,
+        format!("audit-linux-device-{operation:?}"),
+        runtime.authenticate_local_transport(EntryLocalTransport::InProcess, "operator"),
+    )
 }
 
 fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {

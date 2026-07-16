@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::governed_evidence_document::{
+    scoped_governed_evidence_document_key, validate_governed_evidence_document,
+    GovernedEvidenceDocument,
+};
 use super::governed_post_image::{
     revision_is_exact_successor, GovernedDocumentImage, GovernedPostImageValidation,
 };
@@ -11,7 +15,8 @@ use super::long_term::{scoped_long_term_memory_storage_key, LongTermMemoryEntry}
 use super::recall_anchor::canonical_recall_evidence_group;
 use super::CoreRevisionConflictClass;
 use super::{
-    CoreRevisionLedger, CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange,
+    governed_memory_recall_candidate_id, CoreRevisionLedger, CoreRevisionOutcome,
+    CoreRevisionRecord, CoreRevisionRecordChange, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
     RelationshipConstitutionAudit, SelfAuthoredCore, TurnSoulFeedbackLedger,
 };
 
@@ -754,7 +759,7 @@ pub struct EvidenceBacklink {
     pub fingerprint: String,
 }
 
-pub const MEMORY_GRAPH_SCHEMA_VERSION: u32 = 2;
+pub const MEMORY_GRAPH_SCHEMA_VERSION: u32 = 4;
 pub const MEMORY_GRAPH_NODE_NAMESPACE: &str = "memory_graph_nodes";
 pub const MEMORY_GRAPH_EDGE_NAMESPACE: &str = "memory_graph_edges";
 pub const MEMORY_GRAPH_BACKLINK_NAMESPACE: &str = "memory_graph_backlinks";
@@ -806,7 +811,7 @@ pub struct MemoryGraphNodeMembership {
     pub node_id: String,
     pub document_key: String,
     pub document_digest: String,
-    pub owner_record_id: String,
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub owner_revision: u64,
     pub index_key: String,
     pub backlink_membership_keys: Vec<String>,
@@ -867,7 +872,8 @@ pub struct MemoryGraphRevisionDoc {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryGraphOwnerBinding {
-    pub owner_record_id: String,
+    pub node_id: String,
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub owner_revision: u64,
     pub visible: bool,
 }
@@ -896,7 +902,8 @@ pub struct MemoryGraphPostImageClosure {
     pub mounted_subject_id: String,
     pub allow_missing_before_owners: bool,
     pub validate_transition_successors: bool,
-    pub owner_records: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    pub long_term_owners: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    pub evidence_document_owners: Vec<GovernedDocumentImage<GovernedEvidenceDocument>>,
     pub manifest: GovernedDocumentImage<MemoryGraphScopeManifest>,
     pub revision: GovernedDocumentImage<MemoryGraphRevisionDoc>,
     pub node_memberships: Vec<GovernedDocumentImage<MemoryGraphNodeMembership>>,
@@ -935,14 +942,20 @@ pub fn validate_memory_graph_post_image(
     }
 
     let mut owner_bindings = Vec::new();
-    let mut owner_ids = BTreeSet::new();
-    let after_graph_owner_ids = closure
+    let mut owner_refs = BTreeSet::new();
+    let mut memberships_by_owner =
+        BTreeMap::<GovernedMemoryOwnerRef, Vec<&MemoryGraphNodeMembership>>::new();
+    for membership in closure
         .node_memberships
         .iter()
         .filter_map(|image| image.after.as_ref())
-        .map(|membership| membership.owner_record_id.as_str())
-        .collect::<BTreeSet<_>>();
-    for image in &closure.owner_records {
+    {
+        memberships_by_owner
+            .entry(membership.owner_ref.clone())
+            .or_default()
+            .push(membership);
+    }
+    for image in &closure.long_term_owners {
         let Some(observed_owner) = image.after.as_ref().or(image.before.as_ref()) else {
             continue;
         };
@@ -963,16 +976,71 @@ pub fn validate_memory_graph_post_image(
             failures.push("memory_graph_owner_revision_successor_drift".to_string());
         }
         if let Some(owner) = image.after.as_ref() {
-            if after_graph_owner_ids.contains(owner.id.as_str()) {
-                if !owner_ids.insert(owner.id.clone()) {
-                    failures.push("memory_graph_owner_duplicate".to_string());
-                }
-                owner_bindings.push(MemoryGraphOwnerBinding {
-                    owner_record_id: owner.id.clone(),
-                    owner_revision: owner.owner_revision,
-                    visible: true,
-                });
-            }
+            let owner_ref =
+                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone());
+            append_graph_owner_bindings(
+                owner_ref,
+                owner.owner_revision,
+                owner.privacy.projection_content_allowed(),
+                &memberships_by_owner,
+                &mut owner_refs,
+                &mut owner_bindings,
+                &mut failures,
+            );
+        }
+    }
+    for image in &closure.evidence_document_owners {
+        let Some(observed_owner) = image.after.as_ref().or(image.before.as_ref()) else {
+            continue;
+        };
+        let logical_id = observed_owner.document_id.as_str();
+        if scoped_governed_evidence_document_key(memory_space_id, logical_id)
+            .map(|expected| {
+                image.physical_key != expected || observed_owner.physical_key != expected
+            })
+            .unwrap_or(true)
+        {
+            failures.push("memory_graph_owner_physical_key_drift".to_string());
+        }
+        if closure.validate_transition_successors
+            && image.before != image.after
+            && !revision_is_exact_successor(
+                image.before.as_ref().map(|owner| owner.owner_revision),
+                image.after.as_ref().map(|owner| owner.owner_revision),
+            )
+        {
+            failures.push("memory_graph_owner_revision_successor_drift".to_string());
+        }
+        let Some(owner) = image.after.as_ref() else {
+            continue;
+        };
+        if validate_governed_evidence_document(owner).is_err()
+            || owner.memory_space_id != memory_space_id
+            || owner.mounted_subject_id != mounted_subject_id
+        {
+            failures.push("memory_graph_owner_scope_or_schema_drift".to_string());
+        }
+        let owner_ref = GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::EvidenceDocument,
+            owner.document_id.clone(),
+        );
+        if !memberships_by_owner.contains_key(&owner_ref) {
+            failures.push("memory_graph_evidence_owner_membership_missing".to_string());
+        }
+        append_graph_owner_bindings(
+            owner_ref,
+            owner.owner_revision,
+            owner.privacy.projection_content_allowed(),
+            &memberships_by_owner,
+            &mut owner_refs,
+            &mut owner_bindings,
+            &mut failures,
+        );
+    }
+
+    for owner_ref in memberships_by_owner.keys() {
+        if !owner_refs.contains(owner_ref) {
+            failures.push("memory_graph_persistent_node_owner_missing".to_string());
         }
     }
 
@@ -1165,26 +1233,69 @@ pub fn validate_memory_graph_post_image(
     GovernedPostImageValidation::from_failures(failures)
 }
 
+fn append_graph_owner_bindings(
+    owner_ref: GovernedMemoryOwnerRef,
+    owner_revision: u64,
+    visible: bool,
+    memberships_by_owner: &BTreeMap<GovernedMemoryOwnerRef, Vec<&MemoryGraphNodeMembership>>,
+    owner_refs: &mut BTreeSet<GovernedMemoryOwnerRef>,
+    owner_bindings: &mut Vec<MemoryGraphOwnerBinding>,
+    failures: &mut Vec<String>,
+) {
+    let Some(memberships) = memberships_by_owner.get(&owner_ref) else {
+        return;
+    };
+    if !owner_refs.insert(owner_ref.clone()) {
+        failures.push("memory_graph_owner_duplicate".to_string());
+    }
+    for membership in memberships {
+        if membership.owner_revision != owner_revision {
+            failures.push("memory_graph_owner_revision_drift".to_string());
+        }
+        owner_bindings.push(MemoryGraphOwnerBinding {
+            node_id: membership.node_id.clone(),
+            owner_ref: owner_ref.clone(),
+            owner_revision,
+            visible,
+        });
+    }
+}
+
 fn memory_graph_before_image(closure: &MemoryGraphPostImageClosure) -> MemoryGraphPostImageClosure {
-    let before_owner_ids = closure
+    let before_owner_refs = closure
         .node_memberships
         .iter()
         .filter_map(|image| image.before.as_ref())
-        .map(|membership| membership.owner_record_id.as_str())
+        .map(|membership| &membership.owner_ref)
         .collect::<BTreeSet<_>>();
     MemoryGraphPostImageClosure {
         memory_space_id: closure.memory_space_id.clone(),
         mounted_subject_id: closure.mounted_subject_id.clone(),
         allow_missing_before_owners: false,
         validate_transition_successors: false,
-        owner_records: closure
-            .owner_records
+        long_term_owners: closure
+            .long_term_owners
             .iter()
             .filter(|image| {
-                image
-                    .before
-                    .as_ref()
-                    .is_some_and(|owner| before_owner_ids.contains(owner.id.as_str()))
+                image.before.as_ref().is_some_and(|owner| {
+                    before_owner_refs.contains(&GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        owner.id.clone(),
+                    ))
+                })
+            })
+            .map(graph_before_image)
+            .collect(),
+        evidence_document_owners: closure
+            .evidence_document_owners
+            .iter()
+            .filter(|image| {
+                image.before.as_ref().is_some_and(|owner| {
+                    before_owner_refs.contains(&GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::EvidenceDocument,
+                        owner.document_id.clone(),
+                    ))
+                })
             })
             .map(graph_before_image)
             .collect(),
@@ -1200,21 +1311,36 @@ fn memory_graph_before_image(closure: &MemoryGraphPostImageClosure) -> MemoryGra
     }
 }
 
-fn graph_missing_before_owner_ids(closure: &MemoryGraphPostImageClosure) -> BTreeSet<String> {
-    let available_owner_ids = closure
-        .owner_records
+fn graph_missing_before_owner_ids(
+    closure: &MemoryGraphPostImageClosure,
+) -> BTreeSet<GovernedMemoryOwnerRef> {
+    let mut available_owner_refs = closure
+        .long_term_owners
         .iter()
         .filter_map(|image| image.before.as_ref())
-        .map(|owner| owner.id.as_str())
+        .map(|owner| {
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone())
+        })
         .collect::<BTreeSet<_>>();
+    available_owner_refs.extend(
+        closure
+            .evidence_document_owners
+            .iter()
+            .filter_map(|image| image.before.as_ref())
+            .map(|owner| {
+                GovernedMemoryOwnerRef::new(
+                    GovernedMemoryOwnerPlane::EvidenceDocument,
+                    owner.document_id.clone(),
+                )
+            }),
+    );
     closure
         .node_memberships
         .iter()
         .filter_map(|image| {
             let before = image.before.as_ref()?;
-            (!available_owner_ids.contains(before.owner_record_id.as_str())
-                && image.after.is_none())
-            .then(|| before.owner_record_id.clone())
+            (!available_owner_refs.contains(&before.owner_ref) && image.after.is_none())
+                .then(|| before.owner_ref.clone())
         })
         .collect()
 }
@@ -1590,7 +1716,7 @@ fn graph_document_effect_keys<T>(
 
 pub fn memory_graph_scope_digest(memory_space_id: &str, mounted_subject_id: &str) -> String {
     memory_graph_sha256(
-        "memory_graph_scope_v2",
+        "memory_graph_scope_v4",
         &[
             MEMORY_GRAPH_SCHEMA_VERSION.to_string().as_bytes(),
             memory_space_id.trim().as_bytes(),
@@ -1606,7 +1732,7 @@ pub fn scoped_memory_graph_storage_key(
 ) -> String {
     let scope = memory_graph_scope_digest(memory_space_id, mounted_subject_id);
     let document = memory_graph_sha256(
-        "memory_graph_storage_key_v2",
+        "memory_graph_storage_key_v4",
         &[logical_key.trim().as_bytes()],
     );
     format!("scope:{scope}:doc:{document}")
@@ -1636,7 +1762,7 @@ pub fn memory_graph_integrity_incident_token(
     format!(
         "graph_incident:{}",
         memory_graph_sha256(
-            "memory_graph_integrity_incident_v2",
+            "memory_graph_integrity_incident_v4",
             &[
                 scope_digest.as_bytes(),
                 generation.as_bytes(),
@@ -2100,9 +2226,10 @@ pub struct MemoryGraphRecallIndexDoc {
     pub memory_space_id: String,
     pub mounted_subject_id: String,
     pub scope_digest: String,
-    pub source_anchor_id: String,
-    pub owner_record_id: String,
+    pub owner_ref: GovernedMemoryOwnerRef,
+    pub owner_candidate_id: String,
     pub owner_revision: u64,
+    pub source_anchor_node_ids: Vec<String>,
     pub manifest_generation: u64,
     pub graph_revision: String,
     pub node_memberships: Vec<MemoryGraphDependencyRef>,
@@ -2116,7 +2243,7 @@ pub struct MemoryGraphRecallIndexDoc {
 
 pub fn memory_graph_backlink_key(source_kind: &str, source_id: &str) -> String {
     memory_graph_sha256(
-        "memory_graph_backlink_key_v2",
+        "memory_graph_backlink_key_v4",
         &[source_kind.trim().as_bytes(), source_id.trim().as_bytes()],
     )
 }
@@ -2318,12 +2445,12 @@ fn temporal_memory_graph_write_gate(
 pub fn memory_graph_recall_index_key(
     memory_space_id: &str,
     mounted_subject_id: &str,
-    owner_record_id: &str,
+    owner_candidate_id: &str,
 ) -> String {
     scoped_memory_graph_storage_key(
         memory_space_id,
         mounted_subject_id,
-        &format!("graph_index:{owner_record_id}"),
+        &format!("graph_index:{owner_candidate_id}"),
     )
 }
 
@@ -2366,13 +2493,30 @@ pub fn build_memory_graph_persistence_plan(
         &mut failures,
     );
 
-    let owners = owner_bindings
+    append_duplicate_graph_id_failures(
+        owner_bindings.iter().map(|owner| owner.node_id.as_str()),
+        "memory_graph_owner_node_id_duplicate",
+        &mut failures,
+    );
+    let owners_by_node = owner_bindings
         .iter()
-        .map(|owner| (owner.owner_record_id.as_str(), owner))
+        .map(|owner| (owner.node_id.as_str(), owner))
         .collect::<BTreeMap<_, _>>();
+    let mut owner_revisions = BTreeMap::<&GovernedMemoryOwnerRef, u64>::new();
+    for owner in &owner_bindings {
+        if owner_revisions
+            .insert(&owner.owner_ref, owner.owner_revision)
+            .is_some_and(|revision| revision != owner.owner_revision)
+        {
+            failures.push("memory_graph_owner_revision_inconsistent".to_string());
+        }
+    }
     for node in &nodes {
-        match owners.get(node.node_id.as_str()) {
+        match owners_by_node.get(node.node_id.as_str()) {
             None => failures.push("memory_graph_persistent_node_owner_missing".to_string()),
+            Some(owner) if !owner.owner_ref.is_valid() || owner.node_id.trim().is_empty() => {
+                failures.push("memory_graph_persistent_node_owner_identity_invalid".to_string())
+            }
             Some(owner) if !owner.visible => {
                 failures.push("memory_graph_persistent_node_owner_not_visible".to_string())
             }
@@ -2403,7 +2547,11 @@ pub fn build_memory_graph_persistence_plan(
         )
     });
     let mut revision_owners = owner_bindings.clone();
-    revision_owners.sort_by(|left, right| left.owner_record_id.cmp(&right.owner_record_id));
+    revision_owners.sort_by(|left, right| {
+        left.owner_ref
+            .cmp(&right.owner_ref)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
     let graph_revision = format!(
         "graph_revision:{}",
         memory_graph_serialized_digest(&(
@@ -2521,57 +2669,78 @@ pub fn build_memory_graph_persistence_plan(
     struct RawIndexDependencies {
         index_id: String,
         index_key: String,
-        source_anchor_id: String,
+        owner_ref: GovernedMemoryOwnerRef,
+        owner_candidate_id: String,
         owner_revision: u64,
+        source_anchor_node_ids: Vec<String>,
         node_membership_keys: Vec<String>,
         edge_membership_keys: Vec<String>,
         backlink_membership_keys: Vec<String>,
     }
 
-    let raw_indexes = nodes
-        .iter()
-        .map(|node| {
-            let (node_ids, edge_ids) =
-                graph_recall_dependency_ids(&node.node_id, &nodes_by_id, &recall_adjacency);
-            let mut evidence_refs = node_ids
+    let mut raw_indexes_by_owner = BTreeMap::<GovernedMemoryOwnerRef, RawIndexDependencies>::new();
+    for node in &nodes {
+        let owner = owners_by_node
+            .get(node.node_id.as_str())
+            .expect("validated graph owner");
+        let owner_candidate_id = governed_memory_recall_candidate_id(&owner.owner_ref);
+        let (node_ids, edge_ids) =
+            graph_recall_dependency_ids(&node.node_id, &nodes_by_id, &recall_adjacency);
+        let mut evidence_refs = node_ids
+            .iter()
+            .filter_map(|node_id| nodes_by_id.get(node_id.as_str()).copied())
+            .flat_map(|node| node.evidence_refs.iter().cloned())
+            .collect::<Vec<_>>();
+        evidence_refs.extend(
+            edge_ids
                 .iter()
-                .filter_map(|node_id| nodes_by_id.get(node_id.as_str()).copied())
-                .flat_map(|node| node.evidence_refs.iter().cloned())
-                .collect::<Vec<_>>();
-            evidence_refs.extend(
-                edge_ids
-                    .iter()
-                    .filter_map(|edge_id| edges_by_id.get(edge_id.as_str()).copied())
-                    .flat_map(|edge| edge.evidence_refs.iter().cloned()),
-            );
-            evidence_refs.sort();
-            evidence_refs.dedup();
-            let dependency_backlinks = backlink_keys_for_evidence(&evidence_refs);
-            let index_id = format!("graph_index:{}", node.node_id);
-            RawIndexDependencies {
+                .filter_map(|edge_id| edges_by_id.get(edge_id.as_str()).copied())
+                .flat_map(|edge| edge.evidence_refs.iter().cloned()),
+        );
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        let dependency_backlinks = backlink_keys_for_evidence(&evidence_refs);
+        let raw = raw_indexes_by_owner
+            .entry(owner.owner_ref.clone())
+            .or_insert_with(|| RawIndexDependencies {
                 index_key: memory_graph_recall_index_key(
                     &memory_space_id,
                     &mounted_subject_id,
-                    &node.node_id,
+                    &owner_candidate_id,
                 ),
-                index_id,
-                source_anchor_id: node.node_id.clone(),
-                owner_revision: owners
-                    .get(node.node_id.as_str())
-                    .expect("validated graph owner")
-                    .owner_revision,
-                node_membership_keys: node_ids
-                    .iter()
-                    .filter_map(|node_id| node_membership_keys.get(node_id).cloned())
-                    .collect(),
-                edge_membership_keys: edge_ids
-                    .iter()
-                    .filter_map(|edge_id| edge_membership_keys.get(edge_id).cloned())
-                    .collect(),
-                backlink_membership_keys: dependency_backlinks,
-            }
-        })
-        .collect::<Vec<_>>();
+                index_id: format!("graph_index:{owner_candidate_id}"),
+                owner_ref: owner.owner_ref.clone(),
+                owner_candidate_id: owner_candidate_id.clone(),
+                owner_revision: owner.owner_revision,
+                source_anchor_node_ids: Vec::new(),
+                node_membership_keys: Vec::new(),
+                edge_membership_keys: Vec::new(),
+                backlink_membership_keys: Vec::new(),
+            });
+        raw.source_anchor_node_ids.push(node.node_id.clone());
+        raw.node_membership_keys.extend(
+            node_ids
+                .iter()
+                .filter_map(|node_id| node_membership_keys.get(node_id).cloned()),
+        );
+        raw.edge_membership_keys.extend(
+            edge_ids
+                .iter()
+                .filter_map(|edge_id| edge_membership_keys.get(edge_id).cloned()),
+        );
+        raw.backlink_membership_keys.extend(dependency_backlinks);
+    }
+    let mut raw_indexes = raw_indexes_by_owner.into_values().collect::<Vec<_>>();
+    for raw in &mut raw_indexes {
+        raw.source_anchor_node_ids.sort();
+        raw.source_anchor_node_ids.dedup();
+        raw.node_membership_keys.sort();
+        raw.node_membership_keys.dedup();
+        raw.edge_membership_keys.sort();
+        raw.edge_membership_keys.dedup();
+        raw.backlink_membership_keys.sort();
+        raw.backlink_membership_keys.dedup();
+    }
 
     let mut node_memberships = nodes
         .iter()
@@ -2595,15 +2764,24 @@ pub fn build_memory_graph_persistence_plan(
                     &format!("node:{}", node.node_id),
                 ),
                 document_digest: memory_graph_serialized_digest(node),
-                owner_record_id: node.node_id.clone(),
-                owner_revision: owners
+                owner_ref: owners_by_node
+                    .get(node.node_id.as_str())
+                    .expect("validated graph owner")
+                    .owner_ref
+                    .clone(),
+                owner_revision: owners_by_node
                     .get(node.node_id.as_str())
                     .expect("validated graph owner")
                     .owner_revision,
                 index_key: memory_graph_recall_index_key(
                     &memory_space_id,
                     &mounted_subject_id,
-                    &node.node_id,
+                    &governed_memory_recall_candidate_id(
+                        &owners_by_node
+                            .get(node.node_id.as_str())
+                            .expect("validated graph owner")
+                            .owner_ref,
+                    ),
                 ),
                 backlink_membership_keys: backlink_keys,
                 dependency_digest: String::new(),
@@ -2788,9 +2966,10 @@ pub fn build_memory_graph_persistence_plan(
                 memory_space_id: memory_space_id.clone(),
                 mounted_subject_id: mounted_subject_id.clone(),
                 scope_digest: scope_digest.clone(),
-                source_anchor_id: raw.source_anchor_id.clone(),
-                owner_record_id: raw.source_anchor_id,
+                owner_ref: raw.owner_ref,
+                owner_candidate_id: raw.owner_candidate_id,
                 owner_revision: raw.owner_revision,
+                source_anchor_node_ids: raw.source_anchor_node_ids,
                 manifest_generation,
                 graph_revision: graph_revision.clone(),
                 node_memberships: raw
@@ -2910,6 +3089,10 @@ pub fn validate_memory_graph_read_chain(
         .iter()
         .map(|membership| (membership.membership_key.as_str(), membership))
         .collect::<BTreeMap<_, _>>();
+    let node_memberships_by_id = node_memberships
+        .iter()
+        .map(|membership| (membership.node_id.as_str(), membership))
+        .collect::<BTreeMap<_, _>>();
     let edge_membership_map = edge_memberships
         .iter()
         .map(|membership| (membership.membership_key.as_str(), membership))
@@ -2937,9 +3120,47 @@ pub fn validate_memory_graph_read_chain(
         .collect::<BTreeMap<_, _>>();
     let owners = owner_bindings
         .iter()
-        .map(|owner| (owner.owner_record_id.as_str(), owner))
+        .map(|owner| ((&owner.owner_ref, owner.node_id.as_str()), owner))
         .collect::<BTreeMap<_, _>>();
-
+    let expected_backlink_nodes = node_memberships.iter().fold(
+        BTreeMap::<&str, BTreeSet<String>>::new(),
+        |mut expected, membership| {
+            for backlink_key in &membership.backlink_membership_keys {
+                expected
+                    .entry(backlink_key.as_str())
+                    .or_default()
+                    .insert(membership.membership_key.clone());
+            }
+            expected
+        },
+    );
+    let expected_backlink_edges = edge_memberships.iter().fold(
+        BTreeMap::<&str, BTreeSet<String>>::new(),
+        |mut expected, membership| {
+            for backlink_key in &membership.backlink_membership_keys {
+                expected
+                    .entry(backlink_key.as_str())
+                    .or_default()
+                    .insert(membership.membership_key.clone());
+            }
+            expected
+        },
+    );
+    let expected_backlink_indexes = indexes.iter().fold(
+        BTreeMap::<&str, BTreeSet<String>>::new(),
+        |mut expected, index| {
+            for backlink in &index.backlink_memberships {
+                expected
+                    .entry(backlink.storage_key.as_str())
+                    .or_default()
+                    .insert(index.index_key.clone());
+            }
+            expected
+        },
+    );
+    let full_node_closure = node_membership_map.len() == manifest.node_memberships.len();
+    let full_edge_closure = edge_membership_map.len() == manifest.edge_memberships.len();
+    let full_index_closure = indexes.len() == manifest.recall_indexes.len();
     for index in indexes {
         append_graph_scope_binding_failures(index, manifest, "memory_graph_index", &mut failures);
         if index.node_count != index.node_memberships.len()
@@ -2948,8 +3169,29 @@ pub fn validate_memory_graph_read_chain(
         {
             failures.push("memory_graph_index_count_drift".to_string());
         }
-        if index.owner_record_id != index.source_anchor_id || index.owner_revision == 0 {
+        if !index.owner_ref.is_valid() || index.owner_revision == 0 {
             failures.push("memory_graph_index_owner_binding_invalid".to_string());
+        }
+        let expected_owner_candidate_id = governed_memory_recall_candidate_id(&index.owner_ref);
+        if index.owner_candidate_id != expected_owner_candidate_id {
+            failures.push("memory_graph_index_owner_candidate_id_drift".to_string());
+        }
+        if index.index_key
+            != memory_graph_recall_index_key(
+                &index.memory_space_id,
+                &index.mounted_subject_id,
+                &expected_owner_candidate_id,
+            )
+        {
+            failures.push("memory_graph_index_key_drift".to_string());
+        }
+        let mut canonical_anchor_nodes = index.source_anchor_node_ids.clone();
+        canonical_anchor_nodes.sort();
+        canonical_anchor_nodes.dedup();
+        if canonical_anchor_nodes.is_empty()
+            || canonical_anchor_nodes != index.source_anchor_node_ids
+        {
+            failures.push("memory_graph_index_source_anchor_nodes_invalid".to_string());
         }
         let index_digest = memory_graph_recall_index_digest(index);
         if index.dependency_digest != index_digest {
@@ -2962,15 +3204,28 @@ pub fn validate_memory_graph_read_chain(
         ) {
             failures.push("memory_graph_index_manifest_dependency_drift".to_string());
         }
-        match owners.get(index.owner_record_id.as_str()) {
-            None => failures.push("memory_graph_owner_missing".to_string()),
-            Some(owner) if !owner.visible => {
-                failures.push("memory_graph_owner_privacy_scope_restricted".to_string())
+        for source_anchor_node_id in &index.source_anchor_node_ids {
+            match owners.get(&(&index.owner_ref, source_anchor_node_id.as_str())) {
+                None => failures.push("memory_graph_owner_missing".to_string()),
+                Some(owner) if !owner.visible => {
+                    failures.push("memory_graph_owner_privacy_scope_restricted".to_string())
+                }
+                Some(owner) if owner.owner_revision != index.owner_revision => {
+                    failures.push("memory_graph_owner_revision_drift".to_string())
+                }
+                Some(_) => {}
             }
-            Some(owner) if owner.owner_revision != index.owner_revision => {
-                failures.push("memory_graph_owner_revision_drift".to_string())
+            if node_memberships_by_id
+                .get(source_anchor_node_id.as_str())
+                .is_none_or(|membership| {
+                    index
+                        .node_memberships
+                        .iter()
+                        .all(|dependency| dependency.storage_key != membership.membership_key)
+                })
+            {
+                failures.push("memory_graph_index_source_anchor_membership_missing".to_string());
             }
-            Some(_) => {}
         }
         validate_index_membership_refs(
             &index.node_memberships,
@@ -3002,8 +3257,18 @@ pub fn validate_memory_graph_read_chain(
             "memory_graph_node_membership",
             &mut failures,
         );
-        if membership.owner_record_id != membership.node_id || membership.owner_revision == 0 {
+        if !membership.owner_ref.is_valid() || membership.owner_revision == 0 {
             failures.push("memory_graph_node_membership_owner_binding_invalid".to_string());
+        }
+        let expected_index_key = memory_graph_recall_index_key(
+            &membership.memory_space_id,
+            &membership.mounted_subject_id,
+            &governed_memory_recall_candidate_id(&membership.owner_ref),
+        );
+        if membership.index_key != expected_index_key
+            || !manifest_index_refs.contains_key(expected_index_key.as_str())
+        {
+            failures.push("memory_graph_node_membership_index_binding_drift".to_string());
         }
         if membership.dependency_digest != memory_graph_node_membership_digest(membership) {
             failures.push("memory_graph_node_membership_dependency_digest_drift".to_string());
@@ -3022,7 +3287,7 @@ pub fn validate_memory_graph_read_chain(
             }
             Some(_) => {}
         }
-        match owners.get(membership.owner_record_id.as_str()) {
+        match owners.get(&(&membership.owner_ref, membership.node_id.as_str())) {
             None => failures.push("memory_graph_owner_missing".to_string()),
             Some(owner) if !owner.visible => {
                 failures.push("memory_graph_owner_privacy_scope_restricted".to_string())
@@ -3091,6 +3356,30 @@ pub fn validate_memory_graph_read_chain(
             }
             Some(_) => {}
         }
+        validate_backlink_reverse_dependencies(
+            &membership.node_membership_keys,
+            expected_backlink_nodes.get(membership.membership_key.as_str()),
+            &manifest_node_refs,
+            full_node_closure,
+            "memory_graph_backlink_reverse_node_closure_drift",
+            &mut failures,
+        );
+        validate_backlink_reverse_dependencies(
+            &membership.edge_membership_keys,
+            expected_backlink_edges.get(membership.membership_key.as_str()),
+            &manifest_edge_refs,
+            full_edge_closure,
+            "memory_graph_backlink_reverse_edge_closure_drift",
+            &mut failures,
+        );
+        validate_backlink_reverse_dependencies(
+            &membership.index_keys,
+            expected_backlink_indexes.get(membership.membership_key.as_str()),
+            &manifest_index_refs,
+            full_index_closure,
+            "memory_graph_backlink_reverse_index_closure_drift",
+            &mut failures,
+        );
     }
 
     failures.sort();
@@ -3098,6 +3387,28 @@ pub fn validate_memory_graph_read_chain(
     MemoryGraphReadChainValidation {
         verified: failures.is_empty(),
         failures,
+    }
+}
+
+fn validate_backlink_reverse_dependencies(
+    actual: &[String],
+    expected_loaded: Option<&BTreeSet<String>>,
+    manifest: &BTreeMap<&str, &MemoryGraphDependencyRef>,
+    full_closure: bool,
+    failure: &str,
+    failures: &mut Vec<String>,
+) {
+    let actual_set = actual.iter().cloned().collect::<BTreeSet<_>>();
+    let expected_loaded = expected_loaded.cloned().unwrap_or_default();
+    let canonical = actual_set.iter().cloned().collect::<Vec<_>>();
+    if canonical != actual
+        || actual_set
+            .iter()
+            .any(|storage_key| !manifest.contains_key(storage_key.as_str()))
+        || !expected_loaded.is_subset(&actual_set)
+        || (full_closure && actual_set != expected_loaded)
+    {
+        failures.push(failure.to_string());
     }
 }
 
@@ -3238,7 +3549,7 @@ fn graph_recall_dependency_ids(
 fn memory_graph_serialized_digest<T: Serialize>(value: &T) -> String {
     let serialized = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     memory_graph_sha256(
-        "memory_graph_serialized_dependency_v2",
+        "memory_graph_serialized_dependency_v4",
         &[serialized.as_bytes()],
     )
 }
@@ -4663,5 +4974,122 @@ fn rejected(reason: &'static str) -> NextGenContractValidation {
     NextGenContractValidation {
         accepted: false,
         reason: reason.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod graph_read_chain_tests {
+    use super::*;
+
+    #[test]
+    fn read_chain_rebuilds_backlink_reverse_node_closure_instead_of_trusting_digests() {
+        let evidence_ref = "evidence:reverse-closure";
+        let nodes = vec![
+            MemoryGraphNode {
+                node_id: "node:reverse-a".to_string(),
+                kind: MemoryGraphNodeKind::MemoryRecord,
+                label: "Reverse A".to_string(),
+                evidence_refs: vec![evidence_ref.to_string()],
+            },
+            MemoryGraphNode {
+                node_id: "node:reverse-b".to_string(),
+                kind: MemoryGraphNodeKind::MemoryRecord,
+                label: "Reverse B".to_string(),
+                evidence_refs: vec![evidence_ref.to_string()],
+            },
+        ];
+        let edges = vec![MemoryGraphEdge {
+            edge_id: "edge:reverse-a-b".to_string(),
+            kind: MemoryGraphEdgeKind::Supports,
+            from_node_id: nodes[0].node_id.clone(),
+            to_node_id: nodes[1].node_id.clone(),
+            validity: TemporalValidity {
+                valid_from: 10,
+                valid_until: None,
+                observed_at: 10,
+                superseded_by: None,
+            },
+            evidence_refs: vec![evidence_ref.to_string()],
+        }];
+        let backlinks = vec![EvidenceBacklink {
+            source_kind: "conversation_transcript".to_string(),
+            source_id: evidence_ref.to_string(),
+            fingerprint: "fp:reverse-closure".to_string(),
+        }];
+        let owners = nodes
+            .iter()
+            .map(|node| MemoryGraphOwnerBinding {
+                node_id: node.node_id.clone(),
+                owner_ref: GovernedMemoryOwnerRef::new(
+                    GovernedMemoryOwnerPlane::LongTerm,
+                    format!("owner:{}", node.node_id),
+                ),
+                owner_revision: 1,
+                visible: true,
+            })
+            .collect::<Vec<_>>();
+        let mut plan = build_memory_graph_persistence_plan(
+            "space:reverse",
+            "subject:reverse",
+            1,
+            nodes.clone(),
+            edges.clone(),
+            backlinks.clone(),
+            owners.clone(),
+        );
+        assert!(plan.accepted, "{:?}", plan.failures);
+
+        let backlink_membership = plan
+            .backlink_memberships
+            .first_mut()
+            .expect("backlink membership");
+        backlink_membership.node_membership_keys.clear();
+        backlink_membership.dependency_digest =
+            memory_graph_backlink_membership_digest(backlink_membership);
+        let backlink_key = backlink_membership.membership_key.clone();
+        let backlink_digest = backlink_membership.dependency_digest.clone();
+        for index in &mut plan.recall_indexes {
+            for dependency in &mut index.backlink_memberships {
+                if dependency.storage_key == backlink_key {
+                    dependency.dependency_digest = backlink_digest.clone();
+                }
+            }
+            index.dependency_digest = memory_graph_recall_index_digest(index);
+        }
+        let index_digests = plan
+            .recall_indexes
+            .iter()
+            .map(|index| (index.index_key.clone(), index.dependency_digest.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let manifest = plan.scope_manifest.as_mut().expect("scope manifest");
+        manifest
+            .backlink_memberships
+            .iter_mut()
+            .find(|dependency| dependency.storage_key == backlink_key)
+            .expect("manifest backlink dependency")
+            .dependency_digest = backlink_digest;
+        for dependency in &mut manifest.recall_indexes {
+            dependency.dependency_digest = index_digests
+                .get(&dependency.storage_key)
+                .expect("index dependency")
+                .clone();
+        }
+        manifest.dependency_digest = memory_graph_manifest_digest(manifest);
+
+        let validation = validate_memory_graph_read_chain(
+            manifest,
+            &plan.recall_indexes,
+            &plan.node_memberships,
+            &plan.edge_memberships,
+            &plan.backlink_memberships,
+            &nodes,
+            &edges,
+            &backlinks,
+            &owners,
+        );
+        assert!(!validation.verified);
+        assert!(validation
+            .failures
+            .contains(&"memory_graph_backlink_reverse_node_closure_drift".to_string()));
     }
 }

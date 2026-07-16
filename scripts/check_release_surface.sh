@@ -4,6 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
+cargo() {
+  command cargo --locked "$@"
+}
+export -f cargo
+
 gate_tmp="$(mktemp -d "${TMPDIR:-/tmp}/bm-release-surface.XXXXXX")"
 cleanup() {
   rm -rf "$gate_tmp"
@@ -20,6 +25,8 @@ git ls-files --others --ignored --exclude-standard | sort > "$ignored_before"
 required_docs=(
   "docs/README.md"
   "docs/en/api.md"
+  "docs/en/cli-usage.md"
+  "docs/en/deployment.md"
   "docs/en/getting-started.md"
   "docs/en/llm-gateway-integrations.md"
   "docs/en/profiles.md"
@@ -29,6 +36,8 @@ required_docs=(
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
   "docs/zh-CN/api.md"
+  "docs/zh-CN/cli-usage.md"
+  "docs/zh-CN/deployment.md"
   "docs/zh-CN/getting-started.md"
   "docs/zh-CN/llm-gateway-integrations.md"
   "docs/zh-CN/profiles.md"
@@ -49,6 +58,150 @@ for doc in "${required_docs[@]}"; do
     echo "missing release surface document: $doc" >&2
     exit 1
   fi
+done
+
+current_persistence_truth_docs=(
+  "dev-docs/code-quality-governance.md"
+  "dev-docs/config-console-plan.md"
+  "dev-docs/entry-runtime-plan.md"
+  "dev-docs/release-surface-plan.md"
+  "dev-docs/runtime-lifecycle-plan.md"
+  "dev-docs/agent-context-substrate-refactor-plan.md"
+  "dev-docs/conversation-transcript-attribute-plane-plan.md"
+  "dev-docs/conversation-transcript-governance-hardening-plan.md"
+  "dev-docs/conversation-transcript-substrate-plan.md"
+  "dev-docs/deployment-runtime-plan.md"
+  "dev-docs/llm-gateway-production-implementation-plan.md"
+  "dev-docs/adapter-communication-plan.md"
+  "dev-docs/sdk-profile-contract-plan.md"
+  "dev-docs/post-turn-memory-governance-plan.md"
+  "dev-docs/memory-write-transaction-plan.md"
+  "dev-docs/temporal-memory-graph-plan.md"
+)
+
+if rg -n -P 'crates/store/(?:src|tests)|cargo (?:test|clippy|tree|doc)[^\n]*-p bm-store(?!-contract-tests)|bm_store::StorePlatform|bm-store::StorePlatform|-> bm-store(?!-contract-tests)' \
+  "${current_persistence_truth_docs[@]}"; then
+  echo "current persistence truth docs retain the deleted public store owner" >&2
+  exit 1
+fi
+
+if rg -n 'EntryStoreConfig|StoreBackendKind|\.profile\(' \
+  README.md README.zh-CN.md docs/en docs/zh-CN; then
+  echo "release surface contains removed store/profile API" >&2
+  exit 1
+fi
+
+for doc in README.md README.zh-CN.md docs/en/api.md docs/zh-CN/api.md; do
+  rg -F -q 'structured_query_facets' "$doc" || {
+    echo "release surface omits required structured query facets: $doc" >&2
+    exit 1
+  }
+done
+
+for doc in docs/en/api.md docs/zh-CN/api.md; do
+  rg -F -q 'MemoryWriteRequest::GovernedEvidenceDocuments' "$doc" || {
+    echo "release surface omits governed evidence document writes: $doc" >&2
+    exit 1
+  }
+  rg -F -q 'MemoryEvidenceDocumentReadRequest' "$doc" || {
+    echo "release surface omits governed evidence document reads: $doc" >&2
+    exit 1
+  }
+  rg -F -q 'MemoryRuntime::read_governed_evidence_documents(request)' "$doc" || {
+    echo "release surface uses a stale governed evidence read method: $doc" >&2
+    exit 1
+  }
+  rg -F -q '`memory_space_id`, `document_ids`' "$doc" || {
+    echo "release surface uses stale governed evidence read fields: $doc" >&2
+    exit 1
+  }
+done
+
+if rg -n 'read_evidence_documents|`owner_refs`, `view`' docs/en/api.md docs/zh-CN/api.md; then
+  echo "release surface retains the removed governed evidence read contract" >&2
+  exit 1
+fi
+
+for doc in docs/en/cli-usage.md docs/zh-CN/cli-usage.md; do
+  rg -F -q 'BM_HOST_PROFILE' "$doc" || {
+    echo "CLI usage omits the host-native profile selection contract: $doc" >&2
+    exit 1
+  }
+  if rg -n -- '--profile profile-server-linux-dev-full' "$doc"; then
+    echo "CLI usage treats Linux dev-full as the generic local profile: $doc" >&2
+    exit 1
+  fi
+done
+
+for doc in docs/en/deployment.md docs/zh-CN/deployment.md; do
+  if rg -n 'Local CLI/operator process.*profile-server-linux-dev-full|本地 CLI/operator 进程.*profile-server-linux-dev-full' "$doc"; then
+    echo "deployment guide treats Linux dev-full as the generic local profile: $doc" >&2
+    exit 1
+  fi
+done
+
+for marker in \
+  'typed `(memory_space_id, mounted_subject_id)` projection' \
+  '不是 whole-store snapshot 加标签' \
+  '当前 dev 不保留旧 evidence/source-claim/family/export schema' \
+  'MemoryRuntime::read_governed_evidence_documents(' \
+  '所有 Cargo 执行使用 `--locked`'; do
+  rg -F -q "$marker" dev-docs/governed-memory-facet-index-plan.md || {
+    echo "P7 truth source omits audited release decision: $marker" >&2
+    exit 1
+  }
+done
+
+locked_cargo_gates=(
+  scripts/check_release_surface.sh
+  scripts/check_cross_target_compile_gates.sh
+  scripts/check_memory_write_transaction_contract.sh
+  scripts/check_next_gen_memory_plan.sh
+  scripts/check_runtime_budget_contracts.sh
+  scripts/check_sdk_host_integration_readiness.sh
+  scripts/emit_platform_capability_snapshots.sh
+)
+for gate in "${locked_cargo_gates[@]}"; do
+  rg -F -q 'command cargo --locked "$@"' "$gate" || {
+    echo "Cargo gate does not enforce Cargo.lock: $gate" >&2
+    exit 1
+  }
+done
+
+for gate in scripts/*.sh; do
+  if rg -F -q 'command cargo --locked "$@"' "$gate"; then
+    continue
+  fi
+  if rg -n '(^|[[:space:]])cargo (check|test|clippy|build|tree|run|doc|publish)([[:space:]]|$)' "$gate" \
+    | rg -v -- '--locked'; then
+    echo "Cargo gate contains an unlocked command: $gate" >&2
+    exit 1
+  fi
+done
+
+if rg -n \
+  '当前仍是 whole-space snapshot|当前迁移粒度仍是 whole-space snapshot|migration apply 仍需真实 subject key / scope remap|facet_migration_remap_required_fails_closed|memory_space_migration_fails_closed_when_snapshot_contains_facet_index' \
+  dev-docs/README.md \
+  dev-docs/sdk-host-integration-readiness-plan.md \
+  dev-docs/governed-memory-facet-index-plan.md \
+  dev-docs/multi-subject-memory-space-plan.md \
+  scripts/check_memory_write_transaction_contract.sh; then
+  echo "active truth or gate retains the superseded whole-store/remap contract" >&2
+  exit 1
+fi
+
+rg -F -q 'MEMORY_FACET_SCHEMA_VERSION = 4' \
+  dev-docs/governed-memory-facet-index-plan.md
+rg -F -q 'source identity claim，schema 直接为 3' \
+  dev-docs/governed-memory-facet-index-plan.md
+
+for public_entry_doc in \
+  docs/en/deployment.md docs/zh-CN/deployment.md \
+  docs/en/adapters.md docs/zh-CN/adapters.md; do
+  rg -q 'StoreBackendConfig::' "$public_entry_doc" || {
+    echo "entry runtime public example is not bound to StoreBackendConfig: $public_entry_doc" >&2
+    exit 1
+  }
 done
 
 for doc in "${required_docs[@]}"; do
@@ -75,12 +228,23 @@ examples=(
 
 example_tmp_root="$gate_tmp/example-repo"
 mkdir -p "$example_tmp_root/examples"
-cp "$ROOT/Cargo.toml" "$example_tmp_root/Cargo.toml"
+awk '
+  /^members = \[/ {
+    print
+    print "    \"examples/rust-sdk-embedded\","
+    print "    \"examples/server-runtime\","
+    print "    \"examples/linux-device\","
+    print "    \"examples/esp-standalone-memory\","
+    print "    \"examples/esp-embedded-sdk\","
+    next
+  }
+  { print }
+' "$ROOT/Cargo.toml" > "$example_tmp_root/Cargo.toml"
 cp "$ROOT/Cargo.lock" "$example_tmp_root/Cargo.lock"
 ln -s "$ROOT/crates" "$example_tmp_root/crates"
 ln -s "$ROOT/apps" "$example_tmp_root/apps"
 
-run_example_manifest() {
+prepare_example_manifest() {
   local manifest="$1"
   local example_dir
   local example_name
@@ -90,16 +254,56 @@ run_example_manifest() {
   example_name="$(basename "$example_dir")"
   tmp_example="$example_tmp_root/examples/$example_name"
   mkdir -p "$tmp_example"
-  cp "$ROOT/$manifest" "$tmp_example/Cargo.toml"
+  sed '/^\[workspace\]$/d' "$ROOT/$manifest" > "$tmp_example/Cargo.toml"
+  case "$example_name" in
+    rust-sdk-embedded|esp-embedded-sdk)
+      example_lock_dependencies=' "bm-sdk",'
+      ;;
+    linux-device)
+      example_lock_dependencies=$' "bm-adapter",\n "bm-entry",\n "bm-sdk",'
+      ;;
+    server-runtime)
+      example_lock_dependencies=$' "bm-entry",\n "bm-http",\n "bm-sdk",'
+      ;;
+    esp-standalone-memory)
+      example_lock_dependencies=$' "bm-adapter",\n "bm-entry",\n "bm-sdk",\n "bm-wss",'
+      ;;
+    *)
+      echo "release surface example lock owner is missing: $example_name" >&2
+      exit 1
+      ;;
+  esac
+  printf '\n[[package]]\nname = "bm-example-%s"\nversion = "0.1.0"\ndependencies = [\n%s\n]\n' \
+    "$example_name" "$example_lock_dependencies" >> "$example_tmp_root/Cargo.lock"
   if [[ -d "$ROOT/$example_dir/src" ]]; then
     cp -R "$ROOT/$example_dir/src" "$tmp_example/src"
   fi
-  CARGO_TARGET_DIR="$gate_tmp/cargo-target" \
-    cargo run -q --manifest-path "$tmp_example/Cargo.toml"
 }
 
 for manifest in "${examples[@]}"; do
-  run_example_manifest "$manifest"
+  prepare_example_manifest "$manifest"
+done
+
+for manifest in "${examples[@]}"; do
+  example_name="$(basename "$(dirname "$manifest")")"
+  CARGO_TARGET_DIR="$gate_tmp/cargo-target" \
+    cargo check -q --locked -p "bm-example-$example_name" --manifest-path "$example_tmp_root/Cargo.toml"
+done
+
+case "$(uname -s)" in
+  Darwin)
+    host_examples=(rust-sdk-embedded)
+    ;;
+  Linux)
+    host_examples=(server-runtime linux-device)
+    ;;
+  *)
+    host_examples=()
+    ;;
+esac
+for example_name in "${host_examples[@]}"; do
+  CARGO_TARGET_DIR="$gate_tmp/cargo-target" \
+    cargo run -q --locked -p "bm-example-$example_name" --manifest-path "$example_tmp_root/Cargo.toml"
 done
 
 publishable=(
@@ -118,7 +322,7 @@ publishable=(
   "bm-a2a"
 )
 
-cargo doc --no-deps --no-default-features \
+cargo doc --locked --no-deps --no-default-features \
   -p bm-core \
   -p bm-sdk \
   -p bm-replay \
@@ -180,13 +384,26 @@ publish_dry_run() {
       extra+=(--config 'patch.crates-io.bm-replay.path="crates/replay"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
       ;;
-    bm-cli|bm-llm-gateway|bm-http|bm-wss|bm-mcp|bm-a2a)
+    bm-cli|bm-llm-gateway)
+      extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
+      extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
+      extra+=(--config 'patch.crates-io.bm-replay.path="crates/replay"')
+      extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
+      extra+=(--config 'patch.crates-io.bm-entry.path="crates/entry"')
+      ;;
+    bm-http)
       extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
       extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
       extra+=(--config 'patch.crates-io.bm-replay.path="crates/replay"')
       extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
       extra+=(--config 'patch.crates-io.bm-entry.path="crates/entry"')
       extra+=(--config 'patch.crates-io.bm-ollama-transparent.path="crates/ollama-transparent"')
+      ;;
+    bm-wss|bm-mcp|bm-a2a)
+      extra+=(--config 'patch.crates-io.bm-core.path="crates/core"')
+      extra+=(--config 'patch.crates-io.bm-sdk.path="crates/sdk"')
+      extra+=(--config 'patch.crates-io.bm-adapter.path="crates/adapter"')
+      extra+=(--config 'patch.crates-io.bm-entry.path="crates/entry"')
       ;;
     bm-ollama-transparent)
       ;;
@@ -197,9 +414,9 @@ publish_dry_run() {
   esac
 
   if ((${#extra[@]} == 0)); then
-    cargo publish --dry-run -p "$crate"
+    cargo publish --locked --dry-run -p "$crate"
   else
-    cargo publish --dry-run -p "$crate" "${extra[@]}"
+    cargo publish --locked --dry-run -p "$crate" "${extra[@]}"
   fi
 }
 

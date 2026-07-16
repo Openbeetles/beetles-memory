@@ -1,29 +1,52 @@
+#[cfg(all(not(test), not(feature = "profile-desktop-macos-standalone-memory")))]
+compile_error!("bm-desktop requires profile-desktop-macos-standalone-memory");
+
+#[cfg(all(
+    not(test),
+    feature = "profile-desktop-macos-standalone-memory",
+    not(target_os = "macos")
+))]
+compile_error!("profile-desktop-macos-standalone-memory requires target_os=macos");
+
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
 use bm_http::{
-    handle_http_request_with_console, HttpConsoleServices, HttpMethod, HttpRuntimeRequest,
+    handle_http_in_process_request_with_console, HttpConsoleServices, HttpMethod,
+    HttpRuntimeRequest,
 };
 use bm_ollama_transparent::{
-    FileSystemRunnerInstaller, OllamaTransparentConfig, SystemPortOwnerObserver,
-    SystemProcessManager, TransparentController,
+    OllamaTransparentConfig, OllamaTransparentMemoryAuthority, TransparentController,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, Result, StoreBackendKind};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, Result, StoreBackendConfig};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 pub struct DesktopConsoleState {
     runtime: EntryRuntime,
-    ollama_transparent: TransparentController<
-        SystemPortOwnerObserver,
-        FileSystemRunnerInstaller,
-        SystemProcessManager,
-    >,
+    ollama_transparent: TransparentController,
     memory_event_store_paths: Vec<PathBuf>,
+    memory_authority: DesktopMemoryAuthority,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DesktopMemoryAuthority {
+    pub owner_id: String,
+    pub agent_id: String,
+    pub channel: String,
+    pub chat_id: String,
+    pub store_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DesktopRuntimeConfig {
+    pub data_dir: PathBuf,
+    pub gateway_binary_path: PathBuf,
+    pub memory: DesktopMemoryAuthority,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,26 +79,25 @@ pub struct DesktopConsoleInvokeResponse {
 }
 
 impl DesktopConsoleState {
-    pub fn open_for_data_dir(data_dir: impl Into<PathBuf>) -> Result<Self> {
-        let data_dir = data_dir.into();
-        let store_path = desktop_store_path(&data_dir);
+    pub fn open(config: DesktopRuntimeConfig) -> Result<Self> {
+        config.validate()?;
+        let data_dir = config.data_dir;
+        let memory_authority = config.memory;
         let mut capability = MemoryCapabilityPolicy::strict_profile();
         capability.communication_adapter_enabled = true;
         let runtime = EntryRuntime::open(EntryRuntimeConfig {
-            profile: ProfileId::DesktopMacosStandaloneMemory,
             identity: EntryIdentity {
-                agent_id: "bm-desktop".to_string(),
-                owner_id: "local-owner".to_string(),
+                agent_id: memory_authority.agent_id.clone(),
+                owner_id: memory_authority.owner_id.clone(),
             },
             scope: EntryScope {
-                channel: "desktop".to_string(),
-                chat_id: "local-desktop".to_string(),
+                channel: memory_authority.channel.clone(),
+                chat_id: memory_authority.chat_id.clone(),
             },
-            store: EntryStoreConfig {
-                backend: StoreBackendKind::File,
-                data_path: Some(store_path),
-                fsync: true,
-            },
+            store: StoreBackendConfig::file(
+                memory_authority.store_path.clone(),
+                ProfileId::DesktopMacosStandaloneMemory,
+            )?,
             transports: EntryTransportConfig {
                 cli: true,
                 http_server: false,
@@ -90,29 +112,45 @@ impl DesktopConsoleState {
             privacy: MemoryPrivacyPolicy::standard_private_boundary(),
             capability,
         })?;
-        let transparent_config = OllamaTransparentConfig::for_data_dir(&data_dir);
-        let transparent_ports =
-            SystemPortOwnerObserver::new(transparent_config.port_owner_classifier());
-        let memory_event_store_paths = vec![transparent_config.memory_store_path.clone()];
-        let ollama_transparent = TransparentController::new(
-            transparent_config,
-            transparent_ports,
-            FileSystemRunnerInstaller,
-            SystemProcessManager::default(),
+        let transparent_authority = OllamaTransparentMemoryAuthority::new(
+            memory_authority.owner_id.clone(),
+            memory_authority.agent_id.clone(),
+            memory_authority.channel.clone(),
+            memory_authority.store_path.clone(),
+        )
+        .map_err(|error| bm_sdk::Error::config("desktop_memory_authority", error.to_string()))?;
+        let transparent_config = OllamaTransparentConfig::new(
+            &data_dir,
+            config.gateway_binary_path,
+            transparent_authority,
         )
         .map_err(|error| bm_sdk::Error::config("desktop_ollama_transparent", error.to_string()))?;
+        let memory_event_store_paths = vec![memory_authority.store_path.clone()];
+        let ollama_transparent =
+            TransparentController::new(transparent_config).map_err(|error| {
+                bm_sdk::Error::config("desktop_ollama_transparent", error.to_string())
+            })?;
         Ok(Self {
             runtime,
             ollama_transparent,
             memory_event_store_paths,
+            memory_authority,
         })
+    }
+
+    pub fn memory_authority(&self) -> &DesktopMemoryAuthority {
+        &self.memory_authority
+    }
+
+    pub fn ollama_transparent_config(&self) -> &OllamaTransparentConfig {
+        self.ollama_transparent.config()
     }
 
     pub fn handle_console_request(
         &self,
         request: DesktopConsoleRequest,
     ) -> Result<DesktopConsoleResponse> {
-        let response = handle_http_request_with_console(
+        let response = handle_http_in_process_request_with_console(
             &self.runtime,
             request.into_http_runtime_request(),
             HttpConsoleServices::with_ollama_transparent(&self.ollama_transparent)
@@ -176,8 +214,20 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             std::fs::create_dir_all(&data_dir)?;
-            let state = DesktopConsoleState::open_for_data_dir(data_dir)
-                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            let gateway_binary_path = bundled_gateway_path()?;
+            let memory = DesktopMemoryAuthority {
+                owner_id: "local-owner".to_string(),
+                agent_id: "bm-desktop".to_string(),
+                channel: "desktop".to_string(),
+                chat_id: "local-desktop".to_string(),
+                store_path: desktop_store_path(&data_dir),
+            };
+            let state = DesktopConsoleState::open(DesktopRuntimeConfig {
+                data_dir,
+                gateway_binary_path,
+                memory,
+            })
+            .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             app.manage(Mutex::new(state));
 
             // On non-macOS platforms (Windows, Linux), re-enable native window decorations.
@@ -239,35 +289,59 @@ impl DesktopConsoleRequest {
 
     fn into_http_runtime_request(self) -> HttpRuntimeRequest {
         match self.method {
-            HttpMethod::Get => {
-                let mut request = HttpRuntimeRequest::get(self.path);
-                request.authenticated = true;
-                request
-            }
-            HttpMethod::Post => {
-                let mut request = HttpRuntimeRequest::post_json(self.path, self.body);
-                request.authenticated = true;
-                request
-            }
-            HttpMethod::Put => {
-                let mut request = HttpRuntimeRequest::put_json(self.path, self.body);
-                request.authenticated = true;
-                request
-            }
-            HttpMethod::Patch => {
-                let mut request = HttpRuntimeRequest::patch_json(self.path, self.body);
-                request.authenticated = true;
-                request
-            }
-            HttpMethod::Delete => {
-                let mut request = HttpRuntimeRequest::delete(self.path);
-                request.authenticated = true;
-                request
-            }
+            HttpMethod::Get => HttpRuntimeRequest::get(self.path),
+            HttpMethod::Post => HttpRuntimeRequest::post_json(self.path, self.body),
+            HttpMethod::Put => HttpRuntimeRequest::put_json(self.path, self.body),
+            HttpMethod::Patch => HttpRuntimeRequest::patch_json(self.path, self.body),
+            HttpMethod::Delete => HttpRuntimeRequest::delete(self.path),
         }
     }
 }
 
 fn desktop_store_path(data_dir: &Path) -> PathBuf {
     data_dir.join("store")
+}
+
+impl DesktopRuntimeConfig {
+    fn validate(&self) -> Result<()> {
+        for (name, path) in [
+            ("desktop data_dir", &self.data_dir),
+            ("desktop gateway_binary_path", &self.gateway_binary_path),
+            ("desktop store_path", &self.memory.store_path),
+        ] {
+            if !path.is_absolute() {
+                return Err(bm_sdk::Error::config(
+                    "desktop_runtime_config",
+                    format!("{name} must be an explicit absolute path"),
+                ));
+            }
+        }
+        for (name, value) in [
+            ("owner_id", self.memory.owner_id.as_str()),
+            ("agent_id", self.memory.agent_id.as_str()),
+            ("channel", self.memory.channel.as_str()),
+            ("chat_id", self.memory.chat_id.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(bm_sdk::Error::config(
+                    "desktop_runtime_config",
+                    format!("desktop memory {name} must not be empty"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn bundled_gateway_path() -> std::result::Result<PathBuf, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let parent = executable
+        .parent()
+        .ok_or_else(|| "desktop executable has no parent directory".to_string())?;
+    let name = if cfg!(windows) {
+        "bm-llm-gateway.exe"
+    } else {
+        "bm-llm-gateway"
+    };
+    Ok(parent.join(name))
 }

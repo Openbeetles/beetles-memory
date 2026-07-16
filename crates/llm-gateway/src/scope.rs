@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bm_entry::{EntryIdentity, EntryRuntimeScope, EntryScope};
+use bm_entry::{
+    EntryAuthDecision, EntryIdentity, EntryOperationCapability, EntryRuntimeScope, EntryScope,
+};
 
 use crate::{GatewayError, Result};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewayScopeRequest {
-    pub auth_subject: Option<String>,
+    pub auth: EntryAuthDecision,
     pub headers: BTreeMap<String, String>,
     pub workspace_root_digest: Option<String>,
     pub workspace_root_path: Option<String>,
@@ -47,6 +49,8 @@ pub struct GatewayScopeResolution {
     pub agent_id: String,
     pub channel: String,
     pub chat_id: String,
+    pub audit_principal_id: String,
+    pub capabilities: Vec<String>,
     pub audit_safe_summary: String,
     #[serde(skip)]
     pub entry_scope: EntryRuntimeScope,
@@ -91,12 +95,16 @@ impl GatewayScopeResolver {
     }
 
     pub fn resolve(&self, request: &GatewayScopeRequest) -> Result<GatewayScopeResolution> {
-        let owner_id = first_non_empty([
-            request.auth_subject.as_deref(),
-            self.config.local_owner_id.as_deref(),
-            self.config.first_run_owner_id.as_deref(),
-        ])
-        .ok_or_else(|| GatewayError::scope_resolution_failed("owner_id is unavailable"))?;
+        let principal = GatewayPrincipalContext::from_request(request)?;
+        let owner_id = principal
+            .bearer_owner_id()
+            .or_else(|| {
+                first_non_empty([
+                    self.config.local_owner_id.as_deref(),
+                    self.config.first_run_owner_id.as_deref(),
+                ])
+            })
+            .ok_or_else(|| GatewayError::scope_resolution_failed("owner_id is unavailable"))?;
         let agent_id = first_non_empty([
             trusted_header(
                 &request.headers,
@@ -132,6 +140,7 @@ impl GatewayScopeResolver {
             agent_id,
             channel,
             &chat_id.chat_id,
+            &principal,
             request.workspace_root_digest.as_deref(),
             request.model_alias.as_deref(),
         );
@@ -168,6 +177,82 @@ impl GatewayScopeResolver {
     }
 }
 
+impl GatewayScopeRequest {
+    pub fn new(auth: EntryAuthDecision) -> Self {
+        Self {
+            auth,
+            headers: BTreeMap::new(),
+            workspace_root_digest: None,
+            workspace_root_path: None,
+            client_conversation_hint: None,
+            request_id_hint: None,
+            body_conversation_hint: None,
+            model_alias: None,
+        }
+    }
+
+    pub fn require_capabilities(&self, required: &[EntryOperationCapability]) -> Result<()> {
+        let auth = &self.auth;
+        if !auth.is_authenticated() {
+            return Err(GatewayError::forbidden(
+                "gateway principal is unauthenticated",
+            ));
+        }
+        if let Some(missing) = required
+            .iter()
+            .copied()
+            .find(|capability| !auth.allows(*capability))
+        {
+            return Err(GatewayError::forbidden(format!(
+                "gateway principal lacks required capability: {}",
+                missing.as_str()
+            )));
+        }
+        Ok(())
+    }
+}
+
+struct GatewayPrincipalContext {
+    audit_principal_id: String,
+    bearer_owner_id: Option<String>,
+    capabilities: Vec<String>,
+}
+
+impl GatewayPrincipalContext {
+    fn from_request(request: &GatewayScopeRequest) -> Result<Self> {
+        let auth = &request.auth;
+        if !auth.is_authenticated() {
+            return Err(GatewayError::scope_resolution_failed(
+                "gateway principal is unauthenticated",
+            ));
+        }
+        let bearer = auth.bearer_principal();
+        Ok(Self {
+            audit_principal_id: auth.principal_id().to_string(),
+            bearer_owner_id: bearer.map(|principal| principal.owner_id().to_string()),
+            capabilities: bearer.map_or_else(
+                || {
+                    EntryOperationCapability::all()
+                        .iter()
+                        .map(|capability| capability.as_str().to_string())
+                        .collect()
+                },
+                |principal| {
+                    principal
+                        .capabilities()
+                        .iter()
+                        .map(|capability| capability.as_str().to_string())
+                        .collect()
+                },
+            ),
+        })
+    }
+
+    fn bearer_owner_id(&self) -> Option<&str> {
+        self.bearer_owner_id.as_deref()
+    }
+}
+
 struct ChatIdResolution {
     chat_id: String,
     ollama_app_hint_source: Option<&'static str>,
@@ -191,6 +276,8 @@ impl GatewayScopeResolution {
             agent_id: agent_id.to_string(),
             channel: channel.to_string(),
             chat_id: chat_id.to_string(),
+            audit_principal_id: "audit-only".to_string(),
+            capabilities: Vec::new(),
             audit_safe_summary: audit_safe_summary.to_string(),
             entry_scope: EntryRuntimeScope {
                 identity: EntryIdentity {
@@ -210,15 +297,22 @@ impl GatewayScopeResolution {
         agent_id: &str,
         channel: &str,
         chat_id: &str,
+        principal: &GatewayPrincipalContext,
         workspace_digest: Option<&str>,
         model_alias: Option<&str>,
     ) -> Self {
         let audit_safe_summary = format!(
-            "owner_id={owner_id} agent_id={agent_id} channel={channel} chat_id={chat_id} workspace_digest={} model_alias={}",
+            "owner_id={owner_id} agent_id={agent_id} channel={channel} chat_id={chat_id} audit_principal_id={} capabilities={} workspace_digest={} model_alias={}",
+            principal.audit_principal_id,
+            principal.capabilities.join(","),
             workspace_digest.unwrap_or("none"),
             model_alias.unwrap_or("none")
         );
-        Self::audit_only(owner_id, agent_id, channel, chat_id, &audit_safe_summary)
+        let mut resolution =
+            Self::audit_only(owner_id, agent_id, channel, chat_id, &audit_safe_summary);
+        resolution.audit_principal_id = principal.audit_principal_id.clone();
+        resolution.capabilities = principal.capabilities.clone();
+        resolution
     }
 }
 

@@ -2,18 +2,23 @@
 
 mod support;
 
-use bm_core::memory::{memory_facet_manifest_key, MEMORY_FACET_POSTING_NAMESPACE};
+use bm_core::memory::{
+    memory_facet_manifest_key, ContinuitySnapshot, ContinuitySnapshotManifest,
+    ContinuitySnapshotMode, MEMORY_FACET_POSTING_NAMESPACE,
+};
 use bm_core::platform::Platform as _;
 use bm_core::runtime::continuity_flush::{
     ContinuitySnapshotBundle, REL_PATH_REBOOT_CONTINUITY_BUNDLE,
 };
 use bm_sdk::{
-    IngressKind, MemoryCloseRequest, MemoryExportRequest, MemoryInspectionRequest,
-    MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest, MemoryRecoverRequest,
-    MemoryStoreHandle, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleDisposition,
+    default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
+    system_governor_subject_id, IngressKind, MemoryCloseRequest, MemoryIdentity,
+    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryRecoverRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleDisposition,
     RuntimeLifecycleModeInput, RuntimeLifecycleOperation, RuntimeLifecycleTrigger,
     RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
-    StoreRuntimeBudget,
+    StoreRuntimeBudget, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
 };
 
 use support::{
@@ -21,10 +26,66 @@ use support::{
     StaticHttpClient, StaticLlmClient,
 };
 
+fn runtime_mounted_to_subject(store: MemoryStoreHandle, mounted_subject_id: &str) -> MemoryRuntime {
+    let owner_id = "owner-non-soul-mount";
+    let agent_id = "agent-main";
+    let registry = SubjectRegistry::single_agent_default(owner_id, agent_id).expect("registry");
+    let relationship_graph =
+        SubjectRelationshipGraph::single_agent_default(&registry).expect("relationship graph");
+    MemoryRuntime::builder()
+        .identity(MemoryIdentity::new(agent_id, owner_id).expect("identity"))
+        .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+        .store(store)
+        .subject_registry(registry)
+        .subject_relationship_graph(relationship_graph)
+        .scoped_runtime(SubjectScopedRuntime {
+            memory_space_id: default_memory_space_id(owner_id),
+            mounted_subject_id: mounted_subject_id.to_string(),
+            actor_subject_id: mounted_subject_id.to_string(),
+            agent_id: agent_id.to_string(),
+            relationship_scope: None,
+            projection_policy: "subject_aware_default".to_string(),
+            write_policy: "subject_candidate_then_space_governance".to_string(),
+        })
+        .build()
+        .expect("runtime with non-Soul mounted subject")
+}
+
+fn recovery_snapshot(
+    source: &MemoryStoreHandle,
+    memory_space_id: &str,
+    subject_id: &str,
+) -> ContinuitySnapshot {
+    let long_term_memory = source
+        .replay_harness()
+        .scoped_long_term_memory_read_store(memory_space_id)
+        .expect("recovery source store")
+        .list(usize::MAX)
+        .expect("recovery source entries");
+    ContinuitySnapshot {
+        version: 5,
+        exported_at: 1_800_000_000,
+        mode: ContinuitySnapshotMode::FullRestore,
+        chat_id: "chat-1".to_string(),
+        subject_id: subject_id.to_string(),
+        manifest: ContinuitySnapshotManifest::default(),
+        summary_text: None,
+        summary_message_count: None,
+        long_term_memory,
+        self_model: None,
+        self_authored_core: None,
+        core_revision_ledger: None,
+        self_continuity: None,
+        relationship_portfolio: None,
+        relationship_constitution: None,
+        execution_state: None,
+    }
+}
+
 #[test]
 fn runtime_lifecycle_reports_wrap_sdk_operations() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
 
     let write = runtime
         .write(MemoryWriteRequest::Procedural {
@@ -85,12 +146,12 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
 
 #[test]
 fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projection() {
-    let platform = MemoryStoreHandle::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("config"),
+    let platform = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).expect("config"),
     )
     .expect("store");
     let event_reader = platform.clone();
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform, support::host_test_profile());
 
     let write = runtime
         .write(MemoryWriteRequest::Procedural {
@@ -175,8 +236,8 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
 
 #[test]
 fn runtime_lifecycle_maintenance_defer_does_not_run_core_passes() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
     let llm = StaticLlmClient::summary_response("Summary: should not be used");
     let mut http = StaticHttpClient;
 
@@ -213,12 +274,12 @@ fn runtime_lifecycle_maintenance_defer_does_not_run_core_passes() {
 
 #[test]
 fn runtime_lifecycle_inspect_recover_and_close_are_sdk_level_operations() {
-    let platform = MemoryStoreHandle::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("config"),
+    let platform = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).expect("config"),
     )
     .expect("store");
     let event_reader = platform.clone();
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform, support::host_test_profile());
 
     let inspection = runtime
         .inspect(MemoryInspectionRequest {
@@ -284,17 +345,131 @@ fn runtime_lifecycle_inspect_recover_and_close_are_sdk_level_operations() {
 }
 
 #[test]
-fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
-    let source_platform = seeded_store_platform(ProfileId::ServerLinuxDevFull);
-    let source_runtime = test_runtime(source_platform, ProfileId::ServerLinuxDevFull);
-    let snapshot = source_runtime
-        .export(MemoryExportRequest {
-            chat_id: "chat-1".to_string(),
-        })
-        .expect("export recovery snapshot")
-        .snapshot;
+fn runtime_recover_rejects_human_and_system_governor_mounts_before_store_access() {
+    let profile = support::host_test_profile();
+    let owner_id = "owner-non-soul-mount";
+    for mounted_subject_id in [
+        primary_human_subject_id(owner_id),
+        system_governor_subject_id(owner_id),
+    ] {
+        let store = empty_store_platform(profile);
+        let event_reader = store.clone();
+        let runtime = runtime_mounted_to_subject(store, &mounted_subject_id);
+        let events_before = event_reader
+            .replay_harness()
+            .read_events()
+            .expect("events before rejected recovery");
 
-    let target_platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+        let error = match runtime.recover(MemoryRecoverRequest {
+            trigger: RuntimeLifecycleTrigger::BootRecovery,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        }) {
+            Ok(_) => panic!("a non-AgentPersona mount must not inspect or recover Soul state"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.stage(), "soul_kernel_subject_binding");
+        assert_eq!(
+            event_reader
+                .replay_harness()
+                .read_events()
+                .expect("events after rejected recovery"),
+            events_before,
+            "Soul ownership rejection must happen before lifecycle/store effects for {mounted_subject_id}"
+        );
+    }
+}
+
+#[test]
+fn runtime_builder_rejects_missing_or_unbound_soul_owners_before_opening_runtime() {
+    let profile = support::host_test_profile();
+    let owner_id = "owner-invalid-soul-mount";
+    let agent_id = "agent-main";
+    let agent_subject_id = default_agent_subject_id(agent_id);
+
+    let missing_store = empty_store_platform(profile);
+    let missing_events = missing_store.clone();
+    let missing_events_before = missing_events
+        .replay_harness()
+        .read_events()
+        .expect("events before missing subject rejection");
+    let missing_registry =
+        SubjectRegistry::single_agent_default(owner_id, agent_id).expect("registry");
+    let missing_graph = SubjectRelationshipGraph::single_agent_default(&missing_registry)
+        .expect("relationship graph");
+    let missing_error = match MemoryRuntime::builder()
+        .identity(MemoryIdentity::new(agent_id, owner_id).expect("identity"))
+        .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+        .store(missing_store)
+        .subject_registry(missing_registry)
+        .subject_relationship_graph(missing_graph)
+        .scoped_runtime(SubjectScopedRuntime {
+            memory_space_id: default_memory_space_id(owner_id),
+            mounted_subject_id: "subject:missing".to_string(),
+            actor_subject_id: agent_subject_id.clone(),
+            agent_id: agent_id.to_string(),
+            relationship_scope: None,
+            projection_policy: "subject_aware_default".to_string(),
+            write_policy: "subject_candidate_then_space_governance".to_string(),
+        })
+        .build()
+    {
+        Ok(_) => panic!("missing mounted subject must fail runtime construction"),
+        Err(error) => error,
+    };
+    assert_eq!(missing_error.stage(), "memory_runtime_config");
+    assert_eq!(
+        missing_events
+            .replay_harness()
+            .read_events()
+            .expect("events after missing subject rejection"),
+        missing_events_before
+    );
+
+    let unbound_store = empty_store_platform(profile);
+    let unbound_events = unbound_store.clone();
+    let unbound_events_before = unbound_events
+        .replay_harness()
+        .read_events()
+        .expect("events before unbound subject rejection");
+    let mut unbound_registry =
+        SubjectRegistry::single_agent_default(owner_id, agent_id).expect("registry");
+    unbound_registry
+        .subjects
+        .iter_mut()
+        .find(|subject| subject.subject_id == agent_subject_id)
+        .expect("agent subject")
+        .soul_binding = None;
+    let unbound_error = match MemoryRuntime::builder()
+        .identity(MemoryIdentity::new(agent_id, owner_id).expect("identity"))
+        .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+        .store(unbound_store)
+        .subject_registry(unbound_registry)
+        .build()
+    {
+        Ok(_) => panic!("unbound AgentPersona must fail runtime construction"),
+        Err(error) => error,
+    };
+    assert_eq!(unbound_error.stage(), "memory_runtime_config");
+    assert_eq!(
+        unbound_events
+            .replay_harness()
+            .read_events()
+            .expect("events after unbound subject rejection"),
+        unbound_events_before
+    );
+}
+
+#[test]
+fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
+    let source_platform = seeded_store_platform(support::host_test_profile());
+    let snapshot = recovery_snapshot(
+        &source_platform,
+        "space:owner-default",
+        &default_agent_subject_id("agent-main"),
+    );
+
+    let target_platform = empty_store_platform(support::host_test_profile());
     target_platform
         .replay_harness()
         .session_store()
@@ -317,9 +492,9 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
         .expect("write recovery bundle");
     let runtime = test_runtime_with_identity_scope(
         target_platform.clone(),
-        ProfileId::ServerLinuxDevFull,
-        "target-agent",
-        "target-owner",
+        support::host_test_profile(),
+        "agent-main",
+        "owner-default",
         "llm.gateway",
         "chat-target",
     );
@@ -350,13 +525,13 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
     assert_eq!(
         target_platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:target-owner")
+            .scoped_long_term_memory_read_store("space:owner-default")
             .expect("target owner store")
             .count()
             .expect("target owner count"),
         1
     );
-    let manifest_key = memory_facet_manifest_key("space:target-owner", runtime.subject_id())
+    let manifest_key = memory_facet_manifest_key("space:owner-default", runtime.subject_id())
         .expect("target manifest key");
     assert_eq!(
         target_platform
@@ -373,18 +548,17 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
 
 #[test]
 fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
-    let source_platform = seeded_store_platform(ProfileId::ServerLinuxDevFull);
-    let source_runtime = test_runtime(source_platform, ProfileId::ServerLinuxDevFull);
-    let snapshot = source_runtime
-        .export(MemoryExportRequest {
-            chat_id: "chat-1".to_string(),
-        })
-        .expect("export recovery snapshot")
-        .snapshot;
+    let source_platform = seeded_store_platform(support::host_test_profile());
+    let snapshot = recovery_snapshot(
+        &source_platform,
+        "space:owner-default",
+        &default_agent_subject_id("agent-main"),
+    );
 
+    let event_log_max_items = 6;
     let budget = StoreRuntimeBudget {
-        event_log_max_items: 4,
-        kv_max_entries: 64,
+        event_log_max_items,
+        kv_max_entries: 129,
         blob_max_bytes: 4096,
         snapshot_max_bytes: 131_072,
         logical_namespace_max_bytes: 128,
@@ -393,10 +567,11 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
         export_max_bytes: 131_072,
         import_max_bytes: 131_072,
     };
-    let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
+    let config = StoreBackendConfig::in_memory(support::host_test_profile())
         .expect("store config")
-        .with_runtime_store_budget(budget);
-    let target_platform = MemoryStoreHandle::open_in_memory(config).expect("target store");
+        .try_with_nonproduction_store_budget_limit(budget)
+        .expect("valid store budget limit");
+    let target_platform = support::open_memory_store(config).expect("target store");
     target_platform
         .replay_harness()
         .session_store()
@@ -419,9 +594,9 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
         .expect("write recovery bundle");
     let runtime = test_runtime_with_identity_scope(
         target_platform.clone(),
-        ProfileId::ServerLinuxDevFull,
-        "target-agent",
-        "target-owner",
+        support::host_test_profile(),
+        "agent-main",
+        "owner-default",
         "llm.gateway",
         "chat-target",
     );
@@ -429,6 +604,11 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
         .replay_harness()
         .read_events()
         .expect("events before");
+    assert_eq!(
+        events_before.len(),
+        event_log_max_items,
+        "fixture must saturate the event budget before recovery"
+    );
 
     let error = match runtime.recover(MemoryRecoverRequest {
         trigger: RuntimeLifecycleTrigger::BootRecovery,
@@ -442,13 +622,13 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
     assert_eq!(
         target_platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:target-owner")
+            .scoped_long_term_memory_read_store("space:owner-default")
             .expect("target owner store")
             .count()
             .expect("target owner count"),
         0
     );
-    let manifest_key = memory_facet_manifest_key("space:target-owner", runtime.subject_id())
+    let manifest_key = memory_facet_manifest_key("space:owner-default", runtime.subject_id())
         .expect("target manifest key");
     assert!(target_platform
         .replay_harness()

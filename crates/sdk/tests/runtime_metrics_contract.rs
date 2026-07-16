@@ -3,7 +3,7 @@ mod support;
 use bm_sdk::{
     default_agent_subject_id, CanonicalTurnDelta, ConversationScope, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
-    MemoryTurnSource, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    MemoryTurnSource, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
     RuntimeSkillWrite, RuntimeSkillWriteSource, TranscriptInputMessage,
 };
 
@@ -56,7 +56,7 @@ fn finalize_request(turn_id: &str) -> MemoryTurnFinalizeRequest {
 
 #[test]
 fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from_events() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform.clone(), profile, "sdk.direct", "chat-a");
 
@@ -114,7 +114,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
 
 #[test]
 fn operator_readiness_report_is_sdk_owned_not_ui_inferred() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "chat-a");
 

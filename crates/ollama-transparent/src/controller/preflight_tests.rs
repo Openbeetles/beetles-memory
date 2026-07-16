@@ -1,17 +1,23 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use bm_ollama_transparent::{
-    ClassifyPortOwnerRequest, ManagedRunnerReport, ObservedProcess, OllamaTransparentConfig,
-    OllamaTransparentController, OllamaTransparentState, PortBindingReport, PortOwnerKind,
-    PortOwnerObserver, PreflightBlockerCode, ProcessManager, RunnerInstaller,
-    TransparentController,
+use super::ControllerCore;
+use crate::process::ProcessManager;
+use crate::runner::RunnerInstaller;
+use crate::{
+    inspect_executable_identity, ClassifyPortOwnerRequest, ExecutableFileIdentity,
+    ManagedRunnerReport, ObservedProcess, OllamaTransparentConfig, OllamaTransparentController,
+    OllamaTransparentMemoryAuthority, OllamaTransparentState, PortBindingReport, PortOwnerKind,
+    PortOwnerObserver, PreflightBlockerCode,
 };
 
+static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 #[test]
-fn default_config_uses_ollama_app_transparent_ports_and_requires_stop_consent() {
-    let config = OllamaTransparentConfig::default();
+fn explicit_config_uses_ollama_app_transparent_ports_and_requires_stop_consent() {
+    let config = explicit_config();
 
     assert_eq!(config.public_bind, loopback(11434));
     assert_eq!(config.upstream_bind, loopback(11435));
@@ -127,9 +133,10 @@ fn preflight_rejects_official_ollama_owner_until_user_allows_stop() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", windows))]
 fn preflight_builds_stop_plan_for_official_ollama_when_allowed() {
     let config = test_config(true);
-    let official = ObservedProcess::new(301, "ollama", config.official_ollama_binary.clone());
+    let official = official_process(&config, 301, "start-301");
     let controller = controller(
         config.clone(),
         MockPorts::new(
@@ -146,11 +153,77 @@ fn preflight_builds_stop_plan_for_official_ollama_when_allowed() {
 
     let report = controller.preflight().expect("preflight report");
 
-    assert!(report.accepted);
-    assert_eq!(report.resulting_state, OllamaTransparentState::Disabled);
-    let stop_plan = report.stop_plan.expect("official stop plan");
-    assert_eq!(stop_plan.processes, vec![official]);
-    assert!(stop_plan.allowed);
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        assert!(report.accepted);
+        assert_eq!(report.resulting_state, OllamaTransparentState::Disabled);
+        let stop_plan = report.stop_plan.expect("official stop plan");
+        assert_eq!(stop_plan.targets.len(), 1);
+        assert_eq!(stop_plan.targets[0].bind, config.public_bind);
+        assert_eq!(stop_plan.targets[0].process, official);
+        assert!(stop_plan.allowed);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!report.accepted);
+        assert!(report.stop_plan.is_none());
+        assert!(report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.message.contains("cannot retain a stable authority")));
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn preflight_rejects_external_official_ollama_without_stable_process_authority() {
+    let config = test_config(true);
+    let official = official_process(&config, 301, "start-301");
+    let controller = controller(
+        config.clone(),
+        MockPorts::new(
+            PortBindingReport::owned(config.public_bind, PortOwnerKind::OfficialOllama, official),
+            PortBindingReport::empty(config.upstream_bind),
+        ),
+        MockRunner::installed(),
+        MockProcesses::default(),
+    );
+
+    let report = controller.preflight().expect("preflight report");
+
+    assert!(!report.accepted);
+    assert!(report.stop_plan.is_none());
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker.message.contains("cannot retain a stable authority")));
+}
+
+#[test]
+fn preflight_rejects_stop_plan_without_process_start_identity() {
+    let config = test_config(true);
+    let controller = controller(
+        config.clone(),
+        MockPorts::new(
+            PortBindingReport::owned(
+                config.public_bind,
+                PortOwnerKind::OfficialOllama,
+                ObservedProcess::new(302, "ollama", config.official_ollama_binary.clone()),
+            ),
+            PortBindingReport::empty(config.upstream_bind),
+        ),
+        MockRunner::installed(),
+        MockProcesses::default(),
+    );
+
+    let report = controller.preflight().expect("preflight report");
+
+    assert!(!report.accepted);
+    assert!(report.stop_plan.is_none());
+    assert_eq!(
+        report.blockers[0].code,
+        PreflightBlockerCode::PublicPortOwnedByUnknownProcess
+    );
 }
 
 #[test]
@@ -182,21 +255,45 @@ fn controller(
     ports: MockPorts,
     runner: MockRunner,
     processes: MockProcesses,
-) -> TransparentController<MockPorts, MockRunner, MockProcesses> {
-    TransparentController::new(config, ports, runner, processes).expect("controller")
+) -> ControllerCore<MockPorts, MockRunner, MockProcesses> {
+    ControllerCore::new(config, ports, runner, processes).expect("controller")
 }
 
 fn test_config(allow_stop_official_ollama: bool) -> OllamaTransparentConfig {
-    OllamaTransparentConfig {
-        app_bundle_path: PathBuf::from("/Applications/Ollama.app"),
-        official_ollama_binary: PathBuf::from("/Applications/Ollama.app/Contents/Resources/ollama"),
-        managed_runner_path: PathBuf::from("/tmp/beetle-memory/ollama/bin/bm-real-ollama"),
-        gateway_binary_path: std::env::current_exe().expect("test executable path"),
-        public_bind: loopback(11434),
-        upstream_bind: loopback(11435),
-        allow_stop_official_ollama,
-        ..OllamaTransparentConfig::default()
-    }
+    let mut config = explicit_config();
+    config.official_ollama_binary = std::env::current_exe().expect("test executable path");
+    config.allow_stop_official_ollama = allow_stop_official_ollama;
+    config
+}
+
+fn explicit_config() -> OllamaTransparentConfig {
+    let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let data_dir = std::env::temp_dir().join(format!(
+        "bm-ollama-preflight-{}-{sequence}",
+        std::process::id()
+    ));
+    let executable = std::env::current_exe().expect("test executable path");
+    let authority = OllamaTransparentMemoryAuthority::new(
+        "test-owner",
+        "test-agent",
+        "test-channel",
+        data_dir.join("store"),
+    )
+    .expect("test memory authority");
+    OllamaTransparentConfig::new(&data_dir, executable, authority).expect("test transparent config")
+}
+
+fn official_process(
+    config: &OllamaTransparentConfig,
+    pid: u32,
+    start_identity: &str,
+) -> ObservedProcess {
+    ObservedProcess::new(pid, "ollama", config.official_ollama_binary.clone())
+        .with_start_identity(start_identity)
+        .with_executable_identity(
+            inspect_executable_identity(&config.official_ollama_binary)
+                .expect("official executable identity"),
+        )
 }
 
 fn loopback(port: u16) -> SocketAddr {
@@ -215,7 +312,7 @@ impl MockPorts {
 }
 
 impl PortOwnerObserver for MockPorts {
-    fn inspect(&self, bind: SocketAddr) -> bm_ollama_transparent::Result<PortBindingReport> {
+    fn inspect(&self, bind: SocketAddr) -> crate::Result<PortBindingReport> {
         if bind == self.public.bind {
             Ok(self.public.clone())
         } else if bind == self.upstream.bind {
@@ -236,24 +333,21 @@ impl MockRunner {
             report: ManagedRunnerReport::installed(
                 PathBuf::from("/Applications/Ollama.app/Contents/Resources/ollama"),
                 PathBuf::from("/tmp/beetle-memory/ollama/bin/bm-real-ollama"),
-                Some("fnv1a64:test".to_string()),
+                Some("sha256:test".to_string()),
             ),
         }
     }
 }
 
 impl RunnerInstaller for MockRunner {
-    fn inspect(
-        &self,
-        _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<ManagedRunnerReport> {
+    fn inspect(&self, _config: &OllamaTransparentConfig) -> crate::Result<ManagedRunnerReport> {
         Ok(self.report.clone())
     }
 
     fn ensure_installed(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<ManagedRunnerReport> {
+    ) -> crate::Result<ManagedRunnerReport> {
         Ok(self.report.clone())
     }
 }
@@ -264,10 +358,17 @@ struct MockProcesses {
 }
 
 impl ProcessManager for MockProcesses {
+    fn inspect_managed_process_ownership(
+        &self,
+        _config: &OllamaTransparentConfig,
+    ) -> crate::Result<crate::ManagedProcessOwnershipReport> {
+        Ok(crate::ManagedProcessOwnershipReport::default())
+    }
+
     fn stop_official_ollama(
         &self,
-        _plan: &bm_ollama_transparent::OfficialOllamaStopPlan,
-    ) -> bm_ollama_transparent::Result<Vec<bm_ollama_transparent::ProcessActionReport>> {
+        _plan: &crate::OfficialOllamaStopPlan,
+    ) -> crate::Result<Vec<crate::ProcessActionReport>> {
         self.actions
             .lock()
             .expect("actions")
@@ -278,13 +379,14 @@ impl ProcessManager for MockProcesses {
     fn start_managed_upstream(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<bm_ollama_transparent::ManagedProcessReport> {
+        _runner: &ManagedRunnerReport,
+    ) -> crate::Result<crate::ManagedProcessReport> {
         self.actions
             .lock()
             .expect("actions")
             .push("start_upstream".to_string());
-        Ok(bm_ollama_transparent::ManagedProcessReport::started(
-            bm_ollama_transparent::ManagedProcessKind::ManagedUpstream,
+        Ok(crate::ManagedProcessReport::started(
+            crate::ManagedProcessKind::ManagedUpstream,
             Some(401),
         ))
     }
@@ -292,24 +394,25 @@ impl ProcessManager for MockProcesses {
     fn probe_managed_upstream(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<bm_ollama_transparent::ProbeReport> {
+    ) -> crate::Result<crate::ProbeReport> {
         self.actions
             .lock()
             .expect("actions")
             .push("probe_upstream".to_string());
-        Ok(bm_ollama_transparent::ProbeReport::ok("upstream_api"))
+        Ok(crate::ProbeReport::ok("upstream_api"))
     }
 
     fn start_transparent_front(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<bm_ollama_transparent::ManagedProcessReport> {
+        _gateway_executable: &ExecutableFileIdentity,
+    ) -> crate::Result<crate::ManagedProcessReport> {
         self.actions
             .lock()
             .expect("actions")
             .push("start_front".to_string());
-        Ok(bm_ollama_transparent::ManagedProcessReport::started(
-            bm_ollama_transparent::ManagedProcessKind::TransparentFront,
+        Ok(crate::ManagedProcessReport::started(
+            crate::ManagedProcessKind::TransparentFront,
             Some(402),
         ))
     }
@@ -317,46 +420,44 @@ impl ProcessManager for MockProcesses {
     fn probe_public_front(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<bm_ollama_transparent::ProbeReport> {
+    ) -> crate::Result<crate::ProbeReport> {
         self.actions
             .lock()
             .expect("actions")
             .push("probe_public".to_string());
-        Ok(bm_ollama_transparent::ProbeReport::ok("public_api"))
+        Ok(crate::ProbeReport::ok("public_api"))
     }
 
     fn stop_transparent_front(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<bm_ollama_transparent::ProcessActionReport> {
+    ) -> crate::Result<crate::ProcessActionReport> {
         self.actions
             .lock()
             .expect("actions")
             .push("stop_front".to_string());
-        Ok(bm_ollama_transparent::ProcessActionReport::ok("stop_front"))
+        Ok(crate::ProcessActionReport::ok("stop_front"))
     }
 
     fn stop_managed_upstream(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<bm_ollama_transparent::ProcessActionReport> {
+    ) -> crate::Result<crate::ProcessActionReport> {
         self.actions
             .lock()
             .expect("actions")
             .push("stop_upstream".to_string());
-        Ok(bm_ollama_transparent::ProcessActionReport::ok(
-            "stop_upstream",
-        ))
+        Ok(crate::ProcessActionReport::ok("stop_upstream"))
     }
 
     fn open_official_app(
         &self,
         _config: &OllamaTransparentConfig,
-    ) -> bm_ollama_transparent::Result<bm_ollama_transparent::ProcessActionReport> {
+    ) -> crate::Result<crate::ProcessActionReport> {
         self.actions
             .lock()
             .expect("actions")
             .push("open_app".to_string());
-        Ok(bm_ollama_transparent::ProcessActionReport::ok("open_app"))
+        Ok(crate::ProcessActionReport::ok("open_app"))
     }
 }

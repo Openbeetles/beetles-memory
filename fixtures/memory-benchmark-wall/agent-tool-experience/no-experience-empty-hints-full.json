@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "agent-tool-experience-no-experience-empty-hints-full",
   "class": "agent_tool_experience",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "runtime_replay",
   "description": "Full profile may know a host tool registry, but without governed tool experience it returns empty tool hints and requires host fallback.",

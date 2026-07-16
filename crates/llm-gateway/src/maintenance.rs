@@ -1,15 +1,20 @@
 use std::collections::BTreeMap;
+#[cfg(feature = "client-reqwest")]
+use std::io::Read;
 use std::sync::Arc;
 
 use bm_entry::EntryRuntime;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationScope, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse,
-    MaintenanceBudget, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnSource,
-    Message, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
+    MaintenanceBudget, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
+    MemoryTurnSource, Message, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
     TranscriptInputMessage,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
+#[cfg(feature = "client-reqwest")]
+use crate::GatewayUpstreamResponseBudget;
 use crate::{GatewayAuditOutcome, GatewayMaintenanceConfig, GatewayProviderConfig};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -75,11 +80,12 @@ pub(crate) struct GatewayMaintenancePlanInput {
     pub(crate) pressure: bm_sdk::PressureLevel,
     pub(crate) mode_input: RuntimeLifecycleModeInput,
     pub(crate) config: GatewayMaintenanceConfig,
+    pub(crate) budget: MaintenanceBudget,
 }
 
 impl GatewayMaintenancePlan {
     pub(crate) fn new(input: GatewayMaintenancePlanInput) -> Self {
-        let budget = input.runtime.runtime().runtime_budget().maintenance_budget;
+        let budget = input.budget;
         Self {
             runtime: input.runtime,
             user_content: bound_text(
@@ -157,27 +163,70 @@ fn canonical_gateway_turn_id(
     {
         return format!("gateway-request:{request_id}");
     }
-    let seed = format!(
-        "{}\n{}\n{:?}\n{}\n{}\n{}\n{:?}\n{}",
-        conversation.channel,
-        conversation.chat_id,
-        source.protocol,
-        source.endpoint.as_deref().unwrap_or_default(),
-        source.model_alias.as_deref().unwrap_or_default(),
-        user_content.trim(),
-        snapshot.delivery_status,
-        snapshot.reply_content.trim()
+    let mut hasher = Sha256::new();
+    hasher.update(b"bm.llm-gateway.maintenance-turn-id.v1\0");
+    hash_canonical_field(&mut hasher, "channel", &conversation.channel);
+    hash_canonical_field(&mut hasher, "chat_id", &conversation.chat_id);
+    hash_canonical_field(
+        &mut hasher,
+        "protocol",
+        memory_turn_protocol_label(source.protocol),
     );
-    format!("gateway-derived-{:016x}", fnv1a64(seed.as_bytes()))
+    hash_canonical_field(
+        &mut hasher,
+        "endpoint",
+        source.endpoint.as_deref().unwrap_or_default(),
+    );
+    hash_canonical_field(
+        &mut hasher,
+        "model_alias",
+        source.model_alias.as_deref().unwrap_or_default(),
+    );
+    hash_canonical_field(&mut hasher, "user_content", user_content.trim());
+    hash_canonical_field(
+        &mut hasher,
+        "delivery_status",
+        memory_turn_delivery_status_label(snapshot.delivery_status),
+    );
+    hash_canonical_field(&mut hasher, "reply_content", snapshot.reply_content.trim());
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("gateway-derived-sha256:{encoded}")
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+fn hash_canonical_field(hasher: &mut Sha256, name: &str, value: &str) {
+    hash_length_prefixed(hasher, name.as_bytes());
+    hash_length_prefixed(hasher, value.as_bytes());
+}
+
+fn hash_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+const fn memory_turn_protocol_label(protocol: MemoryTurnProtocol) -> &'static str {
+    match protocol {
+        MemoryTurnProtocol::OpenAiChat => "openai_chat",
+        MemoryTurnProtocol::OpenAiResponses => "openai_responses",
+        MemoryTurnProtocol::OllamaChat => "ollama_chat",
+        MemoryTurnProtocol::OllamaGenerate => "ollama_generate",
+        MemoryTurnProtocol::Native => "native",
     }
-    hash
+}
+
+const fn memory_turn_delivery_status_label(status: MemoryTurnDeliveryStatus) -> &'static str {
+    match status {
+        MemoryTurnDeliveryStatus::Delivered => "delivered",
+        MemoryTurnDeliveryStatus::UserOnly => "user_only",
+        MemoryTurnDeliveryStatus::UpstreamFailed => "upstream_failed",
+        MemoryTurnDeliveryStatus::Cancelled => "cancelled",
+        MemoryTurnDeliveryStatus::IncompleteStream => "incomplete_stream",
+        MemoryTurnDeliveryStatus::RejectedByPolicy => "rejected_by_policy",
+    }
 }
 
 impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {
@@ -651,20 +700,27 @@ impl LlmClient for OpenAiMaintenanceLlmClient {
 #[cfg(feature = "client-reqwest")]
 pub struct ReqwestGatewayLlmHttpClient {
     client: reqwest::blocking::Client,
+    response_budget: GatewayUpstreamResponseBudget,
 }
 
 #[cfg(feature = "client-reqwest")]
 impl ReqwestGatewayLlmHttpClient {
-    pub fn new() -> bm_sdk::Result<Self> {
-        Self::new_with_timeout(std::time::Duration::from_secs(600))
+    pub fn new(response_budget: GatewayUpstreamResponseBudget) -> bm_sdk::Result<Self> {
+        Self::new_with_timeout(std::time::Duration::from_secs(600), response_budget)
     }
 
-    pub fn new_with_timeout(timeout: std::time::Duration) -> bm_sdk::Result<Self> {
+    pub fn new_with_timeout(
+        timeout: std::time::Duration,
+        response_budget: GatewayUpstreamResponseBudget,
+    ) -> bm_sdk::Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|error| bm_sdk::Error::config("gateway_llm_http_client", error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            response_budget,
+        })
     }
 }
 
@@ -680,21 +736,83 @@ impl LlmHttpClient for ReqwestGatewayLlmHttpClient {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        let response = request
+        let mut response = request
             .body(body.to_vec())
             .send()
             .map_err(|error| bm_sdk::Error::config("gateway_llm_http_client", error.to_string()))?;
         let status = response.status().as_u16();
-        let body = response
-            .text()
+        let limits = self.response_budget.limits();
+        let limit = limits
+            .buffered_json_max_bytes
+            .min(limits.response_body_max_bytes);
+        if response
+            .content_length()
+            .is_some_and(|content_length| content_length > limit as u64)
+        {
+            return Err(bm_sdk::Error::config(
+                "gateway_llm_http_client",
+                "maintenance response exceeds pinned LLM gateway budget",
+            ));
+        }
+        let read_limit = limit.checked_add(1).ok_or_else(|| {
+            bm_sdk::Error::config(
+                "gateway_llm_http_client",
+                "maintenance response budget cannot be bounded",
+            )
+        })?;
+        let mut body = Vec::new();
+        response
+            .by_ref()
+            .take(read_limit as u64)
+            .read_to_end(&mut body)
             .map_err(|error| bm_sdk::Error::config("gateway_llm_http_client", error.to_string()))?;
-        Ok((status, bm_sdk::ResponseBody::Heap(body.into_bytes())))
+        if body.len() > limit {
+            return Err(bm_sdk::Error::config(
+                "gateway_llm_http_client",
+                "maintenance response exceeds pinned LLM gateway budget",
+            ));
+        }
+        Ok((status, bm_sdk::ResponseBody::Heap(body)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fallback_turn_id_fixture(
+        conversation: &ConversationScope,
+        source: &MemoryTurnSource,
+        user_content: &str,
+        delivery_status: MemoryTurnDeliveryStatus,
+        reply_content: &str,
+    ) -> String {
+        canonical_gateway_turn_id(
+            conversation,
+            source,
+            user_content,
+            &MaintenanceSnapshot {
+                delivery_status,
+                reply_content: reply_content.to_string(),
+                tool_calls: 0,
+                reuse_outcome_note: String::new(),
+            },
+        )
+    }
+
+    fn fallback_turn_source() -> MemoryTurnSource {
+        MemoryTurnSource {
+            ingress: bm_sdk::IngressKind::User,
+            channel: "llm.gateway".to_string(),
+            provider: Some("openai-compatible".to_string()),
+            protocol: MemoryTurnProtocol::OpenAiChat,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            model_alias: Some("model-alias".to_string()),
+            model_resolved: Some("model-resolved".to_string()),
+            request_id: None,
+            client_conversation_hint: Some("conversation-hint".to_string()),
+        }
+    }
 
     fn small_budget() -> MaintenanceBudget {
         MaintenanceBudget {
@@ -703,6 +821,190 @@ mod tests {
             reply_input_max_chars: 5,
             reply_input_max_bytes: 128,
         }
+    }
+
+    #[test]
+    fn fallback_turn_id_is_stable_sha256_over_canonical_fields() {
+        let conversation = ConversationScope {
+            channel: "llm.gateway".to_string(),
+            chat_id: "chat-123".to_string(),
+            conversation_id: Some("conversation-123".to_string()),
+        };
+        let source = fallback_turn_source();
+
+        let turn_id = fallback_turn_id_fixture(
+            &conversation,
+            &source,
+            " user input ",
+            MemoryTurnDeliveryStatus::Delivered,
+            " assistant reply ",
+        );
+
+        assert_eq!(
+            turn_id,
+            "gateway-derived-sha256:a51731db2407fb64140b51a7b091e768b9f21ede9905aa2e0bb447726d98fc0f"
+        );
+        assert_eq!(
+            turn_id,
+            fallback_turn_id_fixture(
+                &conversation,
+                &source,
+                " user input ",
+                MemoryTurnDeliveryStatus::Delivered,
+                " assistant reply ",
+            )
+        );
+    }
+
+    #[test]
+    fn fallback_turn_id_changes_for_each_canonical_field() {
+        let conversation = ConversationScope {
+            channel: "llm.gateway".to_string(),
+            chat_id: "chat-123".to_string(),
+            conversation_id: None,
+        };
+        let source = fallback_turn_source();
+        let baseline = fallback_turn_id_fixture(
+            &conversation,
+            &source,
+            "user input",
+            MemoryTurnDeliveryStatus::Delivered,
+            "assistant reply",
+        );
+
+        let changed_conversation = ConversationScope {
+            channel: "llm.gateway.changed".to_string(),
+            ..conversation.clone()
+        };
+        assert_ne!(
+            baseline,
+            fallback_turn_id_fixture(
+                &changed_conversation,
+                &source,
+                "user input",
+                MemoryTurnDeliveryStatus::Delivered,
+                "assistant reply",
+            )
+        );
+        let changed_conversation = ConversationScope {
+            chat_id: "chat-456".to_string(),
+            ..conversation.clone()
+        };
+        assert_ne!(
+            baseline,
+            fallback_turn_id_fixture(
+                &changed_conversation,
+                &source,
+                "user input",
+                MemoryTurnDeliveryStatus::Delivered,
+                "assistant reply",
+            )
+        );
+
+        for changed_source in [
+            MemoryTurnSource {
+                protocol: MemoryTurnProtocol::OpenAiResponses,
+                ..source.clone()
+            },
+            MemoryTurnSource {
+                endpoint: Some("/v1/responses".to_string()),
+                ..source.clone()
+            },
+            MemoryTurnSource {
+                model_alias: Some("other-model".to_string()),
+                ..source.clone()
+            },
+        ] {
+            assert_ne!(
+                baseline,
+                fallback_turn_id_fixture(
+                    &conversation,
+                    &changed_source,
+                    "user input",
+                    MemoryTurnDeliveryStatus::Delivered,
+                    "assistant reply",
+                )
+            );
+        }
+        assert_ne!(
+            baseline,
+            fallback_turn_id_fixture(
+                &conversation,
+                &source,
+                "different input",
+                MemoryTurnDeliveryStatus::Delivered,
+                "assistant reply",
+            )
+        );
+        assert_ne!(
+            baseline,
+            fallback_turn_id_fixture(
+                &conversation,
+                &source,
+                "user input",
+                MemoryTurnDeliveryStatus::IncompleteStream,
+                "assistant reply",
+            )
+        );
+        assert_ne!(
+            baseline,
+            fallback_turn_id_fixture(
+                &conversation,
+                &source,
+                "user input",
+                MemoryTurnDeliveryStatus::Delivered,
+                "different reply",
+            )
+        );
+    }
+
+    #[test]
+    fn protocol_and_delivery_status_labels_are_stable() {
+        assert_eq!(
+            memory_turn_protocol_label(MemoryTurnProtocol::OpenAiChat),
+            "openai_chat"
+        );
+        assert_eq!(
+            memory_turn_protocol_label(MemoryTurnProtocol::OpenAiResponses),
+            "openai_responses"
+        );
+        assert_eq!(
+            memory_turn_protocol_label(MemoryTurnProtocol::OllamaChat),
+            "ollama_chat"
+        );
+        assert_eq!(
+            memory_turn_protocol_label(MemoryTurnProtocol::OllamaGenerate),
+            "ollama_generate"
+        );
+        assert_eq!(
+            memory_turn_protocol_label(MemoryTurnProtocol::Native),
+            "native"
+        );
+
+        assert_eq!(
+            memory_turn_delivery_status_label(MemoryTurnDeliveryStatus::Delivered),
+            "delivered"
+        );
+        assert_eq!(
+            memory_turn_delivery_status_label(MemoryTurnDeliveryStatus::UserOnly),
+            "user_only"
+        );
+        assert_eq!(
+            memory_turn_delivery_status_label(MemoryTurnDeliveryStatus::UpstreamFailed),
+            "upstream_failed"
+        );
+        assert_eq!(
+            memory_turn_delivery_status_label(MemoryTurnDeliveryStatus::Cancelled),
+            "cancelled"
+        );
+        assert_eq!(
+            memory_turn_delivery_status_label(MemoryTurnDeliveryStatus::IncompleteStream),
+            "incomplete_stream"
+        );
+        assert_eq!(
+            memory_turn_delivery_status_label(MemoryTurnDeliveryStatus::RejectedByPolicy),
+            "rejected_by_policy"
+        );
     }
 
     #[test]

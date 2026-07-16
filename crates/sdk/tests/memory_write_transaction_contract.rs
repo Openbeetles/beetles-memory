@@ -3,10 +3,10 @@
 mod support;
 
 use bm_core::memory::{
-    canonical_evidence_ref_from_source, memory_facet_manifest_key,
-    scoped_memory_facet_owner_storage_key, CanonicalEntityKey, CanonicalEntityKind,
-    CanonicalEntityRef, LongTermMemorySlot, MemoryFacetIndexManifest, QueryFacetInput,
-    MEMORY_FACET_POSTING_NAMESPACE,
+    canonical_evidence_ref_from_source, governed_memory_recall_candidate_id,
+    memory_facet_manifest_key, scoped_memory_facet_owner_storage_key, CanonicalEntityKey,
+    CanonicalEntityKind, CanonicalEntityRef, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    LongTermMemorySlot, MemoryFacetIndexManifest, QueryFacetInput, MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_core::platform::Platform as _;
 use bm_core::task_execution::{
@@ -26,23 +26,24 @@ use bm_sdk::{
     MemoryRecallRequest, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
     MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryWriteCandidate,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
-    ProceduralMemoryPromotionInput, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
+    ProceduralMemoryPromotionInput, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
     RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig, StoreRuntimeBudget,
-    TemporalMemoryGraphWriteRequest, TemporalValidity, TranscriptLifecycleTransition,
+    TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, TemporalValidity,
+    TranscriptLifecycleTransition,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope, StaticHttpClient, StaticLlmClient};
 
 #[test]
 fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
-    platform
+    runtime
         .replay_harness()
         .task_run_store()
         .upsert(&TaskRunRecord {
@@ -71,7 +72,7 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
             },
         })
         .expect("seed terminal run");
-    platform
+    runtime
         .replay_harness()
         .task_learning_store()
         .upsert(&TaskLearningRecord {
@@ -99,6 +100,16 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
             observed_at: 1_800_000_000,
         })
         .expect("seed pending durable fact");
+    let seeded = platform
+        .export_replay_snapshot()
+        .expect("snapshot seeded task learning");
+    assert!(
+        seeded
+            .json_docs
+            .iter()
+            .any(|doc| doc.namespace == "task_learning_by_chat_indexes"),
+        "task learning seed must include its typed chat index"
+    );
     let mut http = StaticHttpClient;
     let llm = StaticLlmClient::summary_response("maintenance summary");
 
@@ -121,7 +132,14 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
             },
         )
         .expect("maintenance");
-    let transaction = report.transaction.expect("maintenance transaction");
+    let maintenance_detail = report
+        .report
+        .as_ref()
+        .map(|outcome| format!("{:?}", outcome.task_learning_outcome));
+    let transaction = report
+        .transaction
+        .as_ref()
+        .unwrap_or_else(|| panic!("maintenance transaction missing: {maintenance_detail:?}"));
     assert_eq!(transaction.operation, "maintain");
     assert_eq!(
         transaction.planned_mutations,
@@ -134,10 +152,11 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
         "maintain",
         transaction.event_ids.len(),
     );
-    let maintenance = report.report.expect("maintenance outcome");
+    let maintenance = report.report.as_ref().expect("maintenance outcome");
     assert_eq!(
         maintenance
             .task_learning_outcome
+            .as_ref()
             .expect("task learning maintenance")
             .canonical_writes,
         1
@@ -181,29 +200,31 @@ fn transaction_budget(event_log_max_items: usize, kv_max_entries: usize) -> Stor
 }
 
 fn store_with_event_budget(event_log_max_items: usize) -> MemoryStoreHandle {
-    store_with_transaction_budget(event_log_max_items, 16)
+    store_with_transaction_budget(event_log_max_items, 256)
 }
 
 fn store_with_transaction_budget(
     event_log_max_items: usize,
     kv_max_entries: usize,
 ) -> MemoryStoreHandle {
-    let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
+    let config = StoreBackendConfig::in_memory(support::host_test_profile())
         .expect("store config")
-        .with_runtime_store_budget(transaction_budget(event_log_max_items, kv_max_entries));
-    MemoryStoreHandle::open_in_memory(config).expect("store platform")
+        .try_with_nonproduction_store_budget_limit(transaction_budget(
+            event_log_max_items,
+            kv_max_entries,
+        ))
+        .expect("transaction budget must be a valid semantic contraction");
+    support::open_memory_store(config).expect("store platform")
 }
 
 fn runtime_with_registry_and_event_budget(
     registry: AgentToolRegistrySnapshot,
     event_log_max_items: usize,
 ) -> (MemoryStoreHandle, bm_sdk::MemoryRuntime) {
-    let profile = ProfileId::ServerLinuxDevFull;
     let platform = store_with_event_budget(event_log_max_items);
     let runtime = bm_sdk::MemoryRuntime::builder()
         .identity(MemoryIdentity::new("transaction-agent", "owner-default").expect("identity"))
         .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
-        .profile(profile)
         .store(platform.clone())
         .agent_tool_registry(registry)
         .build()
@@ -380,6 +401,16 @@ fn graph_node(id: &str, evidence_ref: &str) -> MemoryGraphNode {
     }
 }
 
+fn long_term_graph_owner(node_id: &str, owner_id: &str) -> TemporalMemoryGraphNodeOwnerRef {
+    TemporalMemoryGraphNodeOwnerRef {
+        node_id: node_id.to_string(),
+        owner_ref: GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::LongTerm,
+            owner_id.to_string(),
+        ),
+    }
+}
+
 fn graph_edge(id: &str, from: &str, to: &str, evidence_ref: &str) -> MemoryGraphEdge {
     MemoryGraphEdge {
         edge_id: id.to_string(),
@@ -458,13 +489,13 @@ fn facet_index_docs(
 
 fn assert_facet_index_doc_for_owner(
     platform: &MemoryStoreHandle,
-    owner_record_id: &str,
+    owner_id: &str,
 ) -> serde_json::Value {
     let docs = facet_index_docs(platform);
     let doc = docs
         .iter()
-        .find(|doc| doc.value["owner_record_id"] == owner_record_id)
-        .unwrap_or_else(|| panic!("missing facet index for owner {owner_record_id}"));
+        .find(|doc| doc.value["owner_ref"]["owner_id"] == owner_id)
+        .unwrap_or_else(|| panic!("missing facet index for owner {owner_id}"));
     let memory_space_id = doc.value["memory_space_id"]
         .as_str()
         .expect("facet memory space");
@@ -473,12 +504,15 @@ fn assert_facet_index_doc_for_owner(
         .and_then(|subjects| subjects.first())
         .and_then(serde_json::Value::as_str)
         .expect("facet mounted subject");
+    let owner_ref = GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner_id);
     assert_eq!(
         doc.key,
-        scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, owner_record_id)
+        scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, &owner_ref)
             .expect("scoped facet owner key")
     );
-    assert_eq!(doc.value["owner_plane"], "long_term");
+    assert_eq!(doc.value["owner_ref"]["owner_plane"], "long_term");
+    assert!(doc.value.get("owner_record_id").is_none());
+    assert!(doc.value.get("owner_plane").is_none());
     assert_eq!(doc.value["status"], "active");
     assert!(doc.value["exact_facets"]
         .as_array()
@@ -486,11 +520,11 @@ fn assert_facet_index_doc_for_owner(
     doc.value.clone()
 }
 
-fn assert_no_facet_index_doc_for_owner(platform: &MemoryStoreHandle, owner_record_id: &str) {
+fn assert_no_facet_index_doc_for_owner(platform: &MemoryStoreHandle, owner_id: &str) {
     assert!(
         !facet_index_docs(platform)
             .iter()
-            .any(|doc| doc.value["owner_record_id"] == owner_record_id),
+            .any(|doc| doc.value["owner_ref"]["owner_id"] == owner_id),
         "facet index must be deleted with the owner record"
     );
 }
@@ -561,7 +595,7 @@ fn candidate_write_event_budget_rejects_without_partial_memory() {
     let platform = store_with_event_budget(2);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -613,10 +647,10 @@ fn candidate_write_event_budget_rejects_without_partial_memory() {
 
 #[test]
 fn candidate_write_success_reports_transaction_lineage() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -674,10 +708,10 @@ fn candidate_write_success_reports_transaction_lineage() {
 
 #[test]
 fn candidate_to_draft_to_entry_to_exact_entity_posting_to_typed_query_is_reachable() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -740,16 +774,18 @@ fn candidate_to_draft_to_entry_to_exact_entity_posting_to_typed_query_is_reachab
     assert!(recall.facet_index_report.manifest_integrity_verified);
     assert_eq!(
         recall.facet_index_report.exact_facet_candidate_ids,
-        vec![entry.id]
+        vec![governed_memory_recall_candidate_id(
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id)
+        )]
     );
 }
 
 #[test]
 fn content_change_replaces_entities_and_removes_old_exact_posting() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -825,10 +861,10 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
 
 #[test]
 fn same_content_candidate_reinforcement_unions_entity_aliases_and_evidence() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -871,7 +907,7 @@ fn rejected_candidate_does_not_write_recallable_facet_index() {
     let platform = store_with_event_budget(16);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -907,7 +943,7 @@ fn procedural_write_event_budget_rejects_without_partial_skill() {
     let platform = store_with_event_budget(2);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -950,7 +986,7 @@ fn procedural_write_success_reports_transaction_lineage() {
     let platform = store_with_event_budget(16);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -986,7 +1022,7 @@ fn procedural_promotion_event_budget_rejects_without_partial_skill() {
     let platform = store_with_event_budget(2);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1027,7 +1063,7 @@ fn procedural_promotion_success_reports_transaction_lineage() {
     let platform = store_with_event_budget(16);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1057,7 +1093,7 @@ fn long_term_extraction_event_budget_rejects_without_partial_memory() {
     let platform = store_with_event_budget(2);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1100,10 +1136,10 @@ fn long_term_extraction_event_budget_rejects_without_partial_memory() {
 
 #[test]
 fn long_term_extraction_success_reports_transaction_lineage() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1150,10 +1186,10 @@ fn long_term_extraction_success_reports_transaction_lineage() {
 
 #[test]
 fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1195,7 +1231,7 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
     assert!(report.accepted);
     let transaction = report.transaction.expect("transaction");
     assert_eq!(transaction.operation, "write.long_term_extraction");
-    assert!(platform
+    assert!(runtime
         .replay_harness()
         .scoped_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
@@ -1228,10 +1264,10 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
 
 #[test]
 fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1300,10 +1336,10 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
 
 #[test]
 fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1420,6 +1456,7 @@ fn temporal_memory_graph_write_rejects_missing_backlink_without_partial_graph_st
         .write_temporal_memory_graph(TemporalMemoryGraphWriteRequest {
             operation: "memory_graph.write".to_string(),
             nodes: vec![graph_node("node:release", "turn:release")],
+            node_owners: vec![long_term_graph_owner("node:release", "node:release")],
             edges: Vec::new(),
             backlinks: Vec::new(),
         })
@@ -1445,10 +1482,10 @@ fn temporal_memory_graph_write_rejects_missing_backlink_without_partial_graph_st
 
 #[test]
 fn temporal_memory_graph_write_success_reports_transaction_lineage() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1494,6 +1531,10 @@ fn temporal_memory_graph_write_success_reports_transaction_lineage() {
             nodes: vec![
                 graph_node(&release_id, "turn:release"),
                 graph_node(&verify_id, "turn:release"),
+            ],
+            node_owners: vec![
+                long_term_graph_owner(&release_id, &release_id),
+                long_term_graph_owner(&verify_id, &verify_id),
             ],
             edges: vec![graph_edge(
                 "edge:release:verify",
@@ -1552,10 +1593,10 @@ fn temporal_memory_graph_write_success_reports_transaction_lineage() {
 
 #[test]
 fn long_term_control_event_budget_rejects_without_partial_tombstone() {
-    let seed_platform = support::empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let seed_platform = support::empty_store_platform(support::host_test_profile());
     let seed_runtime = test_runtime_with_scope(
         seed_platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1580,7 +1621,7 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
         .expect("import governed seed");
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1620,7 +1661,7 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
         .get(&record_id)
         .unwrap()
         .is_some());
-    assert!(platform
+    assert!(runtime
         .replay_harness()
         .scoped_long_term_memory_control_read_store("space:owner-default")
         .expect("scoped long-term control store")
@@ -1635,10 +1676,10 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
 
 #[test]
 fn long_term_control_delete_removes_facet_index_in_same_transaction() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1686,7 +1727,7 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
         .get(&owner_id)
         .expect("long-term get")
         .is_none());
-    assert!(platform
+    assert!(runtime
         .replay_harness()
         .scoped_long_term_memory_control_read_store("space:owner-default")
         .expect("scoped long-term control store")
@@ -1709,10 +1750,10 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
 
 #[test]
 fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1792,10 +1833,10 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
 
 #[test]
 fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1875,10 +1916,10 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
 
 #[test]
 fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_indexed() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1953,10 +1994,10 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
 
 #[test]
 fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
-    let platform = store_with_transaction_budget(128, 128);
+    let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );
@@ -1991,6 +2032,7 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
                 label: "Transaction extraction owner graph node".to_string(),
                 evidence_refs: vec!["fixture:long-term-extraction".to_string()],
             }],
+            node_owners: vec![long_term_graph_owner(&owner_id, &owner_id)],
             edges: Vec::new(),
             backlinks: vec![EvidenceBacklink {
                 source_kind: "conversation_transcript".to_string(),
@@ -2049,7 +2091,8 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
             .and_then(serde_json::Value::as_array)
             .is_none_or(|owners| owners.iter().all(|owner| {
                 owner
-                    .get("owner_record_id")
+                    .get("owner_ref")
+                    .and_then(|owner_ref| owner_ref.get("owner_id"))
                     .and_then(serde_json::Value::as_str)
                     != Some(&owner_id)
             }))));
@@ -2130,7 +2173,7 @@ fn long_term_policy_event_budget_rejects_without_partial_policy() {
     let platform = store_with_event_budget(2);
     let runtime = test_runtime_with_scope(
         platform.clone(),
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         "llm.gateway",
         "chat-a",
     );

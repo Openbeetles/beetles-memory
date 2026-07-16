@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+cargo() {
+  command cargo --locked "$@"
+}
+export -f cargo
+
 cargo test -p bm-core --test write_candidate_governance_contract
 cargo test -p bm-core --test turn_delta_contract
 cargo test -p bm-core --test runtime_observation_contract
@@ -25,6 +30,7 @@ cargo test -p bm-sdk --features nonproduction-replay-harness --test projection_a
 cargo test -p bm-sdk --features nonproduction-replay-harness --test retention_compaction_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test replay_import_export
 
+cargo test -p bm-entry --test bearer_principal_contract
 cargo test -p bm-http --features server-std --test http_auth_contract
 cargo test -p bm-http --features server-std --test http_scope_contract
 cargo test -p bm-http --features server-std --test operator_metrics_contract

@@ -1,17 +1,16 @@
 //! Soul kernel continuity contract and recovery helpers.
 //! 板级主体内核的连续性体检与恢复合同。
 
-use crate::memory::{
-    board_subject_scope_id, select_active_continuity_snapshot_chat_ids, CoreRevisionLedger,
-    CoreRevisionLedgerStore, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryReadStore,
-    LongTermMemoryStore, RelationshipPortfolioStore, RelationshipTopologyStore, SelfAuthoredCore,
-    SelfAuthoredCoreStore, SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore,
-    SessionStore,
-};
 #[cfg(test)]
 use crate::memory::{
     import_continuity_snapshot, ContinuitySnapshotImportContext, ContinuitySnapshotImportMode,
     ExecutionStateStore, RelationshipConstitutionStore, SessionSummaryStore,
+};
+use crate::memory::{
+    select_active_continuity_snapshot_chat_ids, CoreRevisionLedger, CoreRevisionLedgerStore,
+    LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryReadStore, LongTermMemoryStore,
+    RelationshipPortfolioStore, RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore,
+    SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore, SessionStore,
 };
 use crate::platform::StateFs;
 use crate::runtime::continuity_flush::{
@@ -110,6 +109,7 @@ pub struct SoulKernelLayerStatus {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SoulKernelRuntimeBundleStatus {
+    pub subject_id: String,
     pub present: bool,
     pub loadable: bool,
     #[serde(default)]
@@ -171,12 +171,14 @@ pub struct SoulKernelRecoveryReport {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SoulKernelRecoveryPlan {
+    pub subject_id: String,
     pub report: SoulKernelRecoveryReport,
     pub ordered_snapshots: Vec<crate::memory::ContinuitySnapshot>,
     pub primary_chat_id: Option<String>,
 }
 
 pub struct SoulKernelInspectContext<'a> {
+    pub subject_id: &'a str,
     pub state_fs: &'a dyn StateFs,
     pub session_store: &'a dyn SessionStore,
     pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
@@ -201,8 +203,10 @@ pub fn plan_soul_kernel_recovery(
     inspect: SoulKernelInspectContext<'_>,
     now_secs: u64,
 ) -> SoulKernelRecoveryPlan {
+    let subject_id = inspect.subject_id.trim().to_string();
     let runtime_bundle_load = load_runtime_bundle(inspect.state_fs);
-    let runtime_bundle_status = runtime_bundle_status_from_load_result(&runtime_bundle_load);
+    let runtime_bundle_status =
+        runtime_bundle_status_from_load_result(&runtime_bundle_load, &subject_id);
     let status_before =
         inspect_soul_kernel_with_runtime_bundle_status(inspect, now_secs, runtime_bundle_status);
 
@@ -210,6 +214,7 @@ pub fn plan_soul_kernel_recovery(
         || (status_before.minimum_viable && !status_before.degraded)
     {
         return SoulKernelRecoveryPlan {
+            subject_id,
             report: SoulKernelRecoveryReport {
                 action: SoulKernelRecoveryAction::NotNeeded,
                 restore_attempted: false,
@@ -219,28 +224,55 @@ pub fn plan_soul_kernel_recovery(
                 status_after: status_before.clone(),
                 status_before,
             },
-            ..SoulKernelRecoveryPlan::default()
+            ordered_snapshots: Vec::new(),
+            primary_chat_id: None,
         };
     }
 
     match runtime_bundle_load {
-        Ok(Some(bundle)) => SoulKernelRecoveryPlan {
-            report: SoulKernelRecoveryReport {
-                action: SoulKernelRecoveryAction::RestoreAttemptedNoChange,
-                restore_attempted: true,
-                restored_snapshots: 0,
-                restored_layers: Vec::new(),
-                errors: Vec::new(),
-                status_after: status_before.clone(),
-                status_before,
-            },
-            ordered_snapshots: ordered_bundle_snapshots(&bundle)
+        Ok(Some(bundle)) => {
+            let ordered_snapshots = ordered_bundle_snapshots_for_subject(&bundle, &subject_id)
                 .into_iter()
                 .cloned()
-                .collect(),
-            primary_chat_id: bundle.primary_chat_id,
-        },
+                .collect::<Vec<_>>();
+            let primary_chat_id = bundle.primary_chat_id.filter(|primary_chat_id| {
+                ordered_snapshots
+                    .iter()
+                    .any(|snapshot| snapshot.chat_id == *primary_chat_id)
+            });
+            if ordered_snapshots.is_empty() {
+                return SoulKernelRecoveryPlan {
+                    subject_id,
+                    report: SoulKernelRecoveryReport {
+                        action: SoulKernelRecoveryAction::NoBundleAvailable,
+                        restore_attempted: false,
+                        restored_snapshots: 0,
+                        restored_layers: Vec::new(),
+                        errors: Vec::new(),
+                        status_after: status_before.clone(),
+                        status_before,
+                    },
+                    ordered_snapshots,
+                    primary_chat_id: None,
+                };
+            }
+            SoulKernelRecoveryPlan {
+                subject_id,
+                report: SoulKernelRecoveryReport {
+                    action: SoulKernelRecoveryAction::RestoreAttemptedNoChange,
+                    restore_attempted: true,
+                    restored_snapshots: 0,
+                    restored_layers: Vec::new(),
+                    errors: Vec::new(),
+                    status_after: status_before.clone(),
+                    status_before,
+                },
+                ordered_snapshots,
+                primary_chat_id,
+            }
+        }
         Ok(None) => SoulKernelRecoveryPlan {
+            subject_id,
             report: SoulKernelRecoveryReport {
                 action: SoulKernelRecoveryAction::NoBundleAvailable,
                 restore_attempted: false,
@@ -250,9 +282,11 @@ pub fn plan_soul_kernel_recovery(
                 status_after: status_before.clone(),
                 status_before,
             },
-            ..SoulKernelRecoveryPlan::default()
+            ordered_snapshots: Vec::new(),
+            primary_chat_id: None,
         },
         Err(error) => SoulKernelRecoveryPlan {
+            subject_id,
             report: SoulKernelRecoveryReport {
                 action: SoulKernelRecoveryAction::BundleUnreadable,
                 restore_attempted: false,
@@ -262,13 +296,14 @@ pub fn plan_soul_kernel_recovery(
                 status_after: status_before.clone(),
                 status_before,
             },
-            ..SoulKernelRecoveryPlan::default()
+            ordered_snapshots: Vec::new(),
+            primary_chat_id: None,
         },
     }
 }
 
 pub fn inspect_soul_kernel(ctx: SoulKernelInspectContext<'_>, now_secs: u64) -> SoulKernelStatus {
-    let runtime_bundle = read_runtime_bundle_status(ctx.state_fs);
+    let runtime_bundle = read_runtime_bundle_status(ctx.state_fs, ctx.subject_id);
     inspect_soul_kernel_with_runtime_bundle_status(ctx, now_secs, runtime_bundle)
 }
 
@@ -277,13 +312,7 @@ fn inspect_soul_kernel_with_runtime_bundle_status(
     now_secs: u64,
     runtime_bundle: SoulKernelRuntimeBundleStatus,
 ) -> SoulKernelStatus {
-    let subject_id = board_subject_scope_id().to_string();
-    let session_chat_count = ctx
-        .session_store
-        .list_chat_ids()
-        .map(|chat_ids| chat_ids.len())
-        .unwrap_or(0);
-
+    let subject_id = ctx.subject_id.trim().to_string();
     let self_model = load_layer_status(
         || ctx.self_model_store.get(&subject_id),
         |value: &SelfModel| value.is_meaningful(),
@@ -306,6 +335,7 @@ fn inspect_soul_kernel_with_runtime_bundle_status(
     );
 
     let active_chat_ids = select_active_continuity_snapshot_chat_ids(
+        &subject_id,
         ctx.session_store,
         ctx.self_continuity_store,
         ctx.relationship_portfolio_store,
@@ -315,13 +345,16 @@ fn inspect_soul_kernel_with_runtime_bundle_status(
         SOUL_KERNEL_ACTIVE_WINDOW_SECS,
         SOUL_KERNEL_ACTIVE_CHAT_LIMIT,
     );
+    let session_chat_count = active_chat_ids.len();
 
     let (key_memory_readable, key_memory_count, key_memory_error) =
         count_key_memory(ctx.long_term_memory_store, &active_chat_ids);
 
     let identity_anchor_ready = self_authored_core.present || self_model.present;
     let continuity_anchor_ready = self_continuity.present;
-    let expected_bootstrap_empty = session_chat_count == 0
+    let subject_scope_valid = !subject_id.is_empty();
+    let expected_bootstrap_empty = subject_scope_valid
+        && session_chat_count == 0
         && key_memory_count == 0
         && !runtime_bundle.present
         && !self_model.present
@@ -333,6 +366,9 @@ fn inspect_soul_kernel_with_runtime_bundle_status(
         || (runtime_bundle.present && runtime_bundle.loadable && runtime_bundle.snapshot_count > 0);
 
     let mut degradation_reasons = Vec::new();
+    if !subject_scope_valid {
+        degradation_reasons.push("subject_id_empty".to_string());
+    }
     push_layer_degradation("self_model", &self_model, &mut degradation_reasons);
     push_layer_degradation(
         "self_authored_core",
@@ -401,9 +437,12 @@ pub fn ensure_soul_kernel_recovery(
     now_secs: u64,
 ) -> SoulKernelRecoveryReport {
     let runtime_bundle_load = load_runtime_bundle(ctx.inspect.state_fs);
-    let runtime_bundle_status = runtime_bundle_status_from_load_result(&runtime_bundle_load);
+    let subject_id = ctx.inspect.subject_id.trim().to_string();
+    let runtime_bundle_status =
+        runtime_bundle_status_from_load_result(&runtime_bundle_load, &subject_id);
     let status_before = inspect_soul_kernel_with_runtime_bundle_status(
         SoulKernelInspectContext {
+            subject_id: ctx.inspect.subject_id,
             state_fs: ctx.inspect.state_fs,
             session_store: ctx.inspect.session_store,
             long_term_memory_store: ctx.inspect.long_term_memory_store,
@@ -491,10 +530,30 @@ pub fn ensure_soul_kernel_recovery(
         relationship_portfolio_store: ctx.inspect.relationship_portfolio_store,
     };
 
+    let ordered_snapshots = ordered_bundle_snapshots_for_subject(&bundle, &subject_id);
+    if ordered_snapshots.is_empty() {
+        append_reboot_recovery_workflow_audit(
+            crate::runtime::WorkflowDisposition::NoTrigger,
+            "runtime_bundle_subject_snapshot_unavailable",
+            crate::runtime::WorkflowEffect::Noop,
+            crate::runtime::WorkflowRecoveryPolicy::ReplayAfterBoot,
+            None,
+        );
+        return SoulKernelRecoveryReport {
+            action: SoulKernelRecoveryAction::NoBundleAvailable,
+            restore_attempted: false,
+            restored_snapshots: 0,
+            restored_layers: Vec::new(),
+            errors: Vec::new(),
+            status_after: status_before.clone(),
+            status_before,
+        };
+    }
+
     let mut restored_snapshots = 0usize;
     let mut restored_layers = Vec::new();
     let mut errors = Vec::new();
-    for snapshot in ordered_bundle_snapshots(&bundle) {
+    for snapshot in ordered_snapshots {
         let target_chat_id = snapshot.chat_id.trim();
         if target_chat_id.is_empty() {
             errors.push("runtime_bundle_snapshot_missing_chat_id".to_string());
@@ -568,6 +627,7 @@ pub fn ensure_soul_kernel_recovery(
 
     let status_after = inspect_soul_kernel_with_runtime_bundle_status(
         SoulKernelInspectContext {
+            subject_id: ctx.inspect.subject_id,
             state_fs: ctx.inspect.state_fs,
             session_store: ctx.inspect.session_store,
             long_term_memory_store: ctx.inspect.long_term_memory_store,
@@ -671,20 +731,26 @@ fn is_soul_kernel_key_memory(entry: &LongTermMemoryEntry, active_chat_ids: &[Str
     ) {
         return false;
     }
-    active_chat_ids.is_empty()
-        || entry.source_chat_id.is_none()
-        || active_chat_ids
-            .iter()
-            .any(|chat_id| entry.source_chat_id.as_deref() == Some(chat_id.as_str()))
+    entry
+        .source_chat_id
+        .as_deref()
+        .is_some_and(|source_chat_id| {
+            active_chat_ids
+                .iter()
+                .any(|chat_id| source_chat_id == chat_id)
+        })
 }
 
-fn read_runtime_bundle_status(state_fs: &dyn StateFs) -> SoulKernelRuntimeBundleStatus {
+fn read_runtime_bundle_status(
+    state_fs: &dyn StateFs,
+    subject_id: &str,
+) -> SoulKernelRuntimeBundleStatus {
     #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
-    if let Some(status) = cached_runtime_bundle_status() {
+    if let Some(status) = cached_runtime_bundle_status(subject_id) {
         return status;
     }
 
-    let status = runtime_bundle_status_from_load_result(&load_runtime_bundle(state_fs));
+    let status = runtime_bundle_status_from_load_result(&load_runtime_bundle(state_fs), subject_id);
 
     #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
     update_runtime_bundle_status_cache(&status);
@@ -694,19 +760,38 @@ fn read_runtime_bundle_status(state_fs: &dyn StateFs) -> SoulKernelRuntimeBundle
 
 fn runtime_bundle_status_from_load_result(
     result: &std::result::Result<Option<ContinuitySnapshotBundle>, String>,
+    subject_id: &str,
 ) -> SoulKernelRuntimeBundleStatus {
+    let subject_id = subject_id.trim();
     match result {
-        Ok(Some(bundle)) => SoulKernelRuntimeBundleStatus {
-            present: true,
-            loadable: true,
-            snapshot_count: bundle.snapshots.len(),
-            primary_chat_id: bundle.primary_chat_id.clone(),
-            reason: Some(bundle.reason.clone()),
-            flushed_at: Some(bundle.flushed_at),
-            error: None,
+        Ok(Some(bundle)) => {
+            let matching = ordered_bundle_snapshots_for_subject(bundle, subject_id);
+            let primary_chat_id = bundle.primary_chat_id.clone().filter(|primary_chat_id| {
+                matching
+                    .iter()
+                    .any(|snapshot| snapshot.chat_id == *primary_chat_id)
+            });
+            SoulKernelRuntimeBundleStatus {
+                subject_id: subject_id.to_string(),
+                present: !matching.is_empty(),
+                loadable: true,
+                snapshot_count: matching.len(),
+                primary_chat_id,
+                reason: Some(if matching.is_empty() {
+                    "no_snapshot_for_subject".to_string()
+                } else {
+                    bundle.reason.clone()
+                }),
+                flushed_at: Some(bundle.flushed_at),
+                error: None,
+            }
+        }
+        Ok(None) => SoulKernelRuntimeBundleStatus {
+            subject_id: subject_id.to_string(),
+            ..SoulKernelRuntimeBundleStatus::default()
         },
-        Ok(None) => SoulKernelRuntimeBundleStatus::default(),
         Err(error) => SoulKernelRuntimeBundleStatus {
+            subject_id: subject_id.to_string(),
             present: true,
             loadable: false,
             snapshot_count: 0,
@@ -732,10 +817,15 @@ fn load_runtime_bundle(
         .map_err(|error| error.to_string())
 }
 
-fn ordered_bundle_snapshots(
-    bundle: &ContinuitySnapshotBundle,
-) -> Vec<&crate::memory::ContinuitySnapshot> {
-    let mut snapshots = bundle.snapshots.iter().collect::<Vec<_>>();
+fn ordered_bundle_snapshots_for_subject<'a>(
+    bundle: &'a ContinuitySnapshotBundle,
+    subject_id: &str,
+) -> Vec<&'a crate::memory::ContinuitySnapshot> {
+    let mut snapshots = bundle
+        .snapshots
+        .iter()
+        .filter(|snapshot| snapshot.subject_id.trim() == subject_id.trim())
+        .collect::<Vec<_>>();
     if let Some(primary_chat_id) = bundle.primary_chat_id.as_deref() {
         snapshots.sort_by_key(|snapshot| (snapshot.chat_id.as_str() != primary_chat_id) as u8);
     }
@@ -777,11 +867,12 @@ fn cached_platform_soul_kernel_status() -> Option<SoulKernelStatus> {
 }
 
 #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
-fn cached_runtime_bundle_status() -> Option<SoulKernelRuntimeBundleStatus> {
+fn cached_runtime_bundle_status(subject_id: &str) -> Option<SoulKernelRuntimeBundleStatus> {
     runtime_bundle_status_cache()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone()
+        .filter(|status| status.subject_id == subject_id.trim())
 }
 
 #[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
@@ -1316,6 +1407,7 @@ mod tests {
     }
 
     struct TestInspectStores<'a> {
+        subject_id: &'a str,
         state_fs: &'a dyn StateFs,
         session_store: &'a TestSessionStore,
         long_term_store: &'a TestLongTermStore,
@@ -1329,6 +1421,7 @@ mod tests {
 
     fn inspect_ctx(stores: TestInspectStores<'_>) -> SoulKernelInspectContext<'_> {
         SoulKernelInspectContext {
+            subject_id: stores.subject_id,
             state_fs: stores.state_fs,
             session_store: stores.session_store,
             long_term_memory_store: stores.long_term_store,
@@ -1338,6 +1431,33 @@ mod tests {
             self_continuity_store: stores.self_continuity_store,
             relationship_portfolio_store: stores.relationship_portfolio_store,
             relationship_topology_store: stores.relationship_topology_store,
+        }
+    }
+
+    fn key_memory_entry(id: &str, chat_id: &str) -> LongTermMemoryEntry {
+        LongTermMemoryEntry {
+            id: id.to_string(),
+            kind: LongTermMemoryKind::Preference,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            topic: id.to_string(),
+            content: format!("key memory for {chat_id}"),
+            keywords: vec![id.to_string()],
+            source_chat_id: Some(chat_id.to_string()),
+            source_type: Default::default(),
+            source_scope: Default::default(),
+            confidence: Default::default(),
+            freshness: Default::default(),
+            stale_hint: Default::default(),
+            supporting_citations: Vec::new(),
+            canonical_entities: Vec::new(),
+            evidence_count: 1,
+            created_at: 10,
+            updated_at: 10,
+            observed_at: 10,
+            last_confirmed_at: 10,
+            source_revision: Some(1),
+            owner_revision: 1,
+            last_used_at: 0,
         }
     }
 
@@ -1355,6 +1475,7 @@ mod tests {
 
         let status = inspect_soul_kernel(
             inspect_ctx(TestInspectStores {
+                subject_id: "board",
                 state_fs: &state_fs,
                 session_store: &session_store,
                 long_term_store: &long_term_store,
@@ -1371,6 +1492,341 @@ mod tests {
         assert!(status.expected_bootstrap_empty);
         assert!(!status.degraded);
         assert!(!status.minimum_viable);
+    }
+
+    #[test]
+    fn inspect_does_not_inherit_other_subject_degradation_or_state() {
+        let state_fs = MemoryStateFs::default();
+        let session_store = TestSessionStore::default();
+        session_store
+            .chat_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push("chat-a".to_string());
+        let long_term_store = TestLongTermStore::default();
+        let self_model_store = TestSelfModelStore::default();
+        let self_authored_core_store = TestSelfAuthoredCoreStore::default();
+        let core_revision_ledger_store = TestCoreRevisionLedgerStore::default();
+        let self_continuity_store = TestSelfContinuityStore::default();
+        let relationship_portfolio_store = TestRelationshipPortfolioStore::default();
+        let relationship_topology_store = TestRelationshipTopologyStore::default();
+
+        self_authored_core_store
+            .set(
+                "board",
+                &SelfAuthoredCore {
+                    identity_anchor: "healthy board".to_string(),
+                    updated_at: 10,
+                    ..SelfAuthoredCore::default()
+                },
+            )
+            .unwrap();
+        self_continuity_store
+            .set(
+                "board",
+                &SelfContinuity {
+                    current_self_state: "healthy board continuity".to_string(),
+                    updated_at: 10,
+                    ..SelfContinuity::default()
+                },
+            )
+            .unwrap();
+
+        let inspect = |subject_id| {
+            inspect_soul_kernel(
+                inspect_ctx(TestInspectStores {
+                    subject_id,
+                    state_fs: &state_fs,
+                    session_store: &session_store,
+                    long_term_store: &long_term_store,
+                    self_model_store: &self_model_store,
+                    self_authored_core_store: &self_authored_core_store,
+                    core_revision_ledger_store: &core_revision_ledger_store,
+                    self_continuity_store: &self_continuity_store,
+                    relationship_portfolio_store: &relationship_portfolio_store,
+                    relationship_topology_store: &relationship_topology_store,
+                }),
+                100,
+            )
+        };
+
+        let current_missing = inspect("subject:current");
+        assert_eq!(current_missing.subject_id, "subject:current");
+        assert!(!current_missing.minimum_viable);
+        assert!(current_missing.expected_bootstrap_empty);
+        assert!(!current_missing.degraded);
+
+        self_authored_core_store.clear("board").unwrap();
+        self_continuity_store.clear("board").unwrap();
+        self_authored_core_store
+            .set(
+                "subject:current",
+                &SelfAuthoredCore {
+                    identity_anchor: "healthy current".to_string(),
+                    updated_at: 20,
+                    ..SelfAuthoredCore::default()
+                },
+            )
+            .unwrap();
+        self_continuity_store
+            .set(
+                "subject:current",
+                &SelfContinuity {
+                    current_self_state: "healthy current continuity".to_string(),
+                    updated_at: 20,
+                    ..SelfContinuity::default()
+                },
+            )
+            .unwrap();
+        session_store
+            .chat_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+
+        let current_healthy = inspect("subject:current");
+        assert_eq!(current_healthy.subject_id, "subject:current");
+        assert!(current_healthy.minimum_viable);
+        assert!(!current_healthy.degraded);
+    }
+
+    #[test]
+    fn inspect_and_recovery_count_only_requested_subject_key_memory() {
+        let board_subject_id = board_subject_scope_id();
+        let current_subject_id = "subject:current";
+        let state_fs = MemoryStateFs::default();
+        let session_store = TestSessionStore::default();
+        session_store
+            .chat_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(["chat-board".to_string(), "chat-current".to_string()]);
+        let long_term_store = TestLongTermStore::default();
+        long_term_store
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend([
+                key_memory_entry("board-memory-1", "chat-board"),
+                key_memory_entry("board-memory-2", "chat-board"),
+                key_memory_entry("current-memory-1", "chat-current"),
+            ]);
+        let self_model_store = TestSelfModelStore::default();
+        let self_authored_core_store = TestSelfAuthoredCoreStore::default();
+        let core_revision_ledger_store = TestCoreRevisionLedgerStore::default();
+        let self_continuity_store = TestSelfContinuityStore::default();
+        let relationship_portfolio_store = TestRelationshipPortfolioStore::default();
+        let relationship_topology_store = TestRelationshipTopologyStore::default();
+
+        for (subject_id, chat_id) in [
+            (board_subject_id, "chat-board"),
+            (current_subject_id, "chat-current"),
+        ] {
+            self_authored_core_store
+                .set(
+                    subject_id,
+                    &SelfAuthoredCore {
+                        identity_anchor: format!("identity for {subject_id}"),
+                        updated_at: 990,
+                        ..SelfAuthoredCore::default()
+                    },
+                )
+                .unwrap();
+            self_continuity_store
+                .set(
+                    subject_id,
+                    &SelfContinuity {
+                        current_self_state: format!("continuity for {subject_id}"),
+                        last_user_turn_at: 990,
+                        last_user_chat_id: chat_id.to_string(),
+                        updated_at: 995,
+                        ..SelfContinuity::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        let inspect = |subject_id| {
+            inspect_soul_kernel(
+                inspect_ctx(TestInspectStores {
+                    subject_id,
+                    state_fs: &state_fs,
+                    session_store: &session_store,
+                    long_term_store: &long_term_store,
+                    self_model_store: &self_model_store,
+                    self_authored_core_store: &self_authored_core_store,
+                    core_revision_ledger_store: &core_revision_ledger_store,
+                    self_continuity_store: &self_continuity_store,
+                    relationship_portfolio_store: &relationship_portfolio_store,
+                    relationship_topology_store: &relationship_topology_store,
+                }),
+                1_000,
+            )
+        };
+        let board_status = inspect(board_subject_id);
+        assert_eq!(board_status.active_chat_ids, vec!["chat-board".to_string()]);
+        assert_eq!(board_status.key_memory_count, 2);
+        let current_status = inspect(current_subject_id);
+        assert_eq!(
+            current_status.active_chat_ids,
+            vec!["chat-current".to_string()]
+        );
+        assert_eq!(current_status.key_memory_count, 1);
+
+        let plan = |subject_id| {
+            plan_soul_kernel_recovery(
+                inspect_ctx(TestInspectStores {
+                    subject_id,
+                    state_fs: &state_fs,
+                    session_store: &session_store,
+                    long_term_store: &long_term_store,
+                    self_model_store: &self_model_store,
+                    self_authored_core_store: &self_authored_core_store,
+                    core_revision_ledger_store: &core_revision_ledger_store,
+                    self_continuity_store: &self_continuity_store,
+                    relationship_portfolio_store: &relationship_portfolio_store,
+                    relationship_topology_store: &relationship_topology_store,
+                }),
+                1_000,
+            )
+        };
+        let board_plan = plan(board_subject_id);
+        assert_eq!(
+            board_plan.report.action,
+            SoulKernelRecoveryAction::NotNeeded
+        );
+        assert_eq!(board_plan.report.status_before.key_memory_count, 2);
+        let current_plan = plan(current_subject_id);
+        assert_eq!(
+            current_plan.report.action,
+            SoulKernelRecoveryAction::NotNeeded
+        );
+        assert_eq!(current_plan.report.status_before.key_memory_count, 1);
+    }
+
+    #[test]
+    fn inspect_without_subject_anchors_does_not_adopt_global_sessions_or_memory() {
+        let state_fs = MemoryStateFs::default();
+        let session_store = TestSessionStore::default();
+        session_store
+            .chat_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(["chat-other-a".to_string(), "chat-other-b".to_string()]);
+        let long_term_store = TestLongTermStore::default();
+        long_term_store
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend([
+                key_memory_entry("other-memory-a", "chat-other-a"),
+                key_memory_entry("other-memory-b", "chat-other-b"),
+            ]);
+        let self_model_store = TestSelfModelStore::default();
+        let self_authored_core_store = TestSelfAuthoredCoreStore::default();
+        let core_revision_ledger_store = TestCoreRevisionLedgerStore::default();
+        let self_continuity_store = TestSelfContinuityStore::default();
+        let relationship_portfolio_store = TestRelationshipPortfolioStore::default();
+        let relationship_topology_store = TestRelationshipTopologyStore::default();
+
+        for subject_id in ["subject:empty-a", "subject:empty-b"] {
+            let status = inspect_soul_kernel(
+                inspect_ctx(TestInspectStores {
+                    subject_id,
+                    state_fs: &state_fs,
+                    session_store: &session_store,
+                    long_term_store: &long_term_store,
+                    self_model_store: &self_model_store,
+                    self_authored_core_store: &self_authored_core_store,
+                    core_revision_ledger_store: &core_revision_ledger_store,
+                    self_continuity_store: &self_continuity_store,
+                    relationship_portfolio_store: &relationship_portfolio_store,
+                    relationship_topology_store: &relationship_topology_store,
+                }),
+                1_000,
+            );
+            assert!(status.active_chat_ids.is_empty());
+            assert_eq!(status.session_chat_count, 0);
+            assert_eq!(status.key_memory_count, 0);
+            assert!(status.expected_bootstrap_empty);
+        }
+    }
+
+    #[test]
+    fn recovery_plan_never_returns_another_subject_snapshot() {
+        let state_fs = MemoryStateFs::default();
+        let session_store = TestSessionStore::default();
+        session_store
+            .chat_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push("chat-board".to_string());
+        let long_term_store = TestLongTermStore::default();
+        let self_model_store = TestSelfModelStore::default();
+        let self_authored_core_store = TestSelfAuthoredCoreStore::default();
+        let core_revision_ledger_store = TestCoreRevisionLedgerStore::default();
+        let self_continuity_store = TestSelfContinuityStore::default();
+        let relationship_portfolio_store = TestRelationshipPortfolioStore::default();
+        let relationship_topology_store = TestRelationshipTopologyStore::default();
+
+        let mut snapshot = crate::memory::ContinuitySnapshot {
+            version: 5,
+            exported_at: 10,
+            mode: crate::memory::ContinuitySnapshotMode::FullRestore,
+            chat_id: "chat-board".to_string(),
+            subject_id: "board".to_string(),
+            manifest: Default::default(),
+            summary_text: None,
+            summary_message_count: None,
+            long_term_memory: Vec::new(),
+            self_model: None,
+            self_authored_core: None,
+            core_revision_ledger: None,
+            self_continuity: None,
+            relationship_portfolio: None,
+            relationship_constitution: None,
+            execution_state: None,
+        };
+        snapshot.self_authored_core = Some(SelfAuthoredCore {
+            identity_anchor: "board only".to_string(),
+            updated_at: 10,
+            ..SelfAuthoredCore::default()
+        });
+        let bundle = ContinuitySnapshotBundle {
+            version: 1,
+            reason: "agent_exit".to_string(),
+            flushed_at: 10,
+            primary_chat_id: Some("chat-board".to_string()),
+            snapshots: vec![snapshot],
+        };
+        state_fs
+            .write(
+                REL_PATH_REBOOT_CONTINUITY_BUNDLE,
+                &serde_json::to_vec(&bundle).unwrap(),
+            )
+            .unwrap();
+
+        let plan = plan_soul_kernel_recovery(
+            inspect_ctx(TestInspectStores {
+                subject_id: "subject:current",
+                state_fs: &state_fs,
+                session_store: &session_store,
+                long_term_store: &long_term_store,
+                self_model_store: &self_model_store,
+                self_authored_core_store: &self_authored_core_store,
+                core_revision_ledger_store: &core_revision_ledger_store,
+                self_continuity_store: &self_continuity_store,
+                relationship_portfolio_store: &relationship_portfolio_store,
+                relationship_topology_store: &relationship_topology_store,
+            }),
+            100,
+        );
+
+        assert_eq!(plan.subject_id, "subject:current");
+        assert_eq!(plan.report.status_before.subject_id, "subject:current");
+        assert_eq!(plan.report.action, SoulKernelRecoveryAction::NotNeeded);
+        assert!(plan.ordered_snapshots.is_empty());
+        assert!(plan.primary_chat_id.is_none());
     }
 
     #[test]
@@ -1395,6 +1851,7 @@ mod tests {
 
         let status = inspect_soul_kernel(
             inspect_ctx(TestInspectStores {
+                subject_id: "board",
                 state_fs: &state_fs,
                 session_store: &session_store,
                 long_term_store: &long_term_store,
@@ -1510,6 +1967,7 @@ mod tests {
                 relationship_portfolio_store: &relationship_portfolio_store,
                 relationship_topology_store: &relationship_topology_store,
             },
+            &subject_id,
             "chat-a",
             crate::memory::ContinuitySnapshotMode::FullRestore,
             100,
@@ -1537,6 +1995,7 @@ mod tests {
         let report = ensure_soul_kernel_recovery(
             SoulKernelRecoveryContext {
                 inspect: inspect_ctx(TestInspectStores {
+                    subject_id: &subject_id,
                     state_fs: &state_fs,
                     session_store: &session_store,
                     long_term_store: &long_term_store,
@@ -1572,7 +2031,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_without_runtime_bundle_records_no_trigger_workflow_audit() {
+    fn recovery_without_subject_anchors_records_no_trigger_workflow_audit() {
         let _guard = crate::runtime::workflow_audit_test_guard();
         reset_workflow_audit_for_tests();
         let state_fs = MemoryStateFs::default();
@@ -1596,6 +2055,7 @@ mod tests {
         let report = ensure_soul_kernel_recovery(
             SoulKernelRecoveryContext {
                 inspect: inspect_ctx(TestInspectStores {
+                    subject_id: "board",
                     state_fs: &state_fs,
                     session_store: &session_store,
                     long_term_store: &long_term_store,
@@ -1614,7 +2074,7 @@ mod tests {
             120,
         );
 
-        assert_eq!(report.action, SoulKernelRecoveryAction::NoBundleAvailable);
+        assert_eq!(report.action, SoulKernelRecoveryAction::NotNeeded);
         let audit = workflow_audit_snapshot(4);
         assert_eq!(audit.summary.no_trigger, 1);
         assert_eq!(
@@ -1690,6 +2150,7 @@ mod tests {
                 relationship_portfolio_store: &relationship_portfolio_store,
                 relationship_topology_store: &relationship_topology_store,
             },
+            &subject_id,
             "chat-a",
             crate::memory::ContinuitySnapshotMode::FullRestore,
             100,
@@ -1717,6 +2178,7 @@ mod tests {
         let _ = ensure_soul_kernel_recovery(
             SoulKernelRecoveryContext {
                 inspect: inspect_ctx(TestInspectStores {
+                    subject_id: &subject_id,
                     state_fs: &state_fs,
                     session_store: &session_store,
                     long_term_store: &long_term_store,

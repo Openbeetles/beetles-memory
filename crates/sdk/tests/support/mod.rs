@@ -8,16 +8,42 @@ use bm_core::llm::{
 };
 use bm_core::memory::LongTermMemoryKind;
 use bm_core::platform::ResponseBody;
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_sdk::NonproductionRuntimeBudgetLimits;
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, LongTermMemoryDraft, MemoryCapabilityPolicy,
     MemoryClock, MemoryIdentity, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime,
     MemoryScope, MemoryStoreHandle, MemoryWriteRequest, NoopMemoryAuditSink,
-    ParsedLongTermMemoryExtraction, ProfileId, Result, RuntimeBudgetReport, StoreBackendConfig,
-    SubjectDescriptor, SubjectRegistry, SubjectScopedRuntime,
+    ParsedLongTermMemoryExtraction, ProfileId, Result, StoreBackendConfig, SubjectDescriptor,
+    SubjectRegistry, SubjectScopedRuntime,
 };
 
 struct FixedMemoryClock {
     now_secs: u64,
+}
+
+pub fn host_test_profile() -> ProfileId {
+    #[cfg(feature = "nonproduction-replay-harness")]
+    {
+        ProfileId::native_dev_full().expect("native dev-full profile")
+    }
+    #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "macos"))]
+    {
+        ProfileId::DesktopMacosEmbeddedSdk
+    }
+    #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "windows"))]
+    {
+        ProfileId::DesktopWindowsEmbeddedSdk
+    }
+    #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "linux"))]
+    {
+        ProfileId::ServerLinuxMemoryGateway
+    }
+    #[cfg(all(
+        not(feature = "nonproduction-replay-harness"),
+        not(any(target_os = "macos", target_os = "windows", target_os = "linux"))
+    ))]
+    compile_error!("SDK host contract tests require macOS, Windows, or Linux");
 }
 
 impl FixedMemoryClock {
@@ -33,8 +59,26 @@ impl MemoryClock for FixedMemoryClock {
 }
 
 pub fn empty_store_platform(profile: ProfileId) -> MemoryStoreHandle {
-    MemoryStoreHandle::open_in_memory(StoreBackendConfig::in_memory(profile).expect("store config"))
-        .expect("store platform")
+    let config = StoreBackendConfig::in_memory(profile).expect("store config");
+    open_memory_store(config).expect("store platform")
+}
+
+pub fn open_memory_store(config: StoreBackendConfig) -> Result<MemoryStoreHandle> {
+    #[cfg(feature = "nonproduction-replay-harness")]
+    return MemoryStoreHandle::open_for_nonproduction_harness(config);
+    #[cfg(not(feature = "nonproduction-replay-harness"))]
+    MemoryStoreHandle::open(config)
+}
+
+#[cfg(feature = "nonproduction-replay-harness")]
+pub fn empty_store_platform_with_budget(
+    profile: ProfileId,
+    limits: NonproductionRuntimeBudgetLimits,
+) -> MemoryStoreHandle {
+    let config = StoreBackendConfig::in_memory(profile)
+        .expect("store config")
+        .with_nonproduction_runtime_budget_limits(limits);
+    open_memory_store(config).expect("store platform")
 }
 
 pub fn seeded_store_platform(profile: ProfileId) -> MemoryStoreHandle {
@@ -88,7 +132,7 @@ pub fn test_runtime_with_scope(
 
 pub fn test_runtime_with_identity_scope(
     platform: MemoryStoreHandle,
-    profile: ProfileId,
+    _profile: ProfileId,
     agent_id: &str,
     owner_id: &str,
     channel: &str,
@@ -97,7 +141,6 @@ pub fn test_runtime_with_identity_scope(
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new(agent_id, owner_id).expect("identity"))
         .scope(MemoryScope::new(channel, chat_id).expect("scope"))
-        .profile(profile)
         .store(platform)
         .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
@@ -127,7 +170,7 @@ pub fn test_runtime_with_scope_and_subject(
 
 pub fn test_runtime_with_identity_scope_and_subject(
     platform: MemoryStoreHandle,
-    profile: ProfileId,
+    _profile: ProfileId,
     agent_id: &str,
     owner_id: &str,
     subject_id: &str,
@@ -138,31 +181,7 @@ pub fn test_runtime_with_identity_scope_and_subject(
         .identity(MemoryIdentity::new(agent_id, owner_id).expect("identity"))
         .subject_id(subject_id)
         .scope(MemoryScope::new(channel, chat_id).expect("scope"))
-        .profile(profile)
         .store(platform)
-        .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
-        .capability_policy(MemoryCapabilityPolicy::strict_profile())
-        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
-        .audit_sink(Arc::new(NoopMemoryAuditSink))
-        .build()
-        .expect("runtime")
-}
-
-pub fn test_runtime_with_scope_subject_and_budget(
-    platform: MemoryStoreHandle,
-    profile: ProfileId,
-    channel: &str,
-    chat_id: &str,
-    subject_id: &str,
-    runtime_budget: RuntimeBudgetReport,
-) -> MemoryRuntime {
-    MemoryRuntime::builder()
-        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
-        .subject_id(subject_id)
-        .scope(MemoryScope::new(channel, chat_id).expect("scope"))
-        .profile(profile)
-        .store(platform)
-        .runtime_budget(runtime_budget)
         .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
@@ -173,7 +192,7 @@ pub fn test_runtime_with_scope_subject_and_budget(
 
 pub fn test_runtime_with_delegated_actor(
     platform: MemoryStoreHandle,
-    profile: ProfileId,
+    _profile: ProfileId,
     mounted_agent_id: &str,
     actor_subject_id: &str,
     chat_id: &str,
@@ -193,7 +212,6 @@ pub fn test_runtime_with_delegated_actor(
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new(mounted_agent_id, owner_id).expect("identity"))
         .scope(MemoryScope::new("llm.gateway", chat_id).expect("scope"))
-        .profile(profile)
         .store(platform)
         .subject_registry(registry)
         .scoped_runtime(SubjectScopedRuntime {

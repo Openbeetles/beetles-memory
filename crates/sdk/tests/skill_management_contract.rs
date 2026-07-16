@@ -1,19 +1,18 @@
+mod support;
 use bm_sdk::{
-    MemoryIdentity, MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryWriteRequest, ProfileId,
-    RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
-    RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    MemoryIdentity, MemoryRuntime, MemoryScope, MemoryWriteRequest, RuntimeSkillDeleteRequest,
+    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListRequest,
+    RuntimeSkillSetEnabledRequest, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 fn test_runtime() -> MemoryRuntime {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let store =
-        MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile).expect("store config"))
+        support::open_memory_store(StoreBackendConfig::in_memory(profile).expect("store config"))
             .expect("store");
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("skill-test-agent", "owner-default").expect("identity"))
         .scope(MemoryScope::new("console", "chat-1").expect("scope"))
-        .profile(profile)
         .store(store)
         .build()
         .expect("runtime")

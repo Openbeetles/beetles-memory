@@ -1,6 +1,25 @@
 use bm_cli::{command_specs, render_capabilities, run_cli};
 use bm_sdk::{resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId};
 
+fn host_profile_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "profile-desktop-macos-standalone-memory"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "profile-desktop-windows-embedded-sdk"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "profile-server-linux-memory-gateway"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        "profile-esp-embedded-sdk"
+    }
+}
+
 #[test]
 fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
     let commands: Vec<_> = command_specs().iter().map(|spec| spec.name).collect();
@@ -12,8 +31,6 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
             "recall",
             "project",
             "replay",
-            "export",
-            "import",
             "write-procedural",
             "long-term-list",
             "long-term-detail",
@@ -45,11 +62,27 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
 }
 
 #[test]
+fn legacy_continuity_transfer_commands_are_rejected_before_runtime_open() {
+    for command in ["export", "import"] {
+        let error = run_cli(["memory", command].into_iter().map(str::to_string))
+            .expect_err("legacy continuity transfer command must not remain public");
+        assert_eq!(error, format!("unsupported memory command: {command}"));
+    }
+}
+
+#[test]
 fn long_term_destructive_commands_require_explicit_reason() {
     let delete = run_cli(
-        ["memory", "long-term-delete", "--record-id", "ltm-test"]
-            .into_iter()
-            .map(str::to_string),
+        [
+            "memory",
+            "long-term-delete",
+            "--profile",
+            host_profile_name(),
+            "--record-id",
+            "ltm-test",
+        ]
+        .into_iter()
+        .map(str::to_string),
     )
     .expect_err("delete without reason should fail");
     assert!(delete.contains("--reason is required"));
@@ -58,6 +91,8 @@ fn long_term_destructive_commands_require_explicit_reason() {
         [
             "memory",
             "long-term-policy-suppress",
+            "--profile",
+            host_profile_name(),
             "--topic",
             "temporary-*",
         ]
@@ -71,6 +106,8 @@ fn long_term_destructive_commands_require_explicit_reason() {
         [
             "memory",
             "transcript-attr-write",
+            "--profile",
+            host_profile_name(),
             "--input",
             "/tmp/missing-transcript-attrs.json",
         ]
@@ -96,6 +133,8 @@ fn transcript_attr_write_command_is_public_and_requires_explicit_reason() {
         [
             "memory",
             "transcript-attr-write",
+            "--profile",
+            host_profile_name(),
             "--input",
             "/tmp/missing-transcript-attrs.json",
         ]
@@ -116,7 +155,7 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "memory",
             "write-procedural",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -149,7 +188,7 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "memory",
             "skill-edit",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -183,7 +222,7 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "memory",
             "skill-list",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -210,7 +249,7 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "memory",
             "skill-disable",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -236,7 +275,7 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "memory",
             "skill-delete",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -291,7 +330,7 @@ fn memory_cli_write_then_recall_uses_entry_runtime_store() {
         "memory",
         "write-procedural",
         "--profile",
-        "profile-server-linux-dev-full",
+        host_profile_name(),
         "--store-file",
         &store,
         "--agent",
@@ -326,7 +365,7 @@ fn memory_cli_write_then_recall_uses_entry_runtime_store() {
             "memory",
             "recall",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -357,7 +396,7 @@ fn memory_cli_write_then_recall_uses_entry_runtime_store() {
             "memory",
             "long-term-list",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -399,7 +438,7 @@ fn memory_cli_binary_can_reopen_file_store_across_processes() {
             "memory",
             "write-procedural",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",
@@ -434,7 +473,7 @@ fn memory_cli_binary_can_reopen_file_store_across_processes() {
             "memory",
             "recall",
             "--profile",
-            "profile-server-linux-dev-full",
+            host_profile_name(),
             "--store-file",
             &store,
             "--agent",

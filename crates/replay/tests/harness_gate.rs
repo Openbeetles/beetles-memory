@@ -2,11 +2,10 @@ use bm_replay::run_sdk_memory_harness;
 use bm_sdk::{ProfileId, StoreBackendConfig};
 
 #[test]
-fn sdk_memory_harness_runs_through_runtime_on_server_profile() {
-    let report = run_sdk_memory_harness(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
-    )
-    .expect("harness report");
+fn sdk_memory_harness_runs_through_runtime_on_host_native_profile() {
+    let profile = ProfileId::native_dev_full().expect("host-native dev-full profile");
+    let report = run_sdk_memory_harness(StoreBackendConfig::in_memory(profile).unwrap())
+        .expect("harness report");
 
     assert!(report.run.passed, "{:?}", report.run.failures);
     assert!(report

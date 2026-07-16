@@ -1,29 +1,10 @@
-use bm_entry::{
-    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntimeBaseConfig,
-    EntryRuntimeScope, EntryScope, EntryStoreConfig, EntryTransportConfig,
-};
+use bm_entry::{EntryIdentity, EntryRuntimeScope, EntryScope};
 use bm_llm_gateway::{
     GatewayConfig, GatewayProviderConfig, GatewayRuntime, GatewayRuntimeCacheConfig,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
 
 fn config() -> GatewayConfig {
     let mut config = GatewayConfig::default_for_local_dev();
-    let mut capability = MemoryCapabilityPolicy::strict_profile();
-    capability.communication_adapter_enabled = true;
-    config.entry = EntryRuntimeBaseConfig {
-        profile: ProfileId::ServerLinuxDevFull,
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
-        transports: EntryTransportConfig::all_enabled(),
-        auth: EntryAuthConfig::disabled_for_local(),
-        idempotency: EntryIdempotencyConfig { max_keys: 32 },
-        privacy: MemoryPrivacyPolicy::standard_private_boundary(),
-        capability,
-    };
     config.runtime_cache = GatewayRuntimeCacheConfig { max_runtimes: 1 };
     config.providers.insert(
         "local".to_string(),
@@ -49,6 +30,7 @@ fn scope(chat_id: &str) -> EntryRuntimeScope {
 #[test]
 fn gateway_runtime_uses_entry_runtime_manager_and_preserves_active_scope_cache() {
     let gateway = GatewayRuntime::open(config()).expect("gateway runtime");
+    assert_eq!(gateway.max_cached_runtimes(), 1);
     let runtime_a_first = gateway
         .runtime_for_scope(scope("chat-a"))
         .expect("runtime a first");
@@ -60,4 +42,20 @@ fn gateway_runtime_uses_entry_runtime_manager_and_preserves_active_scope_cache()
         .expect("runtime a second");
 
     assert!(std::sync::Arc::ptr_eq(&runtime_a_first, &runtime_a_second));
+}
+
+#[test]
+fn gateway_runtime_cache_request_is_clamped_by_the_opened_runtime_report() {
+    let mut config = config();
+    config.runtime_cache = GatewayRuntimeCacheConfig {
+        max_runtimes: usize::MAX,
+    };
+
+    let gateway = GatewayRuntime::open(config).expect("gateway runtime");
+    let compiled_limit = gateway
+        .runtime_budget()
+        .llm_gateway_budget
+        .runtime_cache_max_runtimes;
+
+    assert_eq!(gateway.max_cached_runtimes(), compiled_limit);
 }

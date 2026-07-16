@@ -10,17 +10,17 @@ use bm_adapter::{
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_replay::{load_memory_benchmark_fixture_dir, run_memory_benchmark_wall};
 use bm_sdk::{
-    compile_runtime_budget, probe_host_runtime_resource, resolve_memory_capabilities,
-    AgentSkillDirConfig, Error, MemoryCapabilityPolicy, MemoryCloseRequest,
-    MemoryFacetRecallIndexReport, MemoryIdentity, MemoryInspectionRequest, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest, MemoryStoreHandle,
-    NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeBudgetInput, RuntimeBudgetReport,
-    RuntimeLifecycleModeInput, RuntimeSkillDeleteRequest, RuntimeSkillDetailRequest,
-    RuntimeSkillEditRequest, RuntimeSkillListRequest, RuntimeSkillSetEnabledRequest,
-    StaticPlatformManifest, StoreBackendConfig, StoreBackendKind, StoreOpenReport, WorkbenchApiMap,
+    resolve_memory_capabilities, AgentSkillDirConfig, Error, MemoryCapabilityPolicy,
+    MemoryCloseRequest, MemoryFacetRecallIndexReport, MemoryIdentity, MemoryInspectionRequest,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest, MemorySpacePrivateMaterialPolicy,
+    MemorySpaceScope, MemoryStoreHandle, NoopMemoryAuditSink, PressureLevel, ProfileId, Result,
+    RuntimeBudgetLease, RuntimeBudgetReport, RuntimeLifecycleModeInput, RuntimeSkillDeleteRequest,
+    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListRequest,
+    RuntimeSkillSetEnabledRequest, StoreBackendConfig, StoreOpenReport, WorkbenchApiMap,
     WorkbenchSurface,
 };
+use sha2::{Digest, Sha256};
 
 use crate::config::{enabled_capability_policy, privacy_policy};
 use crate::console::EntryConsoleTelemetrySnapshot;
@@ -37,17 +37,14 @@ use crate::{
     EntryConsoleWorkbenchRecallInspector, EntryConsoleWorkbenchReport,
     EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth, EntryConsoleWorkbenchStatus,
     EntryConsoleWorkbenchVaultMigration, EntryIdempotencyCache, EntryIdempotencyConfig,
-    EntryIdentity, EntryResponse, EntryScope, EntryStoreConfig, EntryTransportConfig,
-    EntryTransportContext,
+    EntryIdentity, EntryResponse, EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 
-pub const DEFAULT_SCOPED_RUNTIME_CACHE_LIMIT: usize = 256;
 const FACET_AUDIT_MARKDOWN_FORMAT: &str = "obsidian-style-facet-audit-markdown";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryRuntimeBaseConfig {
-    pub profile: ProfileId,
-    pub store: EntryStoreConfig,
+    pub store: StoreBackendConfig,
     pub transports: EntryTransportConfig,
     pub auth: EntryAuthConfig,
     pub idempotency: EntryIdempotencyConfig,
@@ -63,10 +60,9 @@ pub struct EntryRuntimeScope {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryRuntimeConfig {
-    pub profile: ProfileId,
     pub identity: EntryIdentity,
     pub scope: EntryScope,
-    pub store: EntryStoreConfig,
+    pub store: StoreBackendConfig,
     pub transports: EntryTransportConfig,
     pub auth: EntryAuthConfig,
     pub idempotency: EntryIdempotencyConfig,
@@ -77,7 +73,6 @@ pub struct EntryRuntimeConfig {
 impl EntryRuntimeConfig {
     pub fn base_config(&self) -> EntryRuntimeBaseConfig {
         EntryRuntimeBaseConfig {
-            profile: self.profile,
             store: self.store.clone(),
             transports: self.transports.clone(),
             auth: self.auth.clone(),
@@ -98,23 +93,16 @@ impl EntryRuntimeConfig {
 pub struct EntryRuntimeFactory {
     base: EntryRuntimeBaseConfig,
     store: MemoryStoreHandle,
-    runtime_budget: RuntimeBudgetReport,
 }
 
 impl EntryRuntimeFactory {
     pub fn open(base: EntryRuntimeBaseConfig) -> Result<Self> {
-        let runtime_budget = compile_entry_runtime_budget(base.profile);
-        let store = open_store(&base.store, base.profile, &runtime_budget)?;
-        Ok(Self {
-            base,
-            store,
-            runtime_budget,
-        })
+        let store = MemoryStoreHandle::open(base.store.clone())?;
+        Ok(Self { base, store })
     }
 
     pub fn runtime_for_scope(&self, scope: EntryRuntimeScope) -> Result<EntryRuntime> {
         let config = EntryRuntimeConfig {
-            profile: self.base.profile,
             identity: scope.identity,
             scope: scope.scope,
             store: self.base.store.clone(),
@@ -124,13 +112,32 @@ impl EntryRuntimeFactory {
             privacy: self.base.privacy.clone(),
             capability: self.base.capability.clone(),
         };
-        EntryRuntime::from_store_handle(config, self.store.clone(), self.runtime_budget.clone())
+        EntryRuntime::from_store_handle(config, self.store.clone())
+    }
+
+    pub fn runtime_budget(&self) -> RuntimeBudgetReport {
+        self.store.runtime_budget()
+    }
+
+    pub fn acquire_budget_lease(&self) -> Result<EntryRuntimeBudgetLease> {
+        self.store
+            .acquire_runtime_budget_lease()
+            .map(|inner| EntryRuntimeBudgetLease { inner })
+    }
+
+    pub fn execute_with_budget_lease<T>(
+        &self,
+        lease: &EntryRuntimeBudgetLease,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.store
+            .execute_with_runtime_budget_lease(&lease.inner, operation)
     }
 }
 
 pub struct EntryRuntimeManager {
     factory: EntryRuntimeFactory,
-    max_runtimes: usize,
+    requested_max_runtimes: Option<usize>,
     state: Mutex<EntryRuntimeManagerState>,
 }
 
@@ -143,64 +150,108 @@ struct EntryRuntimeManagerState {
 
 impl EntryRuntimeManager {
     pub fn open(base: EntryRuntimeBaseConfig) -> Result<Self> {
-        Self::with_max_runtimes(base, DEFAULT_SCOPED_RUNTIME_CACHE_LIMIT)
-    }
-
-    pub fn with_max_runtimes(base: EntryRuntimeBaseConfig, max_runtimes: usize) -> Result<Self> {
-        if max_runtimes == 0 {
-            return Err(Error::config(
-                "entry_runtime_manager",
-                "max_runtimes must be greater than zero",
-            ));
-        }
+        let factory = EntryRuntimeFactory::open(base)?;
         Ok(Self {
-            factory: EntryRuntimeFactory::open(base)?,
-            max_runtimes,
+            factory,
+            requested_max_runtimes: None,
             state: Mutex::new(EntryRuntimeManagerState::default()),
         })
     }
 
+    pub fn open_with_requested_max_runtimes(
+        base: EntryRuntimeBaseConfig,
+        requested_max_runtimes: usize,
+    ) -> Result<Self> {
+        if requested_max_runtimes == 0 {
+            return Err(Error::config(
+                "entry_runtime_manager",
+                "requested_max_runtimes must be greater than zero",
+            ));
+        }
+        let factory = EntryRuntimeFactory::open(base)?;
+        Ok(Self {
+            factory,
+            requested_max_runtimes: Some(requested_max_runtimes),
+            state: Mutex::new(EntryRuntimeManagerState::default()),
+        })
+    }
+
+    pub fn runtime_budget(&self) -> RuntimeBudgetReport {
+        self.factory.runtime_budget()
+    }
+
+    pub fn acquire_budget_lease(&self) -> Result<EntryRuntimeBudgetLease> {
+        self.factory.acquire_budget_lease()
+    }
+
+    pub fn execute_with_budget_lease<T>(
+        &self,
+        lease: &EntryRuntimeBudgetLease,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.factory.execute_with_budget_lease(lease, operation)
+    }
+
+    pub fn max_runtimes(&self) -> usize {
+        self.max_runtimes_for_report(&self.factory.runtime_budget())
+    }
+
     pub fn runtime_for_scope(&self, scope: EntryRuntimeScope) -> Result<Arc<EntryRuntime>> {
+        let report = self.factory.runtime_budget();
+        if report.resource_snapshot.stale {
+            return Err(Error::config(
+                "entry_runtime_manager",
+                "runtime cache admission requires a fresh resource report",
+            ));
+        }
+        let max_runtimes = self.max_runtimes_for_report(&report);
         let mut close_after_unlock = Vec::new();
         let mut state = self
             .state
             .lock()
             .expect("entry runtime manager cache poisoned");
         state.prune_dead_active_evicted();
+        state.evict_to_limit(max_runtimes, &mut close_after_unlock);
         if let Some(runtime) = state.cached.get(&scope).cloned() {
             state.touch(&scope);
+            drop(state);
+            close_entry_runtimes(close_after_unlock)?;
             return Ok(Arc::clone(&runtime));
         }
         if let Some(runtime) = state.active_evicted.get(&scope).and_then(Weak::upgrade) {
+            drop(state);
+            close_entry_runtimes(close_after_unlock)?;
             return Ok(runtime);
         }
         state.active_evicted.remove(&scope);
 
-        let runtime = Arc::new(self.factory.runtime_for_scope(scope.clone())?);
-        while state.cached.len() >= self.max_runtimes {
-            let Some(oldest) = state.lru.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = state.cached.remove(&oldest) {
-                if Arc::strong_count(&evicted) == 1 {
-                    close_after_unlock.push(evicted);
-                } else {
-                    state
-                        .active_evicted
-                        .insert(oldest, Arc::downgrade(&evicted));
-                }
+        let runtime = match self.factory.runtime_for_scope(scope.clone()) {
+            Ok(runtime) => Arc::new(runtime),
+            Err(error) => {
+                drop(state);
+                close_entry_runtimes(close_after_unlock)?;
+                return Err(error);
             }
-        }
+        };
+        state.evict_to_limit(max_runtimes.saturating_sub(1), &mut close_after_unlock);
         state.lru.push_back(scope.clone());
         state.cached.insert(scope, Arc::clone(&runtime));
         drop(state);
-        for evicted in close_after_unlock {
-            evicted.runtime.close(MemoryCloseRequest {
-                reason: "entry_runtime_manager_evicted".to_string(),
-            })?;
-        }
+        close_entry_runtimes(close_after_unlock)?;
         Ok(runtime)
     }
+
+    fn max_runtimes_for_report(&self, report: &RuntimeBudgetReport) -> usize {
+        effective_runtime_cache_limit(
+            self.requested_max_runtimes,
+            report.llm_gateway_budget.runtime_cache_max_runtimes,
+        )
+    }
+}
+
+fn effective_runtime_cache_limit(requested: Option<usize>, current_report_limit: usize) -> usize {
+    let current = current_report_limit.max(1);
+    requested.map_or(current, |value| value.min(current))
 }
 
 impl EntryRuntimeManagerState {
@@ -215,16 +266,54 @@ impl EntryRuntimeManagerState {
         self.active_evicted
             .retain(|_, runtime| runtime.strong_count() > 0);
     }
+
+    fn evict_to_limit(&mut self, limit: usize, close_after_unlock: &mut Vec<Arc<EntryRuntime>>) {
+        while self.cached.len() > limit {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.cached.remove(&oldest) {
+                if Arc::strong_count(&evicted) == 1 {
+                    close_after_unlock.push(evicted);
+                } else {
+                    self.active_evicted.insert(oldest, Arc::downgrade(&evicted));
+                }
+            }
+        }
+    }
+}
+
+fn close_entry_runtimes(runtimes: Vec<Arc<EntryRuntime>>) -> Result<()> {
+    for runtime in runtimes {
+        runtime.runtime.close(MemoryCloseRequest {
+            reason: "entry_runtime_manager_evicted".to_string(),
+        })?;
+    }
+    Ok(())
 }
 
 pub struct EntryRuntime {
     config: EntryRuntimeConfig,
     store: MemoryStoreHandle,
     runtime: MemoryRuntime,
-    runtime_budget: RuntimeBudgetReport,
     capability: EntryCapabilityView,
     idempotency: EntryIdempotencyCache,
     console: EntryConsoleState,
+}
+
+#[derive(Debug)]
+pub struct EntryRuntimeBudgetLease {
+    inner: RuntimeBudgetLease,
+}
+
+impl EntryRuntimeBudgetLease {
+    pub fn report(&self) -> &RuntimeBudgetReport {
+        self.inner.report()
+    }
+
+    pub fn report_id(&self) -> &str {
+        self.inner.report_id()
+    }
 }
 
 impl EntryRuntime {
@@ -233,11 +322,7 @@ impl EntryRuntime {
         factory.runtime_for_scope(config.runtime_scope())
     }
 
-    fn from_store_handle(
-        config: EntryRuntimeConfig,
-        store: MemoryStoreHandle,
-        runtime_budget: RuntimeBudgetReport,
-    ) -> Result<Self> {
+    fn from_store_handle(config: EntryRuntimeConfig, store: MemoryStoreHandle) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
         let privacy = privacy_policy(config.privacy.clone());
         let runtime = MemoryRuntime::builder()
@@ -249,27 +334,25 @@ impl EntryRuntime {
                 config.scope.channel.clone(),
                 config.scope.chat_id.clone(),
             )?)
-            .profile(config.profile)
             .store(store.clone())
-            .runtime_budget(runtime_budget.clone())
             .agent_skill_dirs(agent_skill_dirs_from_env())
             .capability_policy(capability_policy.clone())
             .privacy_policy(privacy.clone())
             .audit_sink(Arc::new(NoopMemoryAuditSink))
             .build()?;
+        let runtime_budget = runtime.runtime_budget();
         let capability = entry_capability_view(
-            config.profile,
+            runtime_budget.profile,
             &capability_policy,
             &privacy,
             &config.transports,
         )?;
         let idempotency = EntryIdempotencyCache::new(config.idempotency.max_keys);
-        let console = EntryConsoleState::new(&config);
+        let console = EntryConsoleState::new(&config, &runtime_budget);
         Ok(Self {
             config,
             store,
             runtime,
-            runtime_budget,
             capability,
             idempotency,
             console,
@@ -280,12 +363,77 @@ impl EntryRuntime {
         &self.runtime
     }
 
-    pub fn runtime_budget(&self) -> &RuntimeBudgetReport {
-        &self.runtime_budget
+    pub fn runtime_budget(&self) -> RuntimeBudgetReport {
+        self.runtime.runtime_budget()
+    }
+
+    pub fn acquire_budget_lease(&self) -> Result<EntryRuntimeBudgetLease> {
+        self.runtime
+            .acquire_runtime_budget_lease()
+            .map(|inner| EntryRuntimeBudgetLease { inner })
+    }
+
+    pub fn execute_with_budget_lease<T>(
+        &self,
+        lease: &EntryRuntimeBudgetLease,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.runtime
+            .execute_with_runtime_budget_lease(&lease.inner, operation)
     }
 
     pub fn uses_local_default_scope_policy(&self) -> bool {
-        !self.config.auth.require_auth
+        !self.config.auth.requires_auth()
+    }
+
+    pub fn has_bearer_verifier(&self) -> bool {
+        self.config.auth.has_bearer_verifier()
+    }
+
+    pub fn authenticate_accepted_tcp_stream(
+        &self,
+        accepted: &crate::EntryAcceptedTcpStream,
+        authorization: Option<&str>,
+        loopback_principal: &str,
+    ) -> crate::EntryAuthDecision {
+        let decision = self.config.auth.authenticate_accepted_tcp_stream(
+            accepted,
+            authorization,
+            loopback_principal,
+        );
+        if decision
+            .bearer_principal()
+            .is_some_and(|principal| principal.owner_id() != self.config.identity.owner_id.trim())
+        {
+            return self
+                .config
+                .auth
+                .verify_bearer_for_owner(authorization, &self.config.identity.owner_id);
+        }
+        decision
+    }
+
+    pub fn authenticate_remote_bearer(
+        &self,
+        authorization: Option<&str>,
+    ) -> crate::EntryAuthDecision {
+        self.config
+            .auth
+            .verify_bearer_for_owner(authorization, &self.config.identity.owner_id)
+    }
+
+    pub fn authenticate_local_transport(
+        &self,
+        transport: crate::EntryLocalTransport,
+        principal: &str,
+    ) -> crate::EntryAuthDecision {
+        self.config
+            .auth
+            .authenticate_local_transport(transport, principal)
+    }
+
+    pub fn accepted_at(&self) -> u64 {
+        self.runtime.config().clock.now_secs()
     }
 
     pub fn capability(&self) -> &EntryCapabilityView {
@@ -309,9 +457,10 @@ impl EntryRuntime {
             .runtime
             .deferred_governance_report()
             .unwrap_or_default();
+        let runtime_budget = self.runtime_budget();
         self.console.overview_with_telemetry_and_budget(
             telemetry,
-            &self.runtime_budget,
+            &runtime_budget,
             deferred_governance,
         )
     }
@@ -537,13 +686,13 @@ impl EntryRuntime {
 
     fn console_workbench_projection_inspector(&self) -> EntryConsoleWorkbenchProjectionInspector {
         let query = "Show operator-safe memory workbench context.".to_string();
+        let runtime_budget = self.runtime_budget();
         match project_adapter_report(
             &self.runtime,
             MemoryProjectionRequest {
                 structured_query_facets: Vec::new(),
                 user_query: query.clone(),
-                system_max_len: self
-                    .runtime_budget
+                system_max_len: runtime_budget
                     .projection_render_budget
                     .system_block_max_chars,
                 recent_messages_limit: 8,
@@ -637,20 +786,30 @@ impl EntryRuntime {
     }
 
     fn console_workbench_vault_migration(&self) -> EntryConsoleWorkbenchVaultMigration {
-        let source_memory_space_id = self.config.scope.chat_id.clone();
+        let source_memory_space_id = self.runtime.memory_space_id().to_string();
         let target_memory_space_id = format!("{source_memory_space_id}-vault-preview");
-        match self.runtime.export_memory_space(MemorySpaceExportRequest {
+        let source_scope = MemorySpaceScope {
             memory_space_id: source_memory_space_id.clone(),
+            mounted_subject_id: self.runtime.subject_id().to_string(),
+        };
+        let target_scope = MemorySpaceScope {
+            memory_space_id: target_memory_space_id.clone(),
+            mounted_subject_id: self.runtime.subject_id().to_string(),
+        };
+        match self.runtime.export_memory_space(MemorySpaceExportRequest {
+            scope: source_scope.clone(),
             include_private: false,
         }) {
             Ok(export) => {
                 let preview =
                     self.runtime
                         .preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-                            source_memory_space_id: source_memory_space_id.clone(),
-                            target_memory_space_id: target_memory_space_id.clone(),
-                            source_profile: self.config.profile,
-                            target_profile: self.config.profile,
+                            source_scope,
+                            target_scope,
+                            expected_private_material_policy:
+                                MemorySpacePrivateMaterialPolicy::ExcludePrivate,
+                            source_profile: self.runtime_budget().profile,
+                            target_profile: self.runtime_budget().profile,
                             archive: export.archive,
                         });
                 match preview {
@@ -662,6 +821,17 @@ impl EntryRuntime {
                                 "vault_migration_preflight_blocked",
                             )
                         };
+                        let mut preflight_failures = vault_preflight_failures(
+                            report.vault_preflight.schema_allowed,
+                            report.vault_preflight.capability_allowed,
+                            report.vault_preflight.privacy_allowed,
+                            report.vault_preflight.lineage_allowed,
+                        );
+                        if report.manifest.identity_remap.required
+                            && !report.manifest.identity_remap.applied
+                        {
+                            preflight_failures.push(report.manifest.identity_remap.reason.clone());
+                        }
                         EntryConsoleWorkbenchVaultMigration {
                             status,
                             source_memory_space_id,
@@ -672,12 +842,7 @@ impl EntryRuntime {
                             privacy_redactions: report.privacy_redactions,
                             loss_risk: report.loss_risk,
                             preflight_passed: report.vault_preflight.passed,
-                            preflight_failures: vault_preflight_failures(
-                                report.vault_preflight.schema_allowed,
-                                report.vault_preflight.capability_allowed,
-                                report.vault_preflight.privacy_allowed,
-                                report.vault_preflight.lineage_allowed,
-                            ),
+                            preflight_failures,
                             snapshot_fingerprint: report.state_fingerprint,
                             event_fingerprint: report.event_fingerprint,
                         }
@@ -716,10 +881,10 @@ impl EntryRuntime {
     }
 
     fn console_workbench_soul_health(&self) -> EntryConsoleWorkbenchSoulHealth {
+        let runtime_budget = self.runtime_budget();
         match self.runtime.inspect(MemoryInspectionRequest {
             query: "workbench soul health".to_string(),
-            system_max_len: self
-                .runtime_budget
+            system_max_len: runtime_budget
                 .projection_render_budget
                 .system_block_max_chars,
             pressure: PressureLevel::Normal,
@@ -741,7 +906,7 @@ impl EntryRuntime {
             },
             Err(error) => EntryConsoleWorkbenchSoulHealth {
                 status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
-                profile: self.config.profile.as_str().to_string(),
+                profile: runtime_budget.profile.as_str().to_string(),
                 hygiene_summary: "inspection_unavailable".to_string(),
                 runtime_skill_records: 0,
                 deferred_total: 0,
@@ -848,7 +1013,7 @@ impl EntryRuntime {
             edit_reason: payload
                 .edit_reason
                 .unwrap_or_else(|| "operator_runtime_skill_edit".to_string()),
-            observed_at: current_unix_secs(),
+            observed_at: self.accepted_at(),
         })?;
         let mutation: EntryConsoleSkillMutation = report.into();
         if mutation.accepted {
@@ -912,7 +1077,8 @@ impl EntryRuntime {
         context: EntryTransportContext,
         command: AdapterCommand,
     ) -> Result<EntryResponse> {
-        self.handle_with_services(context, command, AdapterRuntimeServices::none())
+        let lease = self.acquire_budget_lease()?;
+        self.handle_with_budget_lease(context, command, &lease)
     }
 
     pub fn handle_with_services(
@@ -921,25 +1087,149 @@ impl EntryRuntime {
         command: AdapterCommand,
         services: AdapterRuntimeServices<'_>,
     ) -> Result<EntryResponse> {
-        if let Some(reason) = auth_rejection_reason(&self.config.auth, &context.auth) {
-            return Ok(EntryResponse::from_adapter(AdapterResponse::Rejected {
-                request_id: context.request_id,
-                audit_id: context.audit_id,
-                error_key: AdapterErrorKey::Unauthorized,
-                reason,
-            }));
+        let lease = self.acquire_budget_lease()?;
+        self.handle_with_budget_lease_and_services(context, command, services, &lease)
+    }
+
+    pub fn handle_with_budget_lease(
+        &self,
+        context: EntryTransportContext,
+        command: AdapterCommand,
+        lease: &EntryRuntimeBudgetLease,
+    ) -> Result<EntryResponse> {
+        self.handle_with_budget_lease_and_services(
+            context,
+            command,
+            AdapterRuntimeServices::none(),
+            lease,
+        )
+    }
+
+    pub fn handle_with_budget_lease_and_services(
+        &self,
+        context: EntryTransportContext,
+        command: AdapterCommand,
+        services: AdapterRuntimeServices<'_>,
+        lease: &EntryRuntimeBudgetLease,
+    ) -> Result<EntryResponse> {
+        self.execute_with_budget_lease(lease, || {
+            self.handle_in_budget_lease(context, command, services, lease)
+        })
+    }
+
+    fn handle_in_budget_lease(
+        &self,
+        context: EntryTransportContext,
+        command: AdapterCommand,
+        services: AdapterRuntimeServices<'_>,
+        lease: &EntryRuntimeBudgetLease,
+    ) -> Result<EntryResponse> {
+        if context.operation() != command.operation() {
+            return Ok(EntryResponse::from_adapter(
+                AdapterResponse::Rejected {
+                    request_id: context.request_id().to_string(),
+                    audit_id: context.audit_id().to_string(),
+                    error_key: AdapterErrorKey::OperationMismatch,
+                    reason: "entry operation context does not match decoded command".to_string(),
+                },
+                lease.report().clone(),
+            ));
         }
-        if is_mutation(command.operation()) && !self.idempotency.remember(&context.idempotency_key)
-        {
-            return Ok(EntryResponse::from_adapter(AdapterResponse::Duplicated {
-                request_id: context.request_id,
-                audit_id: context.audit_id,
-                idempotency_key: context.idempotency_key,
-            }));
+        if let Some(reason) = auth_rejection_reason(
+            &self.config.auth,
+            &self.config.identity.owner_id,
+            context.auth(),
+        ) {
+            return Ok(EntryResponse::from_adapter(
+                AdapterResponse::Rejected {
+                    request_id: context.request_id().to_string(),
+                    audit_id: context.audit_id().to_string(),
+                    error_key: AdapterErrorKey::Unauthorized,
+                    reason,
+                },
+                lease.report().clone(),
+            ));
         }
+        let required_capability =
+            crate::EntryOperationCapability::for_adapter_operation(command.operation());
+        if !context.auth().allows(required_capability) {
+            return Ok(EntryResponse::from_adapter(
+                AdapterResponse::Rejected {
+                    request_id: context.request_id().to_string(),
+                    audit_id: context.audit_id().to_string(),
+                    error_key: AdapterErrorKey::Forbidden,
+                    reason: format!(
+                        "entry principal lacks required operation capability: {}",
+                        required_capability.as_str()
+                    ),
+                },
+                lease.report().clone(),
+            ));
+        }
+        let idempotency_reservation = if command.operation().requires_idempotency() {
+            let fingerprint_material = command
+                .idempotency_fingerprint_material()
+                .map_err(|error| bm_sdk::Error::config("entry_idempotency", error.to_string()))?;
+            let digest = format!("{:x}", Sha256::digest(&fingerprint_material));
+            match self.idempotency.reserve(context.idempotency_key(), &digest) {
+                crate::idempotency::EntryIdempotencyReservationOutcome::Reserved(reservation) => {
+                    Some(reservation)
+                }
+                crate::idempotency::EntryIdempotencyReservationOutcome::DuplicateCommitted => {
+                    return Ok(EntryResponse::from_adapter(
+                        AdapterResponse::Duplicated {
+                            request_id: context.request_id().to_string(),
+                            audit_id: context.audit_id().to_string(),
+                            idempotency_key: context.idempotency_key().to_string(),
+                        },
+                        lease.report().clone(),
+                    ));
+                }
+                crate::idempotency::EntryIdempotencyReservationOutcome::InFlight => {
+                    return Ok(EntryResponse::from_adapter(
+                        AdapterResponse::Rejected {
+                            request_id: context.request_id().to_string(),
+                            audit_id: context.audit_id().to_string(),
+                            error_key: AdapterErrorKey::Duplicated,
+                            reason: "idempotency key is reserved by an in-flight mutation"
+                                .to_string(),
+                        },
+                        lease.report().clone(),
+                    ));
+                }
+                crate::idempotency::EntryIdempotencyReservationOutcome::Conflict => {
+                    return Ok(EntryResponse::from_adapter(
+                        AdapterResponse::Rejected {
+                            request_id: context.request_id().to_string(),
+                            audit_id: context.audit_id().to_string(),
+                            error_key: AdapterErrorKey::Duplicated,
+                            reason:
+                                "idempotency key is reserved or committed for a different payload"
+                                    .to_string(),
+                        },
+                        lease.report().clone(),
+                    ));
+                }
+                crate::idempotency::EntryIdempotencyReservationOutcome::CapacityExhausted => {
+                    return Ok(EntryResponse::from_adapter(
+                        AdapterResponse::Rejected {
+                            request_id: context.request_id().to_string(),
+                            audit_id: context.audit_id().to_string(),
+                            error_key: AdapterErrorKey::RuntimeRejected,
+                            reason: "idempotency reservation capacity is exhausted by in-flight mutations"
+                                .to_string(),
+                        },
+                        lease.report().clone(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
 
         let operation = command.operation();
         let source = context.source(&self.config.identity, &self.config.scope);
+        let context = context.into_parts();
         let auth = context.auth.into_adapter();
         let envelope = AdapterEnvelope {
             request_id: context.request_id,
@@ -952,8 +1242,17 @@ impl EntryRuntime {
             audit_id: context.audit_id,
             payload: command,
         };
-        let response = dispatch_adapter_command_with_services(&self.runtime, envelope, services)
-            .map(EntryResponse::from_adapter)?;
+        let response =
+            dispatch_adapter_command_with_services(&self.runtime, &lease.inner, envelope, services)
+                .map(|adapter| EntryResponse::from_adapter(adapter, lease.report().clone()))?;
+        if matches!(
+            &response.adapter,
+            AdapterResponse::Accepted { .. } | AdapterResponse::Queued { .. }
+        ) {
+            if let Some(reservation) = idempotency_reservation {
+                reservation.commit();
+            }
+        }
         self.console
             .record_adapter_response(operation, &response.adapter);
         Ok(response)
@@ -964,20 +1263,13 @@ impl EntryRuntime {
         event_store_paths: &[PathBuf],
     ) -> EntryConsoleTelemetrySnapshot {
         const SECS_PER_DAY: u64 = 24 * 60 * 60;
-        let today_start = (current_unix_secs() / SECS_PER_DAY) * SECS_PER_DAY;
+        let today_start = (self.accepted_at() / SECS_PER_DAY) * SECS_PER_DAY;
         let report = self
             .store
             .telemetry_report_with_file_stores(event_store_paths, today_start)
             .unwrap_or_default();
         EntryConsoleTelemetrySnapshot::from_store_telemetry(report)
     }
-}
-
-fn current_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn agent_skill_dirs_from_env() -> Vec<AgentSkillDirConfig> {
@@ -1082,92 +1374,44 @@ pub fn entry_capability_view(
     ))
 }
 
-fn compile_entry_runtime_budget(profile: ProfileId) -> RuntimeBudgetReport {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    compile_runtime_budget(RuntimeBudgetInput {
-        profile,
-        resource_snapshot: probe_host_runtime_resource(now_secs),
-        static_platform_manifest: StaticPlatformManifest::for_profile(profile),
-        provider_model_context_limit: None,
-    })
-}
-
-fn open_store(
-    config: &EntryStoreConfig,
-    profile: ProfileId,
-    runtime_budget: &RuntimeBudgetReport,
-) -> Result<MemoryStoreHandle> {
-    let store_config = match config.backend {
-        StoreBackendKind::InMemory => StoreBackendConfig::in_memory(profile)?,
-        StoreBackendKind::Embedded => StoreBackendConfig::embedded(profile)?,
-        StoreBackendKind::File => {
-            let path = config.data_path.clone().ok_or_else(|| {
-                Error::config("entry_store_config", "file store requires data_path")
-            })?;
-            validate_absolute_store_path(&path, "file")?;
-            StoreBackendConfig::file(path, profile)?
-        }
-        StoreBackendKind::Sqlite => {
-            let path = config.data_path.clone().ok_or_else(|| {
-                Error::config("entry_store_config", "sqlite store requires data_path")
-            })?;
-            validate_absolute_store_path(&path, "sqlite")?;
-            StoreBackendConfig::sqlite(path, profile)?
-        }
-    }
-    .with_fsync(config.fsync)
-    .with_runtime_store_budget(runtime_budget.store_budget);
-    MemoryStoreHandle::open(store_config)
-}
-
-fn validate_absolute_store_path(path: &std::path::Path, backend: &str) -> Result<()> {
-    if path.is_absolute() {
-        return Ok(());
-    }
-    Err(Error::config(
-        "entry_store_config",
-        format!("{backend} store path must be absolute"),
-    ))
-}
-
 fn auth_rejection_reason(
     auth_config: &EntryAuthConfig,
+    expected_owner_id: &str,
     decision: &crate::EntryAuthDecision,
 ) -> Option<String> {
-    if !auth_config.require_auth {
+    if !auth_config.requires_auth() {
         return None;
     }
-    if decision.local_loopback {
+    if decision.is_loopback() {
         return Some("entry auth rejected loopback for remote/auth-required profile".to_string());
     }
-    if !decision.authenticated {
+    if !decision.is_authenticated() {
         return Some(format!(
             "entry auth rejected request: {}",
-            decision
-                .rejection_reason
-                .as_deref()
-                .unwrap_or("unauthenticated")
+            decision.rejection_reason().unwrap_or("unauthenticated")
         ));
     }
-    if let Some(expected) = auth_config.token_fingerprint() {
-        if decision.token_fingerprint.as_deref() != Some(expected.as_str()) {
-            return Some("entry auth rejected request: token_fingerprint mismatch".to_string());
-        }
+    let Some(principal) = decision.bearer_principal() else {
+        return Some(
+            "entry auth rejected request: configured bearer principal is required".to_string(),
+        );
+    };
+    if principal.owner_id() != expected_owner_id.trim() {
+        return Some("entry auth rejected request: bearer owner binding mismatch".to_string());
     }
     None
 }
 
-const fn is_mutation(operation: bm_adapter::AdapterOperation) -> bool {
-    matches!(
-        operation,
-        bm_adapter::AdapterOperation::Write
-            | bm_adapter::AdapterOperation::Maintain
-            | bm_adapter::AdapterOperation::Recover
-            | bm_adapter::AdapterOperation::Import
-            | bm_adapter::AdapterOperation::TranscriptAttrWrite
-            | bm_adapter::AdapterOperation::Close
-    )
+#[cfg(test)]
+mod runtime_cache_budget_tests {
+    use super::effective_runtime_cache_limit;
+
+    #[test]
+    fn cache_limit_tracks_current_report_and_never_preserves_a_larger_open_time_limit() {
+        assert_eq!(effective_runtime_cache_limit(None, 8), 8);
+        assert_eq!(effective_runtime_cache_limit(None, 2), 2);
+        assert_eq!(effective_runtime_cache_limit(Some(6), 8), 6);
+        assert_eq!(effective_runtime_cache_limit(Some(6), 2), 2);
+        assert_eq!(effective_runtime_cache_limit(Some(6), 0), 1);
+    }
 }

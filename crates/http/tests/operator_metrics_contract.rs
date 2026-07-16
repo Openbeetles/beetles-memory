@@ -1,14 +1,16 @@
 #![cfg(feature = "server-std")]
 
+mod support;
+
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
-use bm_http::{handle_http_request, HttpRuntimeRequest};
+use bm_http::{handle_http_in_process_request, HttpRuntimeRequest};
 use bm_sdk::{
     default_agent_subject_id, CanonicalTurnDelta, ConversationScope, MemoryCapabilityPolicy,
     MemoryPrivacyPolicy, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
-    MemoryTurnSource, ProfileId, StoreBackendKind, TranscriptInputMessage,
+    MemoryTurnSource, StoreBackendConfig, TranscriptInputMessage,
 };
 use serde_json::Value;
 
@@ -16,7 +18,6 @@ fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "operator-metrics-agent".to_string(),
             owner_id: "operator-owner".to_string(),
@@ -25,11 +26,9 @@ fn runtime() -> EntryRuntime {
             channel: "operator.metrics".to_string(),
             chat_id: "operator-chat".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(support::native_runtime_profile())
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 32 },
@@ -85,7 +84,7 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
 #[test]
 fn operator_overview_exposes_stable_runtime_metrics_fields() {
     let runtime = runtime();
-    let write = handle_http_request(
+    let write = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
@@ -95,8 +94,9 @@ fn operator_overview_exposes_stable_runtime_metrics_fields() {
     .expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);
 
-    let response = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
-        .expect("overview");
+    let response =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
+            .expect("overview");
     assert_eq!(response.status_code, 200, "{}", response.body);
     let body: Value = serde_json::from_str(&response.body).expect("json");
     let overview = &body["overview"];
@@ -128,8 +128,9 @@ fn operator_overview_exposes_deferred_governance_queue_from_sdk_report() {
         .finalize_turn_and_maintain(None, None, finalize_request())
         .expect("deferred finalize");
 
-    let response = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
-        .expect("overview");
+    let response =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
+            .expect("overview");
     assert_eq!(response.status_code, 200, "{}", response.body);
     let body: Value = serde_json::from_str(&response.body).expect("json");
     let queue = &body["overview"]["deferredGovernance"];

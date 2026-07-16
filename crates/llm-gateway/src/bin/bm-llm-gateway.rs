@@ -1,14 +1,48 @@
-use std::net::{TcpListener, TcpStream};
+#[cfg(all(
+    not(test),
+    not(any(
+        feature = "profile-server-linux-memory-gateway",
+        feature = "profile-desktop-macos-standalone-memory"
+    ))
+))]
+compile_error!(
+    "bm-llm-gateway executable requires exactly one production profile: profile-server-linux-memory-gateway or profile-desktop-macos-standalone-memory"
+);
+
+#[cfg(all(
+    not(test),
+    feature = "profile-server-linux-memory-gateway",
+    feature = "profile-desktop-macos-standalone-memory"
+))]
+compile_error!("bm-llm-gateway executable accepts exactly one production profile");
+
+#[cfg(all(
+    not(test),
+    feature = "profile-server-linux-memory-gateway",
+    not(target_os = "linux")
+))]
+compile_error!("profile-server-linux-memory-gateway requires target_os=linux");
+
+#[cfg(all(
+    not(test),
+    feature = "profile-desktop-macos-standalone-memory",
+    not(target_os = "macos")
+))]
+compile_error!("profile-desktop-macos-standalone-memory requires target_os=macos");
+
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bm_llm_gateway::{
-    serve_llm_gateway_http_stream_with_services, GatewayConfig, GatewayError,
-    GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig, GatewayProviderConfig,
-    GatewayProviderKind, GatewayRuntime, OllamaMaintenanceLlmClient, OpenAiGatewayServices,
-    OpenAiMaintenanceLlmClient, ReqwestGatewayLlmHttpClient, ReqwestOllamaNativeUpstream,
-    ReqwestOpenAiCompatibleUpstream,
+    serve_llm_gateway_http_accepted_stream_with_services_in_request, GatewayConfig, GatewayError,
+    GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig,
+    GatewayHttpRequestBindings, GatewayProviderConfig, GatewayProviderKind, GatewayRuntime,
+    OllamaMaintenanceLlmClient, OpenAiGatewayServices, OpenAiMaintenanceLlmClient,
+    ReqwestGatewayLlmHttpClient, ReqwestOllamaNativeUpstream, ReqwestOpenAiCompatibleUpstream,
 };
+use bm_sdk::StoreBackendConfig;
+#[cfg(test)]
 use bm_sdk::StoreBackendKind;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,13 +70,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.validate()?;
 
     let listener = TcpListener::bind(&config.server.bind_addr)?;
-    let gateway = Arc::new(GatewayRuntime::open(config.clone())?);
-    let front = GatewayHttpFront::new(GatewayHttpFrontConfig::default())?;
+    let gateway = Arc::new(GatewayRuntime::open(config)?);
+    let front = GatewayHttpFront::new(Arc::clone(&gateway), GatewayHttpFrontConfig::default())?;
     let front_config = front.config();
     front.serve_listener_with_factory(listener, move || {
         Box::new(ReqwestGatewayConnectionHandler {
             gateway: Arc::clone(&gateway),
-            config: config.clone(),
             request_timeout: front_config.request_timeout,
         })
     })?;
@@ -51,29 +84,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 struct ReqwestGatewayConnectionHandler {
     gateway: Arc<GatewayRuntime>,
-    config: GatewayConfig,
     request_timeout: std::time::Duration,
 }
 
 impl GatewayHttpConnectionHandler for ReqwestGatewayConnectionHandler {
-    fn handle(&mut self, stream: &mut TcpStream) -> bm_llm_gateway::Result<()> {
+    fn handle(
+        &mut self,
+        context: &bm_llm_gateway::GatewayRequestBudgetContext,
+        stream: &mut bm_entry::EntryAcceptedTcpStream,
+    ) -> bm_llm_gateway::Result<()> {
         let mut upstream = ReqwestOpenAiCompatibleUpstream::new_with_timeout(self.request_timeout)?;
         let mut ollama_upstream =
             ReqwestOllamaNativeUpstream::new_with_timeout(self.request_timeout)?;
-        let mut maintenance_http =
-            ReqwestGatewayLlmHttpClient::new_with_timeout(self.request_timeout)?;
+        let mut maintenance_http = ReqwestGatewayLlmHttpClient::new_with_timeout(
+            self.request_timeout,
+            context.response_budget().clone(),
+        )?;
         let maintenance_provider_name = std::env::var("BM_LLM_GATEWAY_MAINTENANCE_PROVIDER")
-            .unwrap_or_else(|_| self.config.default_provider.clone());
-        let maintenance_provider = self
-            .config
-            .providers
-            .get(&maintenance_provider_name)
-            .ok_or_else(|| {
-                GatewayError::invalid_config(format!(
-                    "maintenance provider is not configured: {maintenance_provider_name}"
-                ))
-            })?
-            .clone();
+            .unwrap_or_else(|_| self.gateway.default_provider_name().to_string());
+        let maintenance_provider = self.gateway.provider_config(&maintenance_provider_name)?;
         let maintenance_model = std::env::var("BM_LLM_GATEWAY_MAINTENANCE_MODEL")
             .unwrap_or_else(|_| "local".to_string());
         match maintenance_provider.kind {
@@ -82,12 +111,14 @@ impl GatewayHttpConnectionHandler for ReqwestGatewayConnectionHandler {
                     OpenAiMaintenanceLlmClient::new(maintenance_provider, maintenance_model);
                 let mut services = OpenAiGatewayServices::new()
                     .with_maintenance(&mut maintenance_http, &maintenance_llm);
-                serve_llm_gateway_http_stream_with_services(
+                serve_llm_gateway_http_accepted_stream_with_services_in_request(
                     &self.gateway,
-                    &self.config,
-                    &mut upstream,
-                    &mut ollama_upstream,
-                    &mut services,
+                    context,
+                    GatewayHttpRequestBindings::new(
+                        &mut upstream,
+                        &mut ollama_upstream,
+                        &mut services,
+                    ),
                     stream,
                 )
             }
@@ -96,12 +127,14 @@ impl GatewayHttpConnectionHandler for ReqwestGatewayConnectionHandler {
                     OllamaMaintenanceLlmClient::new(maintenance_provider, maintenance_model);
                 let mut services = OpenAiGatewayServices::new()
                     .with_maintenance(&mut maintenance_http, &maintenance_llm);
-                serve_llm_gateway_http_stream_with_services(
+                serve_llm_gateway_http_accepted_stream_with_services_in_request(
                     &self.gateway,
-                    &self.config,
-                    &mut upstream,
-                    &mut ollama_upstream,
-                    &mut services,
+                    context,
+                    GatewayHttpRequestBindings::new(
+                        &mut upstream,
+                        &mut ollama_upstream,
+                        &mut services,
+                    ),
                     stream,
                 )
             }
@@ -110,25 +143,28 @@ impl GatewayHttpConnectionHandler for ReqwestGatewayConnectionHandler {
 }
 
 fn apply_shared_memory_runtime_env(config: &mut GatewayConfig) -> bm_llm_gateway::Result<()> {
-    if env_truthy("BM_MEMORY_STORE_MEMORY") {
-        config.entry.store.backend = StoreBackendKind::InMemory;
-        config.entry.store.data_path = None;
-        config.entry.store.fsync = false;
+    let profile = config.entry.store.profile();
+    let store = if env_truthy("BM_MEMORY_STORE_MEMORY") {
+        StoreBackendConfig::in_memory(profile).map(|store| store.with_fsync(false))
     } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_SQLITE") {
-        config.entry.store.backend = StoreBackendKind::Sqlite;
-        config.entry.store.data_path =
-            Some(memory_store_path_from_env("BM_MEMORY_STORE_SQLITE", path)?);
-        config.entry.store.fsync = true;
+        StoreBackendConfig::sqlite(
+            memory_store_path_from_env("BM_MEMORY_STORE_SQLITE", path)?,
+            profile,
+        )
+        .map(|store| store.with_fsync(true))
     } else if let Ok(path) = std::env::var("BM_MEMORY_STORE_FILE") {
-        config.entry.store.backend = StoreBackendKind::File;
-        config.entry.store.data_path =
-            Some(memory_store_path_from_env("BM_MEMORY_STORE_FILE", path)?);
-        config.entry.store.fsync = true;
+        StoreBackendConfig::file(
+            memory_store_path_from_env("BM_MEMORY_STORE_FILE", path)?,
+            profile,
+        )
+        .map(|store| store.with_fsync(true))
     } else {
         return Err(GatewayError::invalid_config(
             "memory store backend must be explicit: set BM_MEMORY_STORE_MEMORY=1 or an absolute BM_MEMORY_STORE_FILE/BM_MEMORY_STORE_SQLITE",
         ));
     }
+    .map_err(|error| GatewayError::invalid_config(error.to_string()))?;
+    config.entry.store = store;
     if let Ok(owner) = std::env::var("BM_MEMORY_OWNER_ID") {
         config.scope.local_owner_id = Some(owner);
     }
@@ -254,7 +290,7 @@ mod tests {
         std::env::set_var("BM_MEMORY_STORE_MEMORY", "1");
         let mut config = GatewayConfig::default_for_local_dev();
         apply_shared_memory_runtime_env(&mut config).expect("explicit memory store");
-        assert_eq!(config.entry.store.backend, StoreBackendKind::InMemory);
-        assert_eq!(config.entry.store.data_path, None);
+        assert_eq!(config.entry.store.backend(), StoreBackendKind::InMemory);
+        assert_eq!(config.entry.store.data_path(), None);
     }
 }

@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "agent-tool-experience-agent-tool-registry-forbidden-compact",
   "class": "agent_tool_experience",
-  "profile": "esp_standalone_memory",
+  "profile": "target-esp+role-standalone-memory",
   "mode": "compact",
   "evaluation_source": "contract_baseline",
   "description": "Compact ESP profile rejects host agent-tool registry snapshots and keeps only runtime skill memory.",

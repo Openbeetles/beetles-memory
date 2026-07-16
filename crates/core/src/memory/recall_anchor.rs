@@ -17,12 +17,22 @@ impl CanonicalRecallEvidenceGroup {
 pub struct CanonicalRecallEvidenceFamilyGroup(String);
 
 impl CanonicalRecallEvidenceFamilyGroup {
+    pub fn from_structured_identity(value: &str) -> Option<Self> {
+        let normalized = normalize_structured_evidence_key(value);
+        let canonical = opaque_semantic_group("recall-family", &normalized);
+        (!canonical.is_empty()).then_some(Self(canonical))
+    }
+
     pub fn from_canonical(value: impl Into<String>) -> Option<Self> {
         canonical_opaque_group(value, "recall-family").map(Self)
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
     }
 }
 
@@ -80,20 +90,6 @@ fn canonical_recall_evidence_semantic_key(evidence_ref: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("external_eval:") {
-        return recall_external_eval_evidence_group_key(trimmed);
-    }
-    if lower.starts_with("session_")
-        || lower.starts_with("transcript:")
-        || lower.starts_with("turn:")
-        || lower.starts_with("turn_ledger:")
-        || lower.starts_with("archive:")
-        || lower.starts_with("daily_note:")
-        || lower.starts_with("turn_log:")
-    {
-        return normalize_structured_evidence_key(trimmed);
-    }
     normalize_structured_evidence_key(trimmed)
 }
 
@@ -132,21 +128,6 @@ fn canonical_opaque_group(value: impl Into<String>, namespace: &str) -> Option<S
     }
 }
 
-fn recall_external_eval_evidence_group_key(evidence_ref: &str) -> String {
-    let normalized = normalize_structured_evidence_key(evidence_ref);
-    let Some(source) = normalized.strip_prefix("external_eval:") else {
-        return normalized;
-    };
-    let canonical_source = source.split('|').next().unwrap_or(source).trim();
-    if canonical_source.is_empty() {
-        normalized
-    } else if canonical_source.starts_with("session_") {
-        String::new()
-    } else {
-        format!("external_eval:{canonical_source}")
-    }
-}
-
 fn normalize_structured_evidence_key(input: &str) -> String {
     input
         .trim()
@@ -171,8 +152,8 @@ mod tests {
     }
 
     #[test]
-    fn recall_evidence_groups_collapse_external_eval_composite_aliases() {
-        assert_eq!(
+    fn production_recall_groups_do_not_parse_external_eval_locator_aliases() {
+        assert_ne!(
             canonical_recall_evidence_group("external_eval:D1:12|session_1"),
             canonical_recall_evidence_group("external_eval:D1:12")
         );
@@ -180,7 +161,7 @@ mod tests {
             canonical_recall_evidence_group("external_eval:D1:12"),
             canonical_recall_evidence_group("external_eval:D1:13")
         );
-        assert!(canonical_recall_evidence_group("external_eval:session_1").is_empty());
+        assert!(!canonical_recall_evidence_group("external_eval:session_1").is_empty());
     }
 
     #[test]
@@ -225,32 +206,18 @@ mod tests {
     #[test]
     fn benchmark_locator_strings_do_not_determine_production_evidence_family() {
         let canonical = canonical_recall_evidence_group("external_eval:D1:12");
-        let session_group = canonical_recall_evidence_group("external_eval:D1:12|session_1");
-        let conversation_group =
-            canonical_recall_evidence_group("external_eval:D1:12|conversation_9");
-
-        assert_eq!(session_group, canonical);
-        assert_eq!(conversation_group, canonical);
-        assert_eq!(
-            recall_evidence_family_group(
-                CanonicalRecallEvidenceGroup::from_canonical(session_group)
-                    .expect("governed session evidence group")
-                    .into(),
-            ),
-            canonical
-        );
-        assert_eq!(
-            recall_evidence_family_group(
-                CanonicalRecallEvidenceGroup::from_canonical(conversation_group)
-                    .expect("governed conversation evidence group")
-                    .into(),
-            ),
-            canonical
-        );
         assert!(
             CanonicalRecallEvidenceGroup::from_canonical("external_eval:D1:12|session_1").is_none()
         );
-        assert!(CanonicalRecallEvidenceFamilyGroup::from_canonical("conversation_9").is_none());
+        let family = CanonicalRecallEvidenceFamilyGroup::from_structured_identity(
+            "conversation:conversation_9",
+        )
+        .expect("structured family");
+        assert_eq!(
+            recall_evidence_family_group(family.clone().into()),
+            family.as_str()
+        );
+        assert_ne!(family.as_str(), canonical);
     }
 
     #[test]

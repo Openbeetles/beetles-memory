@@ -87,6 +87,6 @@ test ! -e "$sqlite"
 test ! -e "$sqlite-wal"
 test ! -e "$sqlite-shm"
 
-cargo test -p bm-sdk --features nonproduction-replay-harness --test projection_audit_contract empty_store_projection_degrades_subject_mount_without_inventing_personality
-cargo test -p bm-sdk --features nonproduction-replay-harness --test projection_audit_contract empty_store_greeting_projection_does_not_leak_identity_meta_terms
-cargo test -p bm-sdk --features nonproduction-replay-harness --test sdk_runtime_flow runtime_projection_includes_private_planes_when_policy_allows_it
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test projection_audit_contract empty_store_projection_degrades_subject_mount_without_inventing_personality
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test projection_audit_contract empty_store_greeting_projection_does_not_leak_identity_meta_terms
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test sdk_runtime_flow runtime_projection_includes_private_planes_when_policy_allows_it

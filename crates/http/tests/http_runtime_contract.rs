@@ -1,15 +1,24 @@
 #![cfg(feature = "server-std")]
 
+mod support;
+
+#[cfg(feature = "nonproduction-replay-harness")]
 use bm_adapter::AdapterRuntimeServices;
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
-use bm_http::{handle_http_request, handle_http_request_with_services, HttpRuntimeRequest};
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_http::handle_http_in_process_request_with_services;
+use bm_http::{handle_http_in_process_request, HttpRuntimeRequest};
 use bm_sdk::{
-    AgentToolDescriptor, AgentToolRegistrySnapshot, LlmClient, LlmHttpClient, LlmModelCompat,
-    LlmResponse, MemoryCapabilityPolicy, MemoryPrivacyPolicy, Message, ProfileId, ResponseBody,
-    StopReason, StoreBackendKind, ToolChoicePolicy, ToolSpec,
+    AgentToolDescriptor, AgentToolRegistrySnapshot, MemoryCapabilityPolicy, MemoryPrivacyPolicy,
+    StoreBackendConfig,
+};
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_sdk::{
+    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, ResponseBody, StopReason,
+    ToolChoicePolicy, ToolSpec,
 };
 use serde_json::{json, Value};
 
@@ -17,7 +26,6 @@ fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "http-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -26,11 +34,9 @@ fn runtime() -> EntryRuntime {
             channel: "http".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(support::native_runtime_profile())
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled().with_cli(true),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 64 },
@@ -51,7 +57,7 @@ fn agent_tool_registry() -> AgentToolRegistrySnapshot {
 fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
     let runtime = runtime();
 
-    let caps = handle_http_request(
+    let caps = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::get("/memory/profile/capabilities"),
     )
@@ -59,8 +65,9 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
     assert_eq!(caps.status_code, 200);
     assert!(caps.body.contains("\"profile\""));
     assert!(caps.body.contains("\"entry\""));
+    assert!(caps.budget_report_id.starts_with("rtb-v2-"));
 
-    let recall = handle_http_request(
+    let recall = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json("/memory/recall", r#"{"query":"release","limit":2}"#),
     )
@@ -68,7 +75,7 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
     assert_eq!(recall.status_code, 200);
     assert!(recall.body.contains("\"status\""));
 
-    let long_term = handle_http_request(
+    let long_term = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json("/memory/long-term/list", r#"{"query":{},"limit":2}"#),
     )
@@ -78,12 +85,30 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
 }
 
 #[test]
+fn http_fallback_uses_stable_public_report_kind_without_debug_wire() {
+    let runtime = runtime();
+    let response = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/inspect",
+            r#"{"query":"release","system_max_len":4096}"#,
+        ),
+    )
+    .expect("inspect response");
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("response JSON");
+
+    assert_eq!(body["status"], "accepted");
+    assert_eq!(body["report_kind"], "inspect");
+    assert!(!response.body.contains("MemoryInspectionReport"));
+}
+
+#[test]
 fn http_runtime_registers_compact_agent_tool_registry_without_router_behavior() {
     let runtime = runtime();
     let registry = agent_tool_registry();
     let body = serde_json::to_string(&registry).expect("registry body");
 
-    let upsert = handle_http_request(
+    let upsert = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::put_json("/agent-tool-registries/host-tools", body),
     )
@@ -94,8 +119,9 @@ fn http_runtime_registers_compact_agent_tool_registry_without_router_behavior() 
     assert_eq!(upsert_body["report"]["registries"], 1);
     assert_eq!(upsert_body["report"]["tools"], 1);
 
-    let listed = handle_http_request(&runtime, HttpRuntimeRequest::get("/agent-tool-registries"))
-        .expect("list registries");
+    let listed =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/agent-tool-registries"))
+            .expect("list registries");
     let listed_body: Value = serde_json::from_str(&listed.body).expect("list json");
     assert_eq!(
         listed_body["registries"]
@@ -109,7 +135,7 @@ fn http_runtime_registers_compact_agent_tool_registry_without_router_behavior() 
         registry.registry_id.as_str()
     );
 
-    let fetched = handle_http_request(
+    let fetched = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::get("/agent-tool-registries/host-tools"),
     )
@@ -120,13 +146,13 @@ fn http_runtime_registers_compact_agent_tool_registry_without_router_behavior() 
         registry.fingerprint.as_str()
     );
 
-    let deleted = handle_http_request(
+    let deleted = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::delete("/agent-tool-registries/host-tools"),
     )
     .expect("delete registry");
     assert_eq!(deleted.status_code, 200);
-    let after_delete = handle_http_request(
+    let after_delete = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::get("/agent-tool-registries/host-tools"),
     )
@@ -138,7 +164,7 @@ fn http_runtime_registers_compact_agent_tool_registry_without_router_behavior() 
 fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
     let runtime = runtime();
     let registry = agent_tool_registry();
-    handle_http_request(
+    handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::put_json(
             "/agent-tool-registries/host-tools",
@@ -147,13 +173,13 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
     )
     .expect("upsert registry");
 
-    let project_without_experience = handle_http_request(
+    let project_without_experience = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/project",
             json!({
                 "query": "extract text from this PDF",
-                "max_len": 4096,
+                "system_max_len": 4096,
                 "recent_messages_limit": 8,
                 "tool_registry_refs": [registry.registry_ref()]
             })
@@ -212,7 +238,7 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
             "operator_note": null
         }
     });
-    let write = handle_http_request(
+    let write = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json("/memory/write", feedback.to_string()),
     )
@@ -221,13 +247,13 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
     assert_eq!(write_body["agent_tool_experience"]["accepted"], true);
     assert_eq!(write_body["changed"], 1);
 
-    let projected = handle_http_request(
+    let projected = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/project",
             json!({
                 "query": "extract text from this PDF",
-                "max_len": 4096,
+                "system_max_len": 4096,
                 "recent_messages_limit": 8,
                 "tool_registry_refs": [registry.registry_ref()]
             })
@@ -257,26 +283,26 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
 }
 
 #[test]
+#[cfg(feature = "nonproduction-replay-harness")]
 fn http_runtime_decodes_declared_memory_routes_through_entry_runtime() {
     let runtime = runtime();
     let routes = [
         (
             "/memory/project",
-            r#"{"query":"release","max_len":1024,"recent_messages_limit":2}"#,
+            r#"{"query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
         ),
-        ("/memory/inspect", r#"{"query":"release","max_len":1024}"#),
+        (
+            "/memory/inspect",
+            r#"{"query":"release","system_max_len":1024}"#,
+        ),
         ("/memory/recover", r#"{}"#),
         ("/memory/replay", r#"{"chat_id":"chat-1","limit":2}"#),
-        ("/memory/export", r#"{"chat_id":"chat-1"}"#),
-        (
-            "/memory/import",
-            r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,
-        ),
     ];
 
     for (path, body) in routes {
-        let response = handle_http_request(&runtime, HttpRuntimeRequest::post_json(path, body))
-            .unwrap_or_else(|err| panic!("{path} failed: {err}"));
+        let response =
+            handle_http_in_process_request(&runtime, HttpRuntimeRequest::post_json(path, body))
+                .unwrap_or_else(|err| panic!("{path} failed: {err}"));
         assert_eq!(response.status_code, 200, "{path}: {}", response.body);
         assert!(
             response.body.contains("\"status\""),
@@ -290,7 +316,7 @@ fn http_runtime_decodes_declared_memory_routes_through_entry_runtime() {
 fn http_runtime_body_limit_comes_from_runtime_budget_report() {
     let runtime = runtime();
     let over_budget = "x".repeat(runtime.runtime_budget().adapter_budget.http_body_max_bytes + 1);
-    let error = handle_http_request(
+    let error = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json("/memory/recall", &over_budget),
     )
@@ -300,10 +326,23 @@ fn http_runtime_body_limit_comes_from_runtime_budget_report() {
 }
 
 #[test]
+fn http_runtime_accepts_body_at_exact_pinned_budget() {
+    let runtime = runtime();
+    let max_bytes = runtime.runtime_budget().adapter_budget.http_body_max_bytes;
+    let mut request = HttpRuntimeRequest::get("/memory/profile/capabilities");
+    request.body = " ".repeat(max_bytes);
+
+    let response = handle_http_in_process_request(&runtime, request).expect("exact boundary body");
+
+    assert_eq!(response.status_code, 200);
+    assert!(response.budget_report_id.starts_with("rtb-v2-"));
+}
+
+#[test]
 fn http_runtime_agent_tool_registry_body_limit_uses_runtime_budget_report() {
     let runtime = runtime();
     let over_budget = "x".repeat(runtime.runtime_budget().adapter_budget.http_body_max_bytes + 1);
-    let error = handle_http_request(
+    let error = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::put_json("/agent-tool-registries/host-tools", &over_budget),
     )
@@ -313,11 +352,12 @@ fn http_runtime_agent_tool_registry_body_limit_uses_runtime_budget_report() {
 }
 
 #[test]
+#[cfg(feature = "nonproduction-replay-harness")]
 fn http_runtime_runs_maintenance_when_llm_services_are_injected() {
     let runtime = runtime();
     let mut http = StaticHttpClient;
     let llm = StaticLlmClient;
-    let response = handle_http_request_with_services(
+    let response = handle_http_in_process_request_with_services(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/maintain",
@@ -331,11 +371,16 @@ fn http_runtime_runs_maintenance_when_llm_services_are_injected() {
     .expect("maintain");
 
     assert_eq!(response.status_code, 200);
-    assert!(response.body.contains("Maintain"));
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("response JSON");
+    assert_eq!(body["status"], "accepted");
+    assert_eq!(body["report_kind"], "maintain");
+    assert!(!response.body.contains("MemoryMaintenanceReport"));
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 struct StaticHttpClient;
 
+#[cfg(feature = "nonproduction-replay-harness")]
 impl LlmHttpClient for StaticHttpClient {
     fn do_post(
         &mut self,
@@ -347,8 +392,10 @@ impl LlmHttpClient for StaticHttpClient {
     }
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 struct StaticLlmClient;
 
+#[cfg(feature = "nonproduction-replay-harness")]
 impl LlmClient for StaticLlmClient {
     fn model_compat(&self) -> LlmModelCompat {
         LlmModelCompat::default()

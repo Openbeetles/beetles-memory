@@ -1,32 +1,235 @@
+mod support;
 use bm_core::budget::StoreRuntimeBudget;
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::Platform as _;
+#[cfg(feature = "sqlite-store")]
+use bm_sdk::nonproduction_replay_harness::SqliteStoreEngine;
 use bm_sdk::nonproduction_replay_harness::{
-    InMemoryStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
-    StoreBackendKind, StoreCapacityBudget, StoreEngine, StoreEventLog, StoreEventScope,
-    StorePlatform, StoreSnapshot, StoreSnapshotBlob,
+    EmbeddedStoreEngine, FileStoreEngine, InMemoryStoreEngine, MemoryStoreEvent,
+    MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget, StoreEngine,
+    StoreEventLog, StoreEventScope, StoreScopedProjectionReplaceRequest,
+    StoreScopedProjectionScope, StoreSnapshot, StoreSnapshotBlob, StoreSnapshotJsonDoc,
 };
+use serde_json::{json, Value};
 
 fn tiny_store_budget() -> StoreRuntimeBudget {
     StoreRuntimeBudget {
         event_log_max_items: 8,
-        kv_max_entries: 8,
+        kv_max_entries: 256,
         blob_max_bytes: 4,
         snapshot_max_bytes: 128,
         logical_namespace_max_bytes: 64,
-        logical_key_max_bytes: 32,
-        event_record_key_max_bytes: 32,
+        logical_key_max_bytes: 64,
+        event_record_key_max_bytes: 64,
         export_max_bytes: 128,
         import_max_bytes: 128,
     }
 }
 
+fn typed_restore_engine_capacity() -> StoreCapacityBudget {
+    StoreCapacityBudget {
+        event_log_max_items: 8,
+        kv_max_entries: 16,
+        blob_max_bytes: 8,
+        snapshot_max_bytes: 4096,
+        logical_namespace_max_bytes: 128,
+        logical_key_max_bytes: 128,
+        event_record_key_max_bytes: 128,
+        export_max_bytes: 4096,
+        import_max_bytes: 4096,
+    }
+}
+
+fn typed_restore_event(event_id: &str, revision: &str) -> MemoryStoreEvent {
+    MemoryStoreEvent::new(
+        event_id,
+        MemoryStoreEventKind::MemoryProjection,
+        StoreEventScope::new("agent", "owner", "test", "typed-restore")
+            .with_memory_space("space:typed-restore")
+            .with_subject("subject:typed-restore"),
+        1,
+    )
+    .with_plane("self_model")
+    .with_record_key("subject:typed-restore")
+    .with_payload("revision", revision)
+}
+
+fn typed_restore_request() -> StoreScopedProjectionReplaceRequest {
+    StoreScopedProjectionReplaceRequest {
+        scope: StoreScopedProjectionScope::new("space:typed-restore", "subject:typed-restore")
+            .expect("typed restore scope"),
+        json_namespaces: vec!["self_model".to_string()],
+        json_docs: vec![StoreSnapshotJsonDoc {
+            namespace: "self_model".to_string(),
+            key: "subject:typed-restore".to_string(),
+            value: json!({"revision": "replacement"}),
+        }],
+        events: vec![typed_restore_event("typed-restore:new", "replacement")],
+    }
+}
+
+fn seed_typed_restore(engine: &dyn StoreEngine) {
+    engine
+        .put_json_value(
+            "self_model",
+            "subject:typed-restore",
+            json!({"revision": "before"}),
+        )
+        .expect("seed typed restore JSON");
+    engine
+        .put_blob("retained_private", "keep", b"12345")
+        .expect("seed typed restore retained blob");
+    engine
+        .append_event(typed_restore_event("typed-restore:before", "before"))
+        .expect("seed typed restore event");
+}
+
+fn typed_restore_state(
+    engine: &dyn StoreEngine,
+) -> (Option<Value>, Option<Vec<u8>>, Vec<MemoryStoreEvent>) {
+    (
+        engine
+            .get_json_value("self_model", "subject:typed-restore")
+            .expect("read typed restore JSON"),
+        engine
+            .get_blob("retained_private", "keep")
+            .expect("read typed restore blob"),
+        engine.read_events().expect("read typed restore events"),
+    )
+}
+
+fn assert_typed_restore_success(
+    backend: &str,
+    engine: &dyn StoreEngine,
+    capacity: StoreCapacityBudget,
+) {
+    let request = typed_restore_request();
+    engine
+        .replace_scoped_projection_with_capacity(&request, capacity)
+        .unwrap_or_else(|error| panic!("{backend} typed restore exact budget: {error}"));
+    let state = typed_restore_state(engine);
+    assert_eq!(
+        state.0,
+        Some(json!({"revision": "replacement"})),
+        "{backend}"
+    );
+    assert_eq!(state.1, Some(b"12345".to_vec()), "{backend}");
+    assert_eq!(state.2, request.events, "{backend}");
+}
+
+fn assert_typed_restore_rejected_unchanged(
+    backend: &str,
+    engine: &dyn StoreEngine,
+    capacity: StoreCapacityBudget,
+) {
+    let before = typed_restore_state(engine);
+    let error = engine
+        .replace_scoped_projection_with_capacity(&typed_restore_request(), capacity)
+        .expect_err("typed restore +1 budget must fail closed");
+    assert_eq!(error.stage(), "store_budget_exceeded", "backend={backend}");
+    assert_eq!(typed_restore_state(engine), before, "backend={backend}");
+}
+
+fn assert_typed_restore_budget_matrix(
+    backend: &str,
+    mut open: impl FnMut(&str) -> Box<dyn StoreEngine>,
+) {
+    let request = typed_restore_request();
+    let json_event_bytes = request
+        .json_docs
+        .iter()
+        .map(|doc| serde_json::to_vec(&doc.value).expect("JSON bytes").len())
+        .sum::<usize>()
+        + request
+            .events
+            .iter()
+            .map(|event| serde_json::to_vec(event).expect("event bytes").len())
+            .sum::<usize>();
+    let import_bytes = serde_json::to_vec(&request)
+        .expect("typed import bytes")
+        .len();
+    let base = typed_restore_engine_capacity();
+
+    let exact_event = open("event-exact");
+    seed_typed_restore(exact_event.as_ref());
+    let mut capacity = base;
+    capacity.snapshot_max_bytes = json_event_bytes;
+    assert_typed_restore_success(backend, exact_event.as_ref(), capacity);
+
+    let event_plus_one = open("event-plus-one");
+    seed_typed_restore(event_plus_one.as_ref());
+    capacity.snapshot_max_bytes = json_event_bytes - 1;
+    assert_typed_restore_rejected_unchanged(backend, event_plus_one.as_ref(), capacity);
+
+    let exact_import = open("import-exact");
+    seed_typed_restore(exact_import.as_ref());
+    capacity = base;
+    capacity.import_max_bytes = import_bytes;
+    assert_typed_restore_success(backend, exact_import.as_ref(), capacity);
+
+    let import_plus_one = open("import-plus-one");
+    seed_typed_restore(import_plus_one.as_ref());
+    capacity.import_max_bytes = import_bytes - 1;
+    assert_typed_restore_rejected_unchanged(backend, import_plus_one.as_ref(), capacity);
+
+    let exact_blob = open("blob-exact");
+    seed_typed_restore(exact_blob.as_ref());
+    capacity = base;
+    capacity.blob_max_bytes = 5;
+    assert_typed_restore_success(backend, exact_blob.as_ref(), capacity);
+
+    let blob_plus_one = open("blob-plus-one");
+    seed_typed_restore(blob_plus_one.as_ref());
+    capacity.blob_max_bytes = 4;
+    assert_typed_restore_rejected_unchanged(backend, blob_plus_one.as_ref(), capacity);
+}
+
+#[test]
+fn typed_restore_post_image_budgets_are_atomic_across_all_backends() {
+    let capacity = typed_restore_engine_capacity();
+    assert_typed_restore_budget_matrix("in_memory", |_| {
+        Box::new(InMemoryStoreEngine::new(capacity))
+    });
+    assert_typed_restore_budget_matrix("embedded", |_| {
+        Box::new(EmbeddedStoreEngine::new(capacity))
+    });
+
+    let root = std::env::temp_dir().join(format!(
+        "beetle-memory-restore-budget-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let profile = support::native_persistent_profile();
+    assert_typed_restore_budget_matrix("file", |case| {
+        let config = StoreBackendConfig::file(root.join(format!("file-{case}")), profile)
+            .expect("file restore config");
+        let (engine, _, _) = FileStoreEngine::open_with_capacity(&config, capacity)
+            .expect("open file restore engine");
+        Box::new(engine)
+    });
+    #[cfg(feature = "sqlite-store")]
+    assert_typed_restore_budget_matrix("sqlite", |case| {
+        let config = StoreBackendConfig::sqlite(root.join(format!("sqlite-{case}.db")), profile)
+            .expect("sqlite restore config");
+        let (engine, _) = SqliteStoreEngine::open_with_capacity(&config, capacity)
+            .expect("open sqlite restore engine");
+        Box::new(engine)
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn in_memory_store_consumes_compiled_blob_budget() {
-    let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
-        .expect("config")
-        .with_runtime_store_budget(tiny_store_budget());
-    let platform = StorePlatform::open(config).expect("store");
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config")
+    .try_with_nonproduction_store_budget_limit(tiny_store_budget())
+    .expect("valid store budget");
+    let platform = support::open_store(config).expect("store");
 
     let err = platform
         .state_fs()
@@ -45,15 +248,14 @@ fn file_store_consumes_compiled_snapshot_budget() {
             .unwrap()
             .as_nanos()
     ));
-    let config = StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull)
-        .expect("config")
-        .with_runtime_store_budget(tiny_store_budget());
-    let platform = StorePlatform::open(config).expect("store");
-    platform
-        .memory_store()
-        .set_memory("1234")
-        .expect("seed small blob");
-
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config")
+    .try_with_nonproduction_store_budget_limit(tiny_store_budget())
+    .expect("valid store budget");
+    let platform = support::open_store(config).expect("store");
     let err = platform
         .export_store_snapshot()
         .expect_err("snapshot budget must apply to file backend");
@@ -61,19 +263,24 @@ fn file_store_consumes_compiled_snapshot_budget() {
 }
 
 #[test]
-fn static_store_config_capacity_comes_from_runtime_budget_compiler() {
+fn store_capacity_comes_from_the_open_runtime_budget_authority() {
     let config = StoreBackendConfig::in_memory(ProfileId::EspEmbeddedSdk).expect("config");
-    assert!(config.capacity.snapshot_max_bytes <= 256 * 1024);
-    assert_eq!(config.backend, StoreBackendKind::InMemory);
+    let platform = support::open_store(config).expect("store");
+    assert!(platform.capacity().snapshot_max_bytes <= 256 * 1024);
+    let config = platform.config();
+    assert_eq!(config.backend(), StoreBackendKind::InMemory);
 }
 
 #[test]
 fn store_platform_rejects_logical_keys_that_exceed_runtime_budget() {
-    let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
-        .expect("config")
-        .with_runtime_store_budget(tiny_store_budget());
-    let platform = StorePlatform::open(config).expect("store");
-    let oversized_key = "k".repeat(33);
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config")
+    .try_with_nonproduction_store_budget_limit(tiny_store_budget())
+    .expect("valid store budget");
+    let platform = support::open_store(config).expect("store");
+    let oversized_key = "k".repeat(65);
 
     let err = platform
         .state_fs()
@@ -95,8 +302,9 @@ fn in_memory_store_platform_rejects_event_log_overflow_without_persisting_state(
     budget.event_log_max_items = 2;
     let config = StoreBackendConfig::in_memory(ProfileId::EspEmbeddedSdk)
         .expect("config")
-        .with_runtime_store_budget(budget);
-    let platform = StorePlatform::open(config).expect("store");
+        .try_with_nonproduction_store_budget_limit(budget)
+        .expect("valid store budget");
+    let platform = support::open_store(config).expect("store");
 
     platform
         .state_fs()
@@ -156,8 +364,11 @@ fn direct_in_memory_engine_consumes_capacity_budget() {
 
 #[test]
 fn export_and_import_use_dedicated_runtime_budgets() {
-    let source = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("config"),
+    let source = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .expect("config"),
     )
     .expect("source");
     source
@@ -170,10 +381,13 @@ fn export_and_import_use_dedicated_runtime_budgets() {
     export_budget.blob_max_bytes = 1024 * 1024;
     export_budget.snapshot_max_bytes = 1024 * 1024;
     export_budget.export_max_bytes = 64;
-    let export_config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
-        .expect("config")
-        .with_runtime_store_budget(export_budget);
-    let export_target = StorePlatform::open(export_config).expect("export target");
+    let export_config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config")
+    .try_with_nonproduction_store_budget_limit(export_budget)
+    .expect("valid export budget");
+    let export_target = support::open_store(export_config).expect("export target");
     export_target
         .state_fs()
         .write("payload", b"payload large enough for snapshot budget split")
@@ -188,10 +402,13 @@ fn export_and_import_use_dedicated_runtime_budgets() {
     import_budget.blob_max_bytes = 1024 * 1024;
     import_budget.snapshot_max_bytes = 1024 * 1024;
     import_budget.import_max_bytes = 64;
-    let import_config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
-        .expect("config")
-        .with_runtime_store_budget(import_budget);
-    let import_target = StorePlatform::open(import_config).expect("import target");
+    let import_config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config")
+    .try_with_nonproduction_store_budget_limit(import_budget)
+    .expect("valid import budget");
+    let import_target = support::open_store(import_config).expect("import target");
     let err = import_target
         .import_store_snapshot(&snapshot)
         .expect_err("import must use import_max_bytes, not snapshot_max_bytes");
@@ -206,10 +423,13 @@ fn snapshot_import_rejects_oversized_logical_key_before_replacing_state() {
     budget.snapshot_max_bytes = 1024 * 1024;
     budget.import_max_bytes = 1024 * 1024;
     budget.export_max_bytes = 1024 * 1024;
-    let target = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
-            .expect("config")
-            .with_runtime_store_budget(budget),
+    let target = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .expect("config")
+        .try_with_nonproduction_store_budget_limit(budget)
+        .expect("valid import budget"),
     )
     .expect("target");
     target
@@ -223,7 +443,7 @@ fn snapshot_import_rejects_oversized_logical_key_before_replacing_state() {
         Vec::new(),
         vec![StoreSnapshotBlob {
             namespace: "state_fs".to_string(),
-            key: "x".repeat(33),
+            key: "x".repeat(65),
             value: b"1".to_vec(),
         }],
         Vec::new(),

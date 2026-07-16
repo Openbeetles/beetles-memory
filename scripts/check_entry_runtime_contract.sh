@@ -9,12 +9,12 @@ if ! command -v rg >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo test -p bm-entry
-cargo test -p bm-cli --test cli_contract
-cargo test -p bm-http --features server-std --test http_runtime_contract
-cargo test -p bm-wss --features server-std --test wss_runtime_contract
-cargo test -p bm-mcp --features server-stdio --test mcp_runtime_contract
-cargo test -p bm-a2a --features bridge-http --test a2a_runtime_contract
+cargo test --locked -p bm-entry
+cargo test --locked -p bm-cli --test cli_contract
+cargo test --locked -p bm-http --features server-std --test http_runtime_contract
+cargo test --locked -p bm-wss --features server-std --test wss_runtime_contract
+cargo test --locked -p bm-mcp --features server-stdio --test mcp_runtime_contract
+cargo test --locked -p bm-a2a --features bridge-http --test a2a_runtime_contract
 
 entry_consumers=(
   crates/cli
@@ -45,13 +45,13 @@ if rg -n 'adapter-beetle|source_kind.*beetle|beetle_host|beetle_adapter|beetle_s
   exit 1
 fi
 
-if cargo tree -p bm-entry --no-default-features --features profile-esp-standalone-memory | rg -n 'rusqlite|axum|tokio' >/tmp/bm-entry-contract-hit 2>/dev/null; then
+if cargo tree --locked -p bm-entry --no-default-features --features profile-esp-standalone-memory | rg -n 'rusqlite|axum|tokio' >/tmp/bm-entry-contract-hit 2>/dev/null; then
   echo "FAIL: ESP standalone entry must not pull sqlite or server-heavy network deps" >&2
   cat /tmp/bm-entry-contract-hit >&2
   exit 1
 fi
 
-if cargo tree -p bm-entry --no-default-features --features profile-esp-embedded-sdk | rg -n 'rusqlite|axum|tokio' >/tmp/bm-entry-contract-hit 2>/dev/null; then
+if cargo tree --locked -p bm-entry --no-default-features --features profile-esp-embedded-sdk | rg -n 'rusqlite|axum|tokio' >/tmp/bm-entry-contract-hit 2>/dev/null; then
   echo "FAIL: ESP embedded SDK entry must not pull sqlite or server-heavy network deps" >&2
   cat /tmp/bm-entry-contract-hit >&2
   exit 1

@@ -1,6 +1,7 @@
+mod support;
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::Platform;
-use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StoreEventScope, StorePlatform};
+use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StoreEventScope};
 
 #[test]
 fn event_scope_carries_memory_space_subject_and_conversation() {
@@ -22,10 +23,12 @@ fn store_platform_events_preserve_memory_space_scope() {
         .with_memory_space("space-main")
         .with_subject("subject-qingchuan")
         .with_conversation("ollama-window-a");
-    let config = StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull)
-        .expect("config")
-        .with_event_scope(scope);
-    let platform = StorePlatform::open_in_memory(config).expect("platform");
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config")
+    .with_event_scope(scope);
+    let platform = support::open_store_in_memory(config).expect("platform");
 
     platform
         .state_fs()

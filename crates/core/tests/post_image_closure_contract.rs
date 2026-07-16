@@ -1,21 +1,42 @@
 use bm_core::memory::{
-    build_long_term_memory_facet_index_doc, build_memory_graph_persistence_plan,
-    memory_facet_manifest_key, memory_graph_backlink_key, scoped_long_term_control_storage_key,
-    scoped_long_term_memory_storage_key, scoped_memory_facet_owner_storage_key,
-    validate_long_term_control_post_image, validate_memory_facet_post_image,
-    validate_memory_graph_post_image, ControlEffectRef, EvidenceBacklink, GovernedDocumentImage,
-    LongTermControlOperation, LongTermControlPostImageClosure, LongTermMemoryConfidence,
-    LongTermMemoryControlAuditEvent, LongTermMemoryControlRevision, LongTermMemoryEntry,
-    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-    LongTermMemorySourceType, MemoryFacetIndexManifest, MemoryFacetOwnerVersion,
-    MemoryFacetPostImageClosure, MemoryFacetPostingDoc, MemoryFacetPostingRevision,
-    MemoryGraphEdge, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphOwnerBinding,
-    MemoryGraphPostImageClosure, MemoryPrivacyClass, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
+    build_governed_evidence_document_facet_index_doc,
+    build_long_term_memory_facet_index_doc as try_build_long_term_memory_facet_index_doc,
+    build_memory_graph_persistence_plan, canonical_recall_evidence_group,
+    governed_evidence_document_content_digest, memory_facet_manifest_key,
+    memory_graph_backlink_key, scoped_governed_evidence_document_key,
+    scoped_long_term_control_storage_key, scoped_long_term_memory_storage_key,
+    scoped_memory_facet_owner_storage_key, validate_long_term_control_post_image,
+    validate_memory_facet_post_image, validate_memory_graph_post_image, ControlEffectRef,
+    EvidenceBacklink, GovernedDocumentImage, GovernedEvidenceDocument,
+    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane,
+    GovernedMemoryOwnerRef, LongTermControlOperation, LongTermControlPostImageClosure,
+    LongTermMemoryConfidence, LongTermMemoryControlAuditEvent, LongTermMemoryControlRevision,
+    LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
+    LongTermMemorySourceType, MemoryEvidenceAuthority, MemoryFacetIndexDoc,
+    MemoryFacetIndexManifest, MemoryFacetOwnerVersion, MemoryFacetPostImageClosure,
+    MemoryFacetPostingDoc, MemoryFacetPostingRevision, MemoryGraphEdge, MemoryGraphNode,
+    MemoryGraphNodeKind, MemoryGraphOwnerBinding, MemoryGraphPostImageClosure, MemoryPrivacyClass,
+    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    MEMORY_FACET_SCHEMA_VERSION,
 };
 
 const SPACE: &str = "space:main";
 const SUBJECT: &str = "subject:user";
+
+fn build_long_term_memory_facet_index_doc(
+    entry: &LongTermMemoryEntry,
+    memory_space_id: impl Into<String>,
+    subject_ids: Vec<String>,
+    facet_index_revision: u64,
+) -> MemoryFacetIndexDoc {
+    try_build_long_term_memory_facet_index_doc(
+        entry,
+        memory_space_id,
+        subject_ids,
+        facet_index_revision,
+    )
+    .expect("fixture long-term owner must produce a valid governed facet document")
+}
 
 fn owner_entry(id: &str, owner_revision: u64) -> LongTermMemoryEntry {
     LongTermMemoryEntry {
@@ -48,7 +69,7 @@ fn facet_closure() -> MemoryFacetPostImageClosure {
     let owner = owner_entry("ltm:p7", 1);
     let facet = build_long_term_memory_facet_index_doc(&owner, SPACE, vec![SUBJECT.to_string()], 1);
     let owner_version = MemoryFacetOwnerVersion {
-        owner_record_id: owner.id.clone(),
+        owner_ref: facet.owner_ref.clone(),
         owner_revision: owner.owner_revision,
         facet_index_revision: facet.facet_index_revision,
     };
@@ -88,12 +109,13 @@ fn facet_closure() -> MemoryFacetPostImageClosure {
     MemoryFacetPostImageClosure {
         memory_space_id: SPACE.to_string(),
         mounted_subject_id: SUBJECT.to_string(),
-        owner_records: vec![GovernedDocumentImage::created(
+        long_term_owners: vec![GovernedDocumentImage::created(
             scoped_long_term_memory_storage_key(SPACE, &owner.id).expect("owner key"),
             owner,
         )],
+        evidence_document_owners: Vec::new(),
         facet_owners: vec![GovernedDocumentImage::created(
-            scoped_memory_facet_owner_storage_key(SPACE, SUBJECT, &facet.owner_record_id)
+            scoped_memory_facet_owner_storage_key(SPACE, SUBJECT, &facet.owner_ref)
                 .expect("facet owner key"),
             facet,
         )],
@@ -112,7 +134,7 @@ fn facet_post_image_rejects_scoped_key_and_exact_posting_closure_drift() {
     assert!(valid.accepted, "{:?}", valid.failures);
 
     let mut wrong_key = closure.clone();
-    wrong_key.owner_records[0].physical_key = "owner:forged".to_string();
+    wrong_key.long_term_owners[0].physical_key = "owner:forged".to_string();
     let invalid = validate_memory_facet_post_image(&wrong_key);
     assert!(invalid
         .failures
@@ -151,8 +173,13 @@ fn facet_post_image_accepts_complete_last_owner_scope_deletion() {
     let deleted = MemoryFacetPostImageClosure {
         memory_space_id: created.memory_space_id,
         mounted_subject_id: created.mounted_subject_id,
-        owner_records: created
-            .owner_records
+        long_term_owners: created
+            .long_term_owners
+            .into_iter()
+            .map(deleted_image)
+            .collect(),
+        evidence_document_owners: created
+            .evidence_document_owners
             .into_iter()
             .map(deleted_image)
             .collect(),
@@ -169,17 +196,220 @@ fn facet_post_image_accepts_complete_last_owner_scope_deletion() {
     assert!(validation.accepted, "{:?}", validation.failures);
 }
 
-fn graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
+fn evidence_owner_entry(id: &str, owner_revision: u64) -> GovernedEvidenceDocument {
+    let source_locator = "opaque://release/import-only".to_string();
+    let canonical_evidence_group = canonical_recall_evidence_group("evidence:p7.4.1:release");
+    let body = "Schema owners validate complete post-image closure.".to_string();
+    let chunks = vec![GovernedEvidenceDocumentChunk {
+        identity: "section:facet".to_string(),
+        ordinal: 0,
+        body: "typed owner posting manifest".to_string(),
+    }];
+    GovernedEvidenceDocument {
+        schema_version: bm_core::memory::GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION,
+        physical_key: scoped_governed_evidence_document_key(SPACE, id).expect("evidence key"),
+        memory_space_id: SPACE.to_string(),
+        mounted_subject_id: SUBJECT.to_string(),
+        document_id: id.to_string(),
+        source_kind: GovernedEvidenceDocumentSourceKind::StructuredMaterial,
+        source_locator: source_locator.clone(),
+        canonical_evidence_group: canonical_evidence_group.clone(),
+        evidence_family_group: None,
+        source_revision: owner_revision,
+        owner_revision,
+        content_digest: governed_evidence_document_content_digest(
+            &source_locator,
+            &canonical_evidence_group,
+            None,
+            &body,
+            &chunks,
+        ),
+        body,
+        chunks,
+        authority: MemoryEvidenceAuthority::UserAsserted,
+        privacy: MemoryPrivacyClass::SharedWithSubject,
+        observed_at: 10,
+        created_at: 10,
+        updated_at: 10,
+    }
+}
+
+fn mixed_plane_facet_closure() -> MemoryFacetPostImageClosure {
+    let shared_id = "owner:shared-id";
+    let long_term_owner = owner_entry(shared_id, 1);
+    let evidence_owner = evidence_owner_entry(shared_id, 1);
+    let long_term_facet = build_long_term_memory_facet_index_doc(
+        &long_term_owner,
+        SPACE,
+        vec![SUBJECT.to_string()],
+        1,
+    );
+    let evidence_facet = build_governed_evidence_document_facet_index_doc(
+        &evidence_owner,
+        vec![SUBJECT.to_string()],
+        1,
+    )
+    .expect("valid evidence facet owner");
+    let facet_docs: Vec<MemoryFacetIndexDoc> = vec![long_term_facet, evidence_facet];
+    let mut posting_owners =
+        std::collections::BTreeMap::<String, Vec<MemoryFacetOwnerVersion>>::new();
+    for facet in &facet_docs {
+        let owner_version = MemoryFacetOwnerVersion {
+            owner_ref: facet.owner_ref.clone(),
+            owner_revision: facet.owner_revision,
+            facet_index_revision: facet.facet_index_revision,
+        };
+        for posting_key in facet
+            .posting_keys_for_subject(SUBJECT)
+            .expect("posting keys")
+        {
+            posting_owners
+                .entry(posting_key)
+                .or_default()
+                .push(owner_version.clone());
+        }
+    }
+    let postings = posting_owners
+        .into_iter()
+        .map(|(posting_key, mut owner_versions)| {
+            owner_versions.sort();
+            let posting = MemoryFacetPostingDoc {
+                schema_version: MEMORY_FACET_SCHEMA_VERSION,
+                memory_space_id: SPACE.to_string(),
+                subject_id: SUBJECT.to_string(),
+                posting_key: posting_key.clone(),
+                revision: 1,
+                owner_versions,
+            };
+            GovernedDocumentImage::created(posting_key, posting)
+        })
+        .collect::<Vec<_>>();
+    let mut owner_versions = facet_docs
+        .iter()
+        .map(|facet| MemoryFacetOwnerVersion {
+            owner_ref: facet.owner_ref.clone(),
+            owner_revision: facet.owner_revision,
+            facet_index_revision: facet.facet_index_revision,
+        })
+        .collect::<Vec<_>>();
+    owner_versions.sort();
+    let manifest = MemoryFacetIndexManifest {
+        schema_version: MEMORY_FACET_SCHEMA_VERSION,
+        memory_space_id: SPACE.to_string(),
+        subject_id: SUBJECT.to_string(),
+        owner_doc_count: owner_versions.len(),
+        posting_doc_count: postings.len(),
+        revision: 1,
+        owner_versions,
+        posting_revisions: postings
+            .iter()
+            .map(|posting| MemoryFacetPostingRevision {
+                posting_key: posting.after.as_ref().expect("posting").posting_key.clone(),
+                revision: posting.after.as_ref().expect("posting").revision,
+            })
+            .collect(),
+    };
+    let facet_owners = facet_docs
+        .into_iter()
+        .map(|facet| {
+            GovernedDocumentImage::created(
+                scoped_memory_facet_owner_storage_key(SPACE, SUBJECT, &facet.owner_ref)
+                    .expect("facet owner key"),
+                facet,
+            )
+        })
+        .collect();
+
+    MemoryFacetPostImageClosure {
+        memory_space_id: SPACE.to_string(),
+        mounted_subject_id: SUBJECT.to_string(),
+        long_term_owners: vec![GovernedDocumentImage::created(
+            scoped_long_term_memory_storage_key(SPACE, shared_id).expect("long-term key"),
+            long_term_owner,
+        )],
+        evidence_document_owners: vec![GovernedDocumentImage::created(
+            scoped_governed_evidence_document_key(SPACE, shared_id).expect("evidence key"),
+            evidence_owner,
+        )],
+        facet_owners,
+        postings,
+        manifest: GovernedDocumentImage::created(
+            memory_facet_manifest_key(SPACE, SUBJECT).expect("manifest key"),
+            manifest,
+        ),
+    }
+}
+
+#[test]
+fn facet_post_image_supports_same_id_in_long_term_and_evidence_planes() {
+    let closure = mixed_plane_facet_closure();
+    let valid = validate_memory_facet_post_image(&closure);
+    assert!(valid.accepted, "{:?}", valid.failures);
+    assert_eq!(
+        closure
+            .manifest
+            .after
+            .as_ref()
+            .expect("manifest")
+            .owner_versions
+            .iter()
+            .map(|owner| owner.owner_ref.owner_plane)
+            .collect::<Vec<_>>(),
+        vec![
+            GovernedMemoryOwnerPlane::LongTerm,
+            GovernedMemoryOwnerPlane::EvidenceDocument,
+        ]
+    );
+
+    let mut wrong_key = closure.clone();
+    wrong_key.evidence_document_owners[0].physical_key = "owner:forged".to_string();
+    let invalid = validate_memory_facet_post_image(&wrong_key);
+    assert!(invalid
+        .failures
+        .contains(&"memory_facet_owner_physical_key_drift".to_string()));
+
+    let mut wrong_revision = closure.clone();
+    wrong_revision.evidence_document_owners[0]
+        .after
+        .as_mut()
+        .expect("evidence owner")
+        .owner_revision += 1;
+    let invalid = validate_memory_facet_post_image(&wrong_revision);
+    assert!(invalid
+        .failures
+        .contains(&"memory_facet_owner_doc_owner_binding_drift".to_string()));
+
+    let mut wrong_privacy = closure;
+    wrong_privacy.evidence_document_owners[0]
+        .after
+        .as_mut()
+        .expect("evidence owner")
+        .privacy = MemoryPrivacyClass::PrivateGarden;
+    let invalid = validate_memory_facet_post_image(&wrong_privacy);
+    assert!(invalid
+        .failures
+        .contains(&"memory_facet_owner_doc_owner_binding_drift".to_string()));
+}
+
+fn graph_closure_for_owner(
+    generation: u64,
+    node_id: &str,
+    owner_ref: GovernedMemoryOwnerRef,
+    owner_revision: u64,
+    long_term_owners: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    evidence_document_owners: Vec<GovernedDocumentImage<GovernedEvidenceDocument>>,
+) -> MemoryGraphPostImageClosure {
+    let evidence_ref = format!("evidence:{node_id}");
     let nodes = vec![MemoryGraphNode {
-        node_id: "ltm:p7".to_string(),
+        node_id: node_id.to_string(),
         kind: MemoryGraphNodeKind::MemoryRecord,
         label: "P7 closure".to_string(),
-        evidence_refs: vec!["evidence:p7".to_string()],
+        evidence_refs: vec![evidence_ref.clone()],
     }];
     let edges: Vec<MemoryGraphEdge> = Vec::new();
     let backlinks = vec![EvidenceBacklink {
         source_kind: "long_term_memory".to_string(),
-        source_id: "evidence:p7".to_string(),
+        source_id: evidence_ref,
         fingerprint: "fp:p7".to_string(),
     }];
     let plan = build_memory_graph_persistence_plan(
@@ -190,8 +420,9 @@ fn graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
         edges.clone(),
         backlinks.clone(),
         vec![MemoryGraphOwnerBinding {
-            owner_record_id: "ltm:p7".to_string(),
-            owner_revision: 1,
+            node_id: node_id.to_string(),
+            owner_ref,
+            owner_revision,
             visible: true,
         }],
     );
@@ -202,10 +433,8 @@ fn graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
         mounted_subject_id: SUBJECT.to_string(),
         allow_missing_before_owners: false,
         validate_transition_successors: true,
-        owner_records: vec![GovernedDocumentImage::created(
-            scoped_long_term_memory_storage_key(SPACE, "ltm:p7").expect("owner key"),
-            owner_entry("ltm:p7", 1),
-        )],
+        long_term_owners,
+        evidence_document_owners,
         manifest: GovernedDocumentImage::created(
             bm_core::memory::memory_graph_scope_manifest_key(SPACE, SUBJECT),
             plan.scope_manifest.expect("manifest"),
@@ -285,6 +514,60 @@ fn graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
     }
 }
 
+fn graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
+    graph_closure_for_owner(
+        generation,
+        "ltm:p7",
+        GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "ltm:p7"),
+        1,
+        vec![GovernedDocumentImage::created(
+            scoped_long_term_memory_storage_key(SPACE, "ltm:p7").expect("owner key"),
+            owner_entry("ltm:p7", 1),
+        )],
+        Vec::new(),
+    )
+}
+
+fn evidence_graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
+    let owner = evidence_owner_entry("evidence-document:p7", 1);
+    graph_closure_for_owner(
+        generation,
+        "node:evidence-document:p7",
+        GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::EvidenceDocument,
+            owner.document_id.clone(),
+        ),
+        owner.owner_revision,
+        Vec::new(),
+        vec![GovernedDocumentImage::created(
+            owner.physical_key.clone(),
+            owner,
+        )],
+    )
+}
+
+#[test]
+fn graph_post_image_rejects_evidence_owner_without_node_membership() {
+    let mut closure = graph_closure(1);
+    let owner = evidence_owner_entry("evidence-document:unbound", 1);
+    closure
+        .evidence_document_owners
+        .push(GovernedDocumentImage::created(
+            owner.physical_key.clone(),
+            owner,
+        ));
+
+    let invalid = validate_memory_graph_post_image(&closure);
+
+    assert!(
+        invalid
+            .failures
+            .contains(&"memory_graph_evidence_owner_membership_missing".to_string()),
+        "{:?}",
+        invalid.failures
+    );
+}
+
 #[test]
 fn graph_post_image_rejects_physical_key_and_exact_dependency_closure_drift() {
     let closure = graph_closure(1);
@@ -325,6 +608,84 @@ fn graph_post_image_rejects_physical_key_and_exact_dependency_closure_drift() {
 }
 
 #[test]
+fn graph_post_image_accepts_complete_evidence_owner_closure() {
+    let closure = evidence_graph_closure(1);
+    let valid = validate_memory_graph_post_image(&closure);
+    assert!(valid.accepted, "{:?}", valid.failures);
+}
+
+#[test]
+fn graph_post_image_rejects_evidence_owner_physical_key_drift() {
+    let mut closure = evidence_graph_closure(1);
+    closure.evidence_document_owners[0].physical_key = "owner:forged".to_string();
+    let invalid = validate_memory_graph_post_image(&closure);
+    assert!(
+        invalid
+            .failures
+            .contains(&"memory_graph_owner_physical_key_drift".to_string()),
+        "{:?}",
+        invalid.failures
+    );
+}
+
+#[test]
+fn graph_post_image_rejects_evidence_owner_revision_drift() {
+    let mut closure = evidence_graph_closure(1);
+    closure.evidence_document_owners[0]
+        .after
+        .as_mut()
+        .expect("evidence owner")
+        .owner_revision += 1;
+    let invalid = validate_memory_graph_post_image(&closure);
+    assert!(
+        invalid
+            .failures
+            .contains(&"memory_graph_owner_revision_drift".to_string()),
+        "{:?}",
+        invalid.failures
+    );
+}
+
+#[test]
+fn graph_post_image_rejects_evidence_owner_revision_jump() {
+    let mut closure = evidence_graph_closure(1);
+    let owner_image = &mut closure.evidence_document_owners[0];
+    let before = owner_image.after.as_ref().expect("evidence owner").clone();
+    let mut after = before.clone();
+    after.owner_revision = 3;
+    after.source_revision = 3;
+    after.updated_at += 1;
+    owner_image.before = Some(before);
+    owner_image.after = Some(after);
+    let invalid = validate_memory_graph_post_image(&closure);
+    assert!(
+        invalid
+            .failures
+            .contains(&"memory_graph_owner_revision_successor_drift".to_string()),
+        "{:?}",
+        invalid.failures
+    );
+}
+
+#[test]
+fn graph_post_image_rejects_evidence_owner_privacy_drift() {
+    let mut closure = evidence_graph_closure(1);
+    closure.evidence_document_owners[0]
+        .after
+        .as_mut()
+        .expect("evidence owner")
+        .privacy = MemoryPrivacyClass::PrivateGarden;
+    let invalid = validate_memory_graph_post_image(&closure);
+    assert!(
+        invalid
+            .failures
+            .contains(&"memory_graph_persistent_node_owner_not_visible".to_string()),
+        "{:?}",
+        invalid.failures
+    );
+}
+
+#[test]
 fn graph_post_image_accepts_complete_scope_deletion() {
     let created = graph_closure(1);
     let deleted = MemoryGraphPostImageClosure {
@@ -332,8 +693,13 @@ fn graph_post_image_accepts_complete_scope_deletion() {
         mounted_subject_id: created.mounted_subject_id,
         allow_missing_before_owners: false,
         validate_transition_successors: true,
-        owner_records: created
-            .owner_records
+        long_term_owners: created
+            .long_term_owners
+            .into_iter()
+            .map(deleted_image)
+            .collect(),
+        evidence_document_owners: created
+            .evidence_document_owners
             .into_iter()
             .map(deleted_image)
             .collect(),
@@ -385,7 +751,8 @@ fn control_closure() -> LongTermControlPostImageClosure {
         &before_owner,
         &after_owner,
         "corrected",
-        None,
+        "subject:p7".to_string(),
+        Some("governor:p7".to_string()),
         SPACE,
         20,
     );
@@ -411,11 +778,13 @@ fn control_closure() -> LongTermControlPostImageClosure {
                 .clone(),
             record_id: revision.after.as_ref().expect("revision").record_id.clone(),
             successor_record_id: None,
+            owner_subject_id: "subject:p7".to_string(),
             owner_revision: revision.after.as_ref().expect("revision").owner_revision,
             source_revision: revision.after.as_ref().expect("revision").source_revision,
         }],
         "corrected",
-        None,
+        "subject:p7".to_string(),
+        Some("governor:p7".to_string()),
         SPACE,
         20,
     );
@@ -423,7 +792,8 @@ fn control_closure() -> LongTermControlPostImageClosure {
         transaction_id: "tx:p7".to_string(),
         operation: LongTermControlOperation::Correct,
         memory_space_id: SPACE.to_string(),
-        actor_subject_id: None,
+        owner_subject_id: "subject:p7".to_string(),
+        actor_subject_id: Some("governor:p7".to_string()),
         owner_records: vec![GovernedDocumentImage::updated(
             scoped_long_term_memory_storage_key(SPACE, &after_owner.id).expect("owner key"),
             before_owner,
@@ -470,6 +840,7 @@ fn control_post_image_binds_typed_audit_effect_operation_version_and_physical_ke
         .push(ControlEffectRef::Tombstone {
             tombstone_id: "tombstone:forged".to_string(),
             record_id: "ltm:forged".to_string(),
+            owner_subject_id: "subject:p7".to_string(),
             owner_revision: 1,
             source_revision: Some(1),
         });
@@ -539,7 +910,8 @@ fn control_post_image_rejects_forged_owner_revision_jump() {
         &before_owner,
         &after_owner,
         "forged jump",
-        None,
+        "subject:p7".to_string(),
+        Some("governor:p7".to_string()),
         SPACE,
         20,
     );
@@ -548,6 +920,7 @@ fn control_post_image_rejects_forged_owner_revision_jump() {
         revision_id: revision.revision_id,
         record_id: revision.record_id,
         successor_record_id: None,
+        owner_subject_id: "subject:p7".to_string(),
         owner_revision: revision.owner_revision,
         source_revision: revision.source_revision,
     }];

@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "recall-multisession-compact-baseline",
   "class": "recall_multisession",
-  "profile": "esp_standalone_memory",
+  "profile": "target-esp+role-standalone-memory",
   "mode": "compact",
   "evaluation_source": "contract_baseline",
   "description": "Compact profile recalls the current fact from multi-session evidence without selecting stale candidates.",

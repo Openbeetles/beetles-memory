@@ -19,17 +19,16 @@ transport bytes -> adapter command -> bm-entry -> bm-adapter -> MemoryRuntime ->
 ```rust
 use bm_entry::{
     EntryAuthConfig, EntryIdentity, EntryIdempotencyConfig, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendConfig,
 };
 
 let mut capability = MemoryCapabilityPolicy::strict_profile();
 capability.communication_adapter_enabled = true;
 
 let entry = EntryRuntime::open(EntryRuntimeConfig {
-    profile: ProfileId::ServerLinuxMemoryGateway,
     identity: EntryIdentity {
         agent_id: "gateway-agent".to_string(),
         owner_id: "owner-default".to_string(),
@@ -38,11 +37,8 @@ let entry = EntryRuntime::open(EntryRuntimeConfig {
         channel: "gateway".to_string(),
         chat_id: "chat-1".to_string(),
     },
-    store: EntryStoreConfig {
-        backend: StoreBackendKind::InMemory,
-        data_path: None,
-        fsync: false,
-    },
+    store: StoreBackendConfig::in_memory(ProfileId::ServerLinuxMemoryGateway)?
+        .with_fsync(false),
     transports: EntryTransportConfig::all_enabled(),
     auth: EntryAuthConfig::disabled_for_local(),
     idempotency: EntryIdempotencyConfig { max_keys: 128 },
@@ -66,3 +62,5 @@ Transport helpers 会对声明的 memory operations 使用共享 JSON adapter de
 ## 安全边界
 
 `AdapterAuthContext` 和 `EntryAuthConfig` 表示 entry layer 的认证判断。它们不能替代 SDK privacy policy 或 profile capability checks。Adapter visibility 仍必须来自 runtime capability catalog。
+
+认证失败使用协议中立的 `AdapterErrorKey::Unauthorized`，HTTP 映射为 `401`。已认证 principal 缺少所需 operation capability 时，由 `bm-entry` 产出 `AdapterErrorKey::Forbidden`，HTTP transport 只映射为 `403`，不得重新定义授权语义。

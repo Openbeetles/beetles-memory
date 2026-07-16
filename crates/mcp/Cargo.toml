@@ -10,6 +10,11 @@ documentation = "https://docs.rs/bm-mcp"
 name = "bm_mcp"
 path = "src/lib.rs"
 
+[[bin]]
+name = "bm-mcp-server"
+path = "src/bin/bm-mcp-server.rs"
+required-features = ["server-stdio"]
+
 [features]
 default = []
 server-stdio = ["bm-entry"]
@@ -17,7 +22,9 @@ profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]
 profile-desktop-macos-embedded-sdk = ["bm-adapter/profile-desktop-macos-embedded-sdk"]
+profile-desktop-macos-dev-full = ["bm-adapter/profile-desktop-macos-dev-full"]
 profile-desktop-windows-embedded-sdk = ["bm-adapter/profile-desktop-windows-embedded-sdk"]
+profile-desktop-windows-dev-full = ["bm-adapter/profile-desktop-windows-dev-full"]
 profile-server-linux-memory-gateway = ["bm-adapter/profile-server-linux-memory-gateway"]
 profile-server-linux-dev-full = ["bm-adapter/profile-server-linux-dev-full"]
 

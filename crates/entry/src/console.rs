@@ -10,7 +10,7 @@ use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_replay::{MemoryBenchmarkMode, MemoryBenchmarkReport};
 use bm_sdk::{
-    DeferredGovernanceQueueReport, MemoryStoreTelemetryReport, ProfileId, RuntimeBudgetReport,
+    DeferredGovernanceQueueReport, MemoryStoreTelemetryReport, RuntimeBudgetReport,
     RuntimeSkillDetailReport, RuntimeSkillListReport, RuntimeSkillMutationReport,
     RuntimeSkillSummary, StoreBackendKind, WorkbenchApiMap,
 };
@@ -91,6 +91,9 @@ pub struct EntryConsoleOverview {
 pub struct EntryConsoleRuntimeBudget {
     pub report_id: String,
     pub profile: String,
+    pub deployment_target: String,
+    pub deployment_role: String,
+    pub store_medium: String,
     pub resource_source: String,
     pub stale: bool,
     pub limited_by: Vec<String>,
@@ -109,6 +112,9 @@ impl EntryConsoleRuntimeBudget {
         Self {
             report_id: report.report_id.clone(),
             profile: report.profile.as_str().to_string(),
+            deployment_target: report.deployment_target.as_str().to_string(),
+            deployment_role: report.deployment_role.as_str().to_string(),
+            store_medium: report.store_medium.as_str().to_string(),
             resource_source: report.resource_snapshot.source.as_str().to_string(),
             stale: report.resource_snapshot.stale,
             limited_by: report.limited_by.clone(),
@@ -668,7 +674,6 @@ impl EntryConsoleTelemetrySnapshot {
 #[derive(Clone, Debug)]
 struct EntryConsoleInner {
     runtime_shape: EntryConsoleRuntimeShape,
-    profile: ProfileId,
     storage_path: Option<PathBuf>,
     agent_id: String,
     channel: String,
@@ -685,12 +690,11 @@ struct EntryConsoleInner {
 }
 
 impl EntryConsoleState {
-    pub fn new(config: &EntryRuntimeConfig) -> Self {
+    pub fn new(config: &EntryRuntimeConfig, runtime_budget: &RuntimeBudgetReport) -> Self {
         Self {
             inner: Mutex::new(EntryConsoleInner {
-                runtime_shape: runtime_shape(config),
-                profile: config.profile,
-                storage_path: config.store.data_path.clone(),
+                runtime_shape: runtime_shape(config, runtime_budget),
+                storage_path: config.store.data_path().map(Path::to_path_buf),
                 agent_id: config.identity.agent_id.clone(),
                 channel: config.scope.channel.clone(),
                 transports: transports(&config.transports),
@@ -714,25 +718,6 @@ impl EntryConsoleState {
                 api_key_counter: 1,
             }),
         }
-    }
-
-    pub fn overview(&self) -> EntryConsoleOverview {
-        self.overview_with_telemetry(EntryConsoleTelemetrySnapshot::default())
-    }
-
-    pub fn overview_with_telemetry(
-        &self,
-        telemetry: EntryConsoleTelemetrySnapshot,
-    ) -> EntryConsoleOverview {
-        let profile = {
-            let inner = self.inner.lock().expect("console state lock");
-            inner.profile
-        };
-        self.overview_with_telemetry_and_budget(
-            telemetry,
-            &RuntimeBudgetReport::static_for_profile(profile),
-            DeferredGovernanceQueueReport::default(),
-        )
     }
 
     pub fn overview_with_telemetry_and_budget(
@@ -1269,10 +1254,13 @@ fn current_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn runtime_shape(config: &EntryRuntimeConfig) -> EntryConsoleRuntimeShape {
+fn runtime_shape(
+    config: &EntryRuntimeConfig,
+    runtime_budget: &RuntimeBudgetReport,
+) -> EntryConsoleRuntimeShape {
     EntryConsoleRuntimeShape {
-        profile: config.profile.as_str().to_string(),
-        name: match config.profile {
+        profile: runtime_budget.profile.as_str().to_string(),
+        name: match runtime_budget.profile {
             bm_sdk::ProfileId::LinuxDeviceStandaloneMemory => "Linux device standalone".to_string(),
             bm_sdk::ProfileId::DesktopMacosStandaloneMemory => {
                 "macOS desktop standalone".to_string()
@@ -1284,9 +1272,11 @@ fn runtime_shape(config: &EntryRuntimeConfig) -> EntryConsoleRuntimeShape {
             bm_sdk::ProfileId::EspEmbeddedSdk => "ESP embedded SDK".to_string(),
             bm_sdk::ProfileId::DesktopMacosEmbeddedSdk => "macOS embedded SDK".to_string(),
             bm_sdk::ProfileId::DesktopWindowsEmbeddedSdk => "Windows embedded SDK".to_string(),
+            bm_sdk::ProfileId::DesktopMacosDevFull => "macOS development runtime".to_string(),
+            bm_sdk::ProfileId::DesktopWindowsDevFull => "Windows development runtime".to_string(),
             bm_sdk::ProfileId::ServerLinuxDevFull => "Linux development gateway".to_string(),
         },
-        store: store_label(config.store.backend).to_string(),
+        store: store_label(config.store.backend()).to_string(),
         shell: "HTTP console".to_string(),
     }
 }

@@ -12,7 +12,10 @@ path = "src/lib.rs"
 
 [features]
 default = []
-nonproduction-replay-harness = ["dep:bm-replay"]
+nonproduction-replay-harness = [
+    "dep:bm-replay",
+    "bm-adapter/nonproduction-replay-harness",
+]
 profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]
@@ -24,6 +27,14 @@ profile-server-linux-dev-full = [
     "bm-adapter/profile-server-linux-dev-full",
     "nonproduction-replay-harness",
 ]
+profile-desktop-macos-dev-full = [
+    "bm-adapter/profile-desktop-macos-dev-full",
+    "nonproduction-replay-harness",
+]
+profile-desktop-windows-dev-full = [
+    "bm-adapter/profile-desktop-windows-dev-full",
+    "nonproduction-replay-harness",
+]
 
 [dependencies]
 bm-adapter.workspace = true
@@ -31,4 +42,5 @@ bm-replay = { workspace = true, optional = true }
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true

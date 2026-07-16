@@ -5,7 +5,8 @@ The `bm` binary is provided by `bm-cli`. CLI commands go through `bm-entry`, so 
 ## Capability Snapshot
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features profile-server-linux-memory-gateway -- \
   platform capability-snapshot \
   --profile profile-server-linux-memory-gateway
 ```
@@ -17,7 +18,23 @@ This prints the stable platform capability JSON for a profile.
 General form:
 
 ```bash
-cargo run -p bm-cli --bin bm -- memory <command> [options]
+cargo run --locked -p bm-cli --bin bm --no-default-features --features <profile-feature-id> -- \
+  memory <command> --profile <profile-feature-id> [options]
+```
+
+`--profile` is a required deployment contract. It must match both the profile feature enabled for the build and the real host target; the CLI no longer selects dev-full implicitly.
+
+For the examples below, set `BM_HOST_PROFILE` to the one dev-full profile that matches the machine compiling and running the command, then use the helper. Linux is not the generic local-development truth source.
+
+```bash
+# macOS:  profile-desktop-macos-dev-full
+# Windows: profile-desktop-windows-dev-full
+# Linux:  profile-server-linux-dev-full
+export BM_HOST_PROFILE=profile-desktop-macos-dev-full
+bm() {
+  cargo run --locked -p bm-cli --bin bm --no-default-features \
+    --features "$BM_HOST_PROFILE" -- "$@"
+}
 ```
 
 Commands:
@@ -30,8 +47,6 @@ Commands:
 | `project` | Render a memory block for model context. |
 | `inspect` | Return operator inspection data. |
 | `replay` | Inspect turn replay for a chat. |
-| `export` | Export a continuity snapshot. |
-| `import` | Import a continuity snapshot. |
 | `long-term-list` | List accepted long-term memory or filter by topic. |
 | `long-term-detail` | Inspect one long-term memory record by `--record-id`. |
 | `long-term-delete` | Delete one long-term memory record by `--record-id` and emit tombstone/audit reports. |
@@ -48,7 +63,7 @@ Common options:
 
 | Option | Default |
 | --- | --- |
-| `--profile <profile-feature-id>` | `profile-server-linux-dev-full` |
+| `--profile <profile-feature-id>` | required; no default |
 | `--store-file <path>` | none |
 | `--store-sqlite <path>` | none |
 | `--store-embedded` | false |
@@ -67,35 +82,35 @@ Common options:
 These commands call the Memory SDK accepted long-term memory control surface only. They do not read or mutate a host-owned local database. `long-term-delete` removes the target from active recall/projection and writes tombstone/audit reports. `long-term-policy-suppress` affects future long-term memory writes and does not retroactively delete accepted memory.
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory long-term-list \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --query preferred_editor \
   --limit 8
 ```
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory long-term-detail \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --record-id ltm-preferred-editor
 ```
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory long-term-delete \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --record-id ltm-preferred-editor \
   --reason "user requested deletion"
 ```
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory long-term-policy-suppress \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --topic temporary-* \
   --reason "user does not want temporary preferences remembered"
@@ -106,9 +121,9 @@ cargo run -p bm-cli --bin bm -- \
 `transcript-attr-write` is a thin CLI path to `MemoryRuntime::record_transcript_attrs`. It reads a `MemoryTranscriptAttrWriteRequest`-shaped JSON file from `--input` and requires `--reason` for operator audit discipline. The CLI does not construct or interpret attr payloads and does not write the store directly. The response includes `accepted_attrs`, `rejected_attrs`, `redactions_preview`, `profile_budget_applied`, and `audit_event_id`.
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory transcript-attr-write \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --input /tmp/transcript-attrs.json \
   --reason "record provider-reported per-message usage"
@@ -121,9 +136,9 @@ Attr JSON must target existing transcript turns/messages. Do not put raw prompts
 These commands manage existing runtime procedural memory records only. They do not execute skills or install plugins. Standard Agent Skill directories remain host-managed; standalone deployments can mount them with `BM_AGENT_SKILL_DIRS`, and the runtime only scans and recalls them read-only.
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory write-procedural \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
   --name runtime_skill__release_guard \
@@ -136,9 +151,9 @@ cargo run -p bm-cli --bin bm -- \
 ```
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory skill-edit \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
   --name runtime_skill__release_guard \
@@ -151,9 +166,9 @@ cargo run -p bm-cli --bin bm -- \
 ```
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory skill-list \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --query release
 ```
@@ -161,9 +176,9 @@ cargo run -p bm-cli --bin bm -- \
 ## Write And Recall With A File Store
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory write-procedural \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
   --name release_guard \
@@ -174,9 +189,9 @@ cargo run -p bm-cli --bin bm -- \
 ```
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory recall \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
   --query "release artifacts" \
@@ -186,41 +201,25 @@ cargo run -p bm-cli --bin bm -- \
 ## Project A Memory Block
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory project \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
   --query "How should this host release?" \
   --max-len 4096
 ```
 
-## Export And Import
+## Migration Boundary
 
-```bash
-cargo run -p bm-cli --bin bm -- \
-  memory export \
-  --profile profile-server-linux-dev-full \
-  --store-file /tmp/beetle-memory-store \
-  --chat chat-1 \
-  --output /tmp/chat-1.snapshot.json
-```
-
-```bash
-cargo run -p bm-cli --bin bm -- \
-  memory import \
-  --profile profile-server-linux-dev-full \
-  --store-file /tmp/beetle-memory-store-2 \
-  --chat chat-2 \
-  --input /tmp/chat-1.snapshot.json
-```
+The CLI does not expose generic memory `export` or `import` commands. Governed transfer uses the SDK's typed memory-space scope and archive contract described in [Replay And Migration](replay-and-migration.md); continuity snapshots remain internal Soul-recovery payloads.
 
 ## Close Runtime
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+bm \
   memory close \
-  --profile profile-server-linux-dev-full \
+  --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --reason "operator shutdown"
 ```

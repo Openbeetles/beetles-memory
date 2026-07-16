@@ -1,3 +1,4 @@
+mod support;
 use bm_core::feature_gate::ProfileId;
 use bm_core::orchestrator::PressureLevel;
 use bm_core::runtime::{
@@ -5,12 +6,15 @@ use bm_core::runtime::{
     RuntimeLifecycleEventKind, RuntimeLifecycleEventSink, RuntimeLifecycleModeInput,
     RuntimeLifecycleOperation, RuntimeLifecycleReport, RuntimeLifecycleTrigger,
 };
-use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StorePlatform};
+use bm_sdk::nonproduction_replay_harness::StoreBackendConfig;
 
 #[test]
 fn store_platform_persists_lifecycle_and_operator_events() {
-    let platform = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("config"),
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .expect("config"),
     )
     .expect("store");
     let engine = RuntimeLifecycleEngine;
@@ -19,7 +23,7 @@ fn store_platform_persists_lifecycle_and_operator_events() {
         RuntimeLifecycleOperation::Maintain,
         RuntimeLifecycleTrigger::PostReply,
         RuntimeLifecycleModeInput {
-            profile: ProfileId::ServerLinuxDevFull,
+            profile: ProfileId::native_dev_full().expect("native dev-full profile"),
             pressure: PressureLevel::Normal,
             ..RuntimeLifecycleModeInput::default()
         },
@@ -41,7 +45,7 @@ fn store_platform_persists_lifecycle_and_operator_events() {
         RuntimeLifecycleOperation::Inspect,
         RuntimeLifecycleTrigger::OperatorRequested,
         RuntimeLifecycleModeInput {
-            profile: ProfileId::ServerLinuxDevFull,
+            profile: ProfileId::native_dev_full().expect("native dev-full profile"),
             pressure: PressureLevel::Normal,
             ..RuntimeLifecycleModeInput::default()
         },
@@ -86,8 +90,11 @@ fn store_platform_persists_lifecycle_and_operator_events() {
 
 #[test]
 fn runtime_lifecycle_events_survive_store_snapshot_import() {
-    let source = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("source config"),
+    let source = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .expect("source config"),
     )
     .expect("source store");
     let engine = RuntimeLifecycleEngine;
@@ -95,7 +102,7 @@ fn runtime_lifecycle_events_survive_store_snapshot_import() {
         RuntimeLifecycleOperation::Close,
         RuntimeLifecycleTrigger::SdkCall,
         RuntimeLifecycleModeInput {
-            profile: ProfileId::ServerLinuxDevFull,
+            profile: ProfileId::native_dev_full().expect("native dev-full profile"),
             pressure: PressureLevel::Normal,
             ..RuntimeLifecycleModeInput::default()
         },
@@ -118,8 +125,11 @@ fn runtime_lifecycle_events_survive_store_snapshot_import() {
     .expect("close event");
 
     let snapshot = source.export_store_snapshot().expect("snapshot");
-    let target = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("target config"),
+    let target = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .expect("target config"),
     )
     .expect("target store");
     target.import_store_snapshot(&snapshot).expect("import");

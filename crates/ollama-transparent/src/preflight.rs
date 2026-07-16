@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ManagedRunnerReport, ObservedProcess, OllamaTransparentState, PortBindingReport};
+use std::net::SocketAddr;
+
+use crate::{
+    ExecutableFileIdentity, ManagedRunnerReport, ObservedProcess, OllamaTransparentState,
+    PortBindingReport,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PreflightBlockerCode {
@@ -29,15 +34,46 @@ impl PreflightBlocker {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfficialOllamaStopPlan {
-    pub allowed: bool,
-    pub processes: Vec<ObservedProcess>,
-    pub reason: String,
+    pub(crate) allowed: bool,
+    pub(crate) targets: Vec<OfficialOllamaStopTarget>,
+    pub(crate) reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl OfficialOllamaStopPlan {
+    pub fn allowed(&self) -> bool {
+        self.allowed
+    }
+
+    pub fn targets(&self) -> &[OfficialOllamaStopTarget] {
+        &self.targets
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialOllamaStopTarget {
+    pub(crate) bind: SocketAddr,
+    pub(crate) process: ObservedProcess,
+}
+
+impl OfficialOllamaStopTarget {
+    pub fn bind(&self) -> SocketAddr {
+        self.bind
+    }
+
+    pub fn process(&self) -> &ObservedProcess {
+        &self.process
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaTransparentPreflightReport {
     pub accepted: bool,
@@ -45,6 +81,7 @@ pub struct OllamaTransparentPreflightReport {
     pub public_port: PortBindingReport,
     pub upstream_port: PortBindingReport,
     pub managed_runner: ManagedRunnerReport,
+    pub gateway_executable: Option<ExecutableFileIdentity>,
     pub stop_plan: Option<OfficialOllamaStopPlan>,
     pub blockers: Vec<PreflightBlocker>,
 }

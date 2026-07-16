@@ -1,0 +1,136 @@
+{
+  "schema": "beetle-memory.platform.capability.v1",
+  "profile": "profile-desktop-windows-dev-full",
+  "target": "target-desktop-windows",
+  "role": "role-dev-full",
+  "compiled": {
+    "target_esp": false,
+    "target_linux_device": false,
+    "target_desktop_macos": false,
+    "target_desktop_windows": true,
+    "target_server_linux": false,
+    "role_standalone_memory": false,
+    "role_embedded_sdk": false,
+    "role_memory_gateway": false,
+    "role_dev_full": true,
+    "replay_harness_compiled": true,
+    "sqlite_index_compiled": true,
+    "rusqlite_dependency_compiled": true
+  },
+  "memory": {
+    "write": true,
+    "recall": true,
+    "projection": true,
+    "maintenance": true,
+    "inspection": true,
+    "transcript_replay": true,
+    "replay": true,
+    "export": true,
+    "import": true,
+    "long_term_control_inspect": true,
+    "long_term_control_mutation": true,
+    "long_term_control_policy": true,
+    "long_term_control_bulk_forget": true
+  },
+  "lifecycle": {
+    "recover": true,
+    "maintain_full": true,
+    "maintain_lightweight": true,
+    "operator_diagnosis": true,
+    "export_snapshot": true,
+    "import_snapshot": true,
+    "replay_inspection": true
+  },
+  "validation": {
+    "compact_replay_fixture": true,
+    "memory_harness": true,
+    "full_replay_suite": true,
+    "benchmark_gate": true,
+    "proposal_preview": true,
+    "compact_proposal_sandbox": true,
+    "full_proposal_sandbox": true,
+    "proposal_submission": true
+  },
+  "adapter": {
+    "cli": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": true
+    },
+    "http": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": true,
+      "private_data_allowed": true
+    },
+    "wss": {
+      "visible": false,
+      "client_allowed": true,
+      "server_allowed": true,
+      "private_data_allowed": false
+    },
+    "mcp": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": true,
+      "private_data_allowed": false
+    },
+    "a2a": {
+      "visible": false,
+      "client_allowed": true,
+      "server_allowed": true,
+      "private_data_allowed": false
+    }
+  },
+  "entry": {
+    "cli": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": false,
+      "private_data_allowed": true
+    },
+    "http_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": true,
+      "private_data_allowed": true
+    },
+    "wss_client": {
+      "visible": false,
+      "client_allowed": true,
+      "server_allowed": false,
+      "private_data_allowed": false
+    },
+    "wss_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": true,
+      "private_data_allowed": false
+    },
+    "mcp_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": true,
+      "private_data_allowed": false
+    },
+    "a2a_bridge": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": true,
+      "private_data_allowed": false
+    },
+    "llm_gateway_server": {
+      "visible": false,
+      "client_allowed": false,
+      "server_allowed": true,
+      "private_data_allowed": false
+    }
+  },
+  "indexed_recall": {
+    "archive": true,
+    "continuity_capsule": true,
+    "runtime_skill": true,
+    "task_learning": true
+  }
+}

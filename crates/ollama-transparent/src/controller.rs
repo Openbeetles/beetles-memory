@@ -2,13 +2,17 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::process::{ProcessManager, SystemProcessManager};
+use crate::process_authority::AttachedProcessAuthority;
+use crate::runner::{FileSystemRunnerInstaller, RunnerInstaller};
 use crate::{
-    GatewayFrontReport, ManagedRunnerReport, OfficialOllamaStopPlan, OllamaAppReport,
-    OllamaTransparentConfig, OllamaTransparentError, OllamaTransparentPreflightReport,
-    OllamaTransparentState, OllamaTransparentStatus, OllamaTransparentTransitionReport,
-    PortBindingReport, PortOwnerKind, PortOwnerObserver, PreflightBlocker, PreflightBlockerCode,
-    ProcessManager, Result, RollbackReport, RunnerInstaller, TransitionOutcome, TransitionStep,
-    TransitionStepReport,
+    lease::OsTransitionLease, runner::inspect_executable_identity, GatewayFrontReport,
+    ManagedProcessOwnershipReport, ManagedRunnerReport, OfficialOllamaStopPlan,
+    OfficialOllamaStopTarget, OllamaAppReport, OllamaTransparentConfig, OllamaTransparentError,
+    OllamaTransparentPreflightReport, OllamaTransparentState, OllamaTransparentStatus,
+    OllamaTransparentTransitionReport, PortBindingReport, PortOwnerKind, PortOwnerObserver,
+    PreflightBlocker, PreflightBlockerCode, Result, RollbackReport, SystemPortOwnerObserver,
+    TransitionOutcome, TransitionStep, TransitionStepReport,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +46,7 @@ pub trait OllamaTransparentController {
     fn open_app(&self) -> Result<crate::ProcessActionReport>;
 }
 
-pub struct TransparentController<P, R, M> {
+struct ControllerCore<P, R, M> {
     config: OllamaTransparentConfig,
     ports: P,
     runner: R,
@@ -50,10 +54,148 @@ pub struct TransparentController<P, R, M> {
     state: Mutex<ControllerState>,
 }
 
+pub struct TransparentController {
+    inner: ControllerCore<SystemPortOwnerObserver, FileSystemRunnerInstaller, SystemProcessManager>,
+}
+
+impl TransparentController {
+    pub fn new(config: OllamaTransparentConfig) -> Result<Self> {
+        let ports = SystemPortOwnerObserver::new(config.port_owner_classifier());
+        Ok(Self {
+            inner: ControllerCore::new(
+                config,
+                ports,
+                FileSystemRunnerInstaller,
+                SystemProcessManager::default(),
+            )?,
+        })
+    }
+
+    pub fn config(&self) -> &OllamaTransparentConfig {
+        self.inner.config()
+    }
+}
+
+impl OllamaTransparentController for TransparentController {
+    fn preflight(&self) -> Result<OllamaTransparentPreflightReport> {
+        self.inner.preflight()
+    }
+
+    fn enable(
+        &self,
+        request: EnableOllamaTransparentRequest,
+    ) -> Result<OllamaTransparentTransitionReport> {
+        self.inner.enable(request)
+    }
+
+    fn disable(
+        &self,
+        request: DisableOllamaTransparentRequest,
+    ) -> Result<OllamaTransparentTransitionReport> {
+        self.inner.disable(request)
+    }
+
+    fn status(&self) -> Result<OllamaTransparentStatus> {
+        self.inner.status()
+    }
+
+    fn open_app(&self) -> Result<crate::ProcessActionReport> {
+        self.inner.open_app()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ControllerState {
     state: OllamaTransparentState,
     last_transition: Option<OllamaTransparentTransitionReport>,
+    next_lease_id: u64,
+    active_transition: Option<TransitionLeaseRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransitionKind {
+    Enable,
+    Disable,
+    OpenApp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TransitionLeaseRecord {
+    id: u64,
+    kind: TransitionKind,
+}
+
+struct TransitionLease<'a> {
+    record: TransitionLeaseRecord,
+    from_state: OllamaTransparentState,
+    controller_state: &'a Mutex<ControllerState>,
+    committed: bool,
+    _os_lease: OsTransitionLease,
+}
+
+impl TransitionLease<'_> {
+    fn set_state(&self, next: OllamaTransparentState) -> Result<()> {
+        let mut state = self.controller_state.lock().expect("controller state");
+        if state.active_transition != Some(self.record) {
+            return Err(OllamaTransparentError::preflight_rejected(format!(
+                "transition lease {} lost ownership",
+                self.record.id
+            )));
+        }
+        state.state = next;
+        Ok(())
+    }
+
+    fn commit_report(
+        mut self,
+        report: OllamaTransparentTransitionReport,
+    ) -> Result<OllamaTransparentTransitionReport> {
+        {
+            let mut state = self.controller_state.lock().expect("controller state");
+            if state.active_transition != Some(self.record) {
+                return Err(OllamaTransparentError::preflight_rejected(format!(
+                    "transition lease {} lost ownership before completion",
+                    self.record.id
+                )));
+            }
+            state.state = report.to_state;
+            state.last_transition = Some(report.clone());
+            state.active_transition = None;
+        }
+        self.committed = true;
+        Ok(report)
+    }
+
+    fn commit_exclusive(mut self) -> Result<()> {
+        {
+            let mut state = self.controller_state.lock().expect("controller state");
+            if state.active_transition != Some(self.record) {
+                return Err(OllamaTransparentError::preflight_rejected(format!(
+                    "transition lease {} lost ownership before operation completion",
+                    self.record.id
+                )));
+            }
+            state.active_transition = None;
+        }
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for TransitionLease<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut state = self
+            .controller_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active_transition == Some(self.record) {
+            state.state = self.from_state;
+            state.active_transition = None;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,13 +205,13 @@ struct EnableProgress {
     public_front_started: bool,
 }
 
-impl<P, R, M> TransparentController<P, R, M>
+impl<P, R, M> ControllerCore<P, R, M>
 where
     P: PortOwnerObserver,
     R: RunnerInstaller,
     M: ProcessManager,
 {
-    pub fn new(config: OllamaTransparentConfig, ports: P, runner: R, processes: M) -> Result<Self> {
+    fn new(config: OllamaTransparentConfig, ports: P, runner: R, processes: M) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             config,
@@ -79,43 +221,66 @@ where
             state: Mutex::new(ControllerState {
                 state: OllamaTransparentState::Disabled,
                 last_transition: None,
+                next_lease_id: 1,
+                active_transition: None,
             }),
         })
     }
 
-    pub fn config(&self) -> &OllamaTransparentConfig {
+    fn config(&self) -> &OllamaTransparentConfig {
         &self.config
     }
 
-    pub fn ports(&self) -> &P {
-        &self.ports
-    }
-
-    pub fn runner(&self) -> &R {
+    #[cfg(test)]
+    fn runner(&self) -> &R {
         &self.runner
     }
 
-    pub fn processes(&self) -> &M {
+    #[cfg(test)]
+    fn processes(&self) -> &M {
         &self.processes
     }
 
-    #[doc(hidden)]
-    pub fn force_state_for_test(&self, state: OllamaTransparentState) {
-        self.state.lock().expect("controller state").state = state;
-    }
-
-    fn set_state(&self, state: OllamaTransparentState) {
-        self.state.lock().expect("controller state").state = state;
-    }
-
-    fn remember_transition(&self, report: OllamaTransparentTransitionReport) {
+    fn begin_transition(&self, kind: TransitionKind) -> Result<TransitionLease<'_>> {
         let mut state = self.state.lock().expect("controller state");
-        state.state = report.to_state;
-        state.last_transition = Some(report);
+        if let Some(active) = state.active_transition {
+            return Err(OllamaTransparentError::preflight_rejected(format!(
+                "transparent transition {:?} lease {} is already active",
+                active.kind, active.id
+            )));
+        }
+        let lease_id = state.next_lease_id;
+        let next_lease_id = lease_id.checked_add(1).ok_or_else(|| {
+            OllamaTransparentError::preflight_rejected("transition lease id exhausted")
+        })?;
+        let os_lease = OsTransitionLease::acquire(&self.config.transition_lease_path)?;
+        let lease = TransitionLease {
+            record: TransitionLeaseRecord { id: lease_id, kind },
+            from_state: state.state,
+            controller_state: &self.state,
+            committed: false,
+            _os_lease: os_lease,
+        };
+        state.next_lease_id = next_lease_id;
+        state.active_transition = Some(lease.record);
+        state.state = match kind {
+            TransitionKind::Enable => OllamaTransparentState::Enabling,
+            TransitionKind::Disable => OllamaTransparentState::Disabling,
+            TransitionKind::OpenApp => state.state,
+        };
+        Ok(lease)
     }
 }
 
-impl<P, R, M> OllamaTransparentController for TransparentController<P, R, M>
+#[cfg(test)]
+#[path = "controller/preflight_tests.rs"]
+mod preflight_tests;
+
+#[cfg(test)]
+#[path = "controller/state_machine_tests.rs"]
+mod state_machine_tests;
+
+impl<P, R, M> OllamaTransparentController for ControllerCore<P, R, M>
 where
     P: PortOwnerObserver,
     R: RunnerInstaller,
@@ -124,7 +289,10 @@ where
     fn preflight(&self) -> Result<OllamaTransparentPreflightReport> {
         let report = build_preflight_report(&self.config, &self.ports, &self.runner)?;
         if !report.accepted {
-            self.set_state(OllamaTransparentState::PreflightFailed);
+            let mut state = self.state.lock().expect("controller state");
+            if state.active_transition.is_none() {
+                state.state = OllamaTransparentState::PreflightFailed;
+            }
         }
         Ok(report)
     }
@@ -133,8 +301,8 @@ where
         &self,
         request: EnableOllamaTransparentRequest,
     ) -> Result<OllamaTransparentTransitionReport> {
-        let from_state = self.state.lock().expect("controller state").state;
-        self.set_state(OllamaTransparentState::Enabling);
+        let lease = self.begin_transition(TransitionKind::Enable)?;
+        let from_state = lease.from_state;
         let mut effective_config = self.config.clone();
         if request.allow_stop_official_ollama {
             effective_config.allow_stop_official_ollama = true;
@@ -155,8 +323,7 @@ where
                     failing_step: Some(failed),
                     rollback: None,
                 };
-                self.remember_transition(report.clone());
-                return Ok(report);
+                return lease.commit_report(report);
             }
         };
         if !preflight.accepted {
@@ -177,18 +344,34 @@ where
                 failing_step: Some(failed),
                 rollback: None,
             };
-            self.remember_transition(report.clone());
-            return Ok(report);
+            return lease.commit_report(report);
         }
         steps.push(TransitionStepReport::ok(TransitionStep::Preflight));
         if preflight.resulting_state == OllamaTransparentState::Active {
+            let ownership = self
+                .processes
+                .inspect_managed_process_ownership(&effective_config)?;
+            if !ownership.fully_authorized() {
+                let failed = TransitionStepReport::failed(
+                    TransitionStep::Preflight,
+                    "managed-looking listeners lack exact persisted launch receipts",
+                );
+                let report = OllamaTransparentTransitionReport {
+                    from_state,
+                    to_state: OllamaTransparentState::Degraded,
+                    outcome: TransitionOutcome::Rejected,
+                    steps: vec![failed.clone()],
+                    failing_step: Some(failed),
+                    rollback: None,
+                };
+                return lease.commit_report(report);
+            }
             let report = OllamaTransparentTransitionReport::completed(
                 from_state,
                 OllamaTransparentState::Active,
                 steps,
             );
-            self.remember_transition(report.clone());
-            return Ok(report);
+            return lease.commit_report(report);
         }
 
         if let Some(stop_plan) = preflight.stop_plan.as_ref() {
@@ -198,33 +381,41 @@ where
                     steps.push(TransitionStepReport::ok(TransitionStep::StopOfficialOllama));
                 }
                 Err(error) => {
-                    return Ok(self.finish_failed_enable(
+                    return self.finish_failed_enable(
+                        lease,
                         from_state,
                         steps,
                         TransitionStep::StopOfficialOllama,
                         error,
                         progress,
-                    ));
+                    );
                 }
             }
         }
 
-        match self.runner.ensure_installed(&effective_config) {
-            Ok(_) => steps.push(TransitionStepReport::ok(
-                TransitionStep::InstallManagedRunner,
-            )),
+        let installed_runner = match self.runner.ensure_installed(&effective_config) {
+            Ok(report) => {
+                steps.push(TransitionStepReport::ok(
+                    TransitionStep::InstallManagedRunner,
+                ));
+                report
+            }
             Err(error) => {
-                return Ok(self.finish_failed_enable(
+                return self.finish_failed_enable(
+                    lease,
                     from_state,
                     steps,
                     TransitionStep::InstallManagedRunner,
                     error,
                     progress,
-                ));
+                );
             }
-        }
+        };
 
-        match self.processes.start_managed_upstream(&effective_config) {
+        match self
+            .processes
+            .start_managed_upstream(&effective_config, &installed_runner)
+        {
             Ok(_) => {
                 progress.upstream_started = true;
                 steps.push(TransitionStepReport::ok(
@@ -232,13 +423,14 @@ where
                 ));
             }
             Err(error) => {
-                return Ok(self.finish_failed_enable(
+                return self.finish_failed_enable(
+                    lease,
                     from_state,
                     steps,
                     TransitionStep::StartManagedUpstream,
                     error,
                     progress,
-                ));
+                );
             }
         }
 
@@ -247,17 +439,26 @@ where
                 TransitionStep::ProbeManagedUpstream,
             )),
             Err(error) => {
-                return Ok(self.finish_failed_enable(
+                return self.finish_failed_enable(
+                    lease,
                     from_state,
                     steps,
                     TransitionStep::ProbeManagedUpstream,
                     error,
                     progress,
-                ));
+                );
             }
         }
 
-        match self.processes.start_transparent_front(&effective_config) {
+        let gateway_executable = preflight.gateway_executable.as_ref().ok_or_else(|| {
+            OllamaTransparentError::preflight_rejected(
+                "accepted preflight omitted gateway executable identity",
+            )
+        })?;
+        match self
+            .processes
+            .start_transparent_front(&effective_config, gateway_executable)
+        {
             Ok(_) => {
                 progress.public_front_started = true;
                 steps.push(TransitionStepReport::ok(
@@ -265,26 +466,28 @@ where
                 ));
             }
             Err(error) => {
-                return Ok(self.finish_failed_enable(
+                return self.finish_failed_enable(
+                    lease,
                     from_state,
                     steps,
                     TransitionStep::StartTransparentFront,
                     error,
                     progress,
-                ));
+                );
             }
         }
 
         match self.processes.probe_public_front(&effective_config) {
             Ok(_) => steps.push(TransitionStepReport::ok(TransitionStep::ProbePublicFront)),
             Err(error) => {
-                return Ok(self.finish_failed_enable(
+                return self.finish_failed_enable(
+                    lease,
                     from_state,
                     steps,
                     TransitionStep::ProbePublicFront,
                     error,
                     progress,
-                ));
+                );
             }
         }
 
@@ -295,13 +498,14 @@ where
             match self.processes.open_official_app(&effective_config) {
                 Ok(_) => steps.push(TransitionStepReport::ok(TransitionStep::OpenOfficialApp)),
                 Err(error) => {
-                    return Ok(self.finish_failed_enable(
+                    return self.finish_failed_enable(
+                        lease,
                         from_state,
                         steps,
                         TransitionStep::OpenOfficialApp,
                         error,
                         progress,
-                    ));
+                    );
                 }
             }
         }
@@ -311,16 +515,15 @@ where
             OllamaTransparentState::Active,
             steps,
         );
-        self.remember_transition(report.clone());
-        Ok(report)
+        lease.commit_report(report)
     }
 
     fn disable(
         &self,
         request: DisableOllamaTransparentRequest,
     ) -> Result<OllamaTransparentTransitionReport> {
-        let from_state = self.state.lock().expect("controller state").state;
-        self.set_state(OllamaTransparentState::Disabling);
+        let lease = self.begin_transition(TransitionKind::Disable)?;
+        let from_state = lease.from_state;
         let mut steps = Vec::new();
         let mut failing_step = None;
 
@@ -383,17 +586,22 @@ where
             failing_step,
             rollback: None,
         };
-        self.remember_transition(report.clone());
-        Ok(report)
+        lease.commit_report(report)
     }
 
     fn status(&self) -> Result<OllamaTransparentStatus> {
         let public_port = self.ports.inspect(self.config.public_bind)?;
         let upstream_port = self.ports.inspect(self.config.upstream_bind)?;
         let managed_runner = self.runner.inspect(&self.config)?;
+        let ownership = self
+            .processes
+            .inspect_managed_process_ownership(&self.config)?;
         let state = {
             let mut state = self.state.lock().expect("controller state");
-            state.state = reconcile_observed_state(state.state, &public_port, &upstream_port);
+            if state.active_transition.is_none() {
+                state.state =
+                    reconcile_observed_state(state.state, &public_port, &upstream_port, ownership);
+            }
             state.clone()
         };
         Ok(OllamaTransparentStatus {
@@ -408,7 +616,10 @@ where
     }
 
     fn open_app(&self) -> Result<crate::ProcessActionReport> {
-        self.processes.open_official_app(&self.config)
+        let lease = self.begin_transition(TransitionKind::OpenApp)?;
+        let result = self.processes.open_official_app(&self.config)?;
+        lease.commit_exclusive()?;
+        Ok(result)
     }
 }
 
@@ -416,11 +627,13 @@ fn reconcile_observed_state(
     current: OllamaTransparentState,
     public_port: &PortBindingReport,
     upstream_port: &PortBindingReport,
+    ownership: ManagedProcessOwnershipReport,
 ) -> OllamaTransparentState {
     let public_owned = public_port.owner == PortOwnerKind::BeetleMemoryTransparentFront;
     let upstream_owned = upstream_port.owner == PortOwnerKind::ManagedOllamaRunner;
     match (public_owned, upstream_owned) {
-        (true, true) => OllamaTransparentState::Active,
+        (true, true) if ownership.fully_authorized() => OllamaTransparentState::Active,
+        (true, true) => OllamaTransparentState::Degraded,
         (true, false) | (false, true) => {
             if matches!(
                 current,
@@ -449,7 +662,7 @@ fn reconcile_observed_state(
     }
 }
 
-impl<P, R, M> TransparentController<P, R, M>
+impl<P, R, M> ControllerCore<P, R, M>
 where
     P: PortOwnerObserver,
     R: RunnerInstaller,
@@ -457,15 +670,16 @@ where
 {
     fn finish_failed_enable(
         &self,
+        lease: TransitionLease<'_>,
         from_state: OllamaTransparentState,
         mut steps: Vec<TransitionStepReport>,
         failing_step: TransitionStep,
         error: OllamaTransparentError,
         progress: EnableProgress,
-    ) -> OllamaTransparentTransitionReport {
+    ) -> Result<OllamaTransparentTransitionReport> {
         let failed = TransitionStepReport::failed(failing_step, error.to_string());
         steps.push(failed.clone());
-        self.set_state(OllamaTransparentState::RollingBack);
+        lease.set_state(OllamaTransparentState::RollingBack)?;
         let rollback = self.rollback_enable_failure(progress);
         let to_state = if rollback.completed {
             OllamaTransparentState::Disabled
@@ -484,8 +698,7 @@ where
             failing_step: Some(failed),
             rollback: Some(rollback),
         };
-        self.remember_transition(report.clone());
-        report
+        lease.commit_report(report)
     }
 
     fn rollback_enable_failure(&self, progress: EnableProgress) -> RollbackReport {
@@ -546,6 +759,16 @@ where
     let managed_runner = runner.inspect(config)?;
     let mut blockers = Vec::new();
     let mut stop_plan = None;
+    let gateway_executable = match inspect_executable_identity(&config.gateway_binary_path) {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            blockers.push(PreflightBlocker::new(
+                PreflightBlockerCode::GatewayFrontUnavailable,
+                error.to_string(),
+            ));
+            None
+        }
+    };
 
     match public_port.owner {
         PortOwnerKind::NoListener | PortOwnerKind::BeetleMemoryTransparentFront => {}
@@ -559,14 +782,80 @@ where
                     public_port,
                     upstream_port,
                     managed_runner,
+                    gateway_executable,
                     stop_plan,
                     blockers,
                 ));
             };
             if config.allow_stop_official_ollama {
+                if !process.has_complete_identity() {
+                    blockers.push(PreflightBlocker::new(
+                        PreflightBlockerCode::PublicPortOwnedByUnknownProcess,
+                        "official Ollama owner lacks a complete pid/start/command/executable identity",
+                    ));
+                    return Ok(report_from_parts(
+                        public_port,
+                        upstream_port,
+                        managed_runner,
+                        gateway_executable,
+                        stop_plan,
+                        blockers,
+                    ));
+                }
+                let official_identity =
+                    match inspect_executable_identity(&config.official_ollama_binary) {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            blockers.push(PreflightBlocker::new(
+                                PreflightBlockerCode::PublicPortOwnedByUnknownProcess,
+                                format!(
+                                    "official Ollama executable identity is unavailable: {error}"
+                                ),
+                            ));
+                            return Ok(report_from_parts(
+                                public_port,
+                                upstream_port,
+                                managed_runner,
+                                gateway_executable,
+                                stop_plan,
+                                blockers,
+                            ));
+                        }
+                    };
+                if process.executable_identity.as_ref() != Some(&official_identity) {
+                    blockers.push(PreflightBlocker::new(
+                        PreflightBlockerCode::PublicPortOwnedByUnknownProcess,
+                        "classifier matched Ollama, but exact executable identity does not match the governed official binary",
+                    ));
+                    return Ok(report_from_parts(
+                        public_port,
+                        upstream_port,
+                        managed_runner,
+                        gateway_executable,
+                        stop_plan,
+                        blockers,
+                    ));
+                }
+                if !AttachedProcessAuthority::is_supported() {
+                    blockers.push(PreflightBlocker::new(
+                        PreflightBlockerCode::PublicPortOwnedByUnknownProcess,
+                        "platform cannot retain a stable authority for externally launched Ollama; close the official app before enabling transparent mode",
+                    ));
+                    return Ok(report_from_parts(
+                        public_port,
+                        upstream_port,
+                        managed_runner,
+                        gateway_executable,
+                        stop_plan,
+                        blockers,
+                    ));
+                }
                 stop_plan = Some(OfficialOllamaStopPlan {
                     allowed: true,
-                    processes: vec![process],
+                    targets: vec![OfficialOllamaStopTarget {
+                        bind: public_port.bind,
+                        process,
+                    }],
                     reason: "official Ollama owns the public transparent port and user allowed stopping it".to_string(),
                 });
             } else {
@@ -600,20 +889,11 @@ where
             "official Ollama binary is missing; managed runner cannot be installed",
         ));
     }
-    if !config.gateway_binary_path.is_file() {
-        blockers.push(PreflightBlocker::new(
-            PreflightBlockerCode::GatewayFrontUnavailable,
-            format!(
-                "bm-llm-gateway transparent front binary is missing: {}",
-                config.gateway_binary_path.display()
-            ),
-        ));
-    }
-
     Ok(report_from_parts(
         public_port,
         upstream_port,
         managed_runner,
+        gateway_executable,
         stop_plan,
         blockers,
     ))
@@ -623,6 +903,7 @@ fn report_from_parts(
     public_port: PortBindingReport,
     upstream_port: PortBindingReport,
     managed_runner: ManagedRunnerReport,
+    gateway_executable: Option<crate::ExecutableFileIdentity>,
     stop_plan: Option<OfficialOllamaStopPlan>,
     blockers: Vec<PreflightBlocker>,
 ) -> OllamaTransparentPreflightReport {
@@ -642,6 +923,7 @@ fn report_from_parts(
         public_port,
         upstream_port,
         managed_runner,
+        gateway_executable,
         stop_plan,
         blockers,
     }

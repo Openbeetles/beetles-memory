@@ -1,7 +1,10 @@
 use bm_core::memory::{
-    governed_evidence_document_content_digest, plan_governed_evidence_document_upsert,
-    scoped_governed_evidence_document_key, validate_governed_evidence_document,
-    validate_governed_evidence_document_draft, GovernedEvidenceDocumentChunk,
+    governed_evidence_document_content_digest, governed_evidence_source_ref_from_document,
+    plan_governed_evidence_document_delete, plan_governed_evidence_document_upsert,
+    scoped_governed_evidence_document_key, scoped_governed_evidence_source_ref_key,
+    validate_governed_evidence_document, validate_governed_evidence_document_draft,
+    validate_governed_evidence_source_ref, CanonicalRecallEvidenceFamilyGroup,
+    GovernedEvidenceDocument, GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDeletePlan,
     GovernedEvidenceDocumentDraft, GovernedEvidenceDocumentPlan, GovernedEvidenceDocumentRejection,
     GovernedEvidenceDocumentSourceKind, MemoryEvidenceAuthority, MemoryPrivacyClass,
     MAX_GOVERNED_EVIDENCE_DOCUMENT_BODY_BYTES, MAX_GOVERNED_EVIDENCE_DOCUMENT_BYTES,
@@ -12,7 +15,13 @@ const NOW: u64 = 1_900_000_000;
 
 fn fixture_draft() -> GovernedEvidenceDocumentDraft {
     let source_locator = "opaque://导入批次/α-7".to_string();
-    let canonical_evidence_group = "opaque:recall-group:sha256:group-a".to_string();
+    let canonical_evidence_group =
+        bm_core::memory::canonical_recall_evidence_group("external:evidence:group-a");
+    let evidence_family_group = Some(
+        CanonicalRecallEvidenceFamilyGroup::from_structured_identity("transcript:session-alpha")
+            .expect("structured evidence family")
+            .into_string(),
+    );
     let body = "# 发布证据\n\n状态: 已完成\n负责人: 张三".to_string();
     let chunks = vec![GovernedEvidenceDocumentChunk {
         identity: "section:验收".to_string(),
@@ -22,6 +31,7 @@ fn fixture_draft() -> GovernedEvidenceDocumentDraft {
     let content_digest = governed_evidence_document_content_digest(
         &source_locator,
         &canonical_evidence_group,
+        evidence_family_group.as_deref(),
         &body,
         &chunks,
     );
@@ -32,6 +42,7 @@ fn fixture_draft() -> GovernedEvidenceDocumentDraft {
         source_kind: GovernedEvidenceDocumentSourceKind::StructuredMaterial,
         source_locator,
         canonical_evidence_group,
+        evidence_family_group,
         source_revision: 7,
         body,
         chunks,
@@ -46,6 +57,7 @@ fn refresh_digest(draft: &mut GovernedEvidenceDocumentDraft) {
     draft.content_digest = governed_evidence_document_content_digest(
         &draft.source_locator,
         &draft.canonical_evidence_group,
+        draft.evidence_family_group.as_deref(),
         &draft.body,
         &draft.chunks,
     );
@@ -99,11 +111,60 @@ fn structured_utf8_material_creates_complete_governed_owner() {
         document.canonical_evidence_group,
         draft.canonical_evidence_group
     );
+    assert_eq!(document.evidence_family_group, draft.evidence_family_group);
     assert_eq!(document.observed_at, draft.observed_at);
     assert_eq!(document.created_at, NOW);
     assert_eq!(document.updated_at, NOW);
     assert!(!document.shared_fact_surface_allowed());
     assert_eq!(validate_governed_evidence_document(&document), Ok(()));
+}
+
+#[test]
+fn owner_material_closes_safe_binding_family_and_chunk_excerpt_once() {
+    let document = create_fixture();
+    let material = document.owner_material().expect("governed owner material");
+    assert_eq!(material.owner_ref().owner_id, document.document_id);
+    assert_eq!(material.evidence_bindings().len(), 1);
+    let binding = &material.evidence_bindings()[0];
+    assert_ne!(binding.safe_evidence_ref(), document.source_locator);
+    assert!(!binding.safe_evidence_ref().contains("导入批次"));
+    assert_eq!(
+        binding.canonical_evidence_group(),
+        document.canonical_evidence_group
+    );
+    assert_eq!(
+        binding.evidence_family_group(),
+        document.evidence_family_group.as_deref()
+    );
+    assert_eq!(
+        binding.effective_evidence_family_group(),
+        document.evidence_family_group.as_deref().expect("family")
+    );
+
+    let excerpt = document
+        .select_lexical_excerpt("设备验收", 64)
+        .expect("excerpt selection")
+        .expect("bounded excerpt");
+    assert_eq!(excerpt.content_digest(), document.content_digest);
+    assert_eq!(excerpt.segment_identity(), "section:验收");
+    assert!(excerpt.text().contains("设备验收通过"));
+    assert!(excerpt.text().chars().count() <= 64);
+
+    let mut no_family = fixture_draft();
+    no_family.evidence_family_group = None;
+    refresh_digest(&mut no_family);
+    let GovernedEvidenceDocumentPlan::Created(no_family) =
+        plan_governed_evidence_document_upsert(None, &no_family, NOW)
+    else {
+        panic!("family-less owner must create");
+    };
+    let no_family_material = no_family.owner_material().expect("family-less material");
+    let no_family_binding = &no_family_material.evidence_bindings()[0];
+    assert_eq!(no_family_binding.evidence_family_group(), None);
+    assert_eq!(
+        no_family_binding.effective_evidence_family_group(),
+        no_family_binding.canonical_evidence_group()
+    );
 }
 
 #[test]
@@ -131,6 +192,22 @@ fn identity_body_digest_and_metadata_drift_fail_closed() {
     }
 
     let mut draft = fixture_draft();
+    draft.canonical_evidence_group = "not-a-canonical-group".to_string();
+    refresh_digest(&mut draft);
+    assert_eq!(
+        validate_governed_evidence_document_draft(&draft),
+        Err(GovernedEvidenceDocumentRejection::InvalidCanonicalEvidenceGroup)
+    );
+
+    let mut draft = fixture_draft();
+    draft.evidence_family_group = Some("session-alpha".to_string());
+    refresh_digest(&mut draft);
+    assert_eq!(
+        validate_governed_evidence_document_draft(&draft),
+        Err(GovernedEvidenceDocumentRejection::InvalidEvidenceFamilyGroup)
+    );
+
+    let mut draft = fixture_draft();
     draft.body.clear();
     refresh_digest(&mut draft);
     assert_eq!(
@@ -147,11 +224,28 @@ fn identity_body_digest_and_metadata_drift_fail_closed() {
 
     let existing = create_fixture();
     let original_digest = fixture_draft().content_digest;
-    for drift in ["source_locator", "canonical_evidence_group", "observed_at"] {
+    for drift in [
+        "source_locator",
+        "canonical_evidence_group",
+        "evidence_family_group",
+        "observed_at",
+    ] {
         let mut changed = fixture_draft();
         match drift {
             "source_locator" => changed.source_locator.push_str("/drift"),
-            "canonical_evidence_group" => changed.canonical_evidence_group.push_str(":drift"),
+            "canonical_evidence_group" => {
+                changed.canonical_evidence_group =
+                    bm_core::memory::canonical_recall_evidence_group("external:evidence:drift")
+            }
+            "evidence_family_group" => {
+                changed.evidence_family_group = Some(
+                    CanonicalRecallEvidenceFamilyGroup::from_structured_identity(
+                        "transcript:session-beta",
+                    )
+                    .expect("different structured evidence family")
+                    .into_string(),
+                )
+            }
             "observed_at" => changed.observed_at += 1,
             _ => unreachable!(),
         }
@@ -276,6 +370,7 @@ fn chunks_are_ordered_unique_and_all_size_boundaries_are_enforced() {
         governed_evidence_document_content_digest(
             &reordered.source_locator,
             &reordered.canonical_evidence_group,
+            reordered.evidence_family_group.as_deref(),
             &reordered.body,
             &reordered.chunks
         )
@@ -363,6 +458,15 @@ fn revisions_and_timestamps_are_linear_and_source_lineage_is_stable() {
         )
     );
 
+    let mut different_subject = newer.clone();
+    different_subject.mounted_subject_id = "agent:other-subject".to_string();
+    assert_eq!(
+        plan_governed_evidence_document_upsert(Some(&existing), &different_subject, NOW + 10),
+        GovernedEvidenceDocumentPlan::Rejected(
+            GovernedEvidenceDocumentRejection::MountedSubjectMismatch
+        )
+    );
+
     let mut older = draft;
     older.source_revision -= 1;
     assert_eq!(
@@ -375,6 +479,20 @@ fn revisions_and_timestamps_are_linear_and_source_lineage_is_stable() {
 
 #[test]
 fn persisted_document_rejects_invalid_owner_and_time_state() {
+    let mut document = create_fixture();
+    document.schema_version = 0;
+    assert_eq!(
+        validate_governed_evidence_document(&document),
+        Err(GovernedEvidenceDocumentRejection::InvalidSchemaVersion)
+    );
+
+    let mut old_shape = serde_json::to_value(create_fixture()).expect("serialize evidence owner");
+    old_shape
+        .as_object_mut()
+        .expect("evidence owner object")
+        .remove("schema_version");
+    assert!(serde_json::from_value::<GovernedEvidenceDocument>(old_shape).is_err());
+
     let mut document = create_fixture();
     document.owner_revision = 0;
     assert_eq!(
@@ -395,4 +513,69 @@ fn persisted_document_rejects_invalid_owner_and_time_state() {
         validate_governed_evidence_document(&document),
         Err(GovernedEvidenceDocumentRejection::InvalidTimestamps)
     );
+}
+
+#[test]
+fn delete_requires_a_valid_exact_owner_revision() {
+    let existing = create_fixture();
+
+    assert_eq!(
+        plan_governed_evidence_document_delete(None, existing.owner_revision),
+        GovernedEvidenceDocumentDeletePlan::Rejected(
+            GovernedEvidenceDocumentRejection::OwnerDocumentMissing
+        )
+    );
+    assert_eq!(
+        plan_governed_evidence_document_delete(Some(&existing), 0),
+        GovernedEvidenceDocumentDeletePlan::Rejected(
+            GovernedEvidenceDocumentRejection::InvalidOwnerRevision
+        )
+    );
+    assert_eq!(
+        plan_governed_evidence_document_delete(Some(&existing), existing.owner_revision + 1),
+        GovernedEvidenceDocumentDeletePlan::Rejected(
+            GovernedEvidenceDocumentRejection::OwnerRevisionConflict
+        )
+    );
+    assert_eq!(
+        plan_governed_evidence_document_delete(Some(&existing), existing.owner_revision),
+        GovernedEvidenceDocumentDeletePlan::Deleted
+    );
+}
+
+#[test]
+fn derived_source_ref_is_typed_owner_bound_and_locator_free() {
+    let document = create_fixture();
+    let source_ref =
+        governed_evidence_source_ref_from_document(&document).expect("typed evidence source ref");
+
+    assert_eq!(source_ref.owner_ref.owner_id, document.document_id);
+    assert_eq!(source_ref.owner_revision, document.owner_revision);
+    assert_eq!(source_ref.source_revision, document.source_revision);
+    assert_eq!(source_ref.content_digest, document.content_digest);
+    assert_eq!(
+        source_ref.physical_key,
+        scoped_governed_evidence_source_ref_key(
+            &document.memory_space_id,
+            &document.mounted_subject_id,
+            document.source_kind,
+            &document.source_locator,
+            document.source_revision,
+        )
+        .expect("source ref key")
+    );
+    assert_eq!(
+        validate_governed_evidence_source_ref(&document, &source_ref),
+        Ok(())
+    );
+    let encoded = serde_json::to_value(&source_ref).expect("source ref json");
+    assert_eq!(
+        encoded["source_locator_digest"]
+            .as_str()
+            .expect("source locator digest")
+            .len(),
+        64
+    );
+    assert!(encoded.get("source_locator").is_none());
+    assert!(!encoded.to_string().contains(&document.source_locator));
 }

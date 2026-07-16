@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "subject-projection-full-baseline",
   "class": "subject_projection",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "runtime_replay",
   "description": "Full profile emits source, section, private-gate, and budget audit for subject projection.",

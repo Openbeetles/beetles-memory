@@ -13,31 +13,33 @@ use bm_adapter::{AdapterErrorKey, AdapterOperation, TransportKind};
 
 #[cfg(feature = "server-std")]
 use bm_adapter::{
-    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterResponse,
-    AdapterRuntimeServices, AdapterSdkReport, TransportMode,
+    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterRequestIdentityOwner,
+    AdapterResponse, AdapterRuntimeServices, AdapterSdkReport, TransportMode,
 };
 #[cfg(feature = "server-std")]
 use bm_entry::{
-    EntryAuthDecision, EntryConsoleDeviceCreate, EntryConsoleDeviceUpdate,
-    EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled, EntryConsoleTransportUpdate,
-    EntryRuntime, EntryTransportContext,
+    read_authorized_http_request, EntryAcceptedTcpStream, EntryAuthDecision,
+    EntryConsoleDeviceCreate, EntryConsoleDeviceUpdate, EntryConsoleRuntimeSkillEdit,
+    EntryConsoleSkillSetEnabled, EntryConsoleTransportUpdate, EntryHttpAuthorization,
+    EntryHttpIngressErrorKind, EntryHttpIngressLimits, EntryHttpRequestHead, EntryLocalTransport,
+    EntryOperationCapability, EntryRuntime, EntryRuntimeBudgetLease, EntryTransportContext,
 };
 #[cfg(feature = "server-std")]
 use bm_ollama_transparent::{
     DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, OllamaTransparentController,
 };
 #[cfg(feature = "server-std")]
-use bm_sdk::AgentToolRegistrySnapshot;
+use bm_sdk::{AgentToolRegistrySnapshot, RuntimeBudgetReport};
 #[cfg(feature = "server-std")]
 use serde_json::json;
 #[cfg(feature = "server-std")]
-use std::collections::BTreeMap;
+use std::io::Write;
 #[cfg(feature = "server-std")]
-use std::io::{Read, Write};
-#[cfg(feature = "server-std")]
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 #[cfg(feature = "server-std")]
 use std::path::PathBuf;
+#[cfg(feature = "server-std")]
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -106,8 +108,6 @@ const ROUTES: &[RouteSpec] = &[
     memory_post("/memory/inspect", AdapterOperation::Inspect),
     memory_post("/memory/recover", AdapterOperation::Recover),
     memory_post("/memory/replay", AdapterOperation::Replay),
-    memory_post("/memory/export", AdapterOperation::Export),
-    memory_post("/memory/import", AdapterOperation::Import),
     memory_post("/memory/long-term/list", AdapterOperation::LongTermList),
     memory_post("/memory/long-term/detail", AdapterOperation::LongTermDetail),
     memory_post("/memory/long-term/mutate", AdapterOperation::LongTermMutate),
@@ -245,6 +245,10 @@ pub const fn unauthorized_error() -> AdapterErrorKey {
     AdapterErrorKey::Unauthorized
 }
 
+pub const fn forbidden_error() -> AdapterErrorKey {
+    AdapterErrorKey::Forbidden
+}
+
 pub const fn duplicate_idempotency_error() -> AdapterErrorKey {
     AdapterErrorKey::Duplicated
 }
@@ -262,7 +266,7 @@ pub struct HttpRuntimeRequest {
     pub request_id: String,
     pub idempotency_key: String,
     pub audit_id: String,
-    pub authenticated: bool,
+    pub authorization: Option<String>,
 }
 
 #[cfg(feature = "server-std")]
@@ -272,10 +276,10 @@ impl HttpRuntimeRequest {
             method: HttpMethod::Get,
             path: path.into(),
             body: String::new(),
-            request_id: "http-req".to_string(),
-            idempotency_key: "http-idem".to_string(),
-            audit_id: "http-audit".to_string(),
-            authenticated: true,
+            request_id: String::new(),
+            idempotency_key: String::new(),
+            audit_id: String::new(),
+            authorization: None,
         }
     }
 
@@ -284,10 +288,10 @@ impl HttpRuntimeRequest {
             method: HttpMethod::Post,
             path: path.into(),
             body: body.into(),
-            request_id: "http-req".to_string(),
-            idempotency_key: format!("http-idem-{}", unique_request_suffix()),
-            audit_id: "http-audit".to_string(),
-            authenticated: true,
+            request_id: String::new(),
+            idempotency_key: String::new(),
+            audit_id: String::new(),
+            authorization: None,
         }
     }
 
@@ -296,10 +300,10 @@ impl HttpRuntimeRequest {
             method: HttpMethod::Put,
             path: path.into(),
             body: body.into(),
-            request_id: "http-req".to_string(),
-            idempotency_key: format!("http-idem-{}", unique_request_suffix()),
-            audit_id: "http-audit".to_string(),
-            authenticated: true,
+            request_id: String::new(),
+            idempotency_key: String::new(),
+            audit_id: String::new(),
+            authorization: None,
         }
     }
 
@@ -308,10 +312,10 @@ impl HttpRuntimeRequest {
             method: HttpMethod::Patch,
             path: path.into(),
             body: body.into(),
-            request_id: "http-req".to_string(),
-            idempotency_key: format!("http-idem-{}", unique_request_suffix()),
-            audit_id: "http-audit".to_string(),
-            authenticated: true,
+            request_id: String::new(),
+            idempotency_key: String::new(),
+            audit_id: String::new(),
+            authorization: None,
         }
     }
 
@@ -320,11 +324,41 @@ impl HttpRuntimeRequest {
             method: HttpMethod::Delete,
             path: path.into(),
             body: String::new(),
-            request_id: "http-req".to_string(),
-            idempotency_key: format!("http-idem-{}", unique_request_suffix()),
-            audit_id: "http-audit".to_string(),
-            authenticated: true,
+            request_id: String::new(),
+            idempotency_key: String::new(),
+            audit_id: String::new(),
+            authorization: None,
         }
+    }
+
+    pub fn with_bearer_token(mut self, token: impl AsRef<str>) -> Self {
+        self.authorization = Some(format!("Bearer {}", token.as_ref()));
+        self
+    }
+
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = key.into();
+        self
+    }
+}
+
+#[cfg(feature = "server-std")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HttpConnectionTimeouts {
+    pub read: Duration,
+    pub write: Duration,
+}
+
+#[cfg(feature = "server-std")]
+impl HttpConnectionTimeouts {
+    pub fn new(read: Duration, write: Duration) -> bm_sdk::Result<Self> {
+        if read.is_zero() || write.is_zero() {
+            return Err(bm_sdk::Error::config(
+                "http_listener_timeout",
+                "HTTP read and write timeouts must be greater than zero",
+            ));
+        }
+        Ok(Self { read, write })
     }
 }
 
@@ -333,6 +367,27 @@ impl HttpRuntimeRequest {
 pub struct HttpRuntimeResponse {
     pub status_code: u16,
     pub body: String,
+    pub budget_report_id: String,
+}
+
+#[cfg(feature = "server-std")]
+fn acquire_runtime_budget_lease(runtime: &EntryRuntime) -> bm_sdk::Result<EntryRuntimeBudgetLease> {
+    runtime.acquire_budget_lease()
+}
+
+#[cfg(feature = "server-std")]
+fn bind_http_response_budget(
+    mut response: HttpRuntimeResponse,
+    report: &RuntimeBudgetReport,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
+    if response.body.len() > report.adapter_budget.http_body_max_bytes {
+        return Err(bm_sdk::Error::config(
+            "http_response_body",
+            "HTTP response exceeds pinned runtime adapter budget",
+        ));
+    }
+    response.budget_report_id.clone_from(&report.report_id);
+    Ok(response)
 }
 
 #[cfg(feature = "server-std")]
@@ -370,11 +425,11 @@ impl<'a> HttpConsoleServices<'a> {
 }
 
 #[cfg(feature = "server-std")]
-pub fn handle_http_request(
+pub fn handle_http_in_process_request(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
-    handle_http_request_with_console_services(
+    handle_http_in_process_request_with_console_services(
         runtime,
         request,
         AdapterRuntimeServices::none(),
@@ -383,12 +438,12 @@ pub fn handle_http_request(
 }
 
 #[cfg(feature = "server-std")]
-pub fn handle_http_request_with_services(
+pub fn handle_http_in_process_request_with_services(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
     services: AdapterRuntimeServices<'_>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
-    handle_http_request_with_console_services(
+    handle_http_in_process_request_with_console_services(
         runtime,
         request,
         services,
@@ -397,12 +452,12 @@ pub fn handle_http_request_with_services(
 }
 
 #[cfg(feature = "server-std")]
-pub fn handle_http_request_with_console(
+pub fn handle_http_in_process_request_with_console(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
     console_services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
-    handle_http_request_with_console_services(
+    handle_http_in_process_request_with_console_services(
         runtime,
         request,
         AdapterRuntimeServices::none(),
@@ -411,29 +466,79 @@ pub fn handle_http_request_with_console(
 }
 
 #[cfg(feature = "server-std")]
-pub fn handle_http_request_with_console_services(
+pub fn handle_http_in_process_request_with_console_services(
     runtime: &EntryRuntime,
     request: HttpRuntimeRequest,
     services: AdapterRuntimeServices<'_>,
     console_services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
+    let lease = acquire_runtime_budget_lease(runtime)?;
+    let auth = resolve_in_process_http_auth(runtime, &request);
+    let response = runtime.execute_with_budget_lease(&lease, || {
+        handle_http_in_process_request_with_budget_lease(
+            runtime,
+            request,
+            services,
+            console_services,
+            &lease,
+            auth,
+        )
+    })?;
+    bind_http_response_budget(response, lease.report())
+}
+
+#[cfg(feature = "server-std")]
+fn handle_http_in_process_request_with_budget_lease(
+    runtime: &EntryRuntime,
+    request: HttpRuntimeRequest,
+    services: AdapterRuntimeServices<'_>,
+    console_services: HttpConsoleServices<'_>,
+    lease: &EntryRuntimeBudgetLease,
+    auth: EntryAuthDecision,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
+    let budget_report = lease.report();
+    if request.body.len() > budget_report.adapter_budget.http_body_max_bytes {
+        return Err(bm_sdk::Error::config(
+            "http_body",
+            "HTTP body exceeds runtime adapter budget",
+        ));
+    }
+    if !auth.is_authenticated() {
+        return Ok(unauthorized_http_response(&auth));
+    }
+    let principal = auth.principal_id();
+    if principal.is_empty() {
+        return Ok(unauthorized_http_response(&auth));
+    }
+    let request_identity =
+        AdapterRequestIdentityOwner::new(TransportKind::Http, "bm-http-runtime", principal)
+            .issue(
+                (!request.idempotency_key.trim().is_empty())
+                    .then_some(request.idempotency_key.as_str()),
+            )
+            .map_err(|error| bm_sdk::Error::config("http_request_identity", error.to_string()))?;
     if request.path.starts_with("/console/") {
+        let required = if request.method == HttpMethod::Get {
+            EntryOperationCapability::ConsoleRead
+        } else {
+            EntryOperationCapability::ConsoleWrite
+        };
+        if !auth.allows(required) {
+            return Ok(forbidden_capability_response(required));
+        }
         return handle_console_request(runtime, request, console_services);
     }
     let (route_path, _) = split_query_path(&request.path);
     if route_path == "/agent-tool-registries" || route_path.starts_with("/agent-tool-registries/") {
         let route = find_agent_tool_registry_route(request.method, route_path)
             .ok_or_else(|| bm_sdk::Error::config("http_runtime", "unknown route"))?;
-        let body_budget = runtime
-            .runtime()
-            .runtime_budget()
-            .adapter_budget
-            .http_body_max_bytes;
-        if matches!(route.body, RouteBodyMode::Json) && request.body.len() > body_budget {
-            return Err(bm_sdk::Error::config(
-                "http_body",
-                "HTTP body exceeds runtime adapter budget",
-            ));
+        let required = if route.method == HttpMethod::Get {
+            EntryOperationCapability::ConsoleRead
+        } else {
+            EntryOperationCapability::ConsoleWrite
+        };
+        if !auth.allows(required) {
+            return Ok(forbidden_capability_response(required));
         }
         let route_path = route_path.to_string();
         return handle_agent_tool_registry_request(runtime, request, route_path);
@@ -443,201 +548,319 @@ pub fn handle_http_request_with_console_services(
         .find(|route| route.method == request.method && route.path == request.path)
         .copied()
         .ok_or_else(|| bm_sdk::Error::config("http_runtime", "unknown route"))?;
-    let body_budget = runtime
-        .runtime()
-        .runtime_budget()
-        .adapter_budget
-        .http_body_max_bytes;
-    if matches!(route.body, RouteBodyMode::Json) && request.body.len() > body_budget {
-        return Err(bm_sdk::Error::config(
-            "http_body",
-            "HTTP body exceeds runtime adapter budget",
-        ));
-    }
     reject_missing_remote_source_scope(runtime, route.operation, &request.body)?;
     let command = decode_json_adapter_command(
         route.operation,
         &request.body,
         &http_command_options(runtime),
     )?;
-    let response = runtime.handle_with_services(
-        EntryTransportContext {
-            request_id: request.request_id,
-            transport: route.transport,
-            mode: TransportMode::Server,
-            operation: route.operation,
-            source_id: "http-runtime".to_string(),
-            source_kind: "http_client".to_string(),
-            idempotency_key: request.idempotency_key,
-            audit_id: request.audit_id,
-            auth: if request.authenticated {
-                EntryAuthDecision::authenticated("token_or_loopback", "http-client")
-            } else {
-                EntryAuthDecision::unauthenticated("token_or_loopback")
-            },
-        },
+    let response = runtime.handle_with_budget_lease_and_services(
+        EntryTransportContext::new(
+            request_identity.request_id,
+            route.transport,
+            TransportMode::Server,
+            route.operation,
+            "http-runtime",
+            "http_client",
+            request_identity.idempotency_key,
+            request_identity.audit_id,
+            auth,
+        ),
         command,
         services,
+        lease,
     )?;
-    Ok(render_http_response(response.adapter))
+    if response.budget_report != *budget_report {
+        return Err(bm_sdk::Error::config(
+            "http_runtime_budget",
+            "entry_response_budget_lease_identity_mismatch",
+        ));
+    }
+    render_http_response(response.adapter)
+}
+
+#[cfg(feature = "server-std")]
+fn resolve_in_process_http_auth(
+    runtime: &EntryRuntime,
+    request: &HttpRuntimeRequest,
+) -> EntryAuthDecision {
+    if runtime.uses_local_default_scope_policy() {
+        runtime.authenticate_local_transport(EntryLocalTransport::InProcess, "http-in-process")
+    } else {
+        runtime.authenticate_remote_bearer(request.authorization.as_deref())
+    }
+}
+
+#[cfg(feature = "server-std")]
+fn unauthorized_http_response(auth: &EntryAuthDecision) -> HttpRuntimeResponse {
+    json_response(
+        401,
+        json!({
+            "status": "rejected",
+            "error_key": AdapterErrorKey::Unauthorized.as_str(),
+            "reason": auth.rejection_reason().unwrap_or("unauthenticated"),
+        }),
+    )
+}
+
+#[cfg(feature = "server-std")]
+fn forbidden_capability_response(capability: EntryOperationCapability) -> HttpRuntimeResponse {
+    json_response(
+        403,
+        json!({
+            "status": "rejected",
+            "error_key": AdapterErrorKey::Forbidden.as_str(),
+            "reason": format!("principal lacks required capability: {}", capability.as_str()),
+        }),
+    )
 }
 
 #[cfg(feature = "server-std")]
 pub fn serve_http_listener_once(
     runtime: &EntryRuntime,
     listener: &TcpListener,
+    timeouts: HttpConnectionTimeouts,
 ) -> bm_sdk::Result<()> {
-    serve_http_listener_once_with_console_services(runtime, listener, HttpConsoleServices::none())
+    serve_http_listener_once_with_console_services(
+        runtime,
+        listener,
+        timeouts,
+        HttpConsoleServices::none(),
+    )
 }
 
 #[cfg(feature = "server-std")]
 pub fn serve_http_listener_once_with_console_services(
     runtime: &EntryRuntime,
     listener: &TcpListener,
+    timeouts: HttpConnectionTimeouts,
     console_services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<()> {
-    let (mut stream, _) = listener
-        .accept()
+    validate_http_listener_security(runtime, listener)?;
+    let mut stream = EntryAcceptedTcpStream::accept(listener)
         .map_err(|err| bm_sdk::Error::config("http_listener_accept", err.to_string()))?;
-    serve_http_stream_with_console_services(runtime, &mut stream, console_services)
+    configure_http_stream_timeouts(&stream, timeouts)?;
+    serve_http_accepted_stream(runtime, &mut stream, console_services)
 }
 
 #[cfg(feature = "server-std")]
-pub fn serve_http_stream<S: Read + Write>(
+pub fn validate_http_listener_security(
     runtime: &EntryRuntime,
-    stream: &mut S,
+    listener: &TcpListener,
 ) -> bm_sdk::Result<()> {
-    serve_http_stream_with_console_services(runtime, stream, HttpConsoleServices::none())
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| bm_sdk::Error::config("http_listener_addr", error.to_string()))?;
+    validate_http_bind_security(runtime, local_addr)
 }
 
 #[cfg(feature = "server-std")]
-pub fn serve_http_stream_with_console_services<S: Read + Write>(
+pub fn validate_http_bind_security(
     runtime: &EntryRuntime,
-    stream: &mut S,
+    local_addr: SocketAddr,
+) -> bm_sdk::Result<()> {
+    if !local_addr.ip().is_loopback() && !runtime.has_bearer_verifier() {
+        return Err(bm_sdk::Error::config(
+            "http_listener_auth",
+            "non-loopback HTTP bind requires a configured bearer verifier",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server-std")]
+fn configure_http_stream_timeouts(
+    stream: &EntryAcceptedTcpStream,
+    timeouts: HttpConnectionTimeouts,
+) -> bm_sdk::Result<()> {
+    stream
+        .set_read_timeout(Some(timeouts.read))
+        .map_err(|error| bm_sdk::Error::config("http_read_timeout", error.to_string()))?;
+    stream
+        .set_write_timeout(Some(timeouts.write))
+        .map_err(|error| bm_sdk::Error::config("http_write_timeout", error.to_string()))
+}
+
+#[cfg(feature = "server-std")]
+pub fn serve_http_accepted_stream(
+    runtime: &EntryRuntime,
+    stream: &mut EntryAcceptedTcpStream,
     console_services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<()> {
-    let request = read_http_runtime_request(
+    let lease = acquire_runtime_budget_lease(runtime)?;
+    let budget_report = lease.report();
+    let ingress = read_authorized_http_request(
         stream,
-        runtime
-            .runtime()
-            .runtime_budget()
-            .adapter_budget
-            .http_header_max_bytes,
-        runtime
-            .runtime()
-            .runtime_budget()
-            .adapter_budget
-            .http_body_max_bytes,
-    )?;
-    let response = handle_http_request_with_console_services(
-        runtime,
-        request,
-        AdapterRuntimeServices::none(),
-        console_services,
-    )?;
+        EntryHttpIngressLimits::new(
+            budget_report.adapter_budget.http_header_max_bytes,
+            budget_report.adapter_budget.http_body_max_bytes,
+        )
+        .map_err(|error| bm_sdk::Error::config("http_ingress", error.to_string()))?,
+        |accepted, head| {
+            let required = http_head_required_capability(head)?;
+            let auth = runtime.authenticate_accepted_tcp_stream(
+                accepted,
+                head.header("authorization"),
+                "http-loopback",
+            );
+            EntryHttpAuthorization::require(auth, required)
+        },
+    );
+    let ingress = match ingress {
+        Ok(ingress) => ingress,
+        Err(error) if error.kind() == EntryHttpIngressErrorKind::Unauthorized => {
+            let auth = error.auth_decision().ok_or_else(|| {
+                bm_sdk::Error::config("http_auth", "missing ingress auth decision")
+            })?;
+            let response =
+                bind_http_response_budget(unauthorized_http_response(auth), budget_report)?;
+            return write_http_rejection_response(stream, response);
+        }
+        Err(error) if error.kind() == EntryHttpIngressErrorKind::Forbidden => {
+            let capability = error.required_capability().ok_or_else(|| {
+                bm_sdk::Error::config("http_auth", "missing ingress capability decision")
+            })?;
+            let response = bind_http_response_budget(
+                forbidden_capability_response(capability),
+                budget_report,
+            )?;
+            return write_http_rejection_response(stream, response);
+        }
+        Err(error) => return Err(map_http_ingress_error(error)),
+    };
+    let request = http_runtime_request_from_ingress(ingress)?;
+    let auth = request.1;
+    let request = request.0;
+    let response = runtime.execute_with_budget_lease(&lease, || {
+        handle_http_in_process_request_with_budget_lease(
+            runtime,
+            request,
+            AdapterRuntimeServices::none(),
+            console_services,
+            &lease,
+            auth,
+        )
+    })?;
+    let response = bind_http_response_budget(response, budget_report)?;
     write_http_response(stream, response)
 }
 
 #[cfg(feature = "server-std")]
-fn read_http_runtime_request<S: Read>(
-    stream: &mut S,
-    header_max_bytes: usize,
-    body_max_bytes: usize,
-) -> bm_sdk::Result<HttpRuntimeRequest> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0_u8; 1024];
-    let header_end = loop {
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|err| bm_sdk::Error::config("http_read", err.to_string()))?;
-        if read == 0 {
-            break find_header_end(&buffer)
-                .ok_or_else(|| bm_sdk::Error::config("http_read", "missing HTTP headers"))?;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-        if let Some(pos) = find_header_end(&buffer) {
-            break pos;
-        }
-        if buffer.len() > header_max_bytes {
-            return Err(bm_sdk::Error::config("http_read", "HTTP request too large"));
-        }
+fn map_http_ingress_error(error: bm_entry::EntryHttpIngressError) -> bm_sdk::Error {
+    let stage = if error.kind() == EntryHttpIngressErrorKind::PayloadTooLarge
+        || error.message().contains("content-length")
+        || error.message().contains("HTTP body")
+    {
+        "http_body"
+    } else {
+        "http_headers"
     };
+    bm_sdk::Error::config(stage, error.to_string())
+}
 
-    let header_bytes = &buffer[..header_end];
-    let header_text = std::str::from_utf8(header_bytes)
-        .map_err(|err| bm_sdk::Error::config("http_headers", err.to_string()))?;
-    let mut lines = header_text.split("\r\n");
-    let request_line = lines
-        .next()
-        .ok_or_else(|| bm_sdk::Error::config("http_headers", "missing request line"))?;
-    let mut request_parts = request_line.split_whitespace();
-    let method = match request_parts.next() {
-        Some("GET") => HttpMethod::Get,
-        Some("PUT") => HttpMethod::Put,
-        Some("POST") => HttpMethod::Post,
-        Some("PATCH") => HttpMethod::Patch,
-        Some("DELETE") => HttpMethod::Delete,
-        Some(other) => {
-            return Err(bm_sdk::Error::config(
-                "http_headers",
-                format!("unsupported HTTP method: {other}"),
-            ))
-        }
-        None => return Err(bm_sdk::Error::config("http_headers", "missing method")),
-    };
-    let path = request_parts
-        .next()
-        .ok_or_else(|| bm_sdk::Error::config("http_headers", "missing path"))?
-        .to_string();
-    let mut headers = BTreeMap::new();
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
-    }
-
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    if content_length > body_max_bytes {
+#[cfg(feature = "server-std")]
+fn http_runtime_request_from_ingress(
+    ingress: bm_entry::EntryAuthorizedHttpRequest,
+) -> bm_sdk::Result<(HttpRuntimeRequest, EntryAuthDecision)> {
+    let (head, body_bytes, auth) = ingress.into_parts();
+    let method = parse_http_method(head.method())?;
+    let headers = head.headers();
+    let content_length = head.content_length();
+    if matches!(
+        method,
+        HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
+    ) && !headers.contains_key("content-length")
+    {
         return Err(bm_sdk::Error::config(
             "http_body",
-            "HTTP body exceeds runtime adapter budget",
+            "content-length is required for request bodies",
+        ));
+    }
+    if matches!(method, HttpMethod::Get | HttpMethod::Delete) && content_length != 0 {
+        return Err(bm_sdk::Error::config(
+            "http_body",
+            "GET and DELETE requests must not carry a body",
+        ));
+    }
+    if matches!(
+        method,
+        HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
+    ) && headers
+        .get("content-type")
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        != Some("application/json")
+    {
+        return Err(bm_sdk::Error::config(
+            "http_headers",
+            "request body requires application/json content-type",
         ));
     }
 
-    let body_start = header_end + 4;
-    while buffer.len() < body_start + content_length {
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|err| bm_sdk::Error::config("http_body", err.to_string()))?;
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-    }
-    if buffer.len() < body_start + content_length {
-        return Err(bm_sdk::Error::config("http_body", "truncated HTTP body"));
-    }
-    let body = String::from_utf8(buffer[body_start..body_start + content_length].to_vec())
+    let body = String::from_utf8(body_bytes)
         .map_err(|err| bm_sdk::Error::config("http_body", err.to_string()))?;
 
-    Ok(HttpRuntimeRequest {
-        method,
-        path,
-        body,
-        request_id: header_or_default(&headers, "x-request-id", "http-req"),
-        idempotency_key: header_or_default(&headers, "x-idempotency-key", "http-idem"),
-        audit_id: header_or_default(&headers, "x-audit-id", "http-audit"),
-        authenticated: headers.contains_key("authorization")
-            || headers
-                .get("x-loopback")
-                .is_some_and(|value| value == "true" || value == "1"),
-    })
+    Ok((
+        HttpRuntimeRequest {
+            method,
+            path: head.target().to_string(),
+            body,
+            request_id: String::new(),
+            idempotency_key: headers
+                .get("x-idempotency-key")
+                .cloned()
+                .unwrap_or_default(),
+            audit_id: String::new(),
+            authorization: headers.get("authorization").cloned(),
+        },
+        auth,
+    ))
+}
+
+#[cfg(feature = "server-std")]
+fn parse_http_method(method: &str) -> bm_sdk::Result<HttpMethod> {
+    match method {
+        "GET" => Ok(HttpMethod::Get),
+        "PUT" => Ok(HttpMethod::Put),
+        "POST" => Ok(HttpMethod::Post),
+        "PATCH" => Ok(HttpMethod::Patch),
+        "DELETE" => Ok(HttpMethod::Delete),
+        other => Err(bm_sdk::Error::config(
+            "http_headers",
+            format!("unsupported HTTP method: {other}"),
+        )),
+    }
+}
+
+#[cfg(feature = "server-std")]
+fn http_head_required_capability(
+    head: &EntryHttpRequestHead,
+) -> Result<EntryOperationCapability, bm_entry::EntryHttpIngressError> {
+    let method = parse_http_method(head.method())
+        .map_err(|error| bm_entry::EntryHttpIngressError::invalid_request(error.to_string()))?;
+    let (route_path, _) = split_query_path(head.target());
+    if route_path.starts_with("/console/") {
+        return Ok(if method == HttpMethod::Get {
+            EntryOperationCapability::ConsoleRead
+        } else {
+            EntryOperationCapability::ConsoleWrite
+        });
+    }
+    if route_path == "/agent-tool-registries" || route_path.starts_with("/agent-tool-registries/") {
+        let route = find_agent_tool_registry_route(method, route_path).ok_or_else(|| {
+            bm_entry::EntryHttpIngressError::invalid_request("unknown HTTP route")
+        })?;
+        return Ok(if route.method == HttpMethod::Get {
+            EntryOperationCapability::ConsoleRead
+        } else {
+            EntryOperationCapability::ConsoleWrite
+        });
+    }
+    route_specs()
+        .iter()
+        .find(|route| route.method == method && route.path == head.target())
+        .map(|route| EntryOperationCapability::for_adapter_operation(route.operation))
+        .ok_or_else(|| bm_entry::EntryHttpIngressError::invalid_request("unknown HTTP route"))
 }
 
 #[cfg(feature = "server-std")]
@@ -703,6 +926,7 @@ fn write_http_response(
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         409 => "Conflict",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -712,10 +936,11 @@ fn write_http_response(
     };
     let body = response.body;
     let head = format!(
-        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nx-bm-runtime-budget-report-id: {}\r\nconnection: close\r\n\r\n",
         response.status_code,
         reason,
-        body.len()
+        body.len(),
+        response.budget_report_id,
     );
     stream
         .write_all(head.as_bytes())
@@ -725,16 +950,15 @@ fn write_http_response(
 }
 
 #[cfg(feature = "server-std")]
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-#[cfg(feature = "server-std")]
-fn header_or_default(headers: &BTreeMap<String, String>, name: &str, default: &str) -> String {
-    headers
-        .get(name)
-        .cloned()
-        .unwrap_or_else(|| default.to_string())
+fn write_http_rejection_response(
+    stream: &mut EntryAcceptedTcpStream,
+    response: HttpRuntimeResponse,
+) -> bm_sdk::Result<()> {
+    write_http_response(stream, response)?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .and_then(|_| stream.discard_currently_buffered_input())
+        .map_err(|error| bm_sdk::Error::config("http_rejection_close", error.to_string()))
 }
 
 #[cfg(feature = "server-std")]
@@ -743,17 +967,6 @@ fn handle_agent_tool_registry_request(
     request: HttpRuntimeRequest,
     route_path: String,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
-    if !request.authenticated {
-        return Ok(json_response(
-            401,
-            json!({
-                "status": "rejected",
-                "errorKey": "Unauthorized",
-                "reason": "agent tool registry auth rejected request",
-            }),
-        ));
-    }
-
     match (request.method, route_path.as_str()) {
         (HttpMethod::Get, "/agent-tool-registries") => {
             let registries = runtime.runtime().agent_tool_registries();
@@ -843,17 +1056,6 @@ fn handle_console_request(
     request: HttpRuntimeRequest,
     services: HttpConsoleServices<'_>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
-    if !request.authenticated {
-        return Ok(json_response(
-            401,
-            json!({
-                "status": "rejected",
-                "errorKey": "Unauthorized",
-                "reason": "console auth rejected request",
-            }),
-        ));
-    }
-
     let (route_path, query_string) = split_query_path(&request.path);
     match (request.method, route_path) {
         (HttpMethod::Get, "/console/overview") => Ok(json_response(
@@ -1197,7 +1399,7 @@ fn require_ollama_transparent_controller(
 fn map_transparent_error(error: bm_ollama_transparent::OllamaTransparentError) -> bm_sdk::Error {
     bm_sdk::Error::config(
         "console_ollama_transparent",
-        format!("{:?}: {}", error.key(), error.message()),
+        format!("{}: {}", error.key().as_str(), error.message()),
     )
 }
 
@@ -1291,21 +1493,26 @@ fn json_response(status_code: u16, body: serde_json::Value) -> HttpRuntimeRespon
     HttpRuntimeResponse {
         status_code,
         body: body.to_string(),
+        budget_report_id: String::new(),
     }
 }
 
 #[cfg(feature = "server-std")]
-fn render_http_response(response: AdapterResponse<AdapterSdkReport>) -> HttpRuntimeResponse {
-    match response {
+fn render_http_response(
+    response: AdapterResponse<AdapterSdkReport>,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
+    Ok(match response {
         AdapterResponse::Accepted { report, .. } => HttpRuntimeResponse {
             status_code: 200,
-            body: render_report(report),
+            body: render_report(report)?,
+            budget_report_id: String::new(),
         },
         AdapterResponse::Rejected {
             error_key, reason, ..
         } => HttpRuntimeResponse {
             status_code: match error_key {
                 AdapterErrorKey::Unauthorized => 401,
+                AdapterErrorKey::Forbidden => 403,
                 AdapterErrorKey::PayloadTooLarge => 413,
                 AdapterErrorKey::InvalidJson => 400,
                 AdapterErrorKey::Duplicated => 409,
@@ -1315,27 +1522,30 @@ fn render_http_response(response: AdapterResponse<AdapterSdkReport>) -> HttpRunt
             },
             body: json!({
                 "status": "rejected",
-                "error_key": format!("{error_key:?}"),
+                "error_key": error_key.as_str(),
                 "reason": reason,
             })
             .to_string(),
+            budget_report_id: String::new(),
         },
         AdapterResponse::Queued { queue, .. } => HttpRuntimeResponse {
             status_code: 202,
             body: json!({ "status": "queued", "queue": queue }).to_string(),
+            budget_report_id: String::new(),
         },
         AdapterResponse::Duplicated {
             idempotency_key, ..
         } => HttpRuntimeResponse {
             status_code: 409,
             body: json!({ "status": "duplicated", "idempotency_key": idempotency_key }).to_string(),
+            budget_report_id: String::new(),
         },
-    }
+    })
 }
 
 #[cfg(feature = "server-std")]
-fn render_report(report: AdapterSdkReport) -> String {
-    match report {
+fn render_report(report: AdapterSdkReport) -> bm_sdk::Result<String> {
+    Ok(match report {
         AdapterSdkReport::Capabilities(catalog) => json!({
             "status": "accepted",
             "profile": catalog.profile.as_str(),
@@ -1421,16 +1631,8 @@ fn render_report(report: AdapterSdkReport) -> String {
         .to_string(),
         other => json!({
             "status": "accepted",
-            "report": format!("{other:?}"),
+            "report_kind": other.public_kind(),
         })
         .to_string(),
-    }
-}
-
-#[cfg(feature = "server-std")]
-fn unique_request_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
+    })
 }

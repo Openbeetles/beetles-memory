@@ -1,7 +1,7 @@
-//! Export/import of core continuity state for migration and bootstrap.
+//! Subject-bound continuity payloads for internal Soul recovery.
 #![allow(clippy::too_many_arguments)]
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashSet};
 use std::fmt::Write as _;
@@ -105,7 +105,7 @@ pub struct ContinuitySnapshot {
     pub execution_state: Option<ExecutionState>,
 }
 
-pub struct ContinuitySnapshotExportContext<'a> {
+pub(crate) struct ContinuitySnapshotExportContext<'a> {
     pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
     pub execution_state_store: &'a dyn ExecutionStateStore,
@@ -290,13 +290,19 @@ pub fn coalesce_continuity_snapshot_import_plans(plans: &mut [ContinuitySnapshot
     );
 }
 
-pub fn export_continuity_snapshot(
+pub(crate) fn export_continuity_snapshot(
     ctx: ContinuitySnapshotExportContext<'_>,
+    subject_id: &str,
     chat_id: &str,
     mode: ContinuitySnapshotMode,
     exported_at: u64,
 ) -> Result<ContinuitySnapshot> {
-    let subject_id = board_subject_scope_id();
+    if subject_id.is_empty() || subject_id != subject_id.trim() {
+        return Err(Error::config(
+            "continuity_snapshot_subject_binding",
+            "subject_id must be a canonical non-empty value",
+        ));
+    }
     let (summary_text, summary_message_count) = ctx
         .session_summary_store
         .get_with_count(chat_id)?
@@ -359,12 +365,9 @@ pub fn plan_continuity_snapshot_import(
     mode: ContinuitySnapshotImportMode,
     governance_context: SharedFactWriteGovernanceContext,
 ) -> Result<ContinuitySnapshotImportPlan> {
+    validate_snapshot_subject_binding(snapshot, &governance_context.origin_subject_id)?;
     let manifest = snapshot_manifest(snapshot);
-    let target_subject_id = if snapshot.subject_id.trim().is_empty() {
-        board_subject_scope_id()
-    } else {
-        snapshot.subject_id.trim()
-    };
+    let target_subject_id = snapshot.subject_id.as_str();
     let selected = select_import_long_term_memory(snapshot, target_chat_id, mode);
     let drafts = selected
         .iter()
@@ -695,6 +698,24 @@ pub fn plan_continuity_snapshot_import(
     })
 }
 
+fn validate_snapshot_subject_binding(
+    snapshot: &ContinuitySnapshot,
+    mounted_subject_id: &str,
+) -> Result<()> {
+    if mounted_subject_id.is_empty()
+        || mounted_subject_id != mounted_subject_id.trim()
+        || snapshot.subject_id.is_empty()
+        || snapshot.subject_id != snapshot.subject_id.trim()
+        || snapshot.subject_id != mounted_subject_id
+    {
+        return Err(Error::config(
+            "continuity_snapshot_subject_binding",
+            "snapshot subject must exactly match the mounted recovery subject",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn import_continuity_snapshot(
     ctx: ContinuitySnapshotImportContext<'_>,
@@ -703,11 +724,7 @@ pub(crate) fn import_continuity_snapshot(
     snapshot: &ContinuitySnapshot,
     mode: ContinuitySnapshotImportMode,
 ) -> Result<ContinuitySnapshotImportOutcome> {
-    let subject_id = if snapshot.subject_id.trim().is_empty() {
-        board_subject_scope_id()
-    } else {
-        snapshot.subject_id.trim()
-    };
+    let subject_id = snapshot.subject_id.as_str();
     let plan = plan_continuity_snapshot_import(
         ContinuitySnapshotImportContext {
             long_term_memory_store: ctx.long_term_memory_store,
@@ -878,7 +895,8 @@ fn snapshot_content_fingerprint(
 }
 
 pub fn select_active_continuity_snapshot_chat_ids(
-    session_store: &dyn SessionStore,
+    requested_subject_id: &str,
+    _session_store: &dyn SessionStore,
     self_continuity_store: &dyn SelfContinuityStore,
     relationship_portfolio_store: &dyn RelationshipPortfolioStore,
     relationship_topology_store: &dyn RelationshipTopologyStore,
@@ -888,7 +906,7 @@ pub fn select_active_continuity_snapshot_chat_ids(
     limit: usize,
 ) -> Vec<String> {
     let continuity = self_continuity_store
-        .get(board_subject_scope_id())
+        .get(requested_subject_id)
         .ok()
         .flatten();
     let limit = limit.max(1);
@@ -908,7 +926,7 @@ pub fn select_active_continuity_snapshot_chat_ids(
         (!channel.is_empty()).then_some(channel)
     });
     let portfolio = relationship_portfolio_store
-        .get(board_subject_scope_id())
+        .get(requested_subject_id)
         .ok()
         .flatten();
     push_portfolio_chat_ids(
@@ -920,7 +938,7 @@ pub fn select_active_continuity_snapshot_chat_ids(
         limit,
     );
     let topology = relationship_topology_store
-        .get(board_subject_scope_id())
+        .get(requested_subject_id)
         .ok()
         .flatten();
     push_topology_chat_ids(
@@ -932,25 +950,15 @@ pub fn select_active_continuity_snapshot_chat_ids(
         active_window_secs,
         limit,
     );
-    let board_subject_chat_id = continuity.as_ref().and_then(|continuity| {
+    let subject_chat_id = continuity.as_ref().and_then(|continuity| {
         let chat_id = continuity.last_user_chat_id.trim();
         (!chat_id.is_empty()).then_some(chat_id)
     });
-    let board_subject_is_active = last_activity == 0
+    let subject_is_active = last_activity == 0
         || now_secs == 0
         || now_secs.saturating_sub(last_activity) <= active_window_secs;
-    if board_subject_is_active {
-        push_unique_chat_id(&mut selected, board_subject_chat_id, limit);
-    }
-    if selected.is_empty() {
-        let mut chat_ids = session_store.list_chat_ids().unwrap_or_default();
-        chat_ids.sort();
-        for chat_id in chat_ids {
-            if selected.len() >= limit {
-                break;
-            }
-            push_unique_chat_id(&mut selected, Some(chat_id.as_str()), limit);
-        }
+    if subject_is_active {
+        push_unique_chat_id(&mut selected, subject_chat_id, limit);
     }
     selected
 }
@@ -1489,6 +1497,7 @@ mod tests {
     struct StubLongTermMemoryStore {
         entries: Vec<LongTermMemoryEntry>,
         imported: Mutex<Vec<LongTermMemoryDraft>>,
+        list_calls: Mutex<usize>,
     }
 
     impl LongTermMemoryStore for StubLongTermMemoryStore {
@@ -1514,6 +1523,10 @@ mod tests {
         }
 
         fn list(&self, _limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
+            *self
+                .list_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) += 1;
             Ok(self.entries.clone())
         }
 
@@ -1533,10 +1546,15 @@ mod tests {
     #[derive(Default)]
     struct StubSummaryStore {
         value: Mutex<Option<(String, usize)>>,
+        read_calls: Mutex<usize>,
     }
 
     impl SessionSummaryStore for StubSummaryStore {
         fn get(&self, _chat_id: &str) -> Result<Option<String>> {
+            *self
+                .read_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) += 1;
             Ok(self
                 .value
                 .lock()
@@ -1561,6 +1579,10 @@ mod tests {
         }
 
         fn get_with_count(&self, _chat_id: &str) -> Result<Option<(String, usize)>> {
+            *self
+                .read_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) += 1;
             Ok(self.value.lock().unwrap_or_else(|e| e.into_inner()).clone())
         }
     }
@@ -1795,6 +1817,7 @@ mod tests {
                     entries: std::collections::HashMap::new(),
                 },
             },
+            board_subject_scope_id(),
             "chat-1",
             ContinuitySnapshotMode::Bootstrap,
             10,
@@ -1806,6 +1829,115 @@ mod tests {
             .long_term_memory
             .iter()
             .all(|entry| entry.kind != LongTermMemoryKind::Task));
+    }
+
+    #[test]
+    fn import_planning_rejects_cross_subject_snapshot_before_store_reads() {
+        let long_term_store = StubLongTermMemoryStore {
+            entries: vec![sample_entry(LongTermMemoryKind::Fact, "cross_subject")],
+            ..StubLongTermMemoryStore::default()
+        };
+        let summary_store = StubSummaryStore::default();
+        let snapshot = ContinuitySnapshot {
+            version: CONTINUITY_SNAPSHOT_VERSION,
+            exported_at: 20,
+            mode: ContinuitySnapshotMode::FullRestore,
+            chat_id: "chat-old".to_string(),
+            subject_id: "subject-other".to_string(),
+            manifest: ContinuitySnapshotManifest::default(),
+            summary_text: Some("must not be read".to_string()),
+            summary_message_count: Some(1),
+            long_term_memory: vec![sample_entry(LongTermMemoryKind::Fact, "cross_subject")],
+            self_model: None,
+            self_authored_core: None,
+            core_revision_ledger: None,
+            self_continuity: None,
+            relationship_portfolio: None,
+            relationship_constitution: None,
+            execution_state: None,
+        };
+        let error = plan_continuity_snapshot_import(
+            ContinuitySnapshotImportContext {
+                long_term_memory_store: &long_term_store,
+                session_summary_store: &summary_store,
+                execution_state_store: &StubExecutionStateStore::default(),
+                self_model_store: &StubSelfModelStore::default(),
+                self_authored_core_store: &StubSelfAuthoredCoreStore::default(),
+                core_revision_ledger_store: &StubCoreRevisionLedgerStore::default(),
+                self_continuity_store: &StubSelfContinuityStore::default(),
+                relationship_constitution_store: &StubRelationshipConstitutionStore::default(),
+                relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
+            },
+            "chat-new",
+            &snapshot,
+            ContinuitySnapshotImportMode::FullRestore,
+            SharedFactWriteGovernanceContext::new(
+                "space-a",
+                "subject-mounted",
+                "subject-mounted",
+                SharedMemoryWriteSource::SnapshotImport,
+            ),
+        )
+        .expect_err("cross-subject recovery snapshot must fail closed");
+
+        assert_eq!(error.stage(), "continuity_snapshot_subject_binding");
+        assert_eq!(
+            *long_term_store
+                .list_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
+        assert_eq!(
+            *summary_store
+                .read_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
+    }
+
+    #[test]
+    fn recovery_export_rejects_noncanonical_subject_before_store_reads() {
+        let long_term_store = StubLongTermMemoryStore::default();
+        let summary_store = StubSummaryStore::default();
+        let error = export_continuity_snapshot(
+            ContinuitySnapshotExportContext {
+                long_term_memory_store: &long_term_store,
+                session_summary_store: &summary_store,
+                execution_state_store: &StubExecutionStateStore::default(),
+                self_model_store: &StubSelfModelStore::default(),
+                self_authored_core_store: &StubSelfAuthoredCoreStore::default(),
+                core_revision_ledger_store: &StubCoreRevisionLedgerStore::default(),
+                self_continuity_store: &StubSelfContinuityStore::default(),
+                relationship_constitution_store: &StubRelationshipConstitutionStore::default(),
+                relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
+                relationship_topology_store: &StubRelationshipTopologyStore {
+                    entries: std::collections::HashMap::new(),
+                },
+            },
+            " subject-mounted ",
+            "chat-a",
+            ContinuitySnapshotMode::FullRestore,
+            20,
+        )
+        .expect_err("noncanonical recovery subject must fail closed");
+
+        assert_eq!(error.stage(), "continuity_snapshot_subject_binding");
+        assert_eq!(
+            *long_term_store
+                .list_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
+        assert_eq!(
+            *summary_store
+                .read_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
     }
 
     #[test]
@@ -2056,7 +2188,7 @@ mod tests {
     }
 
     #[test]
-    fn select_active_chat_ids_prefers_preferred_and_board_subject_anchor() {
+    fn select_active_chat_ids_prefers_preferred_and_requested_subject_anchor() {
         let session_store = StubSessionStore {
             chat_ids: vec![
                 "chat-stale".to_string(),
@@ -2123,6 +2255,7 @@ mod tests {
             }),
         };
         let selected = select_active_continuity_snapshot_chat_ids(
+            board_subject_scope_id(),
             &session_store,
             &continuity_store,
             &portfolio_store,
@@ -2136,6 +2269,60 @@ mod tests {
             selected,
             vec!["chat-preferred".to_string(), "chat-recent".to_string()]
         );
+    }
+
+    #[test]
+    fn select_active_chat_ids_is_bound_to_requested_subject_in_both_directions() {
+        let board_subject_id = board_subject_scope_id();
+        let current_subject_id = "subject:current";
+        let session_store = StubSessionStore {
+            chat_ids: vec!["chat-board".to_string(), "chat-current".to_string()],
+        };
+        let continuity_store = MultiSelfContinuityStore {
+            entries: [
+                (
+                    board_subject_id.to_string(),
+                    SelfContinuity {
+                        last_user_turn_at: 990,
+                        last_user_chat_id: "chat-board".to_string(),
+                        updated_at: 995,
+                        ..SelfContinuity::default()
+                    },
+                ),
+                (
+                    current_subject_id.to_string(),
+                    SelfContinuity {
+                        last_user_turn_at: 980,
+                        last_user_chat_id: "chat-current".to_string(),
+                        updated_at: 985,
+                        ..SelfContinuity::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let portfolio_store = StubRelationshipPortfolioStore::default();
+        let topology_store = StubRelationshipTopologyStore {
+            entries: std::collections::HashMap::new(),
+        };
+
+        let select = |subject_id| {
+            select_active_continuity_snapshot_chat_ids(
+                subject_id,
+                &session_store,
+                &continuity_store,
+                &portfolio_store,
+                &topology_store,
+                None,
+                1_000,
+                120,
+                4,
+            )
+        };
+
+        assert_eq!(select(board_subject_id), vec!["chat-board".to_string()]);
+        assert_eq!(select(current_subject_id), vec!["chat-current".to_string()]);
     }
 
     #[test]

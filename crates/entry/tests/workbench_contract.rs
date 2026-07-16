@@ -1,14 +1,16 @@
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
+
+mod support;
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
+    let profile = support::host_production_profile();
     EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "workbench-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -17,11 +19,9 @@ fn config() -> EntryRuntimeConfig {
             channel: "console".to_string(),
             chat_id: "workbench-chat".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(profile)
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled().with_cli(true),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 16 },
@@ -121,5 +121,10 @@ fn workbench_report_exposes_real_runtime_reports_without_private_raw_surfaces() 
     );
     assert!(!report.projection_inspector.foreground_disclosure_allowed);
     assert!(report.projection_inspector.disclosure_integrity_passed);
-    assert!(report.vault_migration.preflight_passed);
+    assert!(!report.vault_migration.preflight_passed);
+    assert_eq!(report.vault_migration.status.status, "limited");
+    assert!(report
+        .vault_migration
+        .preflight_failures
+        .contains(&"scoped_projection_does_not_rewrite_identity".to_string()));
 }

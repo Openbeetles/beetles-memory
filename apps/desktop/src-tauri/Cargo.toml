@@ -9,6 +9,14 @@ description = "Tauri desktop shell for Beetle Memory standalone console."
 name = "bm_desktop"
 path = "src/lib.rs"
 
+[features]
+default = []
+profile-desktop-macos-standalone-memory = [
+    "bm-http/profile-desktop-macos-standalone-memory",
+    "bm-entry/profile-desktop-macos-standalone-memory",
+    "bm-sdk/profile-desktop-macos-standalone-memory",
+]
+
 [dependencies]
 bm-entry.workspace = true
 bm-http = { path = "../../../crates/http", features = ["server-std"] }

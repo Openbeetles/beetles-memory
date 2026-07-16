@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+mod support;
+
 use bm_sdk::{
     build_temporal_memory_graph_from_evidence, build_vault_migration_preflight,
     compile_edge_memory_budget_report, default_agent_subject_id, default_memory_space_id,
@@ -18,10 +20,10 @@ use bm_sdk::{
     MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
     MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryProfile,
-    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
-    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
-    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
+    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
+    MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest, MemoryWriteRequest,
+    PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
     PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
     ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
     PromptParticipationPlan, RedactedTranscriptSlice, SoulLifeProjectionReport, StoreBackendConfig,
@@ -253,15 +255,14 @@ fn sdk_runtime_uses_opaque_memory_store_handle_as_public_store_entry() {
     assert!(!runtime_surface.contains("pub fn runtime_metrics_report_from_events("));
     assert!(!sdk_surface.contains("pub use crate::store_internal::*"));
 
-    let store = MemoryStoreHandle::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let store = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).unwrap(),
     )
     .unwrap();
 
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").unwrap())
         .scope(MemoryScope::new("local", "chat-1").unwrap())
-        .profile(ProfileId::ServerLinuxDevFull)
         .store(store)
         .build()
         .unwrap();
@@ -274,10 +275,7 @@ fn sdk_runtime_uses_opaque_memory_store_handle_as_public_store_entry() {
     );
     assert_eq!(default_agent_subject_id("agent-main"), "agent:agent-main");
     assert_eq!(runtime.scope().chat_id, "chat-1");
-    assert_eq!(
-        runtime.capabilities().profile,
-        ProfileId::ServerLinuxDevFull
-    );
+    assert_eq!(runtime.capabilities().profile, support::host_test_profile());
 }
 
 #[test]

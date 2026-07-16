@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+cargo() {
+  command cargo --locked "$@"
+}
+export -f cargo
+
 require_in_file() {
   local pattern="$1"
   local file="$2"
@@ -34,6 +39,9 @@ cargo test -p bm-sdk --features nonproduction-replay-harness --test projection_a
 cargo test -p bm-sdk --features nonproduction-replay-harness --test sdk_runtime_flow runtime_write_recall_project_uses_sdk_entry_only
 cargo test -p bm-sdk --features nonproduction-replay-harness --test write_candidate_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test memory_space_migration_contract
+cargo test -p bm-sdk --features nonproduction-replay-harness,sqlite-store \
+  --test memory_space_migration_contract \
+  same_scope_facet_closure_migrates_across_all_store_backends
 cargo test -p bm-sdk --features nonproduction-replay-harness --test public_surface
 cargo test -p bm-sdk --features nonproduction-replay-harness --test runtime_budget_contract graph_expansion_budget_is_profile_owned_and_not_provider_render_owned
 cargo test -p bm-sdk --features nonproduction-replay-harness --test runtime_budget_contract facet_recall_budget_is_profile_owned_and_not_graph_or_render_owned
@@ -177,7 +185,6 @@ rg -Fq "transcript_mask_redacts_or_blocks_facet_source_refs" dev-docs/governed-m
 rg -Fq "facet_index_rebuild_reports_orphan_and_schema_failures" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "facet_report_view_redacts_sensitive_metadata_by_default" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "human_facet_suggestion_requires_governed_proposal" dev-docs/governed-memory-facet-index-plan.md
-rg -Fq "facet_migration_remap_required_fails_closed" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "eval_recall_reports_facet_stage_for_expanded_miss" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "external_noisy_wall_reports_facet_stage_diagnostics" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "external_noisy_wall_requires_facet_ablation_and_no_render_growth" dev-docs/governed-memory-facet-index-plan.md
@@ -253,11 +260,12 @@ require_in_all "final_projection_integrity" dev-docs/replay-sandbox-plan.md crat
 require_in_all "delivery_drop_reason_counts" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 require_in_all "p7_runner_build_inputs_sha256_v2" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 require_in_all "p7_sdk_build_inputs_sha256_v2" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/build.rs crates/replay/src/bench.rs
-require_in_file "P7_TRUSTED_RUNNER_RELEASE" crates/replay/src/bench.rs
-require_in_file "trusted_runner_anchor_is_structurally_valid_when_frozen" crates/replay/src/bench.rs
+require_in_file "P7_FROZEN_RUNNER_IDENTITY" crates/replay/src/bench.rs
+require_in_file "frozen_runner_identity_contract_is_structurally_valid" crates/replay/src/bench.rs
 require_in_all "QueryFacetInput" dev-docs/governed-memory-facet-index-plan.md crates/core/src/memory/memory_facet.rs crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/adapter/src/payload.rs
 require_in_all "structured_query_facets" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/adapter/src/payload.rs crates/adapter/tests/contract.rs
 require_in_all "MemoryFacetIndexManifest" dev-docs/governed-memory-facet-index-plan.md dev-docs/long-term-memory-control-surface-plan.md crates/core/src/memory/memory_facet.rs crates/sdk/src/runtime.rs
+require_in_all "same_scope_facet_closure_migrates_across_all_store_backends" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/memory_space_migration_contract.rs
 require_in_all "manifest_integrity_verified" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
 require_in_all "candidate_receipts" dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
 require_in_all "exact_render_match" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
@@ -286,7 +294,9 @@ require_in_all "MemoryGraphNodeMembership" dev-docs/temporal-memory-graph-plan.m
 require_in_all "MemoryGraphEdgeMembership" dev-docs/temporal-memory-graph-plan.md crates/core/src/memory/next_gen_contract.rs crates/sdk/src/runtime.rs
 require_in_all "MemoryGraphBacklinkMembership" dev-docs/temporal-memory-graph-plan.md crates/core/src/memory/next_gen_contract.rs crates/sdk/src/runtime.rs
 require_in_all "StoreJsonPrecondition" dev-docs/temporal-memory-graph-plan.md dev-docs/memory-write-transaction-plan.md crates/sdk/src/store_internal/mutation.rs crates/sdk/src/runtime.rs crates/store-contract-tests/tests/mutation_batch_contract.rs
-require_in_all "commit_governed_memory_transaction_with_preconditions" dev-docs/temporal-memory-graph-plan.md dev-docs/memory-write-transaction-plan.md crates/sdk/src/store_internal/platform.rs crates/sdk/src/runtime.rs
+require_in_all "commit_governed_memory_transaction_with_preconditions" dev-docs/temporal-memory-graph-plan.md dev-docs/memory-write-transaction-plan.md crates/sdk/src/store_internal/platform.rs
+require_in_all "commit_governed_memory_transaction_with_runtime_budget" dev-docs/memory-write-transaction-plan.md crates/sdk/src/store_internal/platform.rs crates/sdk/src/runtime.rs
+require_in_all "commit_governed_memory_transaction_authorized" dev-docs/memory-write-transaction-plan.md crates/sdk/src/store_internal/platform.rs
 require_in_all "manifest_contract_verified" dev-docs/temporal-memory-graph-plan.md dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
 require_in_all "selected_dependency_chain_verified" dev-docs/temporal-memory-graph-plan.md dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
 require_in_all "full_scope_closure_verified" dev-docs/temporal-memory-graph-plan.md dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
@@ -306,9 +316,14 @@ require_in_all "production_long_term_control_mutation_is_not_exposed_by_host_sto
 require_in_all "production_continuity_and_shared_memory_planners_are_read_only" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/public_surface.rs
 require_in_all "explicit_privacy_transition_updates_owner_facet_and_postings_atomically" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/memory_write_transaction_contract.rs
 require_in_all "continuity_import_preserves_soul_private_without_public_delivery_or_graph_membership" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/replay_import_export.rs
-require_in_all "load_governed_recall_snapshot" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md crates/sdk/src/store_internal/platform.rs crates/sdk/src/runtime.rs
-require_in_all "governed_recall_snapshot_is_immutable_and_rejects_writes" dev-docs/governed-memory-facet-index-plan.md crates/store-contract-tests/tests/governed_recall_snapshot_contract.rs
-require_in_all "recall_reports_the_single_governed_store_snapshot_it_consumed" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/runtime_contract.rs
+require_in_all "StoreImmutableReadSession" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md crates/sdk/src/store_internal/transaction.rs crates/sdk/src/store_internal/recall_read.rs
+require_in_all "with_recall_immutable_read_session" dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/store_internal/platform.rs crates/sdk/src/runtime.rs crates/store-contract-tests/tests/governed_recall_immutable_session_contract.rs
+require_in_all "production_recall_has_no_whole_store_snapshot_or_second_platform_path" dev-docs/governed-memory-facet-index-plan.md crates/store-contract-tests/tests/governed_recall_immutable_session_contract.rs
+require_in_all "recall_reports_the_single_immutable_session_read_view_it_consumed" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/runtime_contract.rs
+if rg -n "load_governed_recall_snapshot|GovernedRecallSnapshot|ReadOnlySnapshotStoreEngine" crates/sdk crates/store-contract-tests dev-docs; then
+  echo "legacy whole-store recall snapshot path must not exist" >&2
+  exit 1
+fi
 require_in_all "governed_transaction_rejects_owner_mutation_without_facet_closure" dev-docs/governed-memory-facet-index-plan.md crates/store-contract-tests/tests/mutation_batch_contract.rs
 require_in_all "governed_transaction_rejects_control_mutation_without_audit_closure" dev-docs/governed-memory-facet-index-plan.md crates/store-contract-tests/tests/mutation_batch_contract.rs
 require_in_all "governed_transaction_rejects_mismatched_control_audit_binding" dev-docs/governed-memory-facet-index-plan.md crates/store-contract-tests/tests/mutation_batch_contract.rs

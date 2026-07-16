@@ -6,8 +6,5 @@ platform injection, canonical turn delta, write candidates, projection,
 deferred governance jobs, and export/import/replay.
 
 - `generic-rust-host/`: a neutral SDK host with no Beetle-specific behavior.
-- `beetle-derived/`: legacy-shaped inputs extracted from Beetle-style
-  memory behavior. It is evidence only and must not receive a special kernel
-  branch.
-- `beetle-derived-legacy/`: historical alias retained for older notes; new
-  readiness tests use `beetle-derived/`.
+- `beetle-derived/`: Beetle-shaped host evidence exercised through the current
+  public contract. It must not receive a special kernel or compatibility branch.

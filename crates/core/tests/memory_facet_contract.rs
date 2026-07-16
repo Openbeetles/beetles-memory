@@ -1,37 +1,117 @@
 use bm_core::memory::{
-    allocate_recall_delivery_candidates, build_long_term_memory_facet_index_doc,
+    allocate_recall_delivery_candidates, build_governed_evidence_document_facet_index_doc,
+    build_long_term_memory_facet_index_doc as try_build_long_term_memory_facet_index_doc,
+    canonical_recall_evidence_group, governed_evidence_document_content_digest,
+    governed_long_term_owner_evidence_bindings, governed_memory_recall_candidate_id,
     memory_facet_manifest_key, memory_facet_posting_key, scoped_memory_facet_owner_storage_key,
     score_recall_delivery_texts, validate_memory_facet_manifest, validate_memory_facet_posting,
     validate_memory_facet_read_chain, CanonicalEntityKey, CanonicalEntityKind, CanonicalEntityRef,
-    CanonicalEvidenceRef, FacetReportAudience, HumanFacetSuggestion, LongTermMemoryConfidence,
-    LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-    LongTermMemorySourceType, MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetNamespace,
-    MemoryFacetOwnerPlane, MemoryFacetOwnerVersion, MemoryFacetPostingDoc,
-    MemoryFacetPostingRevision, MemoryFacetStatus, MemoryFacetValidationError, MemoryPrivacyClass,
-    QueryFacetInput, QueryFacetParser, RecallDeliveryCandidate, RecallDeliveryOrderingPolicy,
-    RecallDeliverySelectionDropReason, RecallDeliveryText, StructuredFacetParser, TemporalAnchor,
-    TemporalAnchorKind, TemporalAnchorPrecision, MEMORY_FACET_SCHEMA_VERSION,
+    CanonicalEvidenceRef, CanonicalRecallEvidenceFamilyGroup, FacetReportAudience,
+    GovernedEvidenceBinding, GovernedEvidenceDocument, GovernedEvidenceDocumentChunk,
+    GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    HumanFacetSuggestion, LongTermMemoryConfidence, LongTermMemoryEntry, LongTermMemoryFreshness,
+    LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
+    MemoryEvidenceAuthority, MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetNamespace,
+    MemoryFacetOwnerVersion, MemoryFacetPostingDoc, MemoryFacetPostingRevision, MemoryFacetStatus,
+    MemoryFacetValidationError, MemoryPrivacyClass, QueryFacetInput, QueryFacetParser,
+    RecallDeliveryCandidate, RecallDeliveryOrderingPolicy, RecallDeliverySelectionDropReason,
+    RecallDeliveryText, StructuredFacetParser, TemporalAnchor, TemporalAnchorKind,
+    TemporalAnchorPrecision, MEMORY_FACET_SCHEMA_VERSION,
 };
+
+fn build_long_term_memory_facet_index_doc(
+    entry: &LongTermMemoryEntry,
+    memory_space_id: impl Into<String>,
+    subject_ids: Vec<String>,
+    facet_index_revision: u64,
+) -> MemoryFacetIndexDoc {
+    try_build_long_term_memory_facet_index_doc(
+        entry,
+        memory_space_id,
+        subject_ids,
+        facet_index_revision,
+    )
+    .expect("fixture long-term owner must produce a valid governed facet document")
+}
+
+fn delivery_bindings(sources: &[&str], family: Option<&str>) -> Vec<GovernedEvidenceBinding> {
+    let family = family.map(|identity| {
+        CanonicalRecallEvidenceFamilyGroup::from_structured_identity(identity)
+            .expect("structured family")
+            .into_string()
+    });
+    sources
+        .iter()
+        .map(|source| {
+            GovernedEvidenceBinding::try_new(
+                *source,
+                canonical_recall_evidence_group(source),
+                family.clone(),
+            )
+            .expect("canonical owner evidence binding")
+        })
+        .collect()
+}
 
 #[test]
 fn facet_owner_physical_key_is_scoped_before_any_owner_read() {
-    let base = scoped_memory_facet_owner_storage_key("space-a", "subject-a", "owner-1")
+    let long_term = GovernedMemoryOwnerRef {
+        owner_plane: GovernedMemoryOwnerPlane::LongTerm,
+        owner_id: "owner-1".to_string(),
+    };
+    let evidence = GovernedMemoryOwnerRef {
+        owner_plane: GovernedMemoryOwnerPlane::EvidenceDocument,
+        owner_id: "owner-1".to_string(),
+    };
+    let base = scoped_memory_facet_owner_storage_key("space-a", "subject-a", &long_term)
         .expect("scoped facet owner key");
     assert_eq!(
         base,
-        scoped_memory_facet_owner_storage_key("space-a", "subject-a", "owner-1")
+        scoped_memory_facet_owner_storage_key("space-a", "subject-a", &long_term)
             .expect("deterministic key")
     );
     assert_ne!(
         base,
-        scoped_memory_facet_owner_storage_key("space-b", "subject-a", "owner-1")
+        scoped_memory_facet_owner_storage_key("space-b", "subject-a", &long_term)
             .expect("space isolation")
     );
     assert_ne!(
         base,
-        scoped_memory_facet_owner_storage_key("space-a", "subject-b", "owner-1")
+        scoped_memory_facet_owner_storage_key("space-a", "subject-b", &long_term)
             .expect("subject isolation")
     );
+    assert_ne!(
+        base,
+        scoped_memory_facet_owner_storage_key("space-a", "subject-a", &evidence)
+            .expect("owner plane isolation")
+    );
+}
+
+#[test]
+fn governed_recall_candidate_id_never_collides_across_planes() {
+    let owner_id = "shared-owner-id";
+    let owner_planes = [
+        GovernedMemoryOwnerPlane::LongTerm,
+        GovernedMemoryOwnerPlane::EvidenceDocument,
+        GovernedMemoryOwnerPlane::ConversationTranscript,
+        GovernedMemoryOwnerPlane::MemoryGraph,
+        GovernedMemoryOwnerPlane::RuntimeSkill,
+    ];
+
+    let candidate_ids = owner_planes
+        .into_iter()
+        .map(|owner_plane| {
+            let candidate_id = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+                owner_plane,
+                owner_id,
+            ));
+            assert_ne!(candidate_id, owner_id);
+            assert!(candidate_id.starts_with(&format!("owner:{}:", owner_plane.as_str())));
+            candidate_id
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(candidate_ids.len(), owner_planes.len());
 }
 
 fn fixture_long_term_entry() -> LongTermMemoryEntry {
@@ -70,14 +150,57 @@ fn fixture_long_term_entry() -> LongTermMemoryEntry {
     }
 }
 
+fn fixture_evidence_document() -> GovernedEvidenceDocument {
+    let source_locator = "opaque://must-not-become-a-facet/free-tag".to_string();
+    let canonical_evidence_group =
+        bm_core::memory::canonical_recall_evidence_group("evidence:release:p7.4.1");
+    let body = "Typed metadata and bounded lexical indexing close release acceptance.".to_string();
+    let chunks = vec![GovernedEvidenceDocumentChunk {
+        identity: "section:acceptance".to_string(),
+        ordinal: 0,
+        body: "Facet posting manifest verified".to_string(),
+    }];
+    GovernedEvidenceDocument {
+        schema_version: bm_core::memory::GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION,
+        physical_key: bm_core::memory::scoped_governed_evidence_document_key(
+            "space:main",
+            "shared-owner-id",
+        )
+        .expect("evidence owner key"),
+        memory_space_id: "space:main".to_string(),
+        mounted_subject_id: "subject:user".to_string(),
+        document_id: "shared-owner-id".to_string(),
+        source_kind: GovernedEvidenceDocumentSourceKind::StructuredMaterial,
+        source_locator: source_locator.clone(),
+        canonical_evidence_group: canonical_evidence_group.clone(),
+        evidence_family_group: None,
+        source_revision: 7,
+        owner_revision: 3,
+        content_digest: governed_evidence_document_content_digest(
+            &source_locator,
+            &canonical_evidence_group,
+            None,
+            &body,
+            &chunks,
+        ),
+        body,
+        chunks,
+        authority: MemoryEvidenceAuthority::UserAsserted,
+        privacy: MemoryPrivacyClass::SharedWithSubject,
+        observed_at: 1_800_000_010,
+        created_at: 1_800_000_010,
+        updated_at: 1_800_000_030,
+    }
+}
+
 #[test]
 fn delivery_allocator_preserves_distinct_evidence_groups_before_duplicate_rank() {
     let candidates = vec![
         RecallDeliveryCandidate {
             candidate_id: "candidate-shared-high".to_string(),
-            canonical_evidence_groups: vec!["evidence:shared".to_string()],
-            evidence_family_groups: vec!["family:shared".to_string()],
+            evidence_bindings: delivery_bindings(&["evidence:shared"], Some("family:shared")),
             owner_available: true,
+            governed_binding_eligible: true,
             citation_eligible: true,
             privacy_eligible: true,
             temporal_eligible: true,
@@ -89,9 +212,9 @@ fn delivery_allocator_preserves_distinct_evidence_groups_before_duplicate_rank()
         },
         RecallDeliveryCandidate {
             candidate_id: "candidate-shared-second".to_string(),
-            canonical_evidence_groups: vec!["evidence:shared".to_string()],
-            evidence_family_groups: vec!["family:shared".to_string()],
+            evidence_bindings: delivery_bindings(&["evidence:shared"], Some("family:shared")),
             owner_available: true,
+            governed_binding_eligible: true,
             citation_eligible: true,
             privacy_eligible: true,
             temporal_eligible: true,
@@ -103,9 +226,9 @@ fn delivery_allocator_preserves_distinct_evidence_groups_before_duplicate_rank()
         },
         RecallDeliveryCandidate {
             candidate_id: "candidate-distinct".to_string(),
-            canonical_evidence_groups: vec!["evidence:distinct".to_string()],
-            evidence_family_groups: vec!["family:distinct".to_string()],
+            evidence_bindings: delivery_bindings(&["evidence:distinct"], Some("family:distinct")),
             owner_available: true,
+            governed_binding_eligible: true,
             citation_eligible: true,
             privacy_eligible: true,
             temporal_eligible: true,
@@ -117,9 +240,9 @@ fn delivery_allocator_preserves_distinct_evidence_groups_before_duplicate_rank()
         },
         RecallDeliveryCandidate {
             candidate_id: "candidate-private".to_string(),
-            canonical_evidence_groups: vec!["evidence:private".to_string()],
-            evidence_family_groups: vec!["family:private".to_string()],
+            evidence_bindings: delivery_bindings(&["evidence:private"], Some("family:private")),
             owner_available: true,
+            governed_binding_eligible: true,
             citation_eligible: true,
             privacy_eligible: false,
             temporal_eligible: true,
@@ -131,9 +254,9 @@ fn delivery_allocator_preserves_distinct_evidence_groups_before_duplicate_rank()
         },
         RecallDeliveryCandidate {
             candidate_id: "candidate-superseded".to_string(),
-            canonical_evidence_groups: vec!["evidence:stale".to_string()],
-            evidence_family_groups: vec!["family:stale".to_string()],
+            evidence_bindings: delivery_bindings(&["evidence:stale"], Some("family:stale")),
             owner_available: true,
+            governed_binding_eligible: true,
             citation_eligible: true,
             privacy_eligible: true,
             temporal_eligible: false,
@@ -178,9 +301,9 @@ fn delivery_allocator_rejects_missing_owner_before_it_consumes_budget() {
     let candidates = vec![
         RecallDeliveryCandidate {
             candidate_id: "missing-owner".to_string(),
-            canonical_evidence_groups: vec!["evidence:missing".to_string()],
-            evidence_family_groups: vec!["family:missing".to_string()],
+            evidence_bindings: delivery_bindings(&["evidence:missing"], Some("family:missing")),
             owner_available: false,
+            governed_binding_eligible: true,
             citation_eligible: true,
             privacy_eligible: false,
             temporal_eligible: true,
@@ -192,9 +315,9 @@ fn delivery_allocator_rejects_missing_owner_before_it_consumes_budget() {
         },
         RecallDeliveryCandidate {
             candidate_id: "governed-owner".to_string(),
-            canonical_evidence_groups: vec!["evidence:governed".to_string()],
-            evidence_family_groups: vec!["family:governed".to_string()],
+            evidence_bindings: delivery_bindings(&["evidence:governed"], Some("family:governed")),
             owner_available: true,
+            governed_binding_eligible: true,
             citation_eligible: true,
             privacy_eligible: true,
             temporal_eligible: true,
@@ -224,9 +347,9 @@ fn delivery_allocator_rejects_missing_owner_before_it_consumes_budget() {
 fn evidence_family_rotation_off_keeps_exact_group_deduplication_enabled() {
     let candidate = |id: &str, group: &str, rank: usize| RecallDeliveryCandidate {
         candidate_id: id.to_string(),
-        canonical_evidence_groups: vec![group.to_string()],
-        evidence_family_groups: vec![format!("family:{group}")],
+        evidence_bindings: delivery_bindings(&[group], Some(&format!("family:{group}"))),
         owner_available: true,
+        governed_binding_eligible: true,
         citation_eligible: true,
         privacy_eligible: true,
         temporal_eligible: true,
@@ -263,9 +386,9 @@ fn evidence_family_rotation_off_keeps_exact_group_deduplication_enabled() {
 fn delivery_allocator_never_backfills_an_exact_group_duplicate() {
     let candidate = |id: &str, rank: usize| RecallDeliveryCandidate {
         candidate_id: id.to_string(),
-        canonical_evidence_groups: vec!["evidence:shared".to_string()],
-        evidence_family_groups: vec!["family:shared".to_string()],
+        evidence_bindings: delivery_bindings(&["evidence:shared"], Some("family:shared")),
         owner_available: true,
+        governed_binding_eligible: true,
         citation_eligible: true,
         privacy_eligible: true,
         temporal_eligible: true,
@@ -292,12 +415,12 @@ fn delivery_allocator_never_backfills_an_exact_group_duplicate() {
 }
 
 #[test]
-fn delivery_allocator_rejects_partial_exact_group_overlap() {
+fn delivery_allocator_preserves_new_groups_from_partial_overlap() {
     let candidate = |id: &str, groups: &[&str], rank: usize| RecallDeliveryCandidate {
         candidate_id: id.to_string(),
-        canonical_evidence_groups: groups.iter().map(|group| group.to_string()).collect(),
-        evidence_family_groups: vec![format!("family:{id}")],
+        evidence_bindings: delivery_bindings(groups, Some(&format!("family:{id}"))),
         owner_available: true,
+        governed_binding_eligible: true,
         citation_eligible: true,
         privacy_eligible: true,
         temporal_eligible: true,
@@ -318,26 +441,149 @@ fn delivery_allocator_rejects_partial_exact_group_overlap() {
         RecallDeliveryOrderingPolicy::RelevanceRank,
     );
 
-    assert_eq!(report.selected_candidate_ids, vec!["a-b-first"]);
-    assert!(report.decisions.iter().any(|decision| {
-        decision.candidate_id == "b-c-second"
-            && !decision.selected
-            && decision.drop_reason
-                == Some(RecallDeliverySelectionDropReason::DuplicateEvidenceGroup)
-    }));
-    let selected_groups = report
+    assert_eq!(
+        report.selected_candidate_ids,
+        vec!["a-b-first", "b-c-second"]
+    );
+    let second = report
         .decisions
         .iter()
-        .filter(|decision| decision.selected)
-        .flat_map(|decision| decision.canonical_evidence_groups.iter())
-        .collect::<Vec<_>>();
+        .find(|decision| decision.candidate_id == "b-c-second")
+        .expect("second candidate decision");
+    assert!(second.selected);
     assert_eq!(
-        selected_groups.len(),
-        selected_groups
+        second
+            .evidence_bindings
             .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
+            .map(GovernedEvidenceBinding::canonical_evidence_group)
+            .collect::<Vec<_>>(),
+        vec![
+            canonical_recall_evidence_group("evidence:b"),
+            canonical_recall_evidence_group("evidence:c")
+        ]
+    );
+    assert_eq!(
+        second
+            .renderable_evidence_bindings
+            .iter()
+            .map(GovernedEvidenceBinding::canonical_evidence_group)
+            .collect::<Vec<_>>(),
+        vec![canonical_recall_evidence_group("evidence:c")]
+    );
+    assert_eq!(second.drop_reason, None);
+    assert_eq!(
+        report.covered_evidence_groups,
+        vec![
+            canonical_recall_evidence_group("evidence:a"),
+            canonical_recall_evidence_group("evidence:b"),
+            canonical_recall_evidence_group("evidence:c")
+        ]
+    );
+}
+
+#[test]
+fn delivery_allocator_preserves_group_to_family_binding_through_partial_overlap() {
+    let candidate = |id: &str,
+                     bindings: Vec<GovernedEvidenceBinding>,
+                     rank: usize|
+     -> RecallDeliveryCandidate {
+        RecallDeliveryCandidate {
+            candidate_id: id.to_string(),
+            evidence_bindings: bindings,
+            owner_available: true,
+            governed_binding_eligible: true,
+            citation_eligible: true,
+            privacy_eligible: true,
+            temporal_eligible: true,
+            source_rank: Some(rank),
+            expanded_rank: Some(rank),
+            reranked_rank: rank,
+            relevance_score: 100_u32.saturating_sub(rank as u32),
+            authority_score: 100,
+        }
+    };
+    let first = [
+        delivery_bindings(&["evidence:a"], Some("family:a")).remove(0),
+        delivery_bindings(&["evidence:b"], Some("family:b")).remove(0),
+    ];
+    let second = [
+        delivery_bindings(&["evidence:b"], Some("family:b")).remove(0),
+        delivery_bindings(&["evidence:c"], Some("family:c")).remove(0),
+    ];
+
+    let report = allocate_recall_delivery_candidates(
+        &[
+            candidate("a-b-first", first.into(), 1),
+            candidate("b-c-second", second.into(), 2),
+        ],
+        2,
+        RecallDeliveryOrderingPolicy::RelevanceRank,
+    );
+    let second_decision = report
+        .decisions
+        .iter()
+        .find(|decision| decision.candidate_id == "b-c-second")
+        .expect("second candidate decision");
+    let rendered_families = second_decision
+        .renderable_evidence_bindings
+        .iter()
+        .map(GovernedEvidenceBinding::effective_evidence_family_group)
+        .collect::<Vec<_>>();
+    let family_c = delivery_bindings(&["evidence:c"], Some("family:c"))
+        .remove(0)
+        .effective_evidence_family_group()
+        .to_string();
+
+    assert_eq!(second_decision.renderable_evidence_bindings.len(), 1);
+    assert_eq!(rendered_families, vec![family_c.as_str()]);
+    assert_eq!(report.selected_owner_evidence_family_groups.len(), 3);
+    assert_eq!(report.renderable_evidence_family_groups.len(), 3);
+}
+
+#[test]
+fn delivery_allocator_decides_every_candidate_and_types_invalid_governed_binding() {
+    let candidate =
+        |id: &str, governed_binding_eligible: bool, rank: usize| RecallDeliveryCandidate {
+            candidate_id: id.to_string(),
+            evidence_bindings: delivery_bindings(&[&format!("evidence:{id}")], None),
+            owner_available: true,
+            governed_binding_eligible,
+            citation_eligible: true,
+            privacy_eligible: true,
+            temporal_eligible: true,
+            source_rank: Some(rank),
+            expanded_rank: Some(rank),
+            reranked_rank: rank,
+            relevance_score: 100,
+            authority_score: 100,
+        };
+    let candidates = vec![
+        candidate("invalid-binding", false, 1),
+        candidate("selected", true, 2),
+        candidate("budgeted", true, 3),
+    ];
+
+    let report = allocate_recall_delivery_candidates(
+        &candidates,
+        1,
+        RecallDeliveryOrderingPolicy::RelevanceRank,
+    );
+
+    assert_eq!(report.decisions.len(), candidates.len());
+    assert_eq!(report.selected_candidate_ids, vec!["selected"]);
+    assert!(report.decisions.iter().any(|decision| {
+        decision.candidate_id == "invalid-binding"
+            && decision.drop_reason
+                == Some(RecallDeliverySelectionDropReason::GovernedBindingInvalid)
+    }));
+    assert!(report.decisions.iter().any(|decision| {
+        decision.candidate_id == "budgeted"
+            && decision.drop_reason
+                == Some(RecallDeliverySelectionDropReason::ProfileBudgetExhausted)
+    }));
+    assert_eq!(
+        RecallDeliverySelectionDropReason::GovernedBindingInvalid.label(),
+        "governed_binding_invalid"
     );
 }
 
@@ -345,9 +591,9 @@ fn delivery_allocator_rejects_partial_exact_group_overlap() {
 fn evidence_family_rotation_round_robins_only_within_equal_utility() {
     let candidate = |id: &str, group: &str, family: &str, rank: usize| RecallDeliveryCandidate {
         candidate_id: id.to_string(),
-        canonical_evidence_groups: vec![group.to_string()],
-        evidence_family_groups: vec![family.to_string()],
+        evidence_bindings: delivery_bindings(&[group], Some(family)),
         owner_available: true,
+        governed_binding_eligible: true,
         citation_eligible: true,
         privacy_eligible: true,
         temporal_eligible: true,
@@ -397,13 +643,13 @@ fn evidence_family_rotation_round_robins_only_within_equal_utility() {
 fn delivery_rejects_missing_governed_citation_before_budget() {
     let candidate = |id: &str, citation_eligible: bool, rank: usize| RecallDeliveryCandidate {
         candidate_id: id.to_string(),
-        canonical_evidence_groups: if citation_eligible {
-            vec![format!("evidence:{id}")]
+        evidence_bindings: if citation_eligible {
+            delivery_bindings(&[&format!("evidence:{id}")], None)
         } else {
             Vec::new()
         },
-        evidence_family_groups: Vec::new(),
         owner_available: true,
+        governed_binding_eligible: true,
         citation_eligible,
         privacy_eligible: true,
         temporal_eligible: true,
@@ -475,14 +721,24 @@ fn long_term_memory_generates_governed_facets_from_accepted_fields() {
         3,
     );
 
-    assert_eq!(doc.owner_record_id, "ltm:project:agent-memory-w4");
-    assert_eq!(doc.owner_plane, MemoryFacetOwnerPlane::LongTerm);
+    assert_eq!(
+        doc.owner_ref,
+        GovernedMemoryOwnerRef {
+            owner_plane: GovernedMemoryOwnerPlane::LongTerm,
+            owner_id: "ltm:project:agent-memory-w4".to_string(),
+        }
+    );
     assert_eq!(doc.schema_version, MEMORY_FACET_SCHEMA_VERSION);
+    assert_eq!(MEMORY_FACET_SCHEMA_VERSION, 4);
     assert_eq!(doc.facet_index_revision, 3);
     assert_eq!(doc.status, MemoryFacetStatus::Active);
     assert_eq!(doc.memory_space_id, "space:main");
     assert_eq!(doc.subject_ids, vec!["subject:user"]);
     assert_eq!(doc.owner_revision, 5);
+    let serialized = serde_json::to_value(&doc).expect("serialize typed facet owner");
+    assert!(serialized.get("owner_ref").is_some());
+    assert!(serialized.get("owner_record_id").is_none());
+    assert!(serialized.get("owner_plane").is_none());
 
     for namespace in [
         MemoryFacetNamespace::Kind,
@@ -501,6 +757,102 @@ fn long_term_memory_generates_governed_facets_from_accepted_fields() {
             "missing governed facet namespace {namespace:?}"
         );
     }
+}
+
+#[test]
+fn evidence_document_facets_use_typed_metadata_and_bounded_lexical_input_only() {
+    let evidence_owner = fixture_evidence_document();
+    let material = evidence_owner
+        .owner_material()
+        .expect("governed evidence owner material");
+    let doc = build_governed_evidence_document_facet_index_doc(
+        &evidence_owner,
+        vec!["subject:user".to_string()],
+        4,
+    )
+    .expect("valid evidence facet owner");
+
+    assert_eq!(
+        doc.owner_ref,
+        GovernedMemoryOwnerRef {
+            owner_plane: GovernedMemoryOwnerPlane::EvidenceDocument,
+            owner_id: "shared-owner-id".to_string(),
+        }
+    );
+    assert!(doc
+        .exact_facets
+        .iter()
+        .any(|facet| facet.namespace == MemoryFacetNamespace::SourceType));
+    assert!(doc
+        .exact_facets
+        .iter()
+        .any(|facet| facet.namespace == MemoryFacetNamespace::Evidence));
+    assert!(doc
+        .exact_facets
+        .iter()
+        .any(|facet| facet.namespace == MemoryFacetNamespace::Temporal));
+    assert!(doc
+        .exact_facets
+        .iter()
+        .any(|facet| facet.namespace == MemoryFacetNamespace::Keyword));
+    assert_eq!(doc.canonical_evidence_refs.len(), 1);
+    let binding = &material.evidence_bindings()[0];
+    assert_eq!(
+        doc.canonical_evidence_refs[0].source_ref,
+        binding.safe_evidence_ref()
+    );
+    assert_eq!(
+        doc.canonical_evidence_refs[0].canonical_evidence_group,
+        binding.canonical_evidence_group()
+    );
+    assert!(
+        doc.exact_facets.iter().any(|facet| {
+            matches!(
+                &facet.value,
+                bm_core::memory::MemoryFacetValue::Keyword { normalized }
+                    if normalized == "verified"
+            )
+        }),
+        "chunk-only governed lexical content must reach facet indexing"
+    );
+
+    let serialized = serde_json::to_string(&doc).expect("serialize evidence facet doc");
+    assert!(!serialized.contains("must-not-become-a-facet"));
+    assert!(!serialized.contains("free-tag"));
+    assert!(
+        doc.exact_facets.len() <= 68,
+        "lexical facet input must be bounded"
+    );
+}
+
+#[test]
+fn same_owner_id_in_different_planes_has_distinct_facet_ids() {
+    let mut long_term = fixture_long_term_entry();
+    long_term.id = "shared-owner-id".to_string();
+    let long_term_doc = build_long_term_memory_facet_index_doc(
+        &long_term,
+        "space:main",
+        vec!["subject:user".to_string()],
+        4,
+    );
+    let evidence_doc = build_governed_evidence_document_facet_index_doc(
+        &fixture_evidence_document(),
+        vec!["subject:user".to_string()],
+        4,
+    )
+    .expect("valid evidence facet owner");
+
+    let long_term_ids = long_term_doc
+        .exact_facets
+        .iter()
+        .map(|facet| &facet.facet_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let evidence_ids = evidence_doc
+        .exact_facets
+        .iter()
+        .map(|facet| &facet.facet_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(long_term_ids.is_disjoint(&evidence_ids));
 }
 
 #[test]
@@ -631,7 +983,7 @@ fn fixture_facet_read_chain() -> (
         .next()
         .expect("posting key");
     let owner_version = MemoryFacetOwnerVersion {
-        owner_record_id: owner.owner_record_id.clone(),
+        owner_ref: owner.owner_ref.clone(),
         owner_revision: owner.owner_revision,
         facet_index_revision: owner.facet_index_revision,
     };
@@ -854,6 +1206,7 @@ fn malformed_typed_entity_and_temporal_query_facets_fail_closed() {
     let evidence = CanonicalEvidenceRef {
         source_ref: "turn:1".to_string(),
         canonical_evidence_group: "turn:1".to_string(),
+        evidence_family_group: None,
         source_kind: "turn".to_string(),
         source_authority_score: 1,
     };
@@ -989,6 +1342,117 @@ fn canonical_entity_key_is_exact_and_alias_is_provenance_backed_expansion_only()
 }
 
 #[test]
+fn facet_evidence_identity_tamper_cannot_replace_long_term_owner_truth() {
+    let mut entry = fixture_long_term_entry();
+    let owner_evidence =
+        bm_core::memory::canonical_evidence_ref_from_source("archive:release#turn=7")
+            .expect("owner evidence");
+    entry.canonical_entities = vec![CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Repository,
+            canonical_id: "agent-memory".to_string(),
+        },
+        display_label: None,
+        aliases: Vec::new(),
+        evidence_refs: vec![owner_evidence.clone()],
+    }];
+    let owner_bindings = governed_long_term_owner_evidence_bindings(&entry)
+        .expect("owner closes canonical evidence binding");
+    let mut facet = build_long_term_memory_facet_index_doc(
+        &entry,
+        "space:main",
+        vec!["subject:user".to_string()],
+        3,
+    );
+    facet.canonical_evidence_refs[0].source_ref = "forged:facet:identity".to_string();
+    facet.canonical_evidence_refs[0].canonical_evidence_group =
+        canonical_recall_evidence_group("forged:facet:identity");
+
+    let owner_binding = owner_bindings
+        .iter()
+        .find(|binding| binding.safe_evidence_ref() == owner_evidence.source_ref)
+        .expect("owner evidence binding remains authoritative");
+    assert_eq!(owner_binding.safe_evidence_ref(), owner_evidence.source_ref);
+    assert_eq!(
+        owner_binding.canonical_evidence_group(),
+        owner_evidence.canonical_evidence_group
+    );
+    assert_ne!(
+        owner_binding.canonical_evidence_group(),
+        facet.canonical_evidence_refs[0].canonical_evidence_group
+    );
+}
+
+#[test]
+fn long_term_owner_evidence_family_binding_is_order_invariant() {
+    let mut entry = fixture_long_term_entry();
+    entry.supporting_citations.clear();
+    let base = bm_core::memory::canonical_evidence_ref_from_source("archive:family#turn=7")
+        .expect("canonical evidence");
+    let family = CanonicalRecallEvidenceFamilyGroup::from_structured_identity("session:family")
+        .expect("canonical family")
+        .into_string();
+    let mut explicit = base.clone();
+    explicit.evidence_family_group = Some(family.clone());
+    let implicit = base.clone();
+
+    let entity = |evidence_refs| CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Repository,
+            canonical_id: "agent-memory".to_string(),
+        },
+        display_label: None,
+        aliases: Vec::new(),
+        evidence_refs,
+    };
+    entry.canonical_entities = vec![entity(vec![implicit.clone(), explicit.clone()])];
+    let forward = governed_long_term_owner_evidence_bindings(&entry)
+        .expect("forward evidence family binding");
+    entry.canonical_entities = vec![entity(vec![explicit, implicit])];
+    let reverse = governed_long_term_owner_evidence_bindings(&entry)
+        .expect("reverse evidence family binding");
+
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.len(), 1);
+    assert_eq!(forward[0].evidence_family_group(), Some(family.as_str()));
+}
+
+#[test]
+fn long_term_owner_rejects_conflicting_explicit_evidence_families() {
+    let mut entry = fixture_long_term_entry();
+    entry.supporting_citations.clear();
+    let base = bm_core::memory::canonical_evidence_ref_from_source("archive:family#turn=7")
+        .expect("canonical evidence");
+    let mut first = base.clone();
+    first.evidence_family_group = Some(
+        CanonicalRecallEvidenceFamilyGroup::from_structured_identity("session:first")
+            .expect("first family")
+            .into_string(),
+    );
+    let mut second = base;
+    second.evidence_family_group = Some(
+        CanonicalRecallEvidenceFamilyGroup::from_structured_identity("session:second")
+            .expect("second family")
+            .into_string(),
+    );
+    entry.canonical_entities = vec![CanonicalEntityRef {
+        key: CanonicalEntityKey {
+            kind: CanonicalEntityKind::Repository,
+            canonical_id: "agent-memory".to_string(),
+        },
+        display_label: None,
+        aliases: Vec::new(),
+        evidence_refs: vec![first, second],
+    }];
+
+    let error = governed_long_term_owner_evidence_bindings(&entry)
+        .expect_err("conflicting family authorities must fail closed");
+    assert!(error
+        .to_string()
+        .contains("one canonical evidence group maps to multiple evidence families"));
+}
+
+#[test]
 fn facet_parser_never_constructs_entity_from_strings_or_regex() {
     let entity = StructuredFacetParser::parse_entity_anchor("person:/alice.*/", "turn:1");
     assert!(!entity.accepted);
@@ -1038,6 +1502,8 @@ fn facet_report_view_redacts_sensitive_metadata_by_default() {
     let report = doc.report_view(FacetReportAudience::HostUi);
 
     assert!(report.redacted_sensitive_metadata);
+    assert_eq!(report.owner_ref, None);
+    assert!(!report.owner_token.contains(&doc.owner_ref.owner_id));
     assert_eq!(report.visible_canonical_evidence_groups.len(), 0);
     assert_eq!(
         report.redacted_canonical_evidence_group_count,
@@ -1046,6 +1512,7 @@ fn facet_report_view_redacts_sensitive_metadata_by_default() {
 
     let owner_report = doc.report_view(FacetReportAudience::OwnerRaw);
     assert!(!owner_report.redacted_sensitive_metadata);
+    assert_eq!(owner_report.owner_ref.as_ref(), Some(&doc.owner_ref));
     assert_eq!(
         owner_report.visible_canonical_evidence_groups.len(),
         doc.canonical_evidence_refs.len()
@@ -1057,7 +1524,10 @@ fn human_facet_suggestion_requires_governed_proposal() {
     let suggestion = HumanFacetSuggestion {
         suggestion_id: "suggestion:raw-tag".to_string(),
         suggested_by: "operator".to_string(),
-        owner_record_id: "ltm:project:agent-memory-w4".to_string(),
+        owner_ref: GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::LongTerm,
+            "ltm:project:agent-memory-w4",
+        ),
         proposed_facets: vec!["tag:obsidian-style".to_string()],
         governed_proposal_id: None,
     };

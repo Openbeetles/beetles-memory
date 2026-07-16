@@ -2,28 +2,31 @@
 
 Replay 和 migration 是验证与连续性工具。它们不替代正常的 write、recall、project 或 maintain 路径。
 
-## Snapshot Export And Import
+## 受治理的 Memory-space Export And Import
 
 ```rust
-use bm_sdk::{ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest};
+use bm_sdk::{
+    MemorySpaceExportRequest, MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy,
+    MemorySpaceScope,
+};
 
-let exported = runtime.export(MemoryExportRequest {
-    chat_id: "chat-1".to_string(),
+let scope = MemorySpaceScope {
+    memory_space_id: runtime.memory_space_id().to_string(),
+    mounted_subject_id: runtime.subject_id().to_string(),
+};
+let exported = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: scope.clone(),
+    include_private: false,
 })?;
 
-let imported = runtime.import(MemoryImportRequest {
-    snapshot: exported.snapshot,
-    target_chat_id: "chat-2".to_string(),
-    mode: ContinuitySnapshotImportMode::FullRestore,
+let imported = runtime.import_memory_space(MemorySpaceImportRequest {
+    scope,
+    expected_private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
+    archive: exported.archive,
 })?;
 ```
 
-可用 import modes：
-
-- `ContinuitySnapshotImportMode::BootstrapImport`
-- `ContinuitySnapshotImportMode::FullRestore`
-
-Store import 会校验 schema id、memory system kind、namespace、lineage、state fingerprint 和 event fingerprint。失败的导入必须暴露为 report 或 error，不能静默截断数据。
+request scope 必须与 runtime 当前挂载的 `(memory_space_id, mounted_subject_id)` 精确一致，archive 也必须声明相同 typed scope 与 private-material policy。三者在任何 store read、import planning 或 replacement 之前完成校验。Continuity snapshot 只作为 Soul recovery 的内部载荷，不再是 SDK 公开传输格式。
 
 ## Replay Inspection
 
@@ -78,33 +81,42 @@ Transcript attrs 会跟随 target turn/message 一起 replay。`TranscriptAttrEn
 
 ```rust
 use bm_sdk::{
-    apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
+    apply_memory_space_migration, preview_memory_space_migration,
     MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest,
-    MemorySpaceMigratePreviewRequest,
+    MemorySpaceMigratePreviewRequest, MemorySpacePrivateMaterialPolicy, MemorySpaceScope,
 };
 
-let exported = export_memory_space(&store, MemorySpaceExportRequest {
-    memory_space_id: "space-main".to_string(),
+let scope = MemorySpaceScope {
+    memory_space_id: runtime.memory_space_id().to_string(),
+    mounted_subject_id: runtime.subject_id().to_string(),
+};
+let exported = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: scope.clone(),
     include_private: false,
 })?;
 let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-    source_memory_space_id: "space-main".to_string(),
-    target_memory_space_id: "space-copy".to_string(),
-    snapshot: exported.snapshot.clone(),
-});
+    source_scope: scope.clone(),
+    target_scope: scope.clone(),
+    expected_private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
+    source_profile: profile,
+    target_profile: profile,
+    archive: exported.archive,
+})?;
 assert!(!preview.loss_risk);
-assert!(preview.manifest.whole_space_snapshot);
+assert_eq!(preview.manifest.projection_scope.scope, scope);
+assert!(!preview.manifest.identity_remap.required);
 
 apply_memory_space_migration(&target_store, MemorySpaceMigrateApplyRequest {
-    target_memory_space_id: "space-copy".to_string(),
-    snapshot: exported.snapshot,
+    plan: preview.plan,
 })?;
 ```
 
-`include_private=false` 必须剔除 private snapshot entry。Beetle-derived replacement fixture 必须和 generic fixture 使用同一个 public migrator。
-`preview.manifest` 是 dry-run 诊断真源：它列出 plane/privacy count、schema id、whole-space snapshot
-状态、conflict/loss risk 和 subject remap 状态。当前 apply 不做 subject key rewrite；如果 source/target
-space 不同，manifest 会报告 `subject_remap.required=true`、`applied=false`。
+`include_private=false` 必须剔除 private snapshot entry。preview、apply 与 direct import 必须继续绑定调用方显式声明的 `expected_private_material_policy`；策略不一致时必须在任何写入前 fail closed。Beetle-derived replacement fixture 必须和 generic fixture 使用同一个 public migrator。
+`preview.manifest` 是 dry-run 诊断真源：它列出精确的
+`(memory_space_id, mounted_subject_id)` projection scope、private-material 模式、
+plane/privacy count、schema id、conflict/loss risk 和 identity-remap 状态。当前 apply 不做身份重标；
+memory space 或 mounted subject 任一不同时，manifest 会报告
+`identity_remap.required=true`、`applied=false`，并在显式 typed remapper 产出新 archive 前 fail closed。
 
 当 memory-space storage 中存在 transcript evidence 时，`include_private=false` 默认会把 raw transcript document、`conversation_transcript_attr` 和 `conversation_transcript_derived_ref` manifest 从 export 中剔除。Migration diagnostics 必须保留 raw transcript、redacted transcript slice、accepted memory planes、derived refs 和 opaque host refs 的分层。宿主对象 payload 不由 Beetle Memory 导出；只有在请求 view 允许时才携带 `HostOpaqueRef` metadata 和 relation。`RedactedTranscriptSlice` 会报告 message、attr 和 host-ref redactions，让调用方知道哪些内容被省略，但看不到 raw material。`TranscriptLifecycleReport.derived_memory_refs` 是复核从受影响 transcript evidence 派生出的已接受 Memory material 的清单。
 

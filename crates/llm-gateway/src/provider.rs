@@ -9,6 +9,35 @@ pub enum GatewayProviderKind {
     OllamaNative,
 }
 
+impl GatewayProviderKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "open_ai_compatible",
+            Self::OllamaNative => "ollama_native",
+        }
+    }
+}
+
+impl std::fmt::Display for GatewayProviderKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::GatewayProviderKind;
+
+    #[test]
+    fn provider_labels_are_stable_snake_case() {
+        assert_eq!(
+            GatewayProviderKind::OpenAiCompatible.as_str(),
+            "open_ai_compatible"
+        );
+        assert_eq!(GatewayProviderKind::OllamaNative.as_str(), "ollama_native");
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayProviderConfig {
     pub kind: GatewayProviderKind,

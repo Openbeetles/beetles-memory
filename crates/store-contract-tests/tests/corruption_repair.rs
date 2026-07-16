@@ -1,10 +1,11 @@
+mod support;
 use std::path::{Path, PathBuf};
 
 use bm_core::feature_gate::ProfileId;
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
     MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig, StoreEventLog, StoreEventScope,
-    StorePlatform, StoreRepairPolicy,
+    StoreRepairPolicy,
 };
 
 fn first_file_with_extension(root: &Path, extension: &str) -> Option<PathBuf> {
@@ -27,8 +28,8 @@ fn file_store_returns_structured_error_for_corrupt_json() {
     let root =
         std::env::temp_dir().join(format!("beetle-memory-corrupt-file-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let platform = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let platform = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     platform
@@ -57,22 +58,24 @@ fn file_store_reports_or_repairs_only_safe_orphan_tmp_files() {
     std::fs::create_dir_all(tmp.parent().unwrap()).unwrap();
     std::fs::write(&tmp, b"partial").unwrap();
 
-    let (_, report_only) = StorePlatform::open_with_report(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk)
+    let report_only_store = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile())
             .unwrap()
             .with_repair_policy(StoreRepairPolicy::ReportOnly),
     )
     .unwrap();
+    let report_only = report_only_store.open_report();
     assert!(report_only.repair.checked);
     assert!(!report_only.repair.repaired);
     assert!(tmp.exists());
 
-    let (_, repaired) = StorePlatform::open_with_report(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk)
+    let repaired_store = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile())
             .unwrap()
             .with_repair_policy(StoreRepairPolicy::RepairSafe),
     )
     .unwrap();
+    let repaired = repaired_store.open_report();
     assert!(repaired.repair.repaired);
     assert!(!tmp.exists());
 }
@@ -84,8 +87,8 @@ fn file_store_rejects_truncated_jsonl_and_duplicate_events() {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&root);
-    let platform = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let platform = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     let event = MemoryStoreEvent::new(
@@ -134,8 +137,8 @@ fn sqlite_store_rejects_unknown_schema_and_duplicate_events() {
             .unwrap();
     }
 
-    let err = match StorePlatform::open(
-        StoreBackendConfig::sqlite(&path, ProfileId::ServerLinuxMemoryGateway).unwrap(),
+    let err = match support::open_store(
+        StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap(),
     ) {
         Ok(_) => panic!("unknown sqlite schema must be rejected"),
         Err(error) => error,
@@ -143,8 +146,8 @@ fn sqlite_store_rejects_unknown_schema_and_duplicate_events() {
     assert_eq!(err.stage(), "sqlite_store_schema");
 
     let valid_path = root.join("valid.sqlite3");
-    let platform = StorePlatform::open(
-        StoreBackendConfig::sqlite(&valid_path, ProfileId::ServerLinuxMemoryGateway).unwrap(),
+    let platform = support::open_store(
+        StoreBackendConfig::sqlite(&valid_path, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     let event = MemoryStoreEvent::new(
@@ -162,9 +165,17 @@ fn sqlite_store_rejects_unknown_schema_and_duplicate_events() {
 
 #[test]
 fn embedded_store_returns_budget_error_instead_of_dropping_data() {
-    let mut config = StoreBackendConfig::embedded(ProfileId::EspEmbeddedSdk).unwrap();
-    config.capacity.blob_max_bytes = 1;
-    let platform = StorePlatform::open(config).unwrap();
+    let mut budget =
+        support::open_store(StoreBackendConfig::embedded(ProfileId::EspEmbeddedSdk).unwrap())
+            .unwrap()
+            .capacity()
+            .into_runtime_budget();
+    budget.blob_max_bytes = 1;
+    let config = StoreBackendConfig::embedded(ProfileId::EspEmbeddedSdk)
+        .unwrap()
+        .try_with_nonproduction_store_budget_limit(budget)
+        .expect("blob budget must be a valid semantic contraction");
+    let platform = support::open_store(config).unwrap();
 
     let err = platform
         .state_fs()
@@ -174,21 +185,30 @@ fn embedded_store_returns_budget_error_instead_of_dropping_data() {
 }
 
 #[test]
-fn embedded_store_bounds_event_ring_without_dropping_state() {
-    let mut config = StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory).unwrap();
-    config.capacity.event_log_max_items = 1;
-    let platform = StorePlatform::open(config).unwrap();
+fn embedded_store_rejects_state_write_when_event_capacity_is_exhausted() {
+    let mut budget =
+        support::open_store(StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory).unwrap())
+            .unwrap()
+            .capacity()
+            .into_runtime_budget();
+    budget.event_log_max_items = 2;
+    let config = StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory)
+        .unwrap()
+        .try_with_nonproduction_store_budget_limit(budget)
+        .expect("append-only audit budget must be a valid semantic contraction");
+    let platform = support::open_store(config).unwrap();
 
     platform.state_fs().write("one", b"1").unwrap();
-    platform.state_fs().write("two", b"2").unwrap();
+    let error = platform
+        .state_fs()
+        .write("two", b"2")
+        .expect_err("state and event must be rejected atomically at capacity");
 
-    assert_eq!(platform.read_events().unwrap().len(), 1);
+    assert_eq!(error.stage(), "store_budget_exceeded");
+    assert_eq!(platform.read_events().unwrap().len(), 2);
     assert_eq!(
         platform.state_fs().read("one").unwrap(),
         Some(b"1".to_vec())
     );
-    assert_eq!(
-        platform.state_fs().read("two").unwrap(),
-        Some(b"2".to_vec())
-    );
+    assert_eq!(platform.state_fs().read("two").unwrap(), None);
 }

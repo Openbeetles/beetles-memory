@@ -2,6 +2,7 @@
 
 mod agent_tools;
 mod audit;
+mod budget_io;
 mod config;
 mod error;
 mod http_front;
@@ -21,9 +22,10 @@ pub use audit::{
     GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayAuditStageReport,
     GatewayProjectionAuditRecord, GatewayProjectionAuditStatus,
 };
+pub use budget_io::GatewayUpstreamResponseBudget;
 pub use config::{
-    GatewayAuditConfig, GatewayConfig, GatewayMaintenanceConfig, GatewayProjectionConfig,
-    GatewayRuntimeCacheConfig, GatewayServerConfig,
+    llm_gateway_transport_config, GatewayAuditConfig, GatewayConfig, GatewayMaintenanceConfig,
+    GatewayProjectionConfig, GatewayRuntimeCacheConfig, GatewayServerConfig,
 };
 pub use error::{GatewayError, GatewayErrorKey, Result};
 pub use http_front::{GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig};
@@ -54,13 +56,15 @@ pub use provider_probe::{
     probe_openai_provider_capabilities, GatewayModelCapabilityReport,
     GatewayProviderCapabilityReport,
 };
-pub use runtime::GatewayRuntime;
+pub use runtime::{GatewayRequestBudgetContext, GatewayRuntime};
 pub use scope::{
     GatewayOllamaAppScopeConfig, GatewayScopeRequest, GatewayScopeResolution, GatewayScopeResolver,
     GatewayScopeResolverConfig, GatewayTrustedHeaders,
 };
 pub use server::{
-    serve_llm_gateway_http_stream, serve_llm_gateway_http_stream_with_services,
-    serve_ollama_http_stream, serve_ollama_http_stream_with_services, serve_openai_http_stream,
-    serve_openai_http_stream_with_services,
+    serve_llm_gateway_http_accepted_stream, serve_llm_gateway_http_accepted_stream_with_services,
+    serve_llm_gateway_http_accepted_stream_with_services_in_request,
+    serve_ollama_http_accepted_stream, serve_ollama_http_accepted_stream_with_services,
+    serve_openai_http_accepted_stream, serve_openai_http_accepted_stream_with_services,
+    GatewayHttpRequestBindings,
 };

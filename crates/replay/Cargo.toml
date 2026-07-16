@@ -20,6 +20,19 @@ bm-sdk = { workspace = true, features = ["nonproduction-replay-harness"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 sha2.workspace = true

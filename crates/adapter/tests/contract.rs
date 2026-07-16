@@ -3,19 +3,20 @@ use std::sync::Arc;
 use bm_adapter::{
     decode_json_adapter_command, dispatch_adapter_command, dispatch_adapter_command_with_services,
     AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
-    AdapterJsonCommandOptions, AdapterOperation, AdapterResponse, AdapterRuntimeServices,
-    AdapterSdkReport, AdapterSource, TransportKind, TransportMode,
+    AdapterJsonCommandOptions, AdapterOperation, AdapterRequestIdentityError,
+    AdapterRequestIdentityOwner, AdapterResponse, AdapterRuntimeServices, AdapterSdkReport,
+    AdapterSource, TransportKind, TransportMode,
 };
 use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, HostRefVisibility, LlmClient,
     LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
-    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, Message,
-    NoopMemoryAuditSink, PressureLevel, ProfileId, QueryFacetInput, ResponseBody,
-    RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, ToolChoicePolicy, ToolSpec,
-    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    MemoryCloseRequest, MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemoryStoreHandle, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
+    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteRequest, Message, NoopMemoryAuditSink, PressureLevel, ProfileId, QueryFacetInput,
+    ResponseBody, RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, ToolChoicePolicy,
+    ToolSpec, TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
     TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
     TranscriptInputMessage, TranscriptReplayView,
@@ -24,21 +25,265 @@ use serde_json::json;
 
 struct FixedClock;
 
+#[test]
+fn public_adapter_labels_are_stable_snake_case() {
+    let operations = [
+        (AdapterOperation::Write, "write"),
+        (AdapterOperation::Recall, "recall"),
+        (AdapterOperation::Project, "project"),
+        (AdapterOperation::Maintain, "maintain"),
+        (AdapterOperation::Inspect, "inspect"),
+        (AdapterOperation::Recover, "recover"),
+        (AdapterOperation::Replay, "replay"),
+        (AdapterOperation::LongTermList, "long_term_list"),
+        (AdapterOperation::LongTermDetail, "long_term_detail"),
+        (AdapterOperation::LongTermMutate, "long_term_mutate"),
+        (AdapterOperation::LongTermPolicy, "long_term_policy"),
+        (
+            AdapterOperation::TranscriptAttrWrite,
+            "transcript_attr_write",
+        ),
+        (AdapterOperation::Capabilities, "capabilities"),
+        (AdapterOperation::Subscribe, "subscribe"),
+        (AdapterOperation::Close, "close"),
+    ];
+    for (operation, label) in operations {
+        assert_eq!(operation.as_str(), label);
+        assert_eq!(operation.to_string(), label);
+    }
+
+    let errors = [
+        (AdapterErrorKey::InvalidJson, "invalid_json"),
+        (AdapterErrorKey::Unauthorized, "unauthorized"),
+        (AdapterErrorKey::Forbidden, "forbidden"),
+        (AdapterErrorKey::Duplicated, "duplicated"),
+        (AdapterErrorKey::PayloadTooLarge, "payload_too_large"),
+        (AdapterErrorKey::OperationMismatch, "operation_mismatch"),
+        (
+            AdapterErrorKey::UnsupportedOperation,
+            "unsupported_operation",
+        ),
+        (AdapterErrorKey::RuntimeRejected, "runtime_rejected"),
+    ];
+    for (error, label) in errors {
+        assert_eq!(error.as_str(), label);
+        assert_eq!(error.to_string(), label);
+    }
+}
+
+#[test]
+fn legacy_continuity_transfer_operations_are_not_deserializable() {
+    for operation in ["export", "import"] {
+        let encoded = format!("\"{operation}\"");
+        let error = serde_json::from_str::<AdapterOperation>(&encoded)
+            .expect_err("legacy continuity transfer operation must not remain public");
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+}
+
+#[test]
+fn idempotency_material_is_canonical_and_payload_sensitive() {
+    let first = AdapterCommand::Close(MemoryCloseRequest {
+        reason: "operator shutdown".to_string(),
+    });
+    let retry = AdapterCommand::Close(MemoryCloseRequest {
+        reason: "operator shutdown".to_string(),
+    });
+    let different = AdapterCommand::Close(MemoryCloseRequest {
+        reason: "policy shutdown".to_string(),
+    });
+
+    let first_material = first
+        .idempotency_fingerprint_material()
+        .expect("canonical first material");
+    assert_eq!(
+        first_material,
+        retry
+            .idempotency_fingerprint_material()
+            .expect("canonical retry material")
+    );
+    assert_ne!(
+        first_material,
+        different
+            .idempotency_fingerprint_material()
+            .expect("canonical different material")
+    );
+}
+
+#[test]
+fn idempotency_requirement_is_exhaustive_and_covers_long_term_mutations() {
+    let operations = [
+        (AdapterOperation::Write, true),
+        (AdapterOperation::Recall, false),
+        (AdapterOperation::Project, false),
+        (AdapterOperation::Maintain, true),
+        (AdapterOperation::Inspect, false),
+        (AdapterOperation::Recover, true),
+        (AdapterOperation::Replay, false),
+        (AdapterOperation::LongTermList, false),
+        (AdapterOperation::LongTermDetail, false),
+        (AdapterOperation::LongTermMutate, true),
+        (AdapterOperation::LongTermPolicy, true),
+        (AdapterOperation::TranscriptAttrWrite, true),
+        (AdapterOperation::Capabilities, false),
+        (AdapterOperation::Subscribe, false),
+        (AdapterOperation::Close, true),
+    ];
+    for (operation, required) in operations {
+        assert_eq!(operation.requires_idempotency(), required, "{operation}");
+    }
+}
+
+#[test]
+fn adapter_write_time_is_runtime_owned_and_payload_time_is_rejected() {
+    let options = AdapterJsonCommandOptions::new("accepted-at-contract");
+    let error = decode_json_adapter_command(
+        AdapterOperation::Write,
+        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock","observed_at":1800000000}"#,
+        &options,
+    )
+    .expect_err("payload observed_at must not be part of the adapter contract");
+    assert_eq!(error.stage(), "adapter_json_command");
+    assert!(error.to_string().contains("unknown field `observed_at`"));
+
+    let mut command = decode_json_adapter_command(
+        AdapterOperation::Write,
+        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock"}"#,
+        &options,
+    )
+    .expect("write command");
+    command.pin_accepted_at(1_912_345_678);
+    let AdapterCommand::Write(MemoryWriteRequest::Procedural { writes, .. }) = command else {
+        panic!("procedural write");
+    };
+    assert_eq!(writes[0].observed_at, 1_912_345_678);
+}
+
+#[test]
+fn long_term_mutation_and_policy_fingerprints_are_stable_and_field_sensitive() {
+    let options = AdapterJsonCommandOptions::new("idempotency-contract");
+    for (operation, body, different_body) in [
+        (
+            AdapterOperation::LongTermMutate,
+            r#"{"operation":{"delete":{"target":{"record_id":"record-a"}}},"reason":"operator delete","dry_run":true}"#,
+            r#"{"operation":{"delete":{"target":{"record_id":"record-b"}}},"reason":"operator delete","dry_run":true}"#,
+        ),
+        (
+            AdapterOperation::LongTermPolicy,
+            r#"{"operation":{"resume":{"selector":{"topic_pattern":"release-*"}}},"reason":"resume release memory","dry_run":true}"#,
+            r#"{"operation":{"resume":{"selector":{"topic_pattern":"security-*"}}},"reason":"resume release memory","dry_run":true}"#,
+        ),
+    ] {
+        let first = decode_json_adapter_command(operation, body, &options).expect("first command");
+        let retry = decode_json_adapter_command(operation, body, &options).expect("retry command");
+        let different = decode_json_adapter_command(operation, different_body, &options)
+            .expect("different command");
+        assert_eq!(
+            first
+                .idempotency_fingerprint_material()
+                .expect("first material"),
+            retry
+                .idempotency_fingerprint_material()
+                .expect("retry material")
+        );
+        assert_ne!(
+            first
+                .idempotency_fingerprint_material()
+                .expect("first material"),
+            different
+                .idempotency_fingerprint_material()
+                .expect("different material")
+        );
+    }
+}
+
+#[test]
+fn automatic_transport_identity_is_unique_per_request() {
+    let owner = AdapterRequestIdentityOwner::new(TransportKind::Wss, "session-1", "principal-a");
+
+    let first = owner.issue(None).expect("first identity");
+    let second = owner.issue(None).expect("second identity");
+
+    assert_ne!(first.request_id, second.request_id);
+    assert_ne!(first.audit_id, second.audit_id);
+    assert_ne!(first.idempotency_key, second.idempotency_key);
+}
+
+#[test]
+fn explicit_transport_idempotency_is_stable_and_principal_scoped() {
+    let first_owner =
+        AdapterRequestIdentityOwner::new(TransportKind::Mcp, "server-a", "principal-a");
+    let retry_owner =
+        AdapterRequestIdentityOwner::new(TransportKind::Mcp, "server-b", "principal-a");
+    let other_principal =
+        AdapterRequestIdentityOwner::new(TransportKind::Mcp, "server-a", "principal-b");
+
+    let first = first_owner
+        .issue(Some("caller-key"))
+        .expect("first identity");
+    let retry = retry_owner
+        .issue(Some("caller-key"))
+        .expect("retry identity");
+    let isolated = other_principal
+        .issue(Some("caller-key"))
+        .expect("isolated identity");
+
+    assert_eq!(first.idempotency_key, retry.idempotency_key);
+    assert_ne!(first.request_id, retry.request_id);
+    assert_ne!(first.idempotency_key, isolated.idempotency_key);
+    assert!(!first.idempotency_key.contains("principal-a"));
+    assert!(!first.idempotency_key.contains("caller-key"));
+    assert!(first.idempotency_key.starts_with("explicit:v1:sha256:"));
+}
+
+#[test]
+fn transport_identity_rejects_missing_authority_material() {
+    let missing_principal = AdapterRequestIdentityOwner::new(TransportKind::A2a, "peer", " ");
+    assert_eq!(
+        missing_principal.issue(None),
+        Err(AdapterRequestIdentityError::EmptyPrincipal)
+    );
+
+    let owner = AdapterRequestIdentityOwner::new(TransportKind::A2a, "peer", "principal");
+    assert_eq!(
+        owner.issue(Some(" ")),
+        Err(AdapterRequestIdentityError::EmptyExplicitIdempotencyKey)
+    );
+}
+
 impl MemoryClock for FixedClock {
     fn now_secs(&self) -> u64 {
         1_800_000_000
     }
 }
 
+fn host_test_profile() -> ProfileId {
+    #[cfg(target_os = "macos")]
+    {
+        ProfileId::DesktopMacosStandaloneMemory
+    }
+    #[cfg(target_os = "windows")]
+    {
+        ProfileId::DesktopWindowsEmbeddedSdk
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ProfileId::ServerLinuxMemoryGateway
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        ProfileId::EspEmbeddedSdk
+    }
+}
+
 fn runtime() -> MemoryRuntime {
     let store = MemoryStoreHandle::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("config"),
+        StoreBackendConfig::in_memory(host_test_profile()).expect("config"),
     )
     .expect("store");
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
-        .profile(ProfileId::ServerLinuxDevFull)
         .store(store)
         .clock(Arc::new(FixedClock))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
@@ -189,6 +434,7 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
         AdapterOperation::Project,
         r#"{
             "user_query":"typed temporal",
+            "system_max_len":4096,
             "structured_query_facets":[
                 {"kind":"unresolved_temporal","value":"last week"}
             ]
@@ -374,7 +620,7 @@ fn json_decoder_covers_adapter_memory_operations() {
         (AdapterOperation::Recall, r#"{"query":"release","limit":2}"#),
         (
             AdapterOperation::Project,
-            r#"{"query":"release","max_len":1024,"recent_messages_limit":2}"#,
+            r#"{"query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
         ),
         (
             AdapterOperation::Maintain,
@@ -382,17 +628,12 @@ fn json_decoder_covers_adapter_memory_operations() {
         ),
         (
             AdapterOperation::Inspect,
-            r#"{"query":"release","max_len":1024}"#,
+            r#"{"query":"release","system_max_len":1024}"#,
         ),
         (AdapterOperation::Recover, r#"{}"#),
         (
             AdapterOperation::Replay,
             r#"{"chat_id":"chat-1","limit":2}"#,
-        ),
-        (AdapterOperation::Export, r#"{"chat_id":"chat-1"}"#),
-        (
-            AdapterOperation::Import,
-            r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,
         ),
         (
             AdapterOperation::LongTermList,
@@ -420,6 +661,19 @@ fn json_decoder_covers_adapter_memory_operations() {
         let command =
             decode_json_adapter_command(operation, body, &options).expect("decode command");
         assert_eq!(command.operation(), operation);
+    }
+}
+
+#[test]
+fn projection_and_inspection_require_runtime_owned_render_budget() {
+    let options = AdapterJsonCommandOptions::new("test-adapter");
+    for (operation, body) in [
+        (AdapterOperation::Project, r#"{"query":"release"}"#),
+        (AdapterOperation::Inspect, r#"{"query":"release"}"#),
+    ] {
+        let error = decode_json_adapter_command(operation, body, &options)
+            .expect_err("adapter must not invent a projection render budget");
+        assert!(error.to_string().contains("system_max_len"), "{error}");
     }
 }
 
@@ -481,8 +735,12 @@ fn maintain_dispatch_uses_injected_runtime_services() {
     )
     .expect("maintain command");
 
+    let lease = runtime
+        .acquire_runtime_budget_lease()
+        .expect("runtime budget lease");
     let response = dispatch_adapter_command_with_services(
         &runtime,
+        &lease,
         envelope(AdapterOperation::Maintain, command),
         AdapterRuntimeServices {
             http: Some(&mut http),

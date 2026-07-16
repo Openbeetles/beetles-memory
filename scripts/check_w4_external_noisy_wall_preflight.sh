@@ -12,9 +12,18 @@ if [[ -z "${BM_P7_RUN_ID:-}" ]]; then
   exit 2
 fi
 
-cargo run -p bm-replay --bin bm-w4-external-noisy-wall -- \
+target_root="${CARGO_TARGET_DIR:-target}"
+case "$target_root" in
+  /*) ;;
+  *) target_root="$PWD/$target_root" ;;
+esac
+cargo build --release --locked -p bm-replay \
+  --bin bm-w4-external-noisy-wall --bin bm-p7-retained-launch
+operator_bin="$(realpath -- "${target_root}/release/bm-w4-external-noisy-wall")"
+
+"$operator_bin" \
   --preflight \
   --benchmark-root "$BM_W4_EXTERNAL_BENCH_ROOT" \
   --run-id "$BM_P7_RUN_ID"
 
-echo "check_w4_external_noisy_wall_preflight: ok"
+echo "check_w4_external_noisy_wall_preflight: ok" >&2

@@ -118,7 +118,9 @@ pub const fn platform_profile_feature_id(profile: ProfileId) -> &'static str {
         ProfileId::LinuxDeviceStandaloneMemory => "profile-linux-device-standalone-memory",
         ProfileId::DesktopMacosStandaloneMemory => "profile-desktop-macos-standalone-memory",
         ProfileId::DesktopMacosEmbeddedSdk => "profile-desktop-macos-embedded-sdk",
+        ProfileId::DesktopMacosDevFull => "profile-desktop-macos-dev-full",
         ProfileId::DesktopWindowsEmbeddedSdk => "profile-desktop-windows-embedded-sdk",
+        ProfileId::DesktopWindowsDevFull => "profile-desktop-windows-dev-full",
         ProfileId::ServerLinuxMemoryGateway => "profile-server-linux-memory-gateway",
         ProfileId::ServerLinuxDevFull => "profile-server-linux-dev-full",
     }

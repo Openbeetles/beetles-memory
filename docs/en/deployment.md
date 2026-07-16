@@ -6,7 +6,7 @@ Use `bm-entry` when Beetle Memory runs as a standalone process or protocol-facin
 
 | Shape | Profile | Entry surface |
 | --- | --- | --- |
-| Local CLI/operator process | `profile-server-linux-dev-full` or host profile | `bm-cli` |
+| Local CLI/operator process | The dev-full profile matching the compiled host target: macOS, Windows, or Linux | `bm-cli` |
 | Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP, WebSocket, MCP, A2A, LLM gateway server; concrete visibility depends on enabled capability policy and `EntryTransportConfig` |
 | Linux hardware device | `profile-linux-device-standalone-memory` | local CLI, loopback HTTP/WebSocket |
 | ESP standalone memory | `profile-esp-standalone-memory` | compact local/client surfaces with embedded store |
@@ -16,17 +16,16 @@ Use `bm-entry` when Beetle Memory runs as a standalone process or protocol-facin
 ```rust
 use bm_entry::{
     EntryAuthConfig, EntryIdentity, EntryIdempotencyConfig, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendConfig,
 };
 
 let mut capability = MemoryCapabilityPolicy::strict_profile();
 capability.communication_adapter_enabled = true;
 
 let runtime = EntryRuntime::open(EntryRuntimeConfig {
-    profile: ProfileId::ServerLinuxMemoryGateway,
     identity: EntryIdentity {
         agent_id: "gateway-agent".to_string(),
         owner_id: "owner-default".to_string(),
@@ -35,11 +34,11 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
         channel: "gateway".to_string(),
         chat_id: "chat-1".to_string(),
     },
-    store: EntryStoreConfig {
-        backend: StoreBackendKind::Sqlite,
-        data_path: Some("/var/lib/beetle-memory/memory.sqlite3".into()),
-        fsync: true,
-    },
+    store: StoreBackendConfig::sqlite(
+        "/var/lib/beetle-memory/memory.sqlite3",
+        ProfileId::ServerLinuxMemoryGateway,
+    )?
+    .with_fsync(true),
     transports: EntryTransportConfig::all_enabled(),
     auth: EntryAuthConfig::disabled_for_local(),
     idempotency: EntryIdempotencyConfig { max_keys: 1024 },
@@ -50,7 +49,7 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
 
 This runtime view can expose server entry surfaces because the example explicitly sets `capability.communication_adapter_enabled = true` and uses `EntryTransportConfig::all_enabled()` to enable transports. The profile only expresses allowance; strict capability snapshots can still show `server_allowed=true` while `visible=false`.
 
-For production, replace `disabled_for_local()` with an auth boundary owned by your process. The current crate exposes the config boundary; your deployment should enforce token, mTLS, or gateway authentication before requests are marked authenticated.
+For production, replace `disabled_for_local()` with an auth boundary owned by your process. Network traffic must enter through a listener or an explicit `*_from_peer` adapter that derives trust from the accepted socket peer; only same-process hosts may use the explicitly named `handle_http_in_process_request*` APIs.
 
 ## HTTP
 
@@ -68,24 +67,23 @@ Memory routes declared by the crate:
 | `/memory/inspect` | `POST` | inspect contract |
 | `/memory/recover` | `POST` | recover contract |
 | `/memory/replay` | `POST` | replay contract |
-| `/memory/export` | `POST` | export contract |
-| `/memory/import` | `POST` | import contract |
 | `/memory/long-term/list` | `POST` | accepted long-term memory list/search |
 | `/memory/long-term/detail` | `POST` | accepted long-term memory detail |
 | `/memory/long-term/mutate` | `POST` | accepted long-term memory mutation |
 | `/memory/long-term/policy` | `POST` | long-term governance policy mutation |
 
-The `server-std` decoder uses the shared JSON adapter decoder for write, recall, project, maintain, inspect, recover, replay, export, import, long-term list/detail/mutate/policy, capabilities, and close. `Subscribe` is a stream operation, not an HTTP memory command. `Maintain` needs `handle_http_request_with_services` with injected LLM/HTTP services; `handle_http_request` uses no injected services and returns a structured rejection for maintain.
+The `server-std` decoder uses the shared JSON adapter decoder for write, recall, project, maintain, inspect, recover, replay, long-term list/detail/mutate/policy, capabilities, and close. Generic continuity snapshot export/import is not a protocol operation. `Subscribe` is a stream operation, not an HTTP memory command. `Maintain` needs `handle_http_in_process_request_with_services` with injected LLM/HTTP services; `handle_http_in_process_request` uses no injected services and returns a structured rejection for maintain. Project and inspect payloads must provide `system_max_len`; the adapter never invents a fallback render budget.
 
 Headers consumed by the standard-library HTTP helper:
 
 | Header | Purpose |
 | --- | --- |
-| `x-request-id` | Request id used in adapter response reports. |
-| `x-idempotency-key` | Idempotency key for mutation requests. |
-| `x-audit-id` | Audit id carried into adapter events. |
-| `authorization` | Marks the request authenticated. |
-| `x-loopback: true` or `x-loopback: 1` | Marks local loopback requests authenticated. |
+| `x-idempotency-key` | Optional caller idempotency material. The transport derives its internal key and never echoes the raw value. |
+| `authorization: Bearer ...` | Verified against the configured typed principal, owner, tenant, and operation capabilities. |
+
+Loopback trust comes only from the accepted socket peer address. Forwarded identity, subject, and `x-loopback` headers are untrusted and cannot grant authentication or capabilities. A non-loopback listener requires `BM_HTTP_BEARER_TOKEN`, `BM_HTTP_BEARER_PRINCIPAL_ID`, a globally unique `BM_HTTP_BEARER_OWNER_ID`, and `BM_HTTP_BEARER_CAPABILITIES`; `owner_id` is the tenancy namespace. Startup fails closed when the verifier or nonzero read/write timeouts are missing.
+
+At ingress, the HTTP adapter pins one fresh runtime budget report for header parsing, body admission, dispatch, and response rendering. Oversized declared bodies are rejected before allocation; the response exposes the same identity as `HttpRuntimeResponse.budget_report_id` and `x-bm-runtime-budget-report-id`.
 
 Example write body:
 
@@ -133,7 +131,7 @@ Standalone deployments may expose the configuration console on the same HTTP lis
 This repository provides the formal `bm-http-console` executable for Linux server, Linux device, non-desktop deployments, device HTTP consoles, and local development scenarios that explicitly verify the HTTP shell. It is not the macOS desktop production entry, it is not an example entry, and it does not bypass the kernel; all `/console/*` and `/memory/*` requests enter the same `EntryRuntime`.
 
 ```bash
-cargo run -p bm-http --features server-std --bin bm-http-console -- \
+cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
   --store-path /var/lib/beetle-memory/http-console-store
 ```
@@ -142,7 +140,7 @@ To mount host-managed standard Agent Skill directories in standalone deployments
 
 ```bash
 BM_AGENT_SKILL_DIRS=/path/to/project/.agents/skills:/path/to/user/skills \
-  cargo run -p bm-http --features server-std --bin bm-http-console -- \
+  cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
   --store-path /var/lib/beetle-memory/http-console-store
 ```
@@ -194,6 +192,8 @@ Subscription frame kinds:
 
 Command frames use the shared JSON adapter decoder. Subscription frames update session subscription state and return lifecycle/error events; they are not SDK memory commands.
 
+Each frame pins one fresh runtime budget report. Frame admission, subscription admission, dispatch, and the returned event use that same report identity in `WssRuntimeEvent.budget_report_id` and `runtime_budget_report_id`.
+
 Example recall frame:
 
 ```json
@@ -207,6 +207,8 @@ Example recall frame:
 
 Enable `bm-mcp` with `server-stdio`.
 
+The stdio server performs bounded streaming reads and never buffers an unbounded line. Stdio and Streamable HTTP pin one fresh runtime budget report per JSON-RPC request; Streamable HTTP rejects oversized headers or declared bodies before allocation and returns `x-bm-runtime-budget-report-id`.
+
 Published tool specs include:
 
 - `memory_capabilities`
@@ -219,8 +221,6 @@ Published tool specs include:
 - `memory_long_term_detail`
 - `memory_long_term_mutate`
 - `memory_long_term_policy`
-- `memory_export`
-- `memory_import`
 
 The stdio helper uses the shared JSON adapter decoder for all listed tools. Maintain is not listed as an MCP tool because maintain requires explicit service injection.
 
@@ -265,7 +265,6 @@ Bridge message names:
 - `memory_long_term_mutation_request`
 - `memory_long_term_policy_request`
 - `memory_report`
-- `memory_migration_chunk`
 - `runtime_lifecycle_event`
 
 The HTTP bridge helper uses the shared JSON adapter decoder for bridge messages that map to memory operations. A2A messages only carry memory-report permissions and must not grant executor, tool, or workflow permissions.
@@ -294,7 +293,7 @@ Example message:
 2. Choose a supported store backend for that profile.
 3. Set a stable `agent_id`, `owner_id`, `channel`, and `chat_id` policy.
 4. Configure transport visibility through `EntryTransportConfig`.
-5. Enforce authentication before constructing authenticated `EntryTransportContext` values.
+5. Derive `EntryAuthDecision` from the real transport boundary before constructing `EntryTransportContext`; never accept caller-controlled booleans or loopback headers as trust evidence.
 6. Use idempotency keys for mutation operations.
 7. Persist file/sqlite stores under a path owned by the runtime process.
 8. Run `memory capabilities` or the platform capability snapshot before exposing a protocol.

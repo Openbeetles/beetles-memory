@@ -4,17 +4,20 @@ use crate::store_internal::{
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
     CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, DerivedMemoryRef,
-    HostOpaqueRef, LongTermMemoryQuery, MemoryGovernancePolicyMutation,
+    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft,
+    GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerRef, HostOpaqueRef, LongTermMemoryQuery,
+    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
     MemoryGovernancePolicyMutationReport as CoreMemoryGovernancePolicyMutationReport,
     MemoryHygieneInspection, MemoryHygieneOutcome, MemoryLongTermAffectedFacetDoc,
     MemoryLongTermAffectedRecord, MemoryLongTermControlDecision, MemoryLongTermControlView,
     MemoryLongTermDetailReport as CoreMemoryLongTermDetailReport,
     MemoryLongTermListReport as CoreMemoryLongTermListReport, MemoryLongTermMutation,
     MemoryLongTermMutationReport as CoreMemoryLongTermMutationReport, MemoryLongTermTarget,
-    MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryProjectionImpactReport,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateMaterialRedactionReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck,
-    QueryFacetInput, RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
+    MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryPrivacyClass,
+    MemoryProjectionImpactReport, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck, QueryFacetInput,
+    RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
     SubjectProjectionReport, SubjectScopedRuntime, TranscriptAttrEnvelope,
     TranscriptAttrWriteRejection, TranscriptCommitReport, TranscriptEvidenceRef,
     TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRedactionReportItem,
@@ -38,7 +41,6 @@ use bm_core::{
 };
 
 use crate::{
-    ContinuitySnapshot, ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome,
     IntelligenceReplayInspection, MemoryCapabilityCatalog, ParsedLongTermMemoryExtraction,
     PostReplyMemoryMaintenanceOutcome, PromptMemoryContext, RuntimeSkillHit,
     RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteOutcome, RuntimeSkillWriteSource,
@@ -202,7 +204,19 @@ pub struct MemoryGovernancePolicyMutationReport {
     pub core_report: CoreMemoryGovernancePolicyMutationReport,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub enum MemoryEvidenceDocumentMutation {
+    Upsert {
+        draft: Box<GovernedEvidenceDocumentDraft>,
+    },
+    Delete {
+        document_id: String,
+        expected_owner_revision: u64,
+    },
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryWriteRequest {
     Procedural {
         writes: Vec<RuntimeSkillWrite>,
@@ -218,9 +232,22 @@ pub enum MemoryWriteRequest {
     Candidates {
         candidates: Vec<bm_core::memory::MemoryWriteCandidate>,
     },
+    GovernedEvidenceDocuments {
+        mutations: Vec<MemoryEvidenceDocumentMutation>,
+    },
     AgentToolUsageFeedback {
         feedback: AgentToolUsageFeedback,
     },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvidenceDocumentWriteSummary {
+    pub submitted: usize,
+    pub created: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+    pub deleted: usize,
+    pub owner_refs: Vec<GovernedMemoryOwnerRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -236,6 +263,7 @@ pub struct MemoryWriteReport {
     pub procedural_evolution: Option<SkillEvolutionReport>,
     pub procedural_promotions: Vec<ProceduralMemoryPromotionReport>,
     pub agent_tool_experience: Option<AgentToolExperienceGovernanceReport>,
+    pub evidence_documents: Option<MemoryEvidenceDocumentWriteSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,8 +316,8 @@ pub struct MemoryEvalRecallCandidate {
     pub score_breakdown: GraphRecallCandidateScore,
 }
 
-pub const MEMORY_RECALL_DELIVERY_SCHEMA_VERSION: u32 = 2;
-pub const MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION: u32 = 2;
+pub const MEMORY_RECALL_DELIVERY_SCHEMA_VERSION: u32 = 4;
+pub const MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryEvidenceRefVisibility {
@@ -303,6 +331,40 @@ pub struct MemoryEvidenceRefView {
     pub visibility: MemoryEvidenceRefVisibility,
     pub reference: Option<String>,
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvidenceDocumentReadRequest {
+    pub memory_space_id: String,
+    pub document_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvidenceDocumentView {
+    pub owner_ref: GovernedMemoryOwnerRef,
+    pub memory_space_id: String,
+    pub mounted_subject_id: String,
+    pub source_kind: GovernedEvidenceDocumentSourceKind,
+    pub source_locator_view: MemoryEvidenceRefView,
+    pub canonical_evidence_group: String,
+    pub source_revision: u64,
+    pub owner_revision: u64,
+    pub content_digest: String,
+    pub authority: MemoryEvidenceAuthority,
+    pub privacy: MemoryPrivacyClass,
+    pub body: String,
+    pub chunks: Vec<GovernedEvidenceDocumentChunk>,
+    pub observed_at: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub shared_fact_surface_allowed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvidenceDocumentReadReport {
+    pub documents: Vec<MemoryEvidenceDocumentView>,
+    pub missing_document_ids: Vec<String>,
+    pub store_snapshot_consistent: bool,
 }
 
 pub type MemoryRecallSelectionDropReason = RecallDeliverySelectionDropReason;
@@ -319,15 +381,18 @@ pub enum MemoryRecallRenderDropReason {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryRecallSelectionDecision {
+    pub owner_ref: Option<GovernedMemoryOwnerRef>,
     pub candidate_id: String,
     pub canonical_evidence_groups: Vec<String>,
     pub evidence_family_groups: Vec<String>,
+    pub renderable_evidence_groups: Vec<String>,
     pub selected: bool,
     pub drop_reason: Option<MemoryRecallSelectionDropReason>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryRenderedEvidenceCapsule {
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub candidate_id: String,
     pub content: String,
     pub evidence_ref_views: Vec<MemoryEvidenceRefView>,
@@ -374,15 +439,33 @@ pub struct MemoryRecallDeliveryReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvalRecallStageCandidateMatch {
+    pub candidate_id: String,
+    pub rank: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvalRecallCandidateSelectionLoss {
+    pub candidate_id: String,
+    pub drop_reason: MemoryRecallSelectionDropReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryEvalRecallCandidateRenderLoss {
+    pub candidate_id: String,
+    pub drop_reason: MemoryRecallRenderDropReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryEvalRecallLossEntry {
     pub evidence_ref: MemoryEvidenceRefView,
     pub canonical_evidence_group: String,
-    pub expanded_rank: Option<usize>,
-    pub reranked_rank: Option<usize>,
-    pub selected_rank: Option<usize>,
-    pub rendered_rank: Option<usize>,
-    pub selection_drop_reason: Option<MemoryRecallSelectionDropReason>,
-    pub render_drop_reason: Option<MemoryRecallRenderDropReason>,
+    pub expanded_matches: Vec<MemoryEvalRecallStageCandidateMatch>,
+    pub reranked_matches: Vec<MemoryEvalRecallStageCandidateMatch>,
+    pub selected_matches: Vec<MemoryEvalRecallStageCandidateMatch>,
+    pub rendered_matches: Vec<MemoryEvalRecallStageCandidateMatch>,
+    pub selection_losses: Vec<MemoryEvalRecallCandidateSelectionLoss>,
+    pub render_losses: Vec<MemoryEvalRecallCandidateRenderLoss>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -528,6 +611,32 @@ pub struct MemoryEvalRecallAblationReport {
     pub blocked_reasons: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemoryEvalEvidenceApplicability {
+    #[default]
+    Evidence,
+    NoGold,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryEvalQuestionEvaluation {
+    pub canonical_gold_count: usize,
+    pub applicability: MemoryEvalEvidenceApplicability,
+}
+
+impl MemoryEvalQuestionEvaluation {
+    pub fn from_canonical_gold_count(canonical_gold_count: usize) -> Self {
+        Self {
+            canonical_gold_count,
+            applicability: if canonical_gold_count == 0 {
+                MemoryEvalEvidenceApplicability::NoGold
+            } else {
+                MemoryEvalEvidenceApplicability::Evidence
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryEvalRecallStageDiagnostics {
     pub suite: String,
@@ -584,6 +693,8 @@ pub struct MemoryEvalRecallMetrics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryEvalRecallPrivacyReport {
     pub passed: bool,
+    pub checked_long_term_owner_count: u32,
+    pub checked_evidence_document_owner_count: u32,
     pub private_raw_candidate_count: u32,
     pub redacted_candidate_ids: Vec<String>,
     pub failures: Vec<String>,
@@ -620,6 +731,7 @@ pub struct MemoryGraphRecallIndexReport {
 pub struct MemoryEvalRecallReport {
     pub query: String,
     pub benchmark_context: Option<MemoryEvalRecallBenchmarkContext>,
+    pub question_evaluation: MemoryEvalQuestionEvaluation,
     pub source_candidates: Vec<MemoryEvalRecallCandidate>,
     pub graph_anchor_candidates: Vec<MemoryEvalRecallCandidate>,
     pub expanded_candidates: Vec<MemoryEvalRecallCandidate>,
@@ -648,9 +760,16 @@ pub struct MemoryEvalRecallReport {
 }
 
 #[derive(Clone, Debug)]
+pub struct TemporalMemoryGraphNodeOwnerRef {
+    pub node_id: String,
+    pub owner_ref: GovernedMemoryOwnerRef,
+}
+
+#[derive(Clone, Debug)]
 pub struct TemporalMemoryGraphWriteRequest {
     pub operation: String,
     pub nodes: Vec<MemoryGraphNode>,
+    pub node_owners: Vec<TemporalMemoryGraphNodeOwnerRef>,
     pub edges: Vec<MemoryGraphEdge>,
     pub backlinks: Vec<EvidenceBacklink>,
 }
@@ -718,6 +837,7 @@ pub struct MemoryRecallReport {
     pub graph_candidate_evidence_ref_index: Vec<MemoryEvalRecallEvidenceRefIndexEntry>,
     pub compact_graph: CompactMemoryGraph,
     pub delivery_report: MemoryRecallDeliveryReport,
+    pub privacy_report: MemoryEvalRecallPrivacyReport,
     pub store_snapshot_consistent: bool,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
@@ -793,6 +913,7 @@ pub struct RuntimeDisclosureProtocolReport {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeProjectionSourceBlock {
+    pub owner_ref: Option<GovernedMemoryOwnerRef>,
     pub source_id: String,
     pub role: String,
     pub content: String,
@@ -803,12 +924,14 @@ pub struct RuntimeProjectionSourceBlock {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryProjectionDeliveryDigestContentEntry {
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub candidate_id: String,
     pub content_sha256: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryProjectionDeliveryDigestEntry {
+    pub owner_ref: GovernedMemoryOwnerRef,
     pub candidate_id: String,
     pub source_block_sha256: String,
 }
@@ -912,7 +1035,7 @@ pub struct MemoryProjectionAuditReport {
     pub sections: Vec<MemoryProjectionSectionAudit>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MemoryMaintenanceRequest {
     pub ingress: IngressKind,
     pub user_content: String,
@@ -1054,7 +1177,7 @@ pub struct MemoryTranscriptReplayReport {
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MemoryTranscriptAttrWriteRequest {
     pub memory_space_id: String,
     pub channel_id: String,
@@ -1122,48 +1245,62 @@ pub struct MemoryTranscriptExportReport {
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
-#[derive(Clone, Debug)]
-pub struct MemoryExportRequest {
-    pub chat_id: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceScope {
+    pub memory_space_id: String,
+    pub mounted_subject_id: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct MemoryExportReport {
-    pub snapshot: ContinuitySnapshot,
-    pub lifecycle_report: RuntimeLifecycleReport,
-}
-
-#[derive(Clone, Debug)]
-pub struct MemoryImportRequest {
-    pub snapshot: ContinuitySnapshot,
-    pub target_chat_id: String,
-    pub mode: ContinuitySnapshotImportMode,
-}
-
-#[derive(Clone, Debug)]
-pub struct MemoryImportReport {
-    pub outcome: ContinuitySnapshotImportOutcome,
-    pub transaction: Option<MemoryWriteTransactionReport>,
-    pub lifecycle_report: RuntimeLifecycleReport,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpaceProjectionScope {
+    pub scope: MemorySpaceScope,
+    pub includes_private: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceExportRequest {
-    pub memory_space_id: String,
+    pub scope: MemorySpaceScope,
     pub include_private: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemorySpacePrivateMaterialPolicy {
+    ExcludePrivate,
+    IncludePrivate,
+}
+
+impl MemorySpacePrivateMaterialPolicy {
+    pub const fn includes_private(self) -> bool {
+        matches!(self, Self::IncludePrivate)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceExportReport {
-    pub memory_space_id: String,
+    pub projection_scope: MemorySpaceProjectionScope,
     pub archive: MemorySpaceArchive,
     pub export_report: StoreSnapshotExportReport,
     pub privacy_redactions: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MemorySpaceArchive {
     snapshot: StoreSnapshot,
+}
+
+impl std::fmt::Debug for MemorySpaceArchive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let report = self.snapshot.export_report();
+        formatter
+            .debug_struct("MemorySpaceArchive")
+            .field("schema_id", &report.schema_id)
+            .field("json_doc_count", &report.json_docs)
+            .field("blob_count", &report.blobs)
+            .field("event_count", &report.events)
+            .field("state_fingerprint", &report.state_fingerprint)
+            .field("event_fingerprint", &report.event_fingerprint)
+            .finish()
+    }
 }
 
 impl MemorySpaceArchive {
@@ -1200,20 +1337,22 @@ impl MemorySpaceArchive {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceImportRequest {
-    pub memory_space_id: String,
+    pub scope: MemorySpaceScope,
+    pub expected_private_material_policy: MemorySpacePrivateMaterialPolicy,
     pub archive: MemorySpaceArchive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceImportReport {
-    pub memory_space_id: String,
+    pub imported_scope: MemorySpaceScope,
     pub import_report: StoreSnapshotImportReport,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceMigratePreviewRequest {
-    pub source_memory_space_id: String,
-    pub target_memory_space_id: String,
+    pub source_scope: MemorySpaceScope,
+    pub target_scope: MemorySpaceScope,
+    pub expected_private_material_policy: MemorySpacePrivateMaterialPolicy,
     pub source_profile: ProfileId,
     pub target_profile: ProfileId,
     pub archive: MemorySpaceArchive,
@@ -1233,7 +1372,7 @@ pub struct MemorySpaceMigrationPrivacyReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySpaceSubjectRemapReport {
+pub struct MemorySpaceIdentityRemapReport {
     pub required: bool,
     pub applied: bool,
     pub reason: String,
@@ -1241,11 +1380,10 @@ pub struct MemorySpaceSubjectRemapReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceMigrationManifest {
-    pub source_memory_space_id: String,
-    pub target_memory_space_id: String,
+    pub projection_scope: MemorySpaceProjectionScope,
+    pub target_scope: MemorySpaceScope,
     pub schema_id: String,
-    pub whole_space_snapshot: bool,
-    pub subject_remap: MemorySpaceSubjectRemapReport,
+    pub identity_remap: MemorySpaceIdentityRemapReport,
     pub planes: Vec<MemorySpaceMigrationPlaneReport>,
     pub privacy: Vec<MemorySpaceMigrationPrivacyReport>,
     pub conflict_risk: bool,
@@ -1253,8 +1391,8 @@ pub struct MemorySpaceMigrationManifest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceMigratePreviewReport {
-    pub source_memory_space_id: String,
-    pub target_memory_space_id: String,
+    pub source_scope: MemorySpaceScope,
+    pub target_scope: MemorySpaceScope,
     pub schema_id: String,
     pub json_docs: usize,
     pub blobs: usize,
@@ -1270,11 +1408,32 @@ pub struct MemorySpaceMigratePreviewReport {
     pub plan: MemorySpaceMigrationPlan,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MemorySpaceMigrationPlan {
-    pub(crate) target_memory_space_id: String,
+    pub(crate) target_scope: MemorySpaceScope,
+    pub(crate) expected_private_material_policy: MemorySpacePrivateMaterialPolicy,
     pub(crate) snapshot: StoreSnapshot,
     pub(crate) preflight: VaultMigrationPreflight,
+}
+
+impl std::fmt::Debug for MemorySpaceMigrationPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let report = self.snapshot.export_report();
+        formatter
+            .debug_struct("MemorySpaceMigrationPlan")
+            .field("target_scope", &self.target_scope)
+            .field(
+                "expected_private_material_policy",
+                &self.expected_private_material_policy,
+            )
+            .field("schema_id", &report.schema_id)
+            .field("json_doc_count", &report.json_docs)
+            .field("blob_count", &report.blobs)
+            .field("event_count", &report.events)
+            .field("state_fingerprint", &report.state_fingerprint)
+            .field("event_fingerprint", &report.event_fingerprint)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1284,7 +1443,7 @@ pub struct MemorySpaceMigrateApplyRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceMigrateApplyReport {
-    pub target_memory_space_id: String,
+    pub target_scope: MemorySpaceScope,
     pub import_report: StoreSnapshotImportReport,
 }
 
@@ -1293,7 +1452,7 @@ pub struct MemoryProceduralWriteReport {
     pub outcome: RuntimeSkillWriteOutcome,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MemoryRecoverRequest {
     pub trigger: RuntimeLifecycleTrigger,
     pub mode_input: RuntimeLifecycleModeInput,
@@ -1305,7 +1464,7 @@ pub struct MemoryRecoverReport {
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MemoryCloseRequest {
     pub reason: String,
 }

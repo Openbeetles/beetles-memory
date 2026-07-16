@@ -1,3 +1,4 @@
+mod support;
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
     build_long_term_memory_facet_index_doc, canonical_evidence_ref_from_source,
@@ -84,7 +85,7 @@ fn policy(memory_space_id: &str) -> MemoryLongTermGovernancePolicy {
         kind: "suppress".to_string(),
         selector: MemoryGovernanceSelector {
             memory_space_id: Some(memory_space_id.to_string()),
-            subject_id: Some("agent:assistant-main".to_string()),
+            subject_id: Some("subject-human".to_string()),
             kind: Some(LongTermMemoryKind::Preference),
             topic_pattern: Some("temporary-*".to_string()),
             source_chat_id: None,
@@ -105,10 +106,12 @@ fn policy_audit(policy: &MemoryLongTermGovernancePolicy) -> LongTermMemoryContro
         LongTermControlOperation::PolicySuppress,
         vec![ControlEffectRef::Policy {
             policy_id: policy.policy_id.clone(),
+            owner_subject_id: "subject-human".to_string(),
             policy_revision: policy.policy_revision,
             deleted: false,
         }],
         policy.reason.clone(),
+        "subject-human".to_string(),
         Some("subject-human".to_string()),
         policy.memory_space_id.clone(),
         NOW_SECS + 3,
@@ -157,11 +160,12 @@ fn seed_owner(
         memory_space_id,
         vec!["subject-human".to_string()],
         1,
-    );
+    )
+    .expect("seed owner must produce a valid governed facet document");
     let owner_key =
         scoped_long_term_memory_storage_key(memory_space_id, &entry.id).expect("owner key");
     let facet_key =
-        scoped_memory_facet_owner_storage_key(memory_space_id, "subject-human", &entry.id)
+        scoped_memory_facet_owner_storage_key(memory_space_id, "subject-human", &facet.owner_ref)
             .expect("facet key");
     platform
         .commit_governed_memory_transaction_with_preconditions(
@@ -221,6 +225,7 @@ fn seed_control_store(platform: &StorePlatform, memory_space_id: &str) -> Contro
             },
             reason: "user corrected preference".to_string(),
             dry_run: false,
+            owner_subject_id: "subject-human".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some(memory_space_id.to_string()),
             now_secs: NOW_SECS + 1,
@@ -252,12 +257,16 @@ fn seed_control_store(platform: &StorePlatform, memory_space_id: &str) -> Contro
         memory_space_id,
         vec!["subject-human".to_string()],
         2,
-    );
+    )
+    .expect("corrected owner must produce a valid governed facet document");
     let owner_key =
         scoped_long_term_memory_storage_key(memory_space_id, &before.id).expect("owner key");
-    let facet_key =
-        scoped_memory_facet_owner_storage_key(memory_space_id, "subject-human", &before.id)
-            .expect("facet key");
+    let facet_key = scoped_memory_facet_owner_storage_key(
+        memory_space_id,
+        "subject-human",
+        &after_facet.owner_ref,
+    )
+    .expect("facet key");
     let mut mutations = Vec::new();
     let mut preconditions = Vec::new();
     mutations.extend([
@@ -335,6 +344,7 @@ fn seed_control_store(platform: &StorePlatform, memory_space_id: &str) -> Contro
             },
             reason: "user deleted memory".to_string(),
             dry_run: false,
+            owner_subject_id: "subject-human".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some(memory_space_id.to_string()),
             now_secs: NOW_SECS + 2,
@@ -459,8 +469,12 @@ fn seed_control_store(platform: &StorePlatform, memory_space_id: &str) -> Contro
 
 #[test]
 fn store_platform_persists_long_term_control_metadata_and_events() {
-    let platform = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap()
+        .with_event_scope(control_scope("space-user")),
     )
     .unwrap();
     let fixture = seed_control_store(&platform, "space-user");
@@ -503,8 +517,12 @@ fn store_platform_persists_long_term_control_metadata_and_events() {
 
 #[test]
 fn scoped_control_events_expose_logical_ids_not_physical_storage_keys() {
-    let platform = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap()
+        .with_event_scope(control_scope("space-user")),
     )
     .unwrap();
     let fixture = seed_control_store(&platform, "space-user");
@@ -563,8 +581,12 @@ fn scoped_control_events_expose_logical_ids_not_physical_storage_keys() {
 
 #[test]
 fn snapshot_export_import_preserves_long_term_control_namespaces() {
-    let source = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let source = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap()
+        .with_event_scope(control_scope("space-user")),
     )
     .unwrap();
     let fixture = seed_control_store(&source, "space-user");
@@ -585,8 +607,12 @@ fn snapshot_export_import_preserves_long_term_control_namespaces() {
         );
     }
 
-    let target = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let target = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap()
+        .with_event_scope(control_scope("space-user")),
     )
     .unwrap();
     target.import_store_snapshot(&snapshot).unwrap();

@@ -1,5 +1,6 @@
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn main() {
     if let Err(error) = run() {
@@ -49,7 +50,7 @@ fn print_usage() {
         "{}",
         json!({
             "binary": "bm-mcp-server",
-            "usage": "bm-mcp-server stdio|http [--addr 127.0.0.1:8788] [--store-file PATH|--store-sqlite PATH|--store-memory] [--profile profile-server-linux-memory-gateway] [--owner OWNER] [--agent AGENT] [--channel CHANNEL] [--chat-id CHAT]",
+            "usage": "bm-mcp-server stdio|http [--addr 127.0.0.1:8788] [--store-file PATH|--store-sqlite PATH|--store-memory] [--profile PROFILE] [--agent AGENT] [--channel CHANNEL] [--chat-id CHAT] [--connection-read-deadline-ms N --write-timeout-ms N] [--workers N] [--max-in-flight N]",
             "modes": ["stdio", "http"],
             "env": {
                 "store_file": "BM_MEMORY_STORE_FILE",
@@ -60,7 +61,11 @@ fn print_usage() {
                 "agent": "BM_MEMORY_AGENT_ID",
                 "channel": "BM_MEMORY_CHANNEL",
                 "chat_id": "BM_MEMORY_CHAT_ID",
-                "http_addr": "BM_MCP_HTTP_ADDR"
+                "http_addr": "BM_MCP_HTTP_ADDR",
+                "bearer_token": "BM_MCP_BEARER_TOKEN",
+                "bearer_principal": "BM_MCP_BEARER_PRINCIPAL_ID",
+                "bearer_owner": "BM_MCP_BEARER_OWNER_ID",
+                "bearer_capabilities": "BM_MCP_BEARER_CAPABILITIES"
             },
             "features": {
                 "server_stdio": cfg!(feature = "server-stdio")
@@ -81,6 +86,12 @@ struct McpServerOptions {
     owner_id: String,
     channel: String,
     chat_id: String,
+    connection_read_deadline: Option<std::time::Duration>,
+    write_timeout: Option<std::time::Duration>,
+    workers: usize,
+    max_in_flight: usize,
+    auth: bm_entry::EntryAuthConfig,
+    principal_id: String,
 }
 
 impl McpServerOptions {
@@ -149,10 +160,39 @@ impl McpServerOptions {
                         .next()
                         .ok_or_else(|| "--chat-id requires a value".to_string())?;
                 }
+                "--connection-read-deadline-ms" if http_mode => {
+                    options.connection_read_deadline = Some(parse_timeout_ms(
+                        "--connection-read-deadline-ms",
+                        args.next().ok_or_else(|| {
+                            "--connection-read-deadline-ms requires a value".to_string()
+                        })?,
+                    )?);
+                }
+                "--write-timeout-ms" if http_mode => {
+                    options.write_timeout = Some(parse_timeout_ms(
+                        "--write-timeout-ms",
+                        args.next()
+                            .ok_or_else(|| "--write-timeout-ms requires a value".to_string())?,
+                    )?);
+                }
+                "--workers" if http_mode => {
+                    options.workers = parse_nonzero_usize(
+                        "--workers",
+                        args.next()
+                            .ok_or_else(|| "--workers requires a value".to_string())?,
+                    )?;
+                }
+                "--max-in-flight" if http_mode => {
+                    options.max_in_flight = parse_nonzero_usize(
+                        "--max-in-flight",
+                        args.next()
+                            .ok_or_else(|| "--max-in-flight requires a value".to_string())?,
+                    )?;
+                }
                 other => return Err(format!("unsupported bm-mcp-server option: {other}")),
             }
         }
-        options.validate()?;
+        options.validate(http_mode)?;
         Ok(options)
     }
 
@@ -179,6 +219,7 @@ impl McpServerOptions {
             Ok(raw) => parse_profile(&raw)?,
             Err(_) => bm_sdk::ProfileId::ServerLinuxMemoryGateway,
         };
+        let (auth, principal_id, owner_id) = mcp_auth_from_env()?;
         Ok(Self {
             addr: std::env::var("BM_MCP_HTTP_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:8788".to_string()),
@@ -189,15 +230,20 @@ impl McpServerOptions {
             fsync,
             agent_id: std::env::var("BM_MEMORY_AGENT_ID")
                 .unwrap_or_else(|_| "agent-main".to_string()),
-            owner_id: std::env::var("BM_MEMORY_OWNER_ID")
-                .unwrap_or_else(|_| "owner-default".to_string()),
+            owner_id,
             channel: std::env::var("BM_MEMORY_CHANNEL")
                 .unwrap_or_else(|_| "llm.gateway".to_string()),
             chat_id: std::env::var("BM_MEMORY_CHAT_ID").unwrap_or_else(|_| "chat-1".to_string()),
+            connection_read_deadline: None,
+            write_timeout: None,
+            workers: 8,
+            max_in_flight: 64,
+            auth,
+            principal_id,
         })
     }
 
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self, http_mode: bool) -> Result<(), String> {
         if !self.store_explicit {
             return Err("memory store backend must be explicit: use --store-memory or an absolute --store-file/--store-sqlite path".to_string());
         }
@@ -211,12 +257,33 @@ impl McpServerOptions {
             ("agent", &self.agent_id),
             ("channel", &self.channel),
             ("chat-id", &self.chat_id),
+            ("principal", &self.principal_id),
         ] {
             if value.trim().is_empty() {
                 return Err(format!("{field} must not be empty"));
             }
         }
+        if http_mode {
+            self.network_front_config()?;
+        }
         Ok(())
+    }
+
+    #[cfg(feature = "server-stdio")]
+    fn network_front_config(&self) -> Result<bm_entry::EntryTcpNetworkFrontConfig, String> {
+        let connection_read_deadline = self.connection_read_deadline.ok_or_else(|| {
+            "MCP HTTP requires explicit --connection-read-deadline-ms".to_string()
+        })?;
+        let write_timeout = self
+            .write_timeout
+            .ok_or_else(|| "MCP HTTP requires explicit --write-timeout-ms".to_string())?;
+        bm_entry::EntryTcpNetworkFrontConfig::new(
+            self.workers,
+            self.max_in_flight,
+            connection_read_deadline,
+            write_timeout,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -225,6 +292,76 @@ fn env_truthy(name: &str) -> bool {
         std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
     )
+}
+
+fn parse_timeout_ms(label: &str, raw: String) -> Result<std::time::Duration, String> {
+    let millis = raw
+        .parse::<u64>()
+        .map_err(|_| format!("{label} must be an integer"))?;
+    if millis == 0 {
+        return Err(format!("{label} must be greater than zero"));
+    }
+    Ok(std::time::Duration::from_millis(millis))
+}
+
+fn parse_nonzero_usize(label: &str, raw: String) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| format!("{label} must be an integer"))?;
+    if value == 0 {
+        return Err(format!("{label} must be greater than zero"));
+    }
+    Ok(value)
+}
+
+fn mcp_auth_from_env() -> Result<(bm_entry::EntryAuthConfig, String, String), String> {
+    use bm_entry::{EntryBearerPrincipal, EntryOperationCapability};
+
+    let Ok(token) = std::env::var("BM_MCP_BEARER_TOKEN") else {
+        return Ok((
+            bm_entry::EntryAuthConfig::disabled_for_local(),
+            "mcp-stdio-local".to_string(),
+            std::env::var("BM_MEMORY_OWNER_ID").unwrap_or_else(|_| "owner-default".to_string()),
+        ));
+    };
+    let principal_id = required_auth_env("BM_MCP_BEARER_PRINCIPAL_ID")?;
+    let owner_id = required_auth_env("BM_MCP_BEARER_OWNER_ID")?;
+    let capabilities = required_auth_env("BM_MCP_BEARER_CAPABILITIES")?
+        .split(',')
+        .map(|raw| match raw.trim() {
+            "write" => Ok(EntryOperationCapability::Write),
+            "recall" => Ok(EntryOperationCapability::Recall),
+            "project" => Ok(EntryOperationCapability::Project),
+            "maintain" => Ok(EntryOperationCapability::Maintain),
+            "inspect" => Ok(EntryOperationCapability::Inspect),
+            "recover" => Ok(EntryOperationCapability::Recover),
+            "replay" => Ok(EntryOperationCapability::Replay),
+            "long_term_list" => Ok(EntryOperationCapability::LongTermList),
+            "long_term_detail" => Ok(EntryOperationCapability::LongTermDetail),
+            "long_term_mutate" => Ok(EntryOperationCapability::LongTermMutate),
+            "long_term_policy" => Ok(EntryOperationCapability::LongTermPolicy),
+            "transcript_attr_write" => Ok(EntryOperationCapability::TranscriptAttrWrite),
+            "capabilities" => Ok(EntryOperationCapability::Capabilities),
+            "subscribe" => Ok(EntryOperationCapability::Subscribe),
+            "close" => Ok(EntryOperationCapability::Close),
+            "mcp_protocol" => Ok(EntryOperationCapability::McpProtocol),
+            "llm_gateway_protocol" => Ok(EntryOperationCapability::LlmGatewayProtocol),
+            other => Err(format!("unsupported MCP bearer capability: {other}")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let principal = EntryBearerPrincipal::new(principal_id.clone(), owner_id.clone(), capabilities);
+    Ok((
+        bm_entry::EntryAuthConfig::required_bearer_principal(token, principal),
+        principal_id,
+        owner_id,
+    ))
+}
+
+fn required_auth_env(name: &str) -> Result<String, String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{name} is required when BM_MCP_BEARER_TOKEN is set"))
 }
 
 fn memory_store_path_from_arg(label: &str, raw: String) -> Result<PathBuf, String> {
@@ -259,37 +396,32 @@ fn platform_profiles() -> &'static [bm_sdk::ProfileId] {
 
 #[cfg(feature = "server-stdio")]
 fn run_stdio(options: McpServerOptions) -> Result<(), String> {
-    use std::io::{BufRead, Cursor};
+    use bm_mcp::{serve_mcp_stdio, McpToolServer};
 
-    use bm_mcp::{serve_mcp_stdio_once, McpToolServer};
-
-    let runtime = runtime(&options)?;
-    let server = McpToolServer::new("bm-mcp-server");
+    let runtime = runtime(&options, false)?;
+    let server = McpToolServer::new("bm-mcp-server", "mcp-stdio-local");
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
 
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut reader = Cursor::new(format!("{line}\n").into_bytes());
-        serve_mcp_stdio_once(&server, &runtime, &mut reader, &mut writer)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    serve_mcp_stdio(&server, &runtime, &mut stdin.lock(), &mut writer)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "server-stdio")]
 fn run_http(options: McpServerOptions) -> Result<(), String> {
     use std::net::TcpListener;
 
-    use bm_mcp::{serve_mcp_streamable_http_stream, McpToolServer};
+    use bm_mcp::{
+        serve_mcp_streamable_http_accepted_stream, validate_mcp_http_listener_security,
+        McpToolServer,
+    };
 
-    let runtime = runtime(&options)?;
-    let server = McpToolServer::new("bm-mcp-server");
+    let runtime = Arc::new(runtime(&options, true)?);
+    let server = Arc::new(McpToolServer::new("bm-mcp-server", &options.principal_id));
     let listener = TcpListener::bind(&options.addr).map_err(|error| error.to_string())?;
+    let local_addr = listener.local_addr().map_err(|error| error.to_string())?;
+    validate_mcp_http_listener_security(&runtime, local_addr).map_err(|error| error.to_string())?;
     println!(
         "{}",
         json!({
@@ -305,20 +437,61 @@ fn run_http(options: McpServerOptions) -> Result<(), String> {
             "chat_id": options.chat_id,
         })
     );
-    for stream in listener.incoming() {
-        let mut stream = stream.map_err(|error| error.to_string())?;
-        if let Err(error) = serve_mcp_streamable_http_stream(&server, &runtime, &mut stream) {
+    let network_front = options.network_front_config()?;
+    let worker_runtime = Arc::clone(&runtime);
+    let worker_server = Arc::clone(&server);
+    let mut front = bm_entry::EntryTcpNetworkFront::new(network_front, move |mut stream| {
+        let result =
+            serve_mcp_streamable_http_accepted_stream(&worker_server, &worker_runtime, &mut stream)
+                .map_err(|error| error.to_string());
+        if let Err(error) = result {
             eprintln!(
                 "{}",
                 json!({
                     "binary": "bm-mcp-server",
                     "status": "request_error",
-                    "error": error.to_string(),
+                    "error": error,
                 })
             );
         }
+    })
+    .map_err(|error| error.to_string())?;
+    loop {
+        let stream = match bm_entry::EntryAcceptedTcpStream::accept(&listener) {
+            Ok(stream) => stream,
+            Err(error) => {
+                front.shutdown().map_err(|error| error.to_string())?;
+                return Err(error.to_string());
+            }
+        };
+        match front.try_dispatch(stream) {
+            Ok(bm_entry::EntryTcpDispatchOutcome::Accepted) => {}
+            Ok(bm_entry::EntryTcpDispatchOutcome::RejectedSaturated) => eprintln!(
+                "{}",
+                json!({
+                    "binary": "bm-mcp-server",
+                    "status": "connection_rejected",
+                    "error": "max in-flight reached",
+                })
+            ),
+            Ok(bm_entry::EntryTcpDispatchOutcome::RejectedShuttingDown) => eprintln!(
+                "{}",
+                json!({
+                    "binary": "bm-mcp-server",
+                    "status": "connection_rejected",
+                    "error": "network front is shutting down",
+                })
+            ),
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "binary": "bm-mcp-server",
+                    "status": "connection_setup_error",
+                    "error": error.to_string(),
+                })
+            ),
+        }
     }
-    Ok(())
 }
 
 #[cfg(not(feature = "server-stdio"))]
@@ -334,17 +507,16 @@ fn run_http(_options: McpServerOptions) -> Result<(), String> {
 }
 
 #[cfg(feature = "server-stdio")]
-fn runtime(options: &McpServerOptions) -> Result<bm_entry::EntryRuntime, String> {
+fn runtime(options: &McpServerOptions, http_mode: bool) -> Result<bm_entry::EntryRuntime, String> {
     use bm_entry::{
         EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-        EntryScope, EntryStoreConfig, EntryTransportConfig,
+        EntryScope,
     };
-    use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy};
+    use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
 
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: options.profile,
         identity: EntryIdentity {
             agent_id: options.agent_id.clone(),
             owner_id: options.owner_id.clone(),
@@ -353,18 +525,37 @@ fn runtime(options: &McpServerOptions) -> Result<bm_entry::EntryRuntime, String>
             channel: options.channel.clone(),
             chat_id: options.chat_id.clone(),
         },
-        store: EntryStoreConfig {
-            backend: options.store_backend,
-            data_path: options.store_path.clone(),
-            fsync: options.fsync,
+        store: StoreBackendConfig::for_backend(
+            options.store_backend,
+            options.store_path.clone(),
+            options.profile,
+        )
+        .map_err(|error| error.to_string())?
+        .with_fsync(options.fsync),
+        transports: mcp_transport_config(),
+        auth: if http_mode {
+            options.auth.clone()
+        } else {
+            EntryAuthConfig::disabled_for_local()
         },
-        transports: EntryTransportConfig::all_enabled(),
-        auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 1024 },
         privacy: MemoryPrivacyPolicy::standard_private_boundary(),
         capability,
     })
     .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "server-stdio")]
+const fn mcp_transport_config() -> bm_entry::EntryTransportConfig {
+    bm_entry::EntryTransportConfig {
+        cli: false,
+        http_server: false,
+        wss_client: false,
+        wss_server: false,
+        mcp_server: true,
+        a2a_bridge: false,
+        llm_gateway_server: false,
+    }
 }
 
 #[cfg(feature = "server-stdio")]
@@ -428,7 +619,9 @@ mod tests {
 
     fn store_env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -472,5 +665,77 @@ mod tests {
                 .expect("explicit memory store should be accepted");
         assert_eq!(options.store_backend, bm_sdk::StoreBackendKind::InMemory);
         assert_eq!(options.store_path, None);
+    }
+
+    #[test]
+    fn mcp_http_requires_explicit_nonzero_read_deadline_and_write_timeout() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let error = McpServerOptions::parse(vec!["--store-memory".to_string()].into_iter(), true)
+            .expect_err("HTTP mode without a read deadline must fail");
+        assert!(error.contains("--connection-read-deadline-ms"), "{error}");
+
+        let options = McpServerOptions::parse(
+            vec![
+                "--store-memory".to_string(),
+                "--connection-read-deadline-ms".to_string(),
+                "1000".to_string(),
+                "--write-timeout-ms".to_string(),
+                "1000".to_string(),
+            ]
+            .into_iter(),
+            true,
+        )
+        .expect("explicit HTTP timeouts");
+        assert_eq!(
+            options.connection_read_deadline,
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            options.write_timeout,
+            Some(std::time::Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn mcp_binary_enables_only_its_real_transport() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let _options =
+            McpServerOptions::parse(vec!["--store-memory".to_string()].into_iter(), false)
+                .expect("MCP stdio options");
+        let transports = mcp_transport_config();
+
+        assert!(transports.mcp_server);
+        assert!(!transports.cli);
+        assert!(!transports.http_server);
+        assert!(!transports.wss_client);
+        assert!(!transports.wss_server);
+        assert!(!transports.a2a_bridge);
+        assert!(!transports.llm_gateway_server);
+    }
+
+    #[test]
+    fn mcp_http_rejects_unbounded_front_configuration() {
+        let _lock = store_env_lock();
+        let _guards = clear_store_env();
+        let error = McpServerOptions::parse(
+            vec![
+                "--store-memory".to_string(),
+                "--connection-read-deadline-ms".to_string(),
+                "1000".to_string(),
+                "--write-timeout-ms".to_string(),
+                "1000".to_string(),
+                "--workers".to_string(),
+                "2".to_string(),
+                "--max-in-flight".to_string(),
+                "1".to_string(),
+            ]
+            .into_iter(),
+            true,
+        )
+        .expect_err("front below worker count must fail");
+
+        assert!(error.contains("max_in_flight"), "{error}");
     }
 }

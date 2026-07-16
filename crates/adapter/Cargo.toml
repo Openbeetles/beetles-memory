@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+nonproduction-replay-harness = ["bm-sdk/nonproduction-replay-harness"]
 profile-esp-standalone-memory = ["bm-sdk/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-sdk/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-sdk/profile-linux-device-standalone-memory"]
@@ -19,10 +20,22 @@ profile-desktop-macos-standalone-memory = ["bm-sdk/profile-desktop-macos-standal
 profile-desktop-macos-embedded-sdk = ["bm-sdk/profile-desktop-macos-embedded-sdk"]
 profile-desktop-windows-embedded-sdk = ["bm-sdk/profile-desktop-windows-embedded-sdk"]
 profile-server-linux-memory-gateway = ["bm-sdk/profile-server-linux-memory-gateway"]
-profile-server-linux-dev-full = ["bm-sdk/profile-server-linux-dev-full"]
+profile-server-linux-dev-full = [
+    "bm-sdk/profile-server-linux-dev-full",
+    "nonproduction-replay-harness",
+]
+profile-desktop-macos-dev-full = [
+    "bm-sdk/profile-desktop-macos-dev-full",
+    "nonproduction-replay-harness",
+]
+profile-desktop-windows-dev-full = [
+    "bm-sdk/profile-desktop-windows-dev-full",
+    "nonproduction-replay-harness",
+]
 
 [dependencies]
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true

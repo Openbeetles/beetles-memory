@@ -6,7 +6,7 @@
 
 | 形态 | Profile | Entry surface |
 | --- | --- | --- |
-| 本地 CLI/operator 进程 | `profile-server-linux-dev-full` 或 host profile | `bm-cli` |
+| 本地 CLI/operator 进程 | 与实际编译 host target 一致的 macOS、Windows 或 Linux dev-full profile | `bm-cli` |
 | Linux server memory gateway | `profile-server-linux-memory-gateway` | HTTP、WebSocket、MCP、A2A、LLM gateway server；具体 visible 取决于 enabled capability policy 和 `EntryTransportConfig` |
 | Linux 硬件设备 | `profile-linux-device-standalone-memory` | local CLI、loopback HTTP/WebSocket |
 | ESP standalone memory | `profile-esp-standalone-memory` | compact local/client surfaces with embedded store |
@@ -16,17 +16,16 @@
 ```rust
 use bm_entry::{
     EntryAuthConfig, EntryIdentity, EntryIdempotencyConfig, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendConfig,
 };
 
 let mut capability = MemoryCapabilityPolicy::strict_profile();
 capability.communication_adapter_enabled = true;
 
 let runtime = EntryRuntime::open(EntryRuntimeConfig {
-    profile: ProfileId::ServerLinuxMemoryGateway,
     identity: EntryIdentity {
         agent_id: "gateway-agent".to_string(),
         owner_id: "owner-default".to_string(),
@@ -35,11 +34,11 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
         channel: "gateway".to_string(),
         chat_id: "chat-1".to_string(),
     },
-    store: EntryStoreConfig {
-        backend: StoreBackendKind::Sqlite,
-        data_path: Some("/var/lib/beetle-memory/memory.sqlite3".into()),
-        fsync: true,
-    },
+    store: StoreBackendConfig::sqlite(
+        "/var/lib/beetle-memory/memory.sqlite3",
+        ProfileId::ServerLinuxMemoryGateway,
+    )?
+    .with_fsync(true),
     transports: EntryTransportConfig::all_enabled(),
     auth: EntryAuthConfig::disabled_for_local(),
     idempotency: EntryIdempotencyConfig { max_keys: 1024 },
@@ -50,7 +49,7 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
 
 上面的运行时 view 之所以可以暴露 server entry surfaces，是因为示例显式设置了 `capability.communication_adapter_enabled = true`，并使用 `EntryTransportConfig::all_enabled()` 打开 transport。Profile 只表达允许关系；strict capability snapshot 仍可能显示 `server_allowed=true` 但 `visible=false`。
 
-生产环境应把 `disabled_for_local()` 替换为进程拥有的认证边界。当前 crate 暴露配置边界；你的部署应在请求被标记为 authenticated 之前完成 token、mTLS 或 gateway 认证。
+生产环境应把 `disabled_for_local()` 替换为进程拥有的认证边界。网络流量必须通过 listener 或显式 `*_from_peer` adapter 进入，并从 accept 得到的真实 socket peer 派生信任；只有同进程宿主可以调用名称明确的 `handle_http_in_process_request*` API。
 
 ## HTTP
 
@@ -68,24 +67,23 @@ Crate 声明的 memory routes：
 | `/memory/inspect` | `POST` | inspect contract |
 | `/memory/recover` | `POST` | recover contract |
 | `/memory/replay` | `POST` | replay contract |
-| `/memory/export` | `POST` | export contract |
-| `/memory/import` | `POST` | import contract |
 | `/memory/long-term/list` | `POST` | accepted long-term memory list/search |
 | `/memory/long-term/detail` | `POST` | accepted long-term memory detail |
 | `/memory/long-term/mutate` | `POST` | accepted long-term memory mutation |
 | `/memory/long-term/policy` | `POST` | long-term governance policy mutation |
 
-`server-std` decoder 使用共享 JSON adapter decoder，支持 write、recall、project、maintain、inspect、recover、replay、export、import、long-term list/detail/mutate/policy、capabilities、close。`Subscribe` 是 stream operation，不是 HTTP memory command。`Maintain` 需要通过 `handle_http_request_with_services` 注入 LLM/HTTP services；`handle_http_request` 不注入 services，会对 maintain 返回结构化拒绝。
+`server-std` decoder 使用共享 JSON adapter decoder，支持 write、recall、project、maintain、inspect、recover、replay、long-term list/detail/mutate/policy、capabilities、close。通用 continuity snapshot export/import 不属于协议操作。`Subscribe` 是 stream operation，不是 HTTP memory command。`Maintain` 需要通过 `handle_http_in_process_request_with_services` 注入 LLM/HTTP services；`handle_http_in_process_request` 不注入 services，会对 maintain 返回结构化拒绝。project 与 inspect payload 必须显式提供 `system_max_len`，adapter 不得发明 fallback render budget。
 
 Standard-library HTTP helper 会读取这些 headers：
 
 | Header | 用途 |
 | --- | --- |
-| `x-request-id` | 进入 adapter response reports 的 request id。 |
-| `x-idempotency-key` | mutation requests 的 idempotency key。 |
-| `x-audit-id` | 进入 adapter events 的 audit id。 |
-| `authorization` | 标记请求已认证。 |
-| `x-loopback: true` 或 `x-loopback: 1` | 标记本地 loopback 请求已认证。 |
+| `x-idempotency-key` | 可选的调用方幂等材料；transport 派生内部 key，响应不会回显原值。 |
+| `authorization: Bearer ...` | 按已配置的 typed principal、owner、tenant 与 operation capabilities 验证。 |
+
+loopback 信任只来自已接受 socket 的真实 peer address。转发的 identity、subject 与 `x-loopback` headers 均是不可信输入，不能授予认证或 capability。非 loopback listener 必须配置 `BM_HTTP_BEARER_TOKEN`、全局唯一的 `BM_HTTP_BEARER_OWNER_ID` 与 `BM_HTTP_BEARER_CAPABILITIES`；`owner_id` 是唯一租户命名空间。缺少 verifier 或非零 read/write timeout 时启动必须 fail closed。
+
+HTTP adapter 在 ingress 固定一份 fresh runtime budget report，并让 header 解析、body admission、dispatch 与 response rendering 共用该身份。超过预算的 declared body 会在分配前被拒绝；响应通过 `HttpRuntimeResponse.budget_report_id` 和 `x-bm-runtime-budget-report-id` 返回同一身份。
 
 写入 body 示例：
 
@@ -133,7 +131,7 @@ Tauri 开发态会自动启动共享 `apps/console` 前端；生产打包会先�
 本仓库提供正式可执行入口 `bm-http-console`，用于 Linux server、Linux device、非桌面部署、设备 HTTP console，以及需要显式验证 HTTP shell 的本地开发场景。它不是 macOS 桌面生产入口，不是 example，也不绕过内核；所有 `/console/*` 与 `/memory/*` 请求都进入同一个 `EntryRuntime`。
 
 ```bash
-cargo run -p bm-http --features server-std --bin bm-http-console -- \
+cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
   --store-path /var/lib/beetle-memory/http-console-store
 ```
@@ -142,7 +140,7 @@ cargo run -p bm-http --features server-std --bin bm-http-console -- \
 
 ```bash
 BM_AGENT_SKILL_DIRS=/path/to/project/.agents/skills:/path/to/user/skills \
-  cargo run -p bm-http --features server-std --bin bm-http-console -- \
+  cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
   --store-path /var/lib/beetle-memory/http-console-store
 ```
@@ -194,6 +192,8 @@ Subscription frame kinds：
 
 Command frames 使用共享 JSON adapter decoder。Subscription frames 只更新 session subscription state 并返回 lifecycle/error events；它们不是 SDK memory commands。
 
+每个 frame 固定一份 fresh runtime budget report；frame admission、subscription admission、dispatch 和返回事件共用该身份，并通过 `WssRuntimeEvent.budget_report_id` 与 `runtime_budget_report_id` 暴露。
+
 召回 frame 示例：
 
 ```json
@@ -207,6 +207,8 @@ Command frames 使用共享 JSON adapter decoder。Subscription frames 只更新
 
 使用 `bm-mcp` 的 `server-stdio` feature。
 
+Stdio server 使用 bounded streaming read，不缓存无界长行。Stdio 与 Streamable HTTP 为每个 JSON-RPC request 固定一份 fresh runtime budget report；Streamable HTTP 在分配前拒绝超限 header 或 declared body，并返回 `x-bm-runtime-budget-report-id`。
+
 Tool specs 包含：
 
 - `memory_capabilities`
@@ -219,8 +221,6 @@ Tool specs 包含：
 - `memory_long_term_detail`
 - `memory_long_term_mutate`
 - `memory_long_term_policy`
-- `memory_export`
-- `memory_import`
 
 Stdio helper 对所有已列 tools 使用共享 JSON adapter decoder。Maintain 不在 MCP tool list 中，因为 maintain 需要显式 service injection。
 
@@ -265,7 +265,6 @@ Bridge message names：
 - `memory_long_term_mutation_request`
 - `memory_long_term_policy_request`
 - `memory_report`
-- `memory_migration_chunk`
 - `runtime_lifecycle_event`
 
 HTTP bridge helper 对映射到 memory operation 的 bridge messages 使用共享 JSON adapter decoder。A2A messages 只携带 memory-report permissions，不能授予 executor、tool 或 workflow permissions。
@@ -294,7 +293,7 @@ Message 示例：
 2. 为该 profile 选择受支持的 store backend。
 3. 制定稳定的 `agent_id`、`owner_id`、`channel`、`chat_id` 策略。
 4. 通过 `EntryTransportConfig` 配置 transport visibility。
-5. 在构造 authenticated `EntryTransportContext` 前完成认证。
+5. 在构造 `EntryTransportContext` 前，从真实 transport 边界派生 `EntryAuthDecision`；禁止把调用方可控布尔值或 loopback header 当成信任证据。
 6. Mutation operations 使用 idempotency keys。
 7. file/sqlite store 持久化到 runtime 进程拥有的路径。
 8. 暴露协议前运行 `memory capabilities` 或 platform capability snapshot。

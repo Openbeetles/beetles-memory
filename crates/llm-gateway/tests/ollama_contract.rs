@@ -1,7 +1,7 @@
 use bm_entry::EntryRuntimeBaseConfig;
 use bm_llm_gateway::{
     handle_ollama_request, handle_ollama_request_with_services,
-    serve_llm_gateway_http_stream_with_services, GatewayAuditOutcome, GatewayAuditStage,
+    serve_llm_gateway_http_accepted_stream_with_services, GatewayAuditOutcome, GatewayAuditStage,
     GatewayConfig, GatewayProjectionAuditStatus, GatewayProviderConfig, GatewayRuntime,
     GatewayScopeRequest, GatewayScopeResolver, OllamaGatewayBody, OllamaGatewayRequest,
     OllamaMaintenanceLlmClient, OllamaNativeUpstream, OllamaUpstreamRequest,
@@ -16,7 +16,8 @@ use bm_sdk::{
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
-use std::io::{Cursor, Read, Write};
+
+mod support;
 
 fn gateway_config() -> GatewayConfig {
     let mut config = GatewayConfig::default_for_local_dev();
@@ -38,11 +39,10 @@ fn gateway_config() -> GatewayConfig {
 
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
-        auth_subject: Some("owner-token".to_string()),
         workspace_root_digest: Some("workspace-digest".to_string()),
         client_conversation_hint: Some("thread-ollama".to_string()),
         model_alias: Some("local".to_string()),
-        ..GatewayScopeRequest::default()
+        ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
 }
 
@@ -295,14 +295,12 @@ fn tags_and_version_proxy_without_projection_or_maintenance() {
 
     let tags = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::get("/api/tags", scope_request()),
         &mut upstream,
     )
     .expect("tags response");
     let version = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::get("/api/version", scope_request()),
         &mut upstream,
     )
@@ -336,8 +334,7 @@ fn chat_non_streaming_injects_memory_into_existing_system_and_preserves_native_s
 
     let response = handle_ollama_request(
         &gateway,
-        &config,
-        OllamaGatewayRequest::post_json(
+                OllamaGatewayRequest::post_json(
             "/api/chat",
             scope,
             json!({
@@ -396,7 +393,6 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
 
     let response = handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope_request(),
@@ -478,7 +474,6 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
 
     handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope.clone(),
@@ -495,7 +490,6 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
 
     handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope.clone(),
@@ -563,7 +557,6 @@ fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() 
 
     let response = handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope_request(),
@@ -624,7 +617,6 @@ fn generate_injects_system_field_without_prompt_prefix_when_supported() {
 
     let response = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/generate",
             scope,
@@ -684,7 +676,6 @@ fn generate_prompt_prefix_fallback_is_explicitly_audited_when_system_is_unsuppor
 
     let response = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/generate",
             scope,
@@ -729,7 +720,6 @@ fn chat_streaming_passes_ndjson_lines_and_runs_maintenance_after_drain() {
 
     let mut response = handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope_request(),
@@ -788,7 +778,6 @@ fn chat_non_streaming_without_done_true_skips_maintenance() {
 
     let response = handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope_request(),
@@ -822,7 +811,6 @@ fn embed_embeddings_and_show_are_passthrough_without_projection() {
 
     let embed = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/embed",
             scope_request(),
@@ -833,7 +821,6 @@ fn embed_embeddings_and_show_are_passthrough_without_projection() {
     .expect("embed response");
     let embeddings = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/embeddings",
             scope_request(),
@@ -844,7 +831,6 @@ fn embed_embeddings_and_show_are_passthrough_without_projection() {
     .expect("embeddings response");
     let show = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/show",
             scope_request(),
@@ -878,7 +864,6 @@ fn ollama_handler_rejects_openai_provider_to_prevent_protocol_crossing() {
 
     let error = handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::get("/api/tags", scope_request()),
         &mut upstream,
     )
@@ -889,41 +874,6 @@ fn ollama_handler_rejects_openai_provider_to_prevent_protocol_crossing() {
         bm_llm_gateway::GatewayErrorKey::ProviderUnavailable
     );
     assert_eq!(upstream.tags_calls, 0);
-}
-
-struct MemoryStream {
-    read: Cursor<Vec<u8>>,
-    written: Vec<u8>,
-}
-
-impl MemoryStream {
-    fn new(input: String) -> Self {
-        Self {
-            read: Cursor::new(input.into_bytes()),
-            written: Vec::new(),
-        }
-    }
-
-    fn written_string(&self) -> String {
-        String::from_utf8(self.written.clone()).expect("utf8 response")
-    }
-}
-
-impl Read for MemoryStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.read.read(buf)
-    }
-}
-
-impl Write for MemoryStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.written.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 #[test]
@@ -941,7 +891,7 @@ fn llm_gateway_http_dispatch_writes_ollama_ndjson_without_sse_wrapping() {
         body.len(),
         body
     );
-    let mut stream = MemoryStream::new(request);
+    let (mut stream, client) = support::accepted_request(request);
     let mut openai = MockOpenAiUpstream;
     let mut ollama = MockOllamaUpstream::with_response(OllamaUpstreamResponse::ndjson(
         200,
@@ -957,9 +907,8 @@ fn llm_gateway_http_dispatch_writes_ollama_ndjson_without_sse_wrapping() {
     let llm = StaticLlmClient;
     let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    serve_llm_gateway_http_stream_with_services(
+    serve_llm_gateway_http_accepted_stream_with_services(
         &gateway,
-        &config,
         &mut openai,
         &mut ollama,
         &mut services,
@@ -967,7 +916,8 @@ fn llm_gateway_http_dispatch_writes_ollama_ndjson_without_sse_wrapping() {
     )
     .expect("serve ollama request");
 
-    let response = stream.written_string();
+    drop(stream);
+    let response = support::finish_request(client);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("content-type: application/x-ndjson\r\n"));
     assert!(!response.contains("text/event-stream"));

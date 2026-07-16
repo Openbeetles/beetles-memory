@@ -1,19 +1,21 @@
 use bm_adapter::{AdapterCommand, AdapterOperation, TransportKind, TransportMode};
 use bm_entry::{
-    EntryAuthConfig, EntryAuthDecision, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
+    EntryAuthConfig, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
     EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig, EntryScope,
-    EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryWriteRequest, ProfileId, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendKind,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryWriteRequest, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendConfig,
 };
+
+mod support;
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
+    let profile = support::host_production_profile();
     EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "console-skill-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -22,11 +24,9 @@ fn config() -> EntryRuntimeConfig {
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(profile)
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled().with_cli(true),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 16 },
@@ -106,17 +106,17 @@ fn console_skill_facade_edits_disables_and_deletes_runtime_skills_only() {
 fn seed_runtime_skill(runtime: &EntryRuntime, name: &str) {
     let response = runtime
         .handle(
-            EntryTransportContext {
-                request_id: "seed-runtime-skill".to_string(),
-                transport: TransportKind::Cli,
-                mode: TransportMode::InProcess,
-                operation: AdapterOperation::Write,
-                source_id: "entry-test".to_string(),
-                source_kind: "test".to_string(),
-                idempotency_key: format!("seed-{name}"),
-                audit_id: "seed-audit".to_string(),
-                auth: EntryAuthDecision::authenticated("local", "operator"),
-            },
+            EntryTransportContext::new(
+                "seed-runtime-skill",
+                TransportKind::Cli,
+                TransportMode::InProcess,
+                AdapterOperation::Write,
+                "entry-test",
+                "test",
+                format!("seed-{name}"),
+                "seed-audit",
+                support::trusted_local_auth("operator"),
+            ),
             AdapterCommand::Write(MemoryWriteRequest::Procedural {
                 writes: vec![RuntimeSkillWrite {
                     name: name.to_string(),

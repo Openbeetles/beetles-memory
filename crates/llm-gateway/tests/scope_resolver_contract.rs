@@ -1,7 +1,24 @@
+use bm_entry::{
+    EntryAuthConfig, EntryAuthDecision, EntryBearerPrincipal, EntryOperationCapability,
+};
 use bm_llm_gateway::{
     GatewayOllamaAppScopeConfig, GatewayScopeRequest, GatewayScopeResolver,
     GatewayScopeResolverConfig, GatewayTrustedHeaders,
 };
+
+mod support;
+
+fn remote_auth(
+    principal_id: &str,
+    owner_id: &str,
+    capabilities: impl IntoIterator<Item = EntryOperationCapability>,
+) -> EntryAuthDecision {
+    let config = EntryAuthConfig::required_bearer_principal(
+        "scope-token",
+        EntryBearerPrincipal::new(principal_id, owner_id, capabilities),
+    );
+    config.verify_bearer(Some("Bearer scope-token"))
+}
 
 #[test]
 fn scope_resolver_never_accepts_owner_from_untrusted_headers() {
@@ -14,7 +31,7 @@ fn scope_resolver_never_accepts_owner_from_untrusted_headers() {
         trusted_headers: GatewayTrustedHeaders::none(),
         ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
-    let mut request = GatewayScopeRequest::default();
+    let mut request = support::loopback_scope_request("scope-test");
     request.headers.insert(
         "x-bm-owner-id".to_string(),
         "attacker-owner-from-header".to_string(),
@@ -29,7 +46,7 @@ fn scope_resolver_never_accepts_owner_from_untrusted_headers() {
 }
 
 #[test]
-fn scope_resolver_owner_source_order_uses_auth_then_local_then_first_run() {
+fn scope_resolver_owner_source_order_uses_bearer_owner_then_local_then_first_run() {
     let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig {
         local_owner_id: Some("local-owner".to_string()),
         first_run_owner_id: Some("first-run-owner".to_string()),
@@ -41,11 +58,20 @@ fn scope_resolver_owner_source_order_uses_auth_then_local_then_first_run() {
     });
     let resolved = resolver
         .resolve(&GatewayScopeRequest {
-            auth_subject: Some("token-owner".to_string()),
-            ..GatewayScopeRequest::default()
+            auth: remote_auth(
+                "service-principal",
+                "token-owner",
+                [
+                    EntryOperationCapability::Project,
+                    EntryOperationCapability::Maintain,
+                ],
+            ),
+            ..support::loopback_scope_request("unused")
         })
         .expect("resolve token owner");
     assert_eq!(resolved.entry_scope.identity.owner_id, "token-owner");
+    assert_eq!(resolved.audit_principal_id, "service-principal");
+    assert_eq!(resolved.capabilities, ["project", "maintain"]);
 
     let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig {
         local_owner_id: None,
@@ -57,13 +83,13 @@ fn scope_resolver_owner_source_order_uses_auth_then_local_then_first_run() {
         ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
     let resolved = resolver
-        .resolve(&GatewayScopeRequest::default())
+        .resolve(&support::loopback_scope_request("scope-test"))
         .expect("resolve first-run owner");
     assert_eq!(resolved.entry_scope.identity.owner_id, "first-run-owner");
 }
 
 #[test]
-fn scope_resolver_uses_trusted_agent_channel_chat_headers_and_auth_owner_first() {
+fn scope_resolver_uses_trusted_agent_channel_chat_headers_and_bearer_owner() {
     let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig {
         local_owner_id: Some("local-owner".to_string()),
         first_run_owner_id: Some("first-run-owner".to_string()),
@@ -78,8 +104,12 @@ fn scope_resolver_uses_trusted_agent_channel_chat_headers_and_auth_owner_first()
         ollama_app: GatewayOllamaAppScopeConfig::disabled(),
     });
     let mut request = GatewayScopeRequest {
-        auth_subject: Some("token-owner".to_string()),
-        ..GatewayScopeRequest::default()
+        auth: remote_auth(
+            "service-principal",
+            "token-owner",
+            EntryOperationCapability::all().iter().copied(),
+        ),
+        ..support::loopback_scope_request("unused")
     };
     request
         .headers
@@ -100,6 +130,50 @@ fn scope_resolver_uses_trusted_agent_channel_chat_headers_and_auth_owner_first()
 }
 
 #[test]
+fn loopback_principal_is_audit_identity_and_never_becomes_owner() {
+    let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig {
+        local_owner_id: Some("local-owner".to_string()),
+        first_run_owner_id: Some("first-run-owner".to_string()),
+        default_agent_id: "agent-default".to_string(),
+        default_channel: "llm.gateway".to_string(),
+        default_chat_id: None,
+        trusted_headers: GatewayTrustedHeaders::none(),
+        ollama_app: GatewayOllamaAppScopeConfig::disabled(),
+    });
+
+    let resolved = resolver
+        .resolve(&GatewayScopeRequest {
+            ..support::loopback_scope_request("local-service-principal")
+        })
+        .expect("resolve loopback scope");
+
+    assert_eq!(resolved.owner_id, "local-owner");
+    assert_eq!(resolved.audit_principal_id, "local-service-principal");
+}
+
+#[test]
+fn bearer_capability_check_rejects_missing_gateway_operation() {
+    let request = GatewayScopeRequest {
+        auth: remote_auth(
+            "service-principal",
+            "token-owner",
+            [EntryOperationCapability::Project],
+        ),
+        ..support::loopback_scope_request("unused")
+    };
+
+    let error = request
+        .require_capabilities(&[
+            EntryOperationCapability::Project,
+            EntryOperationCapability::Maintain,
+        ])
+        .expect_err("maintain capability must be required");
+
+    assert_eq!(error.key(), bm_llm_gateway::GatewayErrorKey::Forbidden);
+    assert!(error.message().contains("maintain"));
+}
+
+#[test]
 fn scope_resolver_can_use_configured_default_chat_id_for_local_gateway_and_mcp_pairing() {
     let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig {
         local_owner_id: Some("local-owner".to_string()),
@@ -112,7 +186,7 @@ fn scope_resolver_can_use_configured_default_chat_id_for_local_gateway_and_mcp_p
     });
 
     let resolved = resolver
-        .resolve(&GatewayScopeRequest::default())
+        .resolve(&support::loopback_scope_request("scope-test"))
         .expect("resolve configured chat");
 
     assert_eq!(resolved.entry_scope.scope.chat_id, "chat-shared");
@@ -126,7 +200,7 @@ fn scope_resolver_stable_hash_changes_by_workspace_digest_without_leaking_path()
         workspace_root_path: Some("/Users/alice/secret/project".to_string()),
         client_conversation_hint: Some("thread-1".to_string()),
         model_alias: Some("local-model".to_string()),
-        ..GatewayScopeRequest::default()
+        ..support::loopback_scope_request("scope-test")
     };
 
     let mut right = left.clone();
@@ -152,7 +226,7 @@ fn non_ollama_app_scope_preserves_request_id_fallback() {
     let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig::default_for_local_dev());
     let base = GatewayScopeRequest {
         model_alias: Some("local-model".to_string()),
-        ..GatewayScopeRequest::default()
+        ..support::loopback_scope_request("scope-test")
     };
     let mut first = base.clone();
     first.request_id_hint = Some("request-a".to_string());
@@ -178,7 +252,7 @@ fn ollama_app_scope_ignores_transient_request_id_for_internal_new_chat_requests(
     let resolver = GatewayScopeResolver::new(config);
     let base = GatewayScopeRequest {
         model_alias: Some("qwen3.5:0.8b".to_string()),
-        ..GatewayScopeRequest::default()
+        ..support::loopback_scope_request("scope-test")
     };
     let mut first = base.clone();
     first.request_id_hint = Some("request-a".to_string());
@@ -208,7 +282,7 @@ fn ollama_app_scope_prefers_referer_chat_path_over_daily_bucket() {
     let resolver = GatewayScopeResolver::new(config);
     let mut request = GatewayScopeRequest {
         model_alias: Some("qwen3.5:0.8b".to_string()),
-        ..GatewayScopeRequest::default()
+        ..support::loopback_scope_request("scope-test")
     };
     request.headers.insert(
         "referer".to_string(),

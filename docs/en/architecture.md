@@ -41,7 +41,8 @@ Embedded SDK path:
 host code
   -> MemoryStoreHandle::open(StoreBackendConfig)
   -> MemoryRuntime::builder().store(handle)
-  -> runtime.write / recall / project / maintain / inspect / replay / export / import / recover / close
+  -> runtime.write / recall / project / maintain / inspect / replay
+  -> runtime.export_memory_space / import_memory_space / recover / close
 ```
 
 Standalone entry path:
@@ -67,7 +68,7 @@ transport request
 | Maintain | `MemoryRuntime::maintain` | SDK host with explicit LLM client injection |
 | Inspect | `MemoryRuntime::inspect` | Operator tooling and health checks |
 | Replay | `MemoryRuntime::replay` | Migration validation and debugging |
-| Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | Snapshot migration |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Typed scope archive migration |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Runtime lifecycle control |
 
 `Maintain` is deliberately not executed by generic adapter dispatch because it needs explicit LLM/HTTP service injection. Protocol integrations should expose maintain only after they own that dependency injection boundary.

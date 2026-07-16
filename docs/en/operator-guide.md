@@ -86,7 +86,8 @@ Close emits a lifecycle event. A process supervisor can decide whether to exit b
 ## CLI Inspection
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features profile-esp-standalone-memory -- \
   platform capability-snapshot \
   --profile profile-esp-standalone-memory
 ```
@@ -94,7 +95,11 @@ cargo run -p bm-cli --bin bm -- \
 Memory commands also go through `bm-entry`:
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+BM_HOST_PROFILE=profile-desktop-macos-dev-full
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features "$BM_HOST_PROFILE" -- \
   memory capabilities \
-  --profile profile-server-linux-dev-full
+  --profile "$BM_HOST_PROFILE"
 ```
+
+Set `BM_HOST_PROFILE` to the dev-full profile for the machine that compiles and runs the command: macOS desktop, Windows desktop, or Linux server. Linux is not a generic local default.

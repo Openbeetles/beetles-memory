@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "soul-regression-compact-baseline",
   "class": "soul_regression",
-  "profile": "esp_standalone_memory",
+  "profile": "target-esp+role-standalone-memory",
   "mode": "compact",
   "evaluation_source": "contract_baseline",
   "description": "Compact profile detects zero soul regression while exposing only compact digest surfaces.",

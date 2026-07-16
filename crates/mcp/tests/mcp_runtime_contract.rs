@@ -1,18 +1,21 @@
 #![cfg(feature = "server-stdio")]
 
+mod support;
+
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
-use bm_mcp::{handle_mcp_streamable_http_request, McpResourceRead, McpToolCall, McpToolServer};
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind};
+use bm_mcp::{
+    handle_mcp_streamable_http_in_process_request, McpResourceRead, McpToolCall, McpToolServer,
+};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
 use serde_json::Value;
 
 fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "mcp-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -21,11 +24,9 @@ fn runtime() -> EntryRuntime {
             channel: "mcp".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(support::native_runtime_profile())
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_enabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 64 },
@@ -35,10 +36,127 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
+fn write_arguments(name: &str, summary: &str) -> String {
+    serde_json::json!({
+        "name": name,
+        "topic": "mcp-idempotency",
+        "title": format!("MCP write {name}"),
+        "summary": summary,
+        "content": "Dispatch this write through the governed EntryRuntime path.",
+    })
+    .to_string()
+}
+
+#[test]
+fn mcp_automatic_identity_accepts_two_distinct_writes_on_one_server() {
+    let runtime = runtime();
+    let server = McpToolServer::new("mcp-auto", "principal-auto");
+
+    let first = server
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_write_candidate",
+                write_arguments("runtime_skill__mcp_auto_first", "first automatic write"),
+            ),
+        )
+        .expect("first write");
+    let second = server
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_write_candidate",
+                write_arguments("runtime_skill__mcp_auto_second", "second automatic write"),
+            ),
+        )
+        .expect("second write");
+
+    assert_eq!(first.status, "accepted");
+    assert_eq!(second.status, "accepted");
+}
+
+#[test]
+fn mcp_explicit_identity_replays_same_payload_and_rejects_conflict() {
+    let runtime = runtime();
+    let initial_server = McpToolServer::new("mcp-explicit", "principal-explicit");
+    let retry_server = McpToolServer::new("mcp-explicit-retry", "principal-explicit");
+    let arguments = write_arguments("runtime_skill__mcp_explicit", "stable payload");
+
+    let first = initial_server
+        .call(
+            &runtime,
+            McpToolCall::json("memory_write_candidate", arguments.clone())
+                .with_idempotency_key("mcp-caller-key"),
+        )
+        .expect("first write");
+    let replay = retry_server
+        .call(
+            &runtime,
+            McpToolCall::json("memory_write_candidate", arguments)
+                .with_idempotency_key("mcp-caller-key"),
+        )
+        .expect("replay write");
+    let conflict = retry_server
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_write_candidate",
+                write_arguments("runtime_skill__mcp_conflict", "different payload"),
+            )
+            .with_idempotency_key("mcp-caller-key"),
+        )
+        .expect("conflicting write");
+
+    assert_eq!(first.status, "accepted");
+    assert_eq!(replay.status, "duplicated");
+    assert_eq!(conflict.status, "rejected");
+    assert!(
+        !replay.content.contains("mcp-caller-key"),
+        "{}",
+        replay.content
+    );
+    assert!(
+        replay.content.contains("explicit:v1:sha256:"),
+        "{}",
+        replay.content
+    );
+}
+
+#[test]
+fn mcp_explicit_identity_isolated_by_authenticated_principal() {
+    let runtime = runtime();
+    let principal_a = McpToolServer::new("shared-server", "principal-a");
+    let principal_b = McpToolServer::new("shared-server", "principal-b");
+
+    let first = principal_a
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_write_candidate",
+                write_arguments("runtime_skill__mcp_principal_a", "principal A"),
+            )
+            .with_idempotency_key("shared-caller-key"),
+        )
+        .expect("principal A write");
+    let second = principal_b
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_write_candidate",
+                write_arguments("runtime_skill__mcp_principal_b", "principal B"),
+            )
+            .with_idempotency_key("shared-caller-key"),
+        )
+        .expect("principal B write");
+
+    assert_eq!(first.status, "accepted");
+    assert_eq!(second.status, "accepted");
+}
+
 #[test]
 fn mcp_tool_call_dispatches_through_entry_runtime_without_private_raw() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-server-1");
+    let server = McpToolServer::new("mcp-server-1", "mcp-client-1");
     let result = server
         .call(
             &runtime,
@@ -49,26 +167,27 @@ fn mcp_tool_call_dispatches_through_entry_runtime_without_private_raw() {
     assert_eq!(result.status, "accepted");
     assert!(!result.private_raw_allowed);
     assert!(result.content.contains("\"query\""));
+    assert!(result.budget_report_id.starts_with("rtb-v2-"));
 }
 
 #[test]
 fn mcp_tool_server_decodes_declared_memory_tools() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-server-ops");
+    let server = McpToolServer::new("mcp-server-ops", "mcp-client-ops");
     let calls = [
         ("memory_capabilities", r#"{}"#),
-        ("memory_project", r#"{"query":"release","max_len":1024}"#),
-        ("memory_inspect", r#"{"query":"release"}"#),
-        ("memory_replay", r#"{"chat_id":"chat-1","limit":2}"#),
+        (
+            "memory_project",
+            r#"{"query":"release","system_max_len":1024}"#,
+        ),
+        (
+            "memory_inspect",
+            r#"{"query":"release","system_max_len":1024}"#,
+        ),
         ("memory_long_term_list", r#"{"query":{},"limit":2}"#),
         (
             "memory_write_candidate",
             r#"{"name":"runtime_skill__mcp_write","topic":"mcp","title":"MCP write","summary":"MCP write summary","content":"1. Decode MCP tool payload.\n2. Dispatch through EntryRuntime."}"#,
-        ),
-        ("memory_export", r#"{"chat_id":"chat-1"}"#),
-        (
-            "memory_import",
-            r#"{"target_chat_id":"chat-1","snapshot":{"version":5,"exported_at":1800000000,"mode":"full_restore","chat_id":"chat-1"}}"#,
         ),
     ];
 
@@ -82,13 +201,36 @@ fn mcp_tool_server_decodes_declared_memory_tools() {
 }
 
 #[test]
-fn mcp_project_tool_exposes_only_the_adapter_projection_surface() {
+fn mcp_fallback_uses_stable_public_report_kind_without_debug_wire() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-project-boundary");
+    let server = McpToolServer::new("mcp-public-kind", "mcp-public-kind-client");
     let result = server
         .call(
             &runtime,
-            McpToolCall::json("memory_project", r#"{"query":"release","max_len":1024}"#),
+            McpToolCall::json(
+                "memory_inspect",
+                r#"{"query":"release","system_max_len":1024}"#,
+            ),
+        )
+        .expect("inspect tool call");
+    let content: Value = serde_json::from_str(&result.content).expect("inspect result JSON");
+
+    assert_eq!(content["status"], "accepted");
+    assert_eq!(content["report_kind"], "inspect");
+    assert!(!result.content.contains("MemoryInspectionReport"));
+}
+
+#[test]
+fn mcp_project_tool_exposes_only_the_adapter_projection_surface() {
+    let runtime = runtime();
+    let server = McpToolServer::new("mcp-project-boundary", "mcp-project-client");
+    let result = server
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_project",
+                r#"{"query":"release","system_max_len":1024}"#,
+            ),
         )
         .expect("project tool call");
     let content: Value = serde_json::from_str(&result.content).expect("project tool json");
@@ -104,7 +246,7 @@ fn mcp_project_tool_exposes_only_the_adapter_projection_surface() {
 #[test]
 fn mcp_resource_read_uses_entry_runtime_safe_reports_without_private_raw() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-resource");
+    let server = McpToolServer::new("mcp-resource", "mcp-resource-client");
 
     for uri in [
         "memory://profile",
@@ -117,6 +259,7 @@ fn mcp_resource_read_uses_entry_runtime_safe_reports_without_private_raw() {
         assert_eq!(resource.uri, uri);
         assert_eq!(resource.mime_type, "application/json");
         assert!(!resource.private_raw_allowed);
+        assert!(resource.budget_report_id.starts_with("rtb-v2-"));
         assert!(!resource.content.contains("\"private_raw\":true"), "{uri}");
         assert!(!resource.content.contains("raw_content"), "{uri}");
         assert!(!resource.content.contains("store_schema"), "{uri}");
@@ -127,8 +270,8 @@ fn mcp_resource_read_uses_entry_runtime_safe_reports_without_private_raw() {
 #[test]
 fn streamable_http_handles_single_json_rpc_resource_request() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-http");
-    let response = handle_mcp_streamable_http_request(
+    let server = McpToolServer::new("mcp-http", "mcp-http-client");
+    let response = handle_mcp_streamable_http_in_process_request(
         &server,
         &runtime,
         r#"{"jsonrpc":"2.0","id":"r1","method":"resources/list"}"#,
@@ -137,6 +280,7 @@ fn streamable_http_handles_single_json_rpc_resource_request() {
 
     assert_eq!(response.status, 200);
     assert_eq!(response.content_type, "application/json");
+    assert!(response.budget_report_id.starts_with("rtb-v2-"));
     assert!(
         response.body.contains(r#""jsonrpc":"2.0""#),
         "{}",
@@ -158,8 +302,8 @@ fn streamable_http_handles_single_json_rpc_resource_request() {
 #[test]
 fn json_rpc_initialize_negotiates_mcp_capabilities() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-http");
-    let response = handle_mcp_streamable_http_request(
+    let server = McpToolServer::new("mcp-http", "mcp-http-client");
+    let response = handle_mcp_streamable_http_in_process_request(
         &server,
         &runtime,
         r#"{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"contract","version":"1.0.0"}}}"#,
@@ -186,8 +330,8 @@ fn json_rpc_initialize_negotiates_mcp_capabilities() {
 #[test]
 fn json_rpc_tools_list_uses_mcp_input_schema_shape() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-http");
-    let response = handle_mcp_streamable_http_request(
+    let server = McpToolServer::new("mcp-http", "mcp-http-client");
+    let response = handle_mcp_streamable_http_in_process_request(
         &server,
         &runtime,
         r#"{"jsonrpc":"2.0","id":"tools-1","method":"tools/list"}"#,
@@ -218,8 +362,8 @@ fn json_rpc_tools_list_uses_mcp_input_schema_shape() {
 #[test]
 fn json_rpc_tools_call_uses_mcp_content_and_structured_content_shape() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-http");
-    let response = handle_mcp_streamable_http_request(
+    let server = McpToolServer::new("mcp-http", "mcp-http-client");
+    let response = handle_mcp_streamable_http_in_process_request(
         &server,
         &runtime,
         r#"{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"memory_capabilities","arguments":{}}}"#,
@@ -246,10 +390,59 @@ fn json_rpc_tools_call_uses_mcp_content_and_structured_content_shape() {
 }
 
 #[test]
+fn json_rpc_tool_call_uses_only_explicit_meta_key_for_retry_deduplication() {
+    let runtime = runtime();
+    let server = McpToolServer::new("mcp-http-idempotency", "mcp-http-principal");
+    let arguments: Value = serde_json::from_str(&write_arguments(
+        "runtime_skill__mcp_http_explicit",
+        "stable JSON-RPC payload",
+    ))
+    .expect("write arguments");
+    let request = |id: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_write_candidate",
+                "arguments": arguments.clone(),
+                "_meta": {"idempotencyKey": "mcp-http-caller-key"},
+            },
+        })
+        .to_string()
+    };
+
+    let first =
+        handle_mcp_streamable_http_in_process_request(&server, &runtime, &request("write-1"))
+            .expect("first JSON-RPC write");
+    let replay =
+        handle_mcp_streamable_http_in_process_request(&server, &runtime, &request("write-2"))
+            .expect("replayed JSON-RPC write");
+    let first: Value = serde_json::from_str(&first.body).expect("first response JSON");
+    let replay: Value = serde_json::from_str(&replay.body).expect("replay response JSON");
+
+    assert!(!first.to_string().contains("mcp-http-caller-key"));
+    assert!(!replay.to_string().contains("mcp-http-caller-key"));
+
+    assert_eq!(
+        first
+            .pointer("/result/structuredContent/status")
+            .and_then(Value::as_str),
+        Some("accepted")
+    );
+    assert_eq!(
+        replay
+            .pointer("/result/structuredContent/status")
+            .and_then(Value::as_str),
+        Some("duplicated")
+    );
+}
+
+#[test]
 fn json_rpc_resource_read_returns_text_resource_contents() {
     let runtime = runtime();
-    let server = McpToolServer::new("mcp-http");
-    let response = handle_mcp_streamable_http_request(
+    let server = McpToolServer::new("mcp-http", "mcp-http-client");
+    let response = handle_mcp_streamable_http_in_process_request(
         &server,
         &runtime,
         r#"{"jsonrpc":"2.0","id":"res-1","method":"resources/read","params":{"uri":"memory://scope"}}"#,

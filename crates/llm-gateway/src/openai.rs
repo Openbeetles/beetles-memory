@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use bm_entry::EntryOperationCapability;
 use bm_sdk::{
     ConversationScope, MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource,
     ProviderModelContextLimit, RuntimeLifecycleModeInput, TranscriptInputMessage,
@@ -7,6 +8,9 @@ use bm_sdk::{
 use serde_json::{Map, Value};
 
 use crate::agent_tools::request_scoped_agent_tool_registry;
+#[cfg(feature = "client-reqwest")]
+use crate::budget_io::{bounded_json_request, read_bounded_json, BoundedStreamReader};
+use crate::budget_io::{validate_json, StreamBudgetTracker, StreamProtocol};
 use crate::projection::render_model_facing_projection;
 use crate::provider::select_provider_for_kind;
 use crate::{
@@ -15,8 +19,9 @@ use crate::{
         GatewayMaintenancePlanInput, GatewayMaintenanceRunOutcome, OpenAiDeferredMaintenance,
     },
     probe_openai_provider_capabilities, GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage,
-    GatewayConfig, GatewayError, GatewayProviderConfig, GatewayProviderKind, GatewayRuntime,
-    GatewayScopeRequest, GatewayScopeResolver, OpenAiGatewayServices, Result,
+    GatewayConfig, GatewayError, GatewayProviderConfig, GatewayProviderKind,
+    GatewayRequestBudgetContext, GatewayRuntime, GatewayScopeRequest, GatewayScopeResolver,
+    GatewayUpstreamResponseBudget, OpenAiGatewayServices, Result,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,6 +155,8 @@ pub trait OpenAiSseStream: Send {
 pub struct OpenAiSseBody {
     source: OpenAiSseSource,
     deferred_maintenance: Option<Box<OpenAiDeferredMaintenance>>,
+    budget_tracker: Option<StreamBudgetTracker>,
+    request_context: Option<GatewayRequestBudgetContext>,
 }
 
 enum OpenAiSseSource {
@@ -162,6 +169,8 @@ impl OpenAiSseBody {
         Self {
             source: OpenAiSseSource::Buffered { chunks, offset: 0 },
             deferred_maintenance: None,
+            budget_tracker: None,
+            request_context: None,
         }
     }
 
@@ -169,7 +178,18 @@ impl OpenAiSseBody {
         Self {
             source: OpenAiSseSource::Streaming(stream),
             deferred_maintenance: None,
+            budget_tracker: None,
+            request_context: None,
         }
+    }
+
+    fn with_request_budget(mut self, context: GatewayRequestBudgetContext) -> Self {
+        self.budget_tracker = Some(StreamBudgetTracker::new(
+            context.response_budget().clone(),
+            StreamProtocol::Sse,
+        ));
+        self.request_context = Some(context);
+        self
     }
 
     pub(crate) fn with_deferred_maintenance(mut self, plan: GatewayMaintenancePlan) -> Self {
@@ -197,6 +217,9 @@ impl OpenAiSseBody {
             OpenAiSseSource::Streaming(stream) => stream.next_chunk()?,
         };
         if let Some(chunk) = chunk.as_deref() {
+            if let Some(tracker) = &mut self.budget_tracker {
+                tracker.observe_chunk(chunk)?;
+            }
             if let Some(maintenance) = &mut self.deferred_maintenance {
                 maintenance.observe_sse_chunk(chunk);
             }
@@ -256,6 +279,10 @@ impl OpenAiUpstreamResponse {
 }
 
 pub trait OpenAiCompatibleUpstream {
+    fn bind_response_budget(&mut self, _budget: GatewayUpstreamResponseBudget) -> Result<()> {
+        Ok(())
+    }
+
     fn models(&mut self, provider: &GatewayProviderConfig) -> Result<OpenAiUpstreamResponse>;
 
     fn chat_completion(
@@ -287,21 +314,44 @@ pub trait OpenAiCompatibleUpstream {
 
 pub fn handle_openai_request(
     gateway: &GatewayRuntime,
-    config: &GatewayConfig,
     request: OpenAiGatewayRequest,
     upstream: &mut dyn OpenAiCompatibleUpstream,
 ) -> Result<OpenAiGatewayResponse> {
     let mut services = OpenAiGatewayServices::new();
-    handle_openai_request_with_services(gateway, config, request, upstream, &mut services)
+    handle_openai_request_with_services(gateway, request, upstream, &mut services)
 }
 
 pub fn handle_openai_request_with_services(
     gateway: &GatewayRuntime,
+    request: OpenAiGatewayRequest,
+    upstream: &mut dyn OpenAiCompatibleUpstream,
+    services: &mut OpenAiGatewayServices<'_>,
+) -> Result<OpenAiGatewayResponse> {
+    let context = gateway.begin_request()?;
+    gateway.execute_with_request_context(&context, || {
+        handle_openai_request_with_services_in_budget_lease(
+            gateway,
+            &context,
+            gateway.config(),
+            request,
+            upstream,
+            services,
+        )
+    })
+}
+
+pub(crate) fn handle_openai_request_with_services_in_budget_lease(
+    gateway: &GatewayRuntime,
+    context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     request: OpenAiGatewayRequest,
     upstream: &mut dyn OpenAiCompatibleUpstream,
     services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OpenAiGatewayResponse> {
+    request
+        .scope
+        .require_capabilities(required_openai_capabilities(request.method, &request.path))?;
+    upstream.bind_response_budget(context.response_budget().clone())?;
     let provider = select_provider_for_kind(
         config,
         request.provider_name.as_deref(),
@@ -311,19 +361,19 @@ pub fn handle_openai_request_with_services(
 
     match (request.method, request.path.as_str()) {
         (OpenAiGatewayMethod::Get, "/v1/models") => {
-            handle_models(config, request, provider, upstream)
+            handle_models(context, config, request, provider, upstream)
         }
-        (OpenAiGatewayMethod::Post, "/v1/chat/completions") => {
-            handle_chat_completion(gateway, config, request, provider, upstream, services)
-        }
-        (OpenAiGatewayMethod::Post, "/v1/responses") => {
-            handle_responses(gateway, config, request, provider, upstream, services)
-        }
+        (OpenAiGatewayMethod::Post, "/v1/chat/completions") => handle_chat_completion(
+            gateway, context, config, request, provider, upstream, services,
+        ),
+        (OpenAiGatewayMethod::Post, "/v1/responses") => handle_responses(
+            gateway, context, config, request, provider, upstream, services,
+        ),
         (OpenAiGatewayMethod::Post, "/v1/embeddings") => {
-            handle_embeddings(config, request, provider, upstream)
+            handle_embeddings(context, config, request, provider, upstream)
         }
         (OpenAiGatewayMethod::Get, "/v1/bm/provider-capabilities") => {
-            handle_provider_capabilities(config, request, upstream)
+            handle_provider_capabilities(context, config, request, upstream)
         }
         _ => Err(GatewayError::invalid_request(
             "unsupported OpenAI gateway route",
@@ -331,7 +381,24 @@ pub fn handle_openai_request_with_services(
     }
 }
 
+pub(crate) fn required_openai_capabilities(
+    method: OpenAiGatewayMethod,
+    path: &str,
+) -> &'static [EntryOperationCapability] {
+    match (method, path) {
+        (OpenAiGatewayMethod::Post, "/v1/chat/completions" | "/v1/responses") => &[
+            EntryOperationCapability::Project,
+            EntryOperationCapability::Maintain,
+        ],
+        (OpenAiGatewayMethod::Get, "/v1/models" | "/v1/bm/provider-capabilities") => {
+            &[EntryOperationCapability::Capabilities]
+        }
+        _ => &[],
+    }
+}
+
 fn handle_models(
+    context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     request: OpenAiGatewayRequest,
     provider: &GatewayProviderConfig,
@@ -350,11 +417,12 @@ fn handle_models(
         GatewayError::upstream_unavailable(error.to_string())
     })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
+    upstream_response_to_gateway(context, response, audit)
 }
 
 fn handle_chat_completion(
     gateway: &GatewayRuntime,
+    context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     mut request: OpenAiGatewayRequest,
     provider: &GatewayProviderConfig,
@@ -384,13 +452,13 @@ fn handle_chat_completion(
         model_alias,
         scope.clone(),
     );
-    let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
+    let runtime = gateway.runtime_for_scope_in_request(context, scope.entry_scope.clone())?;
     let input_transcript = extract_chat_input_transcript(body_object.get("messages"))?;
     let extracted_user_text = input_transcript.latest_user_text.clone();
     let external_content_used = request_uses_external_content(body_object.get("messages"))
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
-    let runtime_budget = runtime.runtime().runtime_budget();
+    let runtime_budget = context.report();
     let tool_registry_refs = if let Some(registry) =
         request_scoped_agent_tool_registry("openai-compatible", body_object.get("tools"))
     {
@@ -451,7 +519,7 @@ fn handle_chat_completion(
         turn_source: MemoryTurnSource {
             ingress: bm_sdk::IngressKind::User,
             channel: scope.channel.clone(),
-            provider: Some(format!("{:?}", provider.kind)),
+            provider: Some(provider.kind.as_str().to_string()),
             protocol: MemoryTurnProtocol::OpenAiChat,
             endpoint: Some("/v1/chat/completions".to_string()),
             model_alias: Some(model_alias.to_string()),
@@ -465,6 +533,7 @@ fn handle_chat_completion(
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         config: config.maintenance,
+        budget: context.report().maintenance_budget,
     });
     let upstream_request = OpenAiUpstreamRequest {
         endpoint: "/chat/completions".to_string(),
@@ -480,13 +549,14 @@ fn handle_chat_completion(
             GatewayError::upstream_unavailable(error.to_string())
         })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    let mut response = upstream_response_to_gateway(response, audit);
+    let mut response = upstream_response_to_gateway(context, response, audit)?;
     response.prepare_post_reply_maintenance(maintenance_plan, services);
     Ok(response)
 }
 
 fn handle_responses(
     gateway: &GatewayRuntime,
+    context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     mut request: OpenAiGatewayRequest,
     provider: &GatewayProviderConfig,
@@ -531,13 +601,13 @@ fn handle_responses(
     if body_object.get("previous_response_id").is_some() {
         audit.record_note("openai_responses_stateful_passthrough");
     }
-    let runtime = gateway.runtime_for_scope(scope.entry_scope.clone())?;
+    let runtime = gateway.runtime_for_scope_in_request(context, scope.entry_scope.clone())?;
     let extracted_user_text = extract_response_input_text(body_object.get("input"));
     let input_transcript = input_transcript_from_user_text(&extracted_user_text);
     let external_content_used = response_input_uses_external_content(body_object.get("input"))
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
-    let runtime_budget = runtime.runtime().runtime_budget();
+    let runtime_budget = context.report();
     let tool_registry_refs = if let Some(registry) =
         request_scoped_agent_tool_registry("openai-compatible", body_object.get("tools"))
     {
@@ -599,7 +669,7 @@ fn handle_responses(
         turn_source: MemoryTurnSource {
             ingress: bm_sdk::IngressKind::User,
             channel: scope.channel.clone(),
-            provider: Some(format!("{:?}", provider.kind)),
+            provider: Some(provider.kind.as_str().to_string()),
             protocol: MemoryTurnProtocol::OpenAiResponses,
             endpoint: Some("/v1/responses".to_string()),
             model_alias: Some(model_alias.to_string()),
@@ -613,6 +683,7 @@ fn handle_responses(
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         config: config.maintenance,
+        budget: context.report().maintenance_budget,
     });
     let upstream_request = OpenAiUpstreamRequest {
         endpoint: "/responses".to_string(),
@@ -628,12 +699,13 @@ fn handle_responses(
             GatewayError::upstream_unavailable(error.to_string())
         })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    let mut response = upstream_response_to_gateway(response, audit);
+    let mut response = upstream_response_to_gateway(context, response, audit)?;
     response.prepare_post_reply_maintenance(maintenance_plan, services);
     Ok(response)
 }
 
 fn handle_embeddings(
+    context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     mut request: OpenAiGatewayRequest,
     provider: &GatewayProviderConfig,
@@ -684,10 +756,11 @@ fn handle_embeddings(
             GatewayError::upstream_unavailable(error.to_string())
         })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
-    Ok(upstream_response_to_gateway(response, audit))
+    upstream_response_to_gateway(context, response, audit)
 }
 
 fn handle_provider_capabilities(
+    context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     request: OpenAiGatewayRequest,
     upstream: &mut dyn OpenAiCompatibleUpstream,
@@ -709,32 +782,37 @@ fn handle_provider_capabilities(
                 audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Failed);
             })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
+    let body = serde_json::to_value(report)
+        .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
+    validate_json(&body, context.response_budget())?;
     Ok(OpenAiGatewayResponse {
         status_code: 200,
-        body: OpenAiGatewayBody::Json(
-            serde_json::to_value(report)
-                .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?,
-        ),
+        body: OpenAiGatewayBody::Json(body),
         audit,
     })
 }
 
 fn upstream_response_to_gateway(
+    context: &GatewayRequestBudgetContext,
     response: OpenAiUpstreamResponse,
     audit: GatewayAuditReport,
-) -> OpenAiGatewayResponse {
-    match response {
-        OpenAiUpstreamResponse::Json { status_code, body } => OpenAiGatewayResponse {
-            status_code,
-            body: OpenAiGatewayBody::Json(body),
-            audit,
-        },
+) -> Result<OpenAiGatewayResponse> {
+    let response = match response {
+        OpenAiUpstreamResponse::Json { status_code, body } => {
+            validate_json(&body, context.response_budget())?;
+            OpenAiGatewayResponse {
+                status_code,
+                body: OpenAiGatewayBody::Json(body),
+                audit,
+            }
+        }
         OpenAiUpstreamResponse::Sse { status_code, body } => OpenAiGatewayResponse {
             status_code,
-            body: OpenAiGatewayBody::Sse(body),
+            body: OpenAiGatewayBody::Sse(body.with_request_budget(context.clone())),
             audit,
         },
-    }
+    };
+    Ok(response)
 }
 
 fn provider_model_name(provider: &GatewayProviderConfig, model_alias: &str) -> String {
@@ -1038,6 +1116,7 @@ fn extract_content_text(content: Option<&Value>, parts: &mut Vec<String>) {
 #[cfg(feature = "client-reqwest")]
 pub struct ReqwestOpenAiCompatibleUpstream {
     client: reqwest::blocking::Client,
+    response_budget: Option<GatewayUpstreamResponseBudget>,
 }
 
 #[cfg(feature = "client-reqwest")]
@@ -1051,18 +1130,27 @@ impl ReqwestOpenAiCompatibleUpstream {
             .timeout(timeout)
             .build()
             .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            response_budget: None,
+        })
     }
 }
 
 #[cfg(feature = "client-reqwest")]
 impl OpenAiCompatibleUpstream for ReqwestOpenAiCompatibleUpstream {
+    fn bind_response_budget(&mut self, budget: GatewayUpstreamResponseBudget) -> Result<()> {
+        self.response_budget = Some(budget);
+        Ok(())
+    }
+
     fn models(&mut self, provider: &GatewayProviderConfig) -> Result<OpenAiUpstreamResponse> {
+        let budget = self.response_budget()?.clone();
         let response = self
             .authorized_request(provider, reqwest::Method::GET, "/models")?
             .send()
             .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
-        response_to_json(response)
+        response_to_json(response, &budget)
     }
 
     fn chat_completion(
@@ -1070,19 +1158,24 @@ impl OpenAiCompatibleUpstream for ReqwestOpenAiCompatibleUpstream {
         provider: &GatewayProviderConfig,
         request: OpenAiUpstreamRequest,
     ) -> Result<OpenAiUpstreamResponse> {
-        let response = self
-            .authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?
-            .json(&request.body)
-            .send()
-            .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
+        let budget = self.response_budget()?.clone();
+        let response = bounded_json_request(
+            self.authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?,
+            &request.body,
+            &budget,
+        )?
+        .send()
+        .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
         if request.stream {
             let status_code = response.status().as_u16();
             return Ok(OpenAiUpstreamResponse::Sse {
                 status_code,
-                body: OpenAiSseBody::streaming(Box::new(ReqwestLineSseStream::new(response))),
+                body: OpenAiSseBody::streaming(Box::new(ReqwestLineSseStream::new(
+                    response, budget,
+                ))),
             });
         }
-        response_to_json(response)
+        response_to_json(response, &budget)
     }
 
     fn responses(
@@ -1090,19 +1183,24 @@ impl OpenAiCompatibleUpstream for ReqwestOpenAiCompatibleUpstream {
         provider: &GatewayProviderConfig,
         request: OpenAiUpstreamRequest,
     ) -> Result<OpenAiUpstreamResponse> {
-        let response = self
-            .authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?
-            .json(&request.body)
-            .send()
-            .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
+        let budget = self.response_budget()?.clone();
+        let response = bounded_json_request(
+            self.authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?,
+            &request.body,
+            &budget,
+        )?
+        .send()
+        .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
         if request.stream {
             let status_code = response.status().as_u16();
             return Ok(OpenAiUpstreamResponse::Sse {
                 status_code,
-                body: OpenAiSseBody::streaming(Box::new(ReqwestLineSseStream::new(response))),
+                body: OpenAiSseBody::streaming(Box::new(ReqwestLineSseStream::new(
+                    response, budget,
+                ))),
             });
         }
-        response_to_json(response)
+        response_to_json(response, &budget)
     }
 
     fn embeddings(
@@ -1110,17 +1208,26 @@ impl OpenAiCompatibleUpstream for ReqwestOpenAiCompatibleUpstream {
         provider: &GatewayProviderConfig,
         request: OpenAiUpstreamRequest,
     ) -> Result<OpenAiUpstreamResponse> {
-        let response = self
-            .authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?
-            .json(&request.body)
-            .send()
-            .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
-        response_to_json(response)
+        let budget = self.response_budget()?.clone();
+        let response = bounded_json_request(
+            self.authorized_request(provider, reqwest::Method::POST, request.endpoint.as_str())?,
+            &request.body,
+            &budget,
+        )?
+        .send()
+        .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
+        response_to_json(response, &budget)
     }
 }
 
 #[cfg(feature = "client-reqwest")]
 impl ReqwestOpenAiCompatibleUpstream {
+    fn response_budget(&self) -> Result<&GatewayUpstreamResponseBudget> {
+        self.response_budget.as_ref().ok_or_else(|| {
+            GatewayError::runtime_unavailable("OpenAI upstream request budget is not bound")
+        })
+    }
+
     fn authorized_request(
         &self,
         provider: &GatewayProviderConfig,
@@ -1140,24 +1247,25 @@ impl ReqwestOpenAiCompatibleUpstream {
 }
 
 #[cfg(feature = "client-reqwest")]
-fn response_to_json(response: reqwest::blocking::Response) -> Result<OpenAiUpstreamResponse> {
+fn response_to_json(
+    response: reqwest::blocking::Response,
+    budget: &GatewayUpstreamResponseBudget,
+) -> Result<OpenAiUpstreamResponse> {
     let status_code = response.status().as_u16();
-    let body = response
-        .json::<Value>()
-        .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
+    let body = read_bounded_json(response, budget)?;
     Ok(OpenAiUpstreamResponse::Json { status_code, body })
 }
 
 #[cfg(feature = "client-reqwest")]
 struct ReqwestLineSseStream {
-    reader: std::io::BufReader<reqwest::blocking::Response>,
+    reader: BoundedStreamReader<reqwest::blocking::Response>,
 }
 
 #[cfg(feature = "client-reqwest")]
 impl ReqwestLineSseStream {
-    fn new(response: reqwest::blocking::Response) -> Self {
+    fn new(response: reqwest::blocking::Response, budget: GatewayUpstreamResponseBudget) -> Self {
         Self {
-            reader: std::io::BufReader::new(response),
+            reader: BoundedStreamReader::new(response, budget),
         }
     }
 }
@@ -1165,27 +1273,7 @@ impl ReqwestLineSseStream {
 #[cfg(feature = "client-reqwest")]
 impl OpenAiSseStream for ReqwestLineSseStream {
     fn next_chunk(&mut self) -> Result<Option<String>> {
-        use std::io::BufRead;
-
-        let mut event = String::new();
-        loop {
-            let mut line = String::new();
-            let read = self
-                .reader
-                .read_line(&mut line)
-                .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
-            if read == 0 {
-                return if event.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(event))
-                };
-            }
-            event.push_str(&line);
-            if line == "\n" || line == "\r\n" {
-                return Ok(Some(event));
-            }
-        }
+        self.reader.next_sse_event()
     }
 }
 

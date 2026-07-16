@@ -16,6 +16,12 @@ fail() {
 
 command -v curl >/dev/null || fail "curl is required for local OpenAI-compatible smoke"
 
+case "$(uname -s)" in
+  Darwin) production_feature="profile-desktop-macos-standalone-memory" ;;
+  Linux) production_feature="profile-server-linux-memory-gateway" ;;
+  *) fail "bm-llm-gateway has no production profile for this smoke target" ;;
+esac
+
 upstream_base="${BM_LLM_GATEWAY_OPENAI_BASE_URL:-http://127.0.0.1:8000/v1}"
 bind_addr="${BM_LLM_GATEWAY_BIND:-127.0.0.1:18787}"
 model="${BM_LLM_GATEWAY_SMOKE_MODEL:-local}"
@@ -37,7 +43,8 @@ fi
 curl -fsS -m 2 "${auth_args[@]}" "${upstream_base%/}/models" >/dev/null \
   || fail "OpenAI-compatible upstream is not reachable at ${upstream_base}"
 
-env "${gateway_env[@]}" cargo run -p bm-llm-gateway --no-default-features --features server-async,client-reqwest \
+env "${gateway_env[@]}" cargo run --locked -p bm-llm-gateway --no-default-features \
+  --features "server-async,client-reqwest,$production_feature" \
   >"$log_file" 2>&1 &
 gateway_pid=$!
 trap 'kill "$gateway_pid" >/dev/null 2>&1 || true' EXIT

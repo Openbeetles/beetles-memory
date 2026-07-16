@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "soul-regression-soul-life-slot-continuity-full",
   "class": "soul_regression",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "Soul life slots are explicit facets carried through projection instead of one coarse self prompt.",

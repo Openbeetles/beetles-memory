@@ -6,13 +6,16 @@ use bm_core::memory::{
     MemoryPrivacyClass,
 };
 use bm_core::platform::{MemorySystemKind, Platform};
-use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StorePlatform};
+use bm_sdk::nonproduction_replay_harness::StoreBackendConfig;
 use support::{delete_scoped_long_term, seed_scoped_long_term};
 
 #[test]
 fn scoped_long_term_store_isolates_identical_logical_owners_by_memory_space() {
-    let platform = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     )
     .unwrap();
     let space_a = platform
@@ -55,8 +58,11 @@ fn scoped_long_term_store_isolates_identical_logical_owners_by_memory_space() {
 
 #[test]
 fn in_memory_store_platform_covers_core_runtime_paths() {
-    let platform = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -75,8 +81,8 @@ fn in_memory_store_platform_covers_core_runtime_paths() {
     assert_eq!(state_fs.read("runtime/state.json").unwrap(), None);
 
     let skill_storage = platform.skill_storage();
-    skill_storage.write("runtime-alpha", b"skill body").unwrap();
-    assert_eq!(skill_storage.read("runtime-alpha").unwrap(), b"skill body");
+    let skill_body = support::seed_runtime_skill(&platform, "runtime-alpha");
+    assert_eq!(skill_storage.read("runtime-alpha").unwrap(), skill_body);
     assert_eq!(skill_storage.list_names().unwrap(), vec!["runtime-alpha"]);
     skill_storage.remove("runtime-alpha").unwrap();
     assert!(skill_storage.list_names().unwrap().is_empty());

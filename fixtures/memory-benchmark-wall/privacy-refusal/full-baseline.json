@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "privacy-refusal-full-baseline",
   "class": "privacy_refusal",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "golden_judge",
   "description": "Full profile audits privacy refusal, safe summary, and artifact redaction paths.",

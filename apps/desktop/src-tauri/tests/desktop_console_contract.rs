@@ -1,20 +1,22 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bm_desktop::{DesktopConsoleRequest, DesktopConsoleState};
+use bm_desktop::{
+    DesktopConsoleRequest, DesktopConsoleState, DesktopMemoryAuthority, DesktopRuntimeConfig,
+};
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
     PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendKind,
+    RuntimeSkillWriteSource, StoreBackendConfig,
 };
 use serde_json::Value;
 
 #[test]
 fn desktop_console_serves_skills_without_http_listener() {
-    let state = DesktopConsoleState::open_for_data_dir(test_store_dir("skills-list")).unwrap();
+    let state = desktop_state("skills-list");
 
     let response = state
         .handle_console_request(DesktopConsoleRequest::get("/console/skills"))
@@ -27,8 +29,7 @@ fn desktop_console_serves_skills_without_http_listener() {
 
 #[test]
 fn desktop_console_serves_ollama_transparent_status_without_404() {
-    let state = DesktopConsoleState::open_for_data_dir(test_store_dir("ollama-transparent-status"))
-        .unwrap();
+    let state = desktop_state("ollama-transparent-status");
 
     let capabilities = state
         .handle_console_request(DesktopConsoleRequest::get("/console/capabilities"))
@@ -54,7 +55,7 @@ fn desktop_console_serves_ollama_transparent_status_without_404() {
 
 #[test]
 fn desktop_console_mutates_skills_through_entry_runtime() {
-    let state = DesktopConsoleState::open_for_data_dir(test_store_dir("skills-mutation")).unwrap();
+    let state = desktop_state("skills-mutation");
 
     let create_forbidden = state
         .handle_console_request(DesktopConsoleRequest::post_json(
@@ -116,9 +117,9 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
 #[test]
 fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
     let data_dir = test_store_dir("ollama-transparent-overview");
-    let transparent_runtime = runtime_for_store(data_dir.join("ollama").join("memory-store"));
+    let transparent_runtime = runtime_for_store(data_dir.join("store"));
     seed_memory_runtime_activity(&transparent_runtime);
-    let state = DesktopConsoleState::open_for_data_dir(&data_dir).unwrap();
+    let state = DesktopConsoleState::open(desktop_config(data_dir)).unwrap();
 
     let response = state
         .handle_console_request(DesktopConsoleRequest::get("/console/overview"))
@@ -138,6 +139,31 @@ fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
             .unwrap_or_default()
             > 0
     );
+}
+
+#[test]
+fn desktop_and_transparent_gateway_share_one_memory_authority() {
+    let state = desktop_state("shared-memory-authority");
+    let desktop = state.memory_authority();
+    let transparent = &state.ollama_transparent_config().memory_authority;
+
+    assert_eq!(transparent.owner_id, desktop.owner_id);
+    assert_eq!(transparent.agent_id, desktop.agent_id);
+    assert_eq!(transparent.channel, desktop.channel);
+    assert_eq!(transparent.store_path, desktop.store_path);
+}
+
+#[test]
+fn desktop_rejects_relative_gateway_and_store_paths() {
+    let data_dir = test_store_dir("relative-path-rejection");
+    let mut config = desktop_config(data_dir);
+    config.gateway_binary_path = "bm-llm-gateway".into();
+    assert!(DesktopConsoleState::open(config).is_err());
+
+    let data_dir = test_store_dir("relative-store-rejection");
+    let mut config = desktop_config(data_dir);
+    config.memory.store_path = "store".into();
+    assert!(DesktopConsoleState::open(config).is_err());
 }
 
 #[test]
@@ -163,14 +189,33 @@ fn test_store_dir(label: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("bm-desktop-{label}-{nanos}"))
+    let path = std::env::temp_dir().join(format!("bm-desktop-{label}-{nanos}"));
+    std::fs::create_dir_all(&path).expect("desktop test data dir");
+    std::fs::canonicalize(path).expect("canonical desktop test data dir")
+}
+
+fn desktop_state(label: &str) -> DesktopConsoleState {
+    DesktopConsoleState::open(desktop_config(test_store_dir(label))).expect("desktop state")
+}
+
+fn desktop_config(data_dir: std::path::PathBuf) -> DesktopRuntimeConfig {
+    DesktopRuntimeConfig {
+        gateway_binary_path: std::env::current_exe().expect("desktop test executable"),
+        memory: DesktopMemoryAuthority {
+            owner_id: "local-owner".to_string(),
+            agent_id: "bm-desktop".to_string(),
+            channel: "desktop".to_string(),
+            chat_id: "local-desktop".to_string(),
+            store_path: data_dir.join("store"),
+        },
+        data_dir,
+    }
 }
 
 fn runtime_for_store(path: std::path::PathBuf) -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::DesktopMacosStandaloneMemory,
         identity: EntryIdentity {
             agent_id: "bm-desktop".to_string(),
             owner_id: "local-owner".to_string(),
@@ -179,11 +224,9 @@ fn runtime_for_store(path: std::path::PathBuf) -> EntryRuntime {
             channel: "desktop".to_string(),
             chat_id: "local-desktop".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::File,
-            data_path: Some(path),
-            fsync: false,
-        },
+        store: StoreBackendConfig::file(path, ProfileId::DesktopMacosStandaloneMemory)
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 128 },

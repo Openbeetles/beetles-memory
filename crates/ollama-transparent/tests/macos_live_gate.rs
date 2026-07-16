@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use std::cell::Cell;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -5,9 +7,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_ollama_transparent::{
-    DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, FileSystemRunnerInstaller,
-    OllamaTransparentConfig, OllamaTransparentController, OllamaTransparentState, PortOwnerKind,
-    SystemPortOwnerObserver, SystemProcessManager, TransitionOutcome, TransparentController,
+    DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, OllamaTransparentConfig,
+    OllamaTransparentController, OllamaTransparentMemoryAuthority, OllamaTransparentState,
+    PortOwnerKind, TransitionOutcome, TransparentController,
 };
 use serde_json::Value;
 
@@ -19,23 +21,22 @@ fn macos_ollama_app_transparent_live_gate() {
         return;
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        panic!("Ollama App transparent live gate is macOS-only");
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        run_macos_live_gate();
-    }
+    run_macos_live_gate();
 }
 
-#[cfg(target_os = "macos")]
 fn run_macos_live_gate() {
     let model = std::env::var("BM_OLLAMA_TRANSPARENT_LIVE_MODEL")
         .unwrap_or_else(|_| "qwen3.5:0.8b".to_string());
-    let mut config = OllamaTransparentConfig::for_data_dir(live_data_dir());
-    config.gateway_binary_path = gateway_binary_path();
+    let data_dir = live_data_dir();
+    let authority = OllamaTransparentMemoryAuthority::new(
+        "live-owner",
+        "live-agent",
+        "ollama-app",
+        data_dir.join("store"),
+    )
+    .expect("live memory authority");
+    let mut config = OllamaTransparentConfig::new(&data_dir, gateway_binary_path(), authority)
+        .expect("live transparent config");
     config.maintenance_model = model.clone();
     config.open_app_after_enable = true;
     config.restore_official_after_disable = true;
@@ -47,17 +48,11 @@ fn run_macos_live_gate() {
     );
     assert!(
         config.gateway_binary_path.is_file(),
-        "bm-llm-gateway binary missing; run cargo build -p bm-llm-gateway --no-default-features --features server-async,client-reqwest first: {}",
+        "bm-llm-gateway binary missing; run cargo build --locked -p bm-llm-gateway --no-default-features --features server-async,client-reqwest,profile-desktop-macos-standalone-memory first: {}",
         config.gateway_binary_path.display()
     );
 
-    let controller = TransparentController::new(
-        config.clone(),
-        SystemPortOwnerObserver::new(config.port_owner_classifier()),
-        FileSystemRunnerInstaller,
-        SystemProcessManager::default(),
-    )
-    .expect("transparent controller");
+    let controller = TransparentController::new(config.clone()).expect("transparent controller");
     let guard = LiveGateGuard {
         controller: Some(controller),
         restore_on_drop: Cell::new(false),
@@ -101,6 +96,7 @@ fn run_macos_live_gate() {
         PortOwnerKind::ManagedOllamaRunner,
         "{status:?}"
     );
+    assert_launch_receipts_bind_published_executables(&config);
 
     retry_json("GET", "/api/version", None, Duration::from_secs(20)).expect("/api/version");
     let tags = retry_json("GET", "/api/tags", None, Duration::from_secs(20)).expect("/api/tags");
@@ -141,15 +137,36 @@ fn run_macos_live_gate() {
     guard.restore_on_drop.set(false);
 }
 
+fn assert_launch_receipts_bind_published_executables(config: &OllamaTransparentConfig) {
+    let receipt: Value = serde_json::from_slice(
+        &std::fs::read(&config.managed_process_receipt_path).expect("managed process receipt"),
+    )
+    .expect("managed process receipt JSON");
+    for key in ["managedUpstream", "transparentFront"] {
+        let record = receipt.get(key).expect("launch receipt record");
+        let process = record.get("process").expect("process receipt");
+        let authority = record.get("authority").expect("launchd authority");
+        assert_eq!(authority["kind"], "launchd_job");
+        let executable_path = authority["executablePath"]
+            .as_str()
+            .expect("authority executable path");
+        let digest = authority["executableIdentity"]["sha256"]
+            .as_str()
+            .expect("authority executable digest");
+        let digest_hex = digest.strip_prefix("sha256:").expect("sha256 prefix");
+        assert!(executable_path.contains("/objects/"));
+        assert!(!executable_path.starts_with("/dev/fd/"));
+        assert_eq!(process["executable"], executable_path);
+        assert_eq!(process["executableIdentity"]["sha256"], digest);
+        assert!(authority["label"]
+            .as_str()
+            .is_some_and(|label| label.contains(&digest_hex[..16])));
+    }
+}
+
 #[cfg(target_os = "macos")]
 struct LiveGateGuard {
-    controller: Option<
-        TransparentController<
-            SystemPortOwnerObserver,
-            FileSystemRunnerInstaller,
-            SystemProcessManager,
-        >,
-    >,
+    controller: Option<TransparentController>,
     restore_on_drop: Cell<bool>,
 }
 
@@ -188,7 +205,9 @@ fn live_data_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    std::env::temp_dir().join(format!("bm-ollama-transparent-live-{nanos}"))
+    let path = std::env::temp_dir().join(format!("bm-ollama-transparent-live-{nanos}"));
+    std::fs::create_dir_all(&path).expect("live data dir");
+    std::fs::canonicalize(path).expect("canonical live data dir")
 }
 
 #[cfg(target_os = "macos")]

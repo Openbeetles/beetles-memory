@@ -1554,7 +1554,12 @@ fn memory_harness_prompt_inspection_parity() {
     );
     assert_eq!(
         prompt.runtime_skill_recall_report.selected_ids,
-        vec!["runtime_skill__release_checklist".to_string()]
+        vec![governed_memory_recall_candidate_id(
+            &GovernedMemoryOwnerRef::new(
+                GovernedMemoryOwnerPlane::RuntimeSkill,
+                "runtime_skill__release_checklist",
+            ),
+        )]
     );
     assert!(prompt
         .runtime_skill_text
@@ -1662,7 +1667,12 @@ fn memory_harness_l2_production_replay_closes_refresh_and_recall() {
     );
     assert_eq!(
         replay.prompt_runtime_skill_ids_after_refresh,
-        vec!["runtime_skill__release_checklist".to_string()]
+        vec![governed_memory_recall_candidate_id(
+            &GovernedMemoryOwnerRef::new(
+                GovernedMemoryOwnerPlane::RuntimeSkill,
+                "runtime_skill__release_checklist",
+            ),
+        )]
     );
     assert!(!replay.prompt_shared_ids_after_refresh.is_empty());
     assert!(replay

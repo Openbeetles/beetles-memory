@@ -26,9 +26,9 @@ check_file docs/zh-CN/llm-gateway-integrations.md
 rg -q 'llm-gateway-integrations.md' docs/README.md docs/en/README.md docs/zh-CN/README.md \
   || fail "LLM gateway integration docs are not indexed"
 
-cargo test -p bm-llm-gateway --test openai_responses_embeddings_probe_contract
-cargo test -p bm-cli --test agent_rules_cli
-cargo test -p bm-mcp --features server-stdio \
+cargo test --locked -p bm-llm-gateway --test openai_responses_embeddings_probe_contract
+cargo test --locked -p bm-cli --test agent_rules_cli
+cargo test --locked -p bm-mcp --features server-stdio \
   --test mcp_stdio_contract \
   --test mcp_runtime_contract \
   --test mcp_http_contract \
@@ -39,7 +39,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 for target in continue cline aider zed opencode open-webui vscode; do
   output="$tmp_dir/${target}.out"
-  cargo run -q -p bm-cli -- agent-rules export \
+  cargo run --locked -q -p bm-cli -- agent-rules export \
     --target "$target" \
     --gateway-url http://127.0.0.1:8787/v1 \
     --mcp-url http://127.0.0.1:8788/mcp >"$output"

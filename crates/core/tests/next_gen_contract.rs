@@ -7,23 +7,23 @@ use bm_core::memory::{
     build_soul_growth_proposals_from_core_revision_ledger, build_soul_kernel2_gate_report,
     build_soul_regression_suite_report, build_temporal_memory_graph_gate_report,
     build_vault_migration_preflight, build_workbench_gate_report,
-    compile_edge_memory_budget_report, plan_memory_autopilot_for_profile,
-    plan_temporal_memory_graph_write, promote_task_experience_to_procedure,
-    rerank_recall_with_temporal_graph, CompactGraphIndex, CompactSoulProfile,
-    CoreRevisionActionKind, CoreRevisionConflictClass, CoreRevisionLedger, CoreRevisionOutcome,
-    CoreRevisionRecord, CoreRevisionRecordChange, DroppedProjectionCandidate, EdgeRecoveryFixture,
-    EncryptedSnapshotEnvelope, EvidenceBacklink, GraphRecallExpansionBudget, MemoryAutopilotInput,
-    MemoryAutopilotPlan, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence,
-    MemoryGraphNode, MemoryGraphNodeKind, MemoryHygieneDiff, NextGenPhase,
-    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionPolicy, ProceduralMemoryRecordV2, ProcedureGenome,
-    ProjectionBudgetDecision, ProjectionPrivacyDecision, RelationshipConstitutionAudit,
-    SelfAuthoredCore, SkillEvolutionReport, SoulFeedbackReport, SoulGrowthDecision,
-    SoulGrowthProposal, SoulRegressionSuite, SubjectProjectionBoundaryProtocolReport,
-    SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
-    TemporalValidity, TurnSoulFeedbackLedger, TurnSoulInitiativeLedger, TurnSoulReplyLedger,
-    TurnSoulStrategyLedger, VaultManifest, VaultMigrationPreflight, WorkbenchApiMap,
-    WorkbenchSurface,
+    compile_edge_memory_budget_report, governed_memory_recall_candidate_id,
+    plan_memory_autopilot_for_profile, plan_temporal_memory_graph_write,
+    promote_task_experience_to_procedure, rerank_recall_with_temporal_graph, CompactGraphIndex,
+    CompactSoulProfile, CoreRevisionActionKind, CoreRevisionConflictClass, CoreRevisionLedger,
+    CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange, DroppedProjectionCandidate,
+    EdgeRecoveryFixture, EncryptedSnapshotEnvelope, EvidenceBacklink, GovernedMemoryOwnerPlane,
+    GovernedMemoryOwnerRef, GraphRecallExpansionBudget, MemoryAutopilotInput, MemoryAutopilotPlan,
+    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphEvidence, MemoryGraphNode,
+    MemoryGraphNodeKind, MemoryHygieneDiff, NextGenPhase, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProceduralMemoryRecordV2,
+    ProcedureGenome, ProjectionBudgetDecision, ProjectionPrivacyDecision,
+    RelationshipConstitutionAudit, SelfAuthoredCore, SkillEvolutionReport, SoulFeedbackReport,
+    SoulGrowthDecision, SoulGrowthProposal, SoulRegressionSuite,
+    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
+    SubjectProjectionWorkIntegrityReport, TemporalValidity, TurnSoulFeedbackLedger,
+    TurnSoulInitiativeLedger, TurnSoulReplyLedger, TurnSoulStrategyLedger, VaultManifest,
+    VaultMigrationPreflight, WorkbenchApiMap, WorkbenchSurface,
 };
 
 #[test]
@@ -654,7 +654,11 @@ fn temporal_memory_graph_recall_index_carries_two_hop_membership_dependencies() 
             .nodes
             .iter()
             .map(|node| bm_core::memory::MemoryGraphOwnerBinding {
-                owner_record_id: node.node_id.clone(),
+                node_id: node.node_id.clone(),
+                owner_ref: bm_core::memory::GovernedMemoryOwnerRef::new(
+                    bm_core::memory::GovernedMemoryOwnerPlane::LongTerm,
+                    node.node_id.clone(),
+                ),
                 owner_revision: 1,
                 visible: true,
             })
@@ -662,10 +666,13 @@ fn temporal_memory_graph_recall_index_carries_two_hop_membership_dependencies() 
     );
     assert!(persistence.accepted, "{:?}", persistence.failures);
 
+    let seed_owner_candidate_id = governed_memory_recall_candidate_id(
+        &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "fact:seed"),
+    );
     let seed_index = persistence
         .recall_indexes
         .iter()
-        .find(|index| index.source_anchor_id == "fact:seed")
+        .find(|index| index.owner_candidate_id == seed_owner_candidate_id)
         .expect("seed index");
     assert_eq!(seed_index.node_count, 3);
     assert_eq!(seed_index.edge_count, 2);

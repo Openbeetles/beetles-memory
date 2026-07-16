@@ -1,3 +1,4 @@
+mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,11 +8,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bm_core::feature_gate::ProfileId;
+use bm_core::platform::Platform as _;
 use bm_sdk::nonproduction_replay_harness::{
     FileStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
-    StoreConsistentNamespaceReadRequest, StoreConsistentReadRequest, StoreEngine,
-    StoreEngineMutation, StoreEventLog, StoreEventScope, StoreJsonAddress, StoreJsonPrecondition,
-    StoreTransactionRequest,
+    StoreConsistentReadRequest, StoreEngine, StoreEngineMutation, StoreEventLog, StoreEventScope,
+    StoreJsonAddress, StoreJsonPrecondition, StoreTransactionRequest,
 };
 use serde_json::{json, Value};
 
@@ -30,7 +31,11 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 fn config(root: &Path) -> StoreBackendConfig {
-    StoreBackendConfig::file(root, ProfileId::ServerLinuxDevFull).expect("file config")
+    StoreBackendConfig::file(
+        root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("file config")
 }
 
 fn event(transaction_id: &str) -> MemoryStoreEvent {
@@ -79,7 +84,7 @@ fn request(
 }
 
 fn open(root: &Path) -> FileStoreEngine {
-    FileStoreEngine::open(&config(root))
+    support::open_file_engine(&config(root))
         .expect("open file engine")
         .0
 }
@@ -117,6 +122,20 @@ fn crash_worker(root: &Path, crash_point: &str) -> std::process::ExitStatus {
         .stderr(Stdio::null())
         .status()
         .expect("spawn crash worker")
+}
+
+fn primitive_crash_worker(root: &Path, crash_point: &str) -> std::process::ExitStatus {
+    Command::new(std::env::current_exe().expect("test executable"))
+        .arg("--exact")
+        .arg("file_primitive_recovery_crash_worker")
+        .arg("--nocapture")
+        .env("BM_FILE_PRIMITIVE_RECOVERY_WORKER", "1")
+        .env("BM_FILE_TRANSACTION_ROOT", root)
+        .env("BM_FILE_PRIMITIVE_CRASH_POINT", crash_point)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn primitive crash worker")
 }
 
 fn pause_worker(
@@ -215,6 +234,43 @@ fn prepared_journal_recovers_before_image_after_process_crash() {
 }
 
 #[test]
+fn primitive_blob_and_event_recover_as_one_journaled_transaction() {
+    let root = temp_root("primitive-prepared");
+    let platform = support::open_store(config(&root)).expect("initialize file store");
+    assert!(platform
+        .state_fs()
+        .read("primitive/state.bin")
+        .expect("read initial blob")
+        .is_none());
+    assert!(!platform
+        .read_events()
+        .expect("initial events")
+        .iter()
+        .any(|event| event.plane == "state_fs" && event.record_key == "primitive/state.bin"));
+    drop(platform);
+
+    let status = primitive_crash_worker(&root, "after_apply_before_commit");
+    assert!(!status.success(), "primitive worker must crash after apply");
+    assert_journal_state(&root, "prepared");
+
+    let recovered = support::open_store(config(&root)).expect("recover file store");
+    assert!(recovered
+        .state_fs()
+        .read("primitive/state.bin")
+        .expect("read recovered blob")
+        .is_none());
+    assert!(
+        !recovered
+            .read_events()
+            .expect("read recovered events")
+            .iter()
+            .any(|event| event.plane == "state_fs" && event.record_key == "primitive/state.bin"),
+        "primitive data and its event must roll back together"
+    );
+    assert!(!root.join(".beetle-memory.transaction").exists());
+}
+
+#[test]
 fn committed_journal_recovers_after_image_after_process_crash() {
     let root = temp_root("committed");
     seed(&root);
@@ -280,16 +336,16 @@ fn ordinary_and_namespace_reads_recover_before_exposing_a_prepared_after_image()
         1
     );
 
-    let namespace_read = namespace_reader
-        .read_consistent_namespaces(&StoreConsistentNamespaceReadRequest {
-            json_namespaces: vec![NAMESPACE.to_string()],
-            blob_namespaces: Vec::new(),
+    let exact_read = namespace_reader
+        .read_consistent(&StoreConsistentReadRequest {
+            json: vec![StoreJsonAddress::new(NAMESPACE, KEY)],
+            blobs: Vec::new(),
             include_events: true,
         })
-        .expect("namespace read after recovery");
-    assert_eq!(namespace_read.json_docs.len(), 1);
-    assert_eq!(namespace_read.json_docs[0].value, json!({"generation": 1}));
-    assert_eq!(namespace_read.events.len(), 1);
+        .expect("exact read after recovery");
+    assert_eq!(exact_read.json.len(), 1);
+    assert_eq!(exact_read.json[0].value, Some(json!({"generation": 1})));
+    assert_eq!(exact_read.events.len(), 1);
     assert!(
         !root.join(".beetle-memory.transaction").exists(),
         "the first ordinary read must complete prepared-journal recovery"
@@ -301,10 +357,10 @@ fn active_after_image_stays_hidden_until_commit_and_journal_cleanup_finish() {
     let root = temp_root("active-after-image-read-fence");
     seed(&root);
     let reader_config = config(&root).with_lock_timeout(Duration::from_millis(50));
-    let ordinary_reader = FileStoreEngine::open(&reader_config)
+    let ordinary_reader = support::open_file_engine(&reader_config)
         .expect("ordinary reader")
         .0;
-    let namespace_reader = FileStoreEngine::open(&reader_config)
+    let namespace_reader = support::open_file_engine(&reader_config)
         .expect("namespace reader")
         .0;
     let ready = root.join("after-image.ready");
@@ -318,14 +374,14 @@ fn active_after_image_stays_hidden_until_commit_and_journal_cleanup_finish() {
         .get_json_value(NAMESPACE, KEY)
         .expect_err("ordinary read must not expose the uncommitted after-image");
     assert_eq!(ordinary_error.stage(), "store_transaction_busy");
-    let namespace_error = namespace_reader
-        .read_consistent_namespaces(&StoreConsistentNamespaceReadRequest {
-            json_namespaces: vec![NAMESPACE.to_string()],
-            blob_namespaces: Vec::new(),
+    let exact_read_error = namespace_reader
+        .read_consistent(&StoreConsistentReadRequest {
+            json: vec![StoreJsonAddress::new(NAMESPACE, KEY)],
+            blobs: Vec::new(),
             include_events: true,
         })
-        .expect_err("namespace read must not expose the uncommitted after-image");
-    assert_eq!(namespace_error.stage(), "store_transaction_busy");
+        .expect_err("exact read must not expose the uncommitted after-image");
+    assert_eq!(exact_read_error.stage(), "store_transaction_busy");
 
     fs::write(&release, b"release").expect("release writer");
     assert!(writer.wait().expect("pause worker").success());
@@ -335,15 +391,15 @@ fn active_after_image_stays_hidden_until_commit_and_journal_cleanup_finish() {
             .expect("ordinary committed read"),
         Some(json!({"generation": 2}))
     );
-    let namespace_read = namespace_reader
-        .read_consistent_namespaces(&StoreConsistentNamespaceReadRequest {
-            json_namespaces: vec![NAMESPACE.to_string()],
-            blob_namespaces: Vec::new(),
+    let exact_read = namespace_reader
+        .read_consistent(&StoreConsistentReadRequest {
+            json: vec![StoreJsonAddress::new(NAMESPACE, KEY)],
+            blobs: Vec::new(),
             include_events: true,
         })
-        .expect("namespace committed read");
-    assert_eq!(namespace_read.json_docs[0].value, json!({"generation": 2}));
-    assert_eq!(namespace_read.events.len(), 2);
+        .expect("exact committed read");
+    assert_eq!(exact_read.json[0].value, Some(json!({"generation": 2})));
+    assert_eq!(exact_read.events.len(), 2);
     assert!(
         !root.join(".beetle-memory.transaction").exists(),
         "readers may proceed only after committed-journal cleanup"
@@ -474,7 +530,7 @@ fn tampered_journal_checksum_phase_and_after_image_require_repair() {
         match tamper {
             "checksum" => journal["checksum"] = Value::String("0".repeat(64)),
             "phase" => journal["state"] = Value::String("prepared".to_string()),
-            "after" => journal["after"]["json_docs"][0]["value"] = json!({"generation": 99}),
+            "after" => journal["after"]["json"][0]["value"] = json!({"generation": 99}),
             _ => unreachable!(),
         }
         fs::write(
@@ -483,7 +539,7 @@ fn tampered_journal_checksum_phase_and_after_image_require_repair() {
         )
         .expect("write tampered journal");
 
-        let error = FileStoreEngine::open(&config(&root))
+        let error = support::open_file_engine(&config(&root))
             .err()
             .expect("tampered journal must fail closed");
         assert_eq!(
@@ -512,6 +568,31 @@ fn file_transaction_recovery_crash_worker() {
         .commit_transaction(&request("crash", Some(1), 2))
         .unwrap_or_else(|error| panic!("transaction returned before {crash_point:?}: {error}"));
     panic!("transaction did not terminate at {crash_point:?}");
+}
+
+#[test]
+fn file_primitive_recovery_crash_worker() {
+    let Some(root) = std::env::var_os("BM_FILE_TRANSACTION_ROOT") else {
+        return;
+    };
+    let Some(crash_point) = std::env::var_os("BM_FILE_PRIMITIVE_CRASH_POINT") else {
+        return;
+    };
+    assert_eq!(
+        std::env::var_os("BM_FILE_PRIMITIVE_RECOVERY_WORKER"),
+        Some("1".into()),
+        "worker must be explicitly enabled"
+    );
+
+    let platform =
+        support::open_store(config(Path::new(&root))).expect("open primitive file store");
+    std::env::set_var("BM_FILE_TRANSACTION_RECOVERY_WORKER", "1");
+    std::env::set_var("BM_FILE_TRANSACTION_CRASH_POINT", &crash_point);
+    platform
+        .state_fs()
+        .write("primitive/state.bin", b"after")
+        .unwrap_or_else(|error| panic!("primitive write returned before {crash_point:?}: {error}"));
+    panic!("primitive write did not terminate at {crash_point:?}");
 }
 
 #[test]

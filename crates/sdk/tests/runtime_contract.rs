@@ -1,9 +1,9 @@
+mod support;
 use std::sync::Arc;
 
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemoryStoreHandle, NoopMemoryAuditSink, ProfileId,
-    StoreBackendConfig,
+    MemoryRuntime, MemoryScope, NoopMemoryAuditSink, ProfileId, StoreBackendConfig,
 };
 
 struct FixedMemoryClock {
@@ -33,14 +33,13 @@ fn runtime_builder_rejects_empty_identity_and_scope() {
 
 #[test]
 fn runtime_builder_exposes_capabilities_with_store_platform() {
-    let store = MemoryStoreHandle::open_in_memory(
+    let store = support::open_memory_store(
         StoreBackendConfig::in_memory(ProfileId::EspEmbeddedSdk).unwrap(),
     )
     .unwrap();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
-        .profile(ProfileId::EspEmbeddedSdk)
         .store(store)
         .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
@@ -55,15 +54,14 @@ fn runtime_builder_exposes_capabilities_with_store_platform() {
 }
 
 #[test]
-fn recall_reports_the_single_governed_store_snapshot_it_consumed() {
-    let store = MemoryStoreHandle::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+fn recall_reports_the_single_immutable_session_read_view_it_consumed() {
+    let store = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).unwrap(),
     )
     .unwrap();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").unwrap())
         .scope(MemoryScope::new("local", "chat-1").unwrap())
-        .profile(ProfileId::ServerLinuxDevFull)
         .store(store)
         .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
         .build()

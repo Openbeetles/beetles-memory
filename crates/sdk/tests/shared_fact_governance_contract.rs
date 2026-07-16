@@ -4,7 +4,7 @@ use bm_sdk::{
     default_memory_space_id, LongTermMemoryKind, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryEvidenceAuthority, MemoryIdentity, MemoryPrivacyClass, MemoryRuntime, MemoryScope,
-    MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteRequest, ProfileId,
+    MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteRequest,
 };
 
 use support::empty_store_platform;
@@ -65,12 +65,11 @@ fn accepted_procedural_candidate(id: &str, body: &str) -> MemoryWriteCandidate {
 
 #[test]
 fn subject_candidate_shared_fact_is_owned_by_memory_space_governance() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .profile(profile)
         .store(platform)
         .build()
         .expect("runtime");
@@ -106,11 +105,10 @@ fn subject_candidate_shared_fact_is_owned_by_memory_space_governance() {
 
 #[test]
 fn candidate_report_rejects_semantically_accepted_but_non_durable_shared_fact() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .profile(profile)
         .store(empty_store_platform(profile))
         .build()
         .expect("runtime");
@@ -135,11 +133,10 @@ fn candidate_report_rejects_semantically_accepted_but_non_durable_shared_fact() 
 
 #[test]
 fn candidate_report_exposes_partial_durable_shared_fact_admission() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .profile(profile)
         .store(empty_store_platform(profile))
         .build()
         .expect("runtime");
@@ -171,11 +168,10 @@ fn candidate_report_exposes_partial_durable_shared_fact_admission() {
 
 #[test]
 fn candidate_report_rejects_semantically_accepted_but_weak_procedural_candidate() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .profile(profile)
         .store(empty_store_platform(profile))
         .build()
         .expect("runtime");
@@ -202,11 +198,10 @@ fn candidate_report_rejects_semantically_accepted_but_weak_procedural_candidate(
 
 #[test]
 fn candidate_report_rejects_mixed_batch_with_a_final_plane_rejection() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .profile(profile)
         .store(empty_store_platform(profile))
         .build()
         .expect("runtime");
@@ -243,11 +238,10 @@ fn candidate_report_rejects_mixed_batch_with_a_final_plane_rejection() {
 
 #[test]
 fn candidate_write_rejects_duplicate_durable_owner_identity_before_commit() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .profile(profile)
         .store(empty_store_platform(profile))
         .build()
         .expect("runtime");

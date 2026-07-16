@@ -44,6 +44,18 @@ profile-desktop-windows-embedded-sdk = [
     "bm-core/sqlite-index",
     "sqlite-store",
 ]
+profile-desktop-macos-dev-full = [
+    "bm-core/profile-desktop-macos-dev-full",
+    "bm-core/nonproduction-replay-harness",
+    "bm-core/sqlite-index",
+    "sqlite-store",
+]
+profile-desktop-windows-dev-full = [
+    "bm-core/profile-desktop-windows-dev-full",
+    "bm-core/nonproduction-replay-harness",
+    "bm-core/sqlite-index",
+    "sqlite-store",
+]
 profile-server-linux-memory-gateway = [
     "bm-core/profile-server-linux-memory-gateway",
     "bm-core/sqlite-index",

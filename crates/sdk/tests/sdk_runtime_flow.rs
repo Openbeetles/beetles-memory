@@ -5,14 +5,15 @@ mod support;
 use std::sync::Arc;
 
 use bm_core::memory::{
-    board_subject_scope_id, private_garden_scope_id, InnerLife, PrivateDocEntry,
+    board_subject_scope_id, governed_memory_recall_candidate_id, private_garden_scope_id,
+    GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, InnerLife, PrivateDocEntry,
     PrivateDocWorkspace, SelfContinuity, SelfModel,
 };
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     IngressKind, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
     MemoryMaintenanceRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemoryWriteRequest, NoopMemoryAuditSink, PressureLevel, ProfileId,
+    MemoryRuntime, MemoryScope, MemoryWriteRequest, NoopMemoryAuditSink, PressureLevel,
     ProjectionSourceAuthority, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
     RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
@@ -23,8 +24,8 @@ use support::{
 
 #[test]
 fn runtime_write_recall_project_uses_sdk_entry_only() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
 
     let write = runtime
         .write(MemoryWriteRequest::Procedural {
@@ -65,6 +66,11 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
             tool_registry_refs: Vec::new(),
         })
         .expect("recall");
+    let runtime_skill_candidate_id =
+        governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::RuntimeSkill,
+            "runtime_skill__release_guard",
+        ));
 
     assert!(recall
         .procedural_hits
@@ -74,12 +80,12 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
         .graph_rerank
         .candidate_ids
         .iter()
-        .any(|candidate| candidate == "runtime_skill__release_guard"));
+        .any(|candidate| candidate == &runtime_skill_candidate_id));
     assert!(recall
         .graph_rerank
         .reranked_candidate_ids
         .iter()
-        .any(|candidate| candidate == "runtime_skill__release_guard"));
+        .any(|candidate| candidate == &runtime_skill_candidate_id));
     assert!(!recall.graph_gate.high_confidence_projection_allowed);
     assert!(recall
         .graph_gate
@@ -91,7 +97,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
         .compact_graph
         .nodes
         .iter()
-        .any(|node| node.node_id == "runtime_skill__release_guard"));
+        .any(|node| node.node_id == runtime_skill_candidate_id));
 
     let projection = runtime
         .project(MemoryProjectionRequest {
@@ -110,7 +116,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
 
 #[test]
 fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_platform() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     platform
         .replay_harness()
@@ -241,8 +247,8 @@ fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_pl
 
 #[test]
 fn runtime_maintain_and_inspect_return_structured_reports() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform, support::host_test_profile());
     let llm = StaticLlmClient::summary_response("Summary: release safety");
     let mut http = StaticHttpClient;
 
@@ -281,13 +287,13 @@ fn runtime_maintain_and_inspect_return_structured_reports() {
     assert_eq!(inspection.working.query, "release");
     assert_eq!(
         inspection.capabilities.profile,
-        ProfileId::ServerLinuxDevFull
+        support::host_test_profile()
     );
 }
 
 #[test]
 fn runtime_projection_includes_private_planes_when_policy_allows_it() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
     platform
         .replay_harness()
         .private_doc_store()
@@ -333,7 +339,6 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
-        .profile(ProfileId::ServerLinuxDevFull)
         .store(platform)
         .clock(Arc::new(TestClock))
         .capability_policy(bm_sdk::MemoryCapabilityPolicy::strict_profile())
@@ -491,7 +496,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
 
 #[test]
 fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
-    let platform = empty_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = empty_store_platform(support::host_test_profile());
     platform
         .replay_harness()
         .self_model_store()
@@ -554,7 +559,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         )
         .expect("private garden seed");
     let runtime =
-        test_runtime_with_scope(platform, ProfileId::ServerLinuxDevFull, "local", "chat-1");
+        test_runtime_with_scope(platform, support::host_test_profile(), "local", "chat-1");
 
     let projection = runtime
         .project(MemoryProjectionRequest {

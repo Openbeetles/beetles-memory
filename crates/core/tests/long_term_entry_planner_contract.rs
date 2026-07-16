@@ -1,10 +1,11 @@
 use bm_core::memory::{
     canonical_evidence_ref_from_source, plan_long_term_memory_owner_mutation,
     plan_long_term_memory_upsert, scoped_long_term_memory_storage_key, CanonicalEntityKey,
-    CanonicalEntityKind, CanonicalEntityRef, LongTermMemoryConfidence, LongTermMemoryDraft,
-    LongTermMemoryEntryPlan, LongTermMemoryEntryRejection, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemorySourceScope,
-    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryPrivacyClass,
+    CanonicalEntityKind, CanonicalEntityRef, CanonicalRecallEvidenceFamilyGroup,
+    LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryEntryPlan,
+    LongTermMemoryEntryRejection, LongTermMemoryFreshness, LongTermMemoryKind,
+    LongTermMemoryOwnerMutation, LongTermMemorySourceScope, LongTermMemorySourceType,
+    LongTermMemoryStaleHint, MemoryPrivacyClass,
 };
 
 #[test]
@@ -106,6 +107,30 @@ fn create_sets_owner_revision_one_and_preserves_optional_source_revision() {
         "beetle-memory"
     );
     assert_eq!(entry.canonical_entities[0].aliases, vec!["Beetle"]);
+}
+
+#[test]
+fn canonical_entity_preserves_only_structured_optional_evidence_family() {
+    let mut governed = draft("v1", Some(7));
+    let family =
+        CanonicalRecallEvidenceFamilyGroup::from_structured_identity("transcript-session:chat-a")
+            .expect("structured family")
+            .into_string();
+    governed.canonical_entities[0].evidence_refs[0].evidence_family_group = Some(family.clone());
+
+    let entry = created(plan_long_term_memory_upsert(None, &governed, NOW));
+    assert_eq!(
+        entry.canonical_entities[0].evidence_refs[0].evidence_family_group,
+        Some(family)
+    );
+
+    let mut invalid = draft("v1", Some(7));
+    invalid.canonical_entities[0].evidence_refs[0].evidence_family_group =
+        Some("chat-a".to_string());
+    assert_eq!(
+        plan_long_term_memory_upsert(None, &invalid, NOW),
+        LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::InvalidCanonicalEntity)
+    );
 }
 
 #[test]

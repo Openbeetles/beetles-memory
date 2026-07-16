@@ -1448,6 +1448,7 @@ fn build_continuity_capsule_candidate(
     };
     RecallCandidate {
         plane: RecallPlane::ContinuityCapsule,
+        owner_ref: None,
         candidate_id: capsule.capsule_id.clone(),
         title: capsule.topic,
         excerpt: truncate_content_to_max(&excerpt, 180).trim().to_string(),

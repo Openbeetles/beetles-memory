@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "privacy-refusal-compact-baseline",
   "class": "privacy_refusal",
-  "profile": "esp_standalone_memory",
+  "profile": "target-esp+role-standalone-memory",
   "mode": "compact",
   "evaluation_source": "contract_baseline",
   "description": "Compact profile fails closed and blocks private raw disclosure from public artifacts.",

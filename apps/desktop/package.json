@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "cargo build -p bm-llm-gateway --no-default-features --features server-async,client-reqwest && tauri dev",
-    "build": "tauri build"
+    "dev": "cargo build --locked -p bm-llm-gateway --no-default-features --features server-async,client-reqwest,profile-desktop-macos-standalone-memory && tauri dev --features profile-desktop-macos-standalone-memory",
+    "build": "tauri build --features profile-desktop-macos-standalone-memory"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.0"

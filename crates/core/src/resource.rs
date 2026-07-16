@@ -1,7 +1,11 @@
 use crate::orchestrator::PressureLevel;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::fmt;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -13,8 +17,6 @@ pub enum RuntimeResourceProbeSource {
     HostLinux,
     HostWindows,
     HostOther,
-    Injected,
-    Cached,
 }
 
 impl RuntimeResourceProbeSource {
@@ -27,8 +29,6 @@ impl RuntimeResourceProbeSource {
             Self::HostLinux => "host_linux",
             Self::HostWindows => "host_windows",
             Self::HostOther => "host_other",
-            Self::Injected => "injected",
-            Self::Cached => "cached",
         }
     }
 }
@@ -57,10 +57,9 @@ impl RuntimeResourceUnavailableReason {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeResourceSnapshot {
+pub struct RuntimeResourceObservation {
     pub observed_at_unix_secs: u64,
     pub ttl_ms: u64,
-    pub source: RuntimeResourceProbeSource,
     pub stale: bool,
     pub pressure: PressureLevel,
     pub available_parallelism: Option<u16>,
@@ -74,32 +73,21 @@ pub struct RuntimeResourceSnapshot {
     pub psram_largest_block_bytes: Option<u64>,
     pub storage_total_bytes: Option<u64>,
     pub storage_available_bytes: Option<u64>,
-    pub active_http_count: u32,
-    pub active_wss_count: u32,
-    pub active_runtime_jobs: u32,
-    pub inbound_queue_depth: u32,
-    pub outbound_queue_depth: u32,
-    pub tls_fragmentation_risk: bool,
-    pub storage_contention_risk: bool,
     pub unavailable_reason: Option<RuntimeResourceUnavailableReason>,
     pub unavailable_detail: Option<String>,
 }
 
-impl RuntimeResourceSnapshot {
+impl RuntimeResourceObservation {
     pub fn unavailable(
         observed_at_unix_secs: u64,
-        source: RuntimeResourceProbeSource,
         reason: RuntimeResourceUnavailableReason,
     ) -> Self {
         Self {
             observed_at_unix_secs,
             ttl_ms: 30_000,
-            source,
             stale: false,
             pressure: PressureLevel::Cautious,
-            available_parallelism: std::thread::available_parallelism()
-                .ok()
-                .and_then(|value| u16::try_from(value.get()).ok()),
+            available_parallelism: None,
             memory_total_bytes: None,
             memory_available_bytes: None,
             internal_heap_free_bytes: None,
@@ -110,13 +98,6 @@ impl RuntimeResourceSnapshot {
             psram_largest_block_bytes: None,
             storage_total_bytes: None,
             storage_available_bytes: None,
-            active_http_count: 0,
-            active_wss_count: 0,
-            active_runtime_jobs: 0,
-            inbound_queue_depth: 0,
-            outbound_queue_depth: 0,
-            tls_fragmentation_risk: false,
-            storage_contention_risk: false,
             unavailable_reason: Some(reason),
             unavailable_detail: None,
         }
@@ -127,162 +108,353 @@ impl RuntimeResourceSnapshot {
         self
     }
 
-    pub fn mark_stale(mut self, now_secs: u64) -> Self {
+    fn mark_stale(mut self) -> Self {
         self.stale = true;
-        self.observed_at_unix_secs = now_secs;
+        if self.pressure == PressureLevel::Normal {
+            self.pressure = PressureLevel::Cautious;
+        }
         self.unavailable_reason = Some(RuntimeResourceUnavailableReason::SnapshotStale);
         self
     }
 
     pub fn is_expired(&self, now_secs: u64) -> bool {
+        if now_secs < self.observed_at_unix_secs {
+            return true;
+        }
         let ttl_secs = self.ttl_ms.div_ceil(1000);
-        now_secs.saturating_sub(self.observed_at_unix_secs) > ttl_secs
+        now_secs - self.observed_at_unix_secs >= ttl_secs
     }
 
-    pub fn host_probe(now_secs: u64) -> Self {
+    fn host_probe(now_secs: u64, storage_path: Option<&Path>) -> Self {
         let (memory_total_bytes, memory_available_bytes) = host_memory_bytes();
-        let (storage_total_bytes, storage_available_bytes) = host_storage_bytes();
+        let (storage_total_bytes, storage_available_bytes) =
+            storage_path.map(host_storage_bytes).unwrap_or((None, None));
         let available_parallelism = std::thread::available_parallelism()
             .ok()
             .and_then(|value| u16::try_from(value.get()).ok());
         let pressure = pressure_from_resources(memory_total_bytes, memory_available_bytes);
-        let source = host_probe_source();
-        let mut snapshot = Self {
+        let mut observation = Self {
             observed_at_unix_secs: now_secs,
             ttl_ms: 30_000,
-            source,
             stale: false,
             pressure,
             available_parallelism,
             memory_total_bytes,
             memory_available_bytes,
-            internal_heap_free_bytes: memory_available_bytes,
-            internal_heap_minimum_free_bytes: memory_available_bytes,
-            internal_heap_largest_block_bytes: memory_available_bytes,
+            internal_heap_free_bytes: None,
+            internal_heap_minimum_free_bytes: None,
+            internal_heap_largest_block_bytes: None,
             psram_total_bytes: None,
             psram_free_bytes: None,
             psram_largest_block_bytes: None,
             storage_total_bytes,
             storage_available_bytes,
-            active_http_count: 0,
-            active_wss_count: 0,
-            active_runtime_jobs: 0,
-            inbound_queue_depth: 0,
-            outbound_queue_depth: 0,
-            tls_fragmentation_risk: false,
-            storage_contention_risk: false,
             unavailable_reason: None,
             unavailable_detail: None,
         };
         if memory_total_bytes.is_none() && memory_available_bytes.is_none() {
-            snapshot.unavailable_reason = Some(RuntimeResourceUnavailableReason::MemoryUnavailable);
+            observation.unavailable_reason =
+                Some(RuntimeResourceUnavailableReason::MemoryUnavailable);
         }
-        if storage_total_bytes.is_none() && storage_available_bytes.is_none() {
-            snapshot.unavailable_reason = snapshot
+        if storage_path.is_some()
+            && storage_total_bytes.is_none()
+            && storage_available_bytes.is_none()
+        {
+            observation.unavailable_reason = observation
                 .unavailable_reason
                 .or(Some(RuntimeResourceUnavailableReason::StorageUnavailable));
         }
-        snapshot
+        observation
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeResourceSnapshot {
+    pub source: RuntimeResourceProbeSource,
+    #[serde(flatten)]
+    observation: RuntimeResourceObservation,
+}
+
+impl RuntimeResourceSnapshot {
+    pub fn unavailable(
+        observed_at_unix_secs: u64,
+        source: RuntimeResourceProbeSource,
+        reason: RuntimeResourceUnavailableReason,
+    ) -> Self {
+        Self::from_observation(
+            source,
+            RuntimeResourceObservation::unavailable(observed_at_unix_secs, reason),
+        )
+    }
+
+    pub(crate) fn from_observation(
+        source: RuntimeResourceProbeSource,
+        observation: RuntimeResourceObservation,
+    ) -> Self {
+        Self {
+            source,
+            observation,
+        }
+    }
+
+    pub fn with_unavailable_detail(mut self, detail: impl Into<String>) -> Self {
+        self.observation.unavailable_detail = Some(detail.into());
+        self
+    }
+
+    pub fn mark_stale(mut self) -> Self {
+        self.observation = self.observation.mark_stale();
+        self
+    }
+
+    pub fn is_expired(&self, now_secs: u64) -> bool {
+        self.observation.is_expired(now_secs)
+    }
+}
+
+impl Deref for RuntimeResourceSnapshot {
+    type Target = RuntimeResourceObservation;
+
+    fn deref(&self) -> &Self::Target {
+        &self.observation
+    }
+}
+
+impl DerefMut for RuntimeResourceSnapshot {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.observation
     }
 }
 
 pub trait RuntimeResourceProbe: Send + Sync {
-    fn probe(&self, now_secs: u64) -> Result<RuntimeResourceSnapshot>;
+    fn probe(&self, now_secs: u64) -> Result<RuntimeResourceObservation>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostStorageObservation {
+    VolatileMemory,
+    PersistentFilesystem,
+}
+
+// runtime-resource-public-surface: core-owned-host-probe
+#[derive(Clone)]
+pub(crate) struct RuntimeResourceProbeRegistration {
+    attested_source: RuntimeResourceProbeSource,
+    host_storage_observation: Option<HostStorageObservation>,
+    probe: Arc<dyn RuntimeResourceProbe>,
+}
+
+impl RuntimeResourceProbeRegistration {
+    pub(crate) fn host(probe: HostRuntimeResourceProbe) -> Self {
+        let host_storage_observation = probe.storage_observation();
+        Self {
+            attested_source: compiled_host_probe_source(),
+            host_storage_observation: Some(host_storage_observation),
+            probe: Arc::new(probe),
+        }
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub(crate) fn nonproduction_host(
+        probe: Arc<dyn RuntimeResourceProbe>,
+        host_storage_observation: HostStorageObservation,
+    ) -> Self {
+        Self {
+            attested_source: compiled_host_probe_source(),
+            host_storage_observation: Some(host_storage_observation),
+            probe,
+        }
+    }
+
+    pub(crate) fn firmware(probe: Arc<dyn RuntimeResourceProbe>) -> Self {
+        Self {
+            attested_source: RuntimeResourceProbeSource::FirmwareManifest,
+            host_storage_observation: None,
+            probe,
+        }
+    }
+
+    pub(crate) fn firmware_unavailable() -> Self {
+        Self::firmware(Arc::new(UnavailableRuntimeResourceProbe::new(
+            RuntimeResourceUnavailableReason::ProbeNotConfigured,
+        )))
+    }
+
+    pub(crate) const fn attested_source(&self) -> RuntimeResourceProbeSource {
+        self.attested_source
+    }
+
+    pub(crate) const fn host_storage_observation(&self) -> Option<HostStorageObservation> {
+        self.host_storage_observation
+    }
+
+    pub(crate) fn probe_snapshot(&self, now_secs: u64) -> Result<RuntimeResourceSnapshot> {
+        self.probe.probe(now_secs).map(|observation| {
+            RuntimeResourceSnapshot::from_observation(self.attested_source, observation)
+        })
+    }
+}
+
+impl fmt::Debug for RuntimeResourceProbeRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeResourceProbeRegistration")
+            .field("attested_source", &self.attested_source)
+            .field("host_storage_observation", &self.host_storage_observation)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct UnavailableRuntimeResourceProbe {
-    source: RuntimeResourceProbeSource,
     reason: RuntimeResourceUnavailableReason,
 }
 
 impl UnavailableRuntimeResourceProbe {
-    pub const fn new(
-        source: RuntimeResourceProbeSource,
-        reason: RuntimeResourceUnavailableReason,
-    ) -> Self {
-        Self { source, reason }
+    pub const fn new(reason: RuntimeResourceUnavailableReason) -> Self {
+        Self { reason }
     }
 }
 
 impl Default for UnavailableRuntimeResourceProbe {
     fn default() -> Self {
-        Self::new(
-            RuntimeResourceProbeSource::Unavailable,
-            RuntimeResourceUnavailableReason::ProbeNotConfigured,
-        )
+        Self::new(RuntimeResourceUnavailableReason::ProbeNotConfigured)
     }
 }
 
 impl RuntimeResourceProbe for UnavailableRuntimeResourceProbe {
-    fn probe(&self, now_secs: u64) -> Result<RuntimeResourceSnapshot> {
-        Ok(RuntimeResourceSnapshot::unavailable(
+    fn probe(&self, now_secs: u64) -> Result<RuntimeResourceObservation> {
+        Ok(RuntimeResourceObservation::unavailable(
             now_secs,
-            self.source,
             self.reason,
         ))
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct HostRuntimeResourceProbe;
+pub struct HostRuntimeResourceProbe {
+    storage_path: Option<PathBuf>,
+}
+
+impl HostRuntimeResourceProbe {
+    pub const fn for_volatile_memory() -> Self {
+        Self { storage_path: None }
+    }
+
+    pub fn for_persistent_filesystem(data_path: impl Into<PathBuf>) -> Result<Self> {
+        let data_path = data_path.into();
+        if data_path.as_os_str().is_empty() {
+            return Err(Error::config(
+                "runtime_resource_probe_config",
+                "persistent_filesystem_path_is_empty",
+            ));
+        }
+        let storage_path = nearest_existing_ancestor(&data_path)?;
+        Ok(Self {
+            storage_path: Some(storage_path),
+        })
+    }
+
+    const fn storage_observation(&self) -> HostStorageObservation {
+        if self.storage_path.is_some() {
+            HostStorageObservation::PersistentFilesystem
+        } else {
+            HostStorageObservation::VolatileMemory
+        }
+    }
+}
+
+fn nearest_existing_ancestor(data_path: &Path) -> Result<PathBuf> {
+    let mut candidate = if data_path.is_absolute() {
+        data_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                Error::config(
+                    "runtime_resource_probe_config",
+                    format!("persistent_filesystem_current_dir_unavailable:{error}"),
+                )
+            })?
+            .join(data_path)
+    };
+
+    loop {
+        match candidate.try_exists() {
+            Ok(true) => return Ok(candidate),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(Error::config(
+                    "runtime_resource_probe_config",
+                    format!(
+                        "persistent_filesystem_path_observation_failed:{}:{error}",
+                        candidate.display()
+                    ),
+                ));
+            }
+        }
+        if !candidate.pop() {
+            return Err(Error::config(
+                "runtime_resource_probe_config",
+                "persistent_filesystem_has_no_existing_ancestor",
+            ));
+        }
+    }
+}
+
+impl Default for HostRuntimeResourceProbe {
+    fn default() -> Self {
+        Self::for_volatile_memory()
+    }
+}
 
 impl RuntimeResourceProbe for HostRuntimeResourceProbe {
-    fn probe(&self, now_secs: u64) -> Result<RuntimeResourceSnapshot> {
-        Ok(RuntimeResourceSnapshot::host_probe(now_secs))
+    fn probe(&self, now_secs: u64) -> Result<RuntimeResourceObservation> {
+        Ok(RuntimeResourceObservation::host_probe(
+            now_secs,
+            self.storage_path.as_deref(),
+        ))
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct StaticRuntimeResourceProbe {
+pub(crate) struct RuntimeResourceSnapshotCache {
     snapshot: RuntimeResourceSnapshot,
-}
-
-impl StaticRuntimeResourceProbe {
-    pub fn new(snapshot: RuntimeResourceSnapshot) -> Self {
-        Self { snapshot }
-    }
-}
-
-impl RuntimeResourceProbe for StaticRuntimeResourceProbe {
-    fn probe(&self, _now_secs: u64) -> Result<RuntimeResourceSnapshot> {
-        Ok(self.snapshot.clone())
-    }
-}
-
-#[derive(Debug)]
-pub struct RuntimeResourceSnapshotCache {
-    snapshot: Mutex<RuntimeResourceSnapshot>,
+    refresh_deadline: Instant,
 }
 
 impl RuntimeResourceSnapshotCache {
-    pub fn new(snapshot: RuntimeResourceSnapshot) -> Self {
+    pub(crate) fn new(snapshot: RuntimeResourceSnapshot) -> Self {
+        let refresh_deadline = monotonic_refresh_deadline(snapshot.ttl_ms);
         Self {
-            snapshot: Mutex::new(snapshot),
+            snapshot,
+            refresh_deadline,
         }
     }
 
-    pub fn current(&self, now_secs: u64) -> RuntimeResourceSnapshot {
-        let snapshot = self.snapshot.lock().expect("resource snapshot cache");
-        if snapshot.is_expired(now_secs) {
-            return snapshot.clone().mark_stale(now_secs);
-        }
-        snapshot.clone()
+    pub(crate) fn requires_refresh(&self, now_secs: u64) -> bool {
+        self.snapshot.stale
+            || self.snapshot.is_expired(now_secs)
+            || Instant::now() >= self.refresh_deadline
     }
 
-    pub fn refresh_from_probe(
-        &self,
-        probe: &dyn RuntimeResourceProbe,
-        now_secs: u64,
-    ) -> Result<RuntimeResourceSnapshot> {
-        let snapshot = probe.probe(now_secs)?;
-        *self.snapshot.lock().expect("resource snapshot cache") = snapshot.clone();
-        Ok(snapshot)
+    pub(crate) fn current(&self, now_secs: u64) -> RuntimeResourceSnapshot {
+        if !self.snapshot.stale && self.requires_refresh(now_secs) {
+            return self.snapshot.clone().mark_stale();
+        }
+        self.snapshot.clone()
+    }
+
+    pub(crate) fn replace(&mut self, snapshot: RuntimeResourceSnapshot) {
+        self.refresh_deadline = monotonic_refresh_deadline(snapshot.ttl_ms);
+        self.snapshot = snapshot;
     }
 }
 
-pub fn probe_host_runtime_resource(now_secs: u64) -> RuntimeResourceSnapshot {
-    RuntimeResourceSnapshot::host_probe(now_secs)
+fn monotonic_refresh_deadline(ttl_ms: u64) -> Instant {
+    Instant::now()
+        .checked_add(Duration::from_millis(ttl_ms))
+        .unwrap_or_else(Instant::now)
 }
 
 fn pressure_from_resources(
@@ -309,13 +481,24 @@ fn pressure_from_resources(
     PressureLevel::Normal
 }
 
-fn host_probe_source() -> RuntimeResourceProbeSource {
-    match std::env::consts::OS {
-        "macos" => RuntimeResourceProbeSource::HostMacos,
-        "linux" => RuntimeResourceProbeSource::HostLinux,
-        "windows" => RuntimeResourceProbeSource::HostWindows,
-        _ => RuntimeResourceProbeSource::HostOther,
-    }
+#[cfg(target_os = "macos")]
+const fn compiled_host_probe_source() -> RuntimeResourceProbeSource {
+    RuntimeResourceProbeSource::HostMacos
+}
+
+#[cfg(target_os = "linux")]
+const fn compiled_host_probe_source() -> RuntimeResourceProbeSource {
+    RuntimeResourceProbeSource::HostLinux
+}
+
+#[cfg(target_os = "windows")]
+const fn compiled_host_probe_source() -> RuntimeResourceProbeSource {
+    RuntimeResourceProbeSource::HostWindows
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const fn compiled_host_probe_source() -> RuntimeResourceProbeSource {
+    RuntimeResourceProbeSource::HostOther
 }
 
 fn host_memory_bytes() -> (Option<u64>, Option<u64>) {
@@ -327,32 +510,136 @@ fn host_memory_bytes() -> (Option<u64>, Option<u64>) {
     {
         return macos_memory_bytes();
     }
+    #[cfg(target_os = "windows")]
+    {
+        return windows_memory_bytes();
+    }
     #[allow(unreachable_code)]
     (None, None)
 }
 
 #[cfg(target_os = "linux")]
 fn linux_memory_bytes() -> (Option<u64>, Option<u64>) {
-    let Ok(text) = std::fs::read_to_string("/proc/meminfo") else {
+    linux_memory_bytes_from_reader(&FilesystemLinuxResourceReader)
+}
+
+trait LinuxResourceReader {
+    fn read_to_string(&self, path: &Path) -> Option<String>;
+}
+
+struct FilesystemLinuxResourceReader;
+
+impl LinuxResourceReader for FilesystemLinuxResourceReader {
+    fn read_to_string(&self, path: &Path) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+}
+
+fn linux_memory_bytes_from_reader(reader: &dyn LinuxResourceReader) -> (Option<u64>, Option<u64>) {
+    let Some(text) = reader.read_to_string(Path::new("/proc/meminfo")) else {
         return (None, None);
     };
     let mut total = None;
     let mut available = None;
     for line in text.lines() {
         if let Some(value) = parse_meminfo_kib(line, "MemTotal:") {
-            total = Some(value * 1024);
+            total = value.checked_mul(1024);
         }
         if let Some(value) = parse_meminfo_kib(line, "MemAvailable:") {
-            available = Some(value * 1024);
+            available = value.checked_mul(1024);
         }
     }
-    (total, available)
+    let Some((limit, current)) = linux_cgroup_memory(reader) else {
+        return (total, available);
+    };
+    let cgroup_available = limit.saturating_sub(current);
+    (
+        Some(total.map_or(limit, |host_total| host_total.min(limit))),
+        Some(available.map_or(cgroup_available, |host_available| {
+            host_available.min(cgroup_available)
+        })),
+    )
 }
 
-#[cfg(target_os = "linux")]
 fn parse_meminfo_kib(line: &str, prefix: &str) -> Option<u64> {
     let rest = line.strip_prefix(prefix)?.trim();
     rest.split_whitespace().next()?.parse::<u64>().ok()
+}
+
+fn linux_cgroup_memory(reader: &dyn LinuxResourceReader) -> Option<(u64, u64)> {
+    let cgroup = reader.read_to_string(Path::new("/proc/self/cgroup"))?;
+    let mountinfo = reader.read_to_string(Path::new("/proc/self/mountinfo"));
+    if let Some(relative) = cgroup.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some("0"), Some(""), Some(path)) => Some(path),
+            _ => None,
+        }
+    }) {
+        let mount = mountinfo
+            .as_deref()
+            .and_then(|text| cgroup_mountpoint(text, "cgroup2", None))
+            .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"));
+        let directory = join_cgroup_path(&mount, relative);
+        let limit = parse_cgroup_limit(&reader.read_to_string(&directory.join("memory.max"))?)?;
+        let current =
+            parse_cgroup_value(&reader.read_to_string(&directory.join("memory.current"))?)?;
+        return Some((limit, current));
+    }
+
+    let relative = cgroup.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let _hierarchy = fields.next()?;
+        let controllers = fields.next()?;
+        let path = fields.next()?;
+        controllers
+            .split(',')
+            .any(|value| value == "memory")
+            .then_some(path)
+    })?;
+    let mount = mountinfo
+        .as_deref()
+        .and_then(|text| cgroup_mountpoint(text, "cgroup", Some("memory")))
+        .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup/memory"));
+    let directory = join_cgroup_path(&mount, relative);
+    let limit =
+        parse_cgroup_limit(&reader.read_to_string(&directory.join("memory.limit_in_bytes"))?)?;
+    let current =
+        parse_cgroup_value(&reader.read_to_string(&directory.join("memory.usage_in_bytes"))?)?;
+    Some((limit, current))
+}
+
+fn cgroup_mountpoint(text: &str, fs_type: &str, controller: Option<&str>) -> Option<PathBuf> {
+    text.lines().find_map(|line| {
+        let (before, after) = line.split_once(" - ")?;
+        let mut after_fields = after.split_whitespace();
+        if after_fields.next()? != fs_type {
+            return None;
+        }
+        let _source = after_fields.next()?;
+        let super_options = after_fields.next().unwrap_or_default();
+        if controller.is_some_and(|value| !super_options.split(',').any(|item| item == value)) {
+            return None;
+        }
+        before.split_whitespace().nth(4).map(PathBuf::from)
+    })
+}
+
+fn join_cgroup_path(mount: &Path, relative: &str) -> PathBuf {
+    mount.join(relative.trim_start_matches('/'))
+}
+
+fn parse_cgroup_limit(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw == "max" {
+        return None;
+    }
+    let value = raw.parse::<u64>().ok()?;
+    (value < (1_u64 << 60)).then_some(value)
+}
+
+fn parse_cgroup_value(raw: &str) -> Option<u64> {
+    raw.trim().parse::<u64>().ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -391,20 +678,113 @@ fn parse_vm_stat_pages(text: &str, prefix: &str) -> Option<u64> {
     None
 }
 
-fn host_storage_bytes() -> (Option<u64>, Option<u64>) {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        return df_storage_bytes(".");
-    }
-    #[allow(unreachable_code)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn host_storage_bytes(path: &Path) -> (Option<u64>, Option<u64>) {
+    df_storage_bytes(path)
+}
+
+#[cfg(target_os = "windows")]
+fn host_storage_bytes(path: &Path) -> (Option<u64>, Option<u64>) {
+    windows_storage_bytes(path)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn host_storage_bytes(path: &Path) -> (Option<u64>, Option<u64>) {
+    let _ = path;
     (None, None)
 }
 
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct WindowsMemoryStatusEx {
+    length: u32,
+    memory_load: u32,
+    total_physical: u64,
+    available_physical: u64,
+    total_page_file: u64,
+    available_page_file: u64,
+    total_virtual: u64,
+    available_virtual: u64,
+    available_extended_virtual: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GlobalMemoryStatusEx(status: *mut WindowsMemoryStatusEx) -> i32;
+    fn GetDiskFreeSpaceExW(
+        directory_name: *const u16,
+        free_bytes_available: *mut u64,
+        total_number_of_bytes: *mut u64,
+        total_number_of_free_bytes: *mut u64,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn windows_memory_bytes() -> (Option<u64>, Option<u64>) {
+    let mut status = WindowsMemoryStatusEx {
+        length: std::mem::size_of::<WindowsMemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_physical: 0,
+        available_physical: 0,
+        total_page_file: 0,
+        available_page_file: 0,
+        total_virtual: 0,
+        available_virtual: 0,
+        available_extended_virtual: 0,
+    };
+    // SAFETY: `status` is writable, correctly sized, and initialized as required by Win32.
+    let succeeded = unsafe { GlobalMemoryStatusEx(&mut status) } != 0;
+    if succeeded {
+        (Some(status.total_physical), Some(status.available_physical))
+    } else {
+        (None, None)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_storage_bytes(path: &Path) -> (Option<u64>, Option<u64>) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut available = 0_u64;
+    let mut total = 0_u64;
+    let mut total_free = 0_u64;
+    // SAFETY: `wide` is NUL-terminated and all output pointers remain valid for the call.
+    let succeeded =
+        unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut total_free) }
+            != 0;
+    if succeeded {
+        (Some(total), Some(available))
+    } else {
+        (None, None)
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn df_storage_bytes(path: &str) -> (Option<u64>, Option<u64>) {
-    let Some(text) =
-        command_output("/bin/df", &["-k", path]).or_else(|| command_output("df", &["-k", path]))
-    else {
+fn df_storage_bytes(path: &Path) -> (Option<u64>, Option<u64>) {
+    let output = std::process::Command::new("/bin/df")
+        .arg("-k")
+        .arg(path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .or_else(|| {
+            std::process::Command::new("df")
+                .arg("-k")
+                .arg(path)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+        });
+    let Some(output) = output else {
+        return (None, None);
+    };
+    let Ok(text) = String::from_utf8(output.stdout) else {
         return (None, None);
     };
     let Some(line) = text.lines().last() else {
@@ -440,6 +820,25 @@ pub fn probe_error(detail: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct FixtureLinuxResourceReader {
+        files: BTreeMap<PathBuf, String>,
+    }
+
+    impl FixtureLinuxResourceReader {
+        fn with(mut self, path: &str, value: &str) -> Self {
+            self.files.insert(PathBuf::from(path), value.to_string());
+            self
+        }
+    }
+
+    impl LinuxResourceReader for FixtureLinuxResourceReader {
+        fn read_to_string(&self, path: &Path) -> Option<String> {
+            self.files.get(path).cloned()
+        }
+    }
 
     #[test]
     fn unavailable_probe_never_reports_full_budget() {
@@ -450,22 +849,153 @@ mod tests {
             Some(RuntimeResourceUnavailableReason::ProbeNotConfigured)
         );
         assert_eq!(snapshot.memory_available_bytes, None);
+        assert_eq!(snapshot.available_parallelism, None);
         assert_eq!(snapshot.pressure, PressureLevel::Cautious);
     }
 
     #[test]
     fn stale_cache_marks_snapshot_without_reprobing() {
-        let snapshot = RuntimeResourceSnapshot::unavailable(
+        let mut snapshot = RuntimeResourceSnapshot::unavailable(
             1,
             RuntimeResourceProbeSource::Unavailable,
             RuntimeResourceUnavailableReason::ProbeNotConfigured,
         );
+        snapshot.pressure = PressureLevel::Normal;
         let cache = RuntimeResourceSnapshotCache::new(snapshot);
         let stale = cache.current(60);
         assert!(stale.stale);
+        assert_eq!(stale.observed_at_unix_secs, 1);
+        assert_eq!(stale.pressure, PressureLevel::Cautious);
         assert_eq!(
             stale.unavailable_reason,
             Some(RuntimeResourceUnavailableReason::SnapshotStale)
+        );
+    }
+
+    #[test]
+    fn ttl_expires_at_the_exact_boundary() {
+        let mut snapshot = RuntimeResourceSnapshot::unavailable(
+            10,
+            RuntimeResourceProbeSource::Unavailable,
+            RuntimeResourceUnavailableReason::ProbeNotConfigured,
+        );
+        snapshot.ttl_ms = 1_000;
+        assert!(!snapshot.is_expired(10));
+        assert!(snapshot.is_expired(11));
+    }
+
+    #[test]
+    fn wall_clock_rollback_expires_the_observation() {
+        let mut snapshot = RuntimeResourceSnapshot::unavailable(
+            100,
+            RuntimeResourceProbeSource::HostLinux,
+            RuntimeResourceUnavailableReason::MemoryUnavailable,
+        );
+        snapshot.ttl_ms = 30_000;
+
+        assert!(snapshot.is_expired(99));
+        assert!(!snapshot.is_expired(100));
+    }
+
+    #[test]
+    fn persistent_probe_observes_existing_ancestor_without_creating_data_path() {
+        let unique = format!(
+            "bm-resource-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let missing_root = std::env::temp_dir().join(unique);
+        let data_path = missing_root.join("nested").join("store.sqlite");
+        assert!(!missing_root.exists());
+
+        let probe = HostRuntimeResourceProbe::for_persistent_filesystem(&data_path).unwrap();
+
+        assert_eq!(
+            probe.storage_path.as_deref(),
+            Some(std::env::temp_dir().as_path())
+        );
+        assert!(!missing_root.exists());
+    }
+
+    #[test]
+    fn linux_cgroup_v2_caps_host_memory_by_limit_minus_current() {
+        let reader = FixtureLinuxResourceReader::default()
+            .with(
+                "/proc/meminfo",
+                "MemTotal:       16777216 kB\nMemAvailable:   12582912 kB\n",
+            )
+            .with("/proc/self/cgroup", "0::/workload.slice/test\n")
+            .with(
+                "/proc/self/mountinfo",
+                "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+            )
+            .with(
+                "/sys/fs/cgroup/workload.slice/test/memory.max",
+                "1073741824\n",
+            )
+            .with(
+                "/sys/fs/cgroup/workload.slice/test/memory.current",
+                "268435456\n",
+            );
+
+        assert_eq!(
+            linux_memory_bytes_from_reader(&reader),
+            (Some(1_073_741_824), Some(805_306_368))
+        );
+    }
+
+    #[test]
+    fn linux_cgroup_v1_caps_host_memory_and_treats_kernel_sentinel_as_unlimited() {
+        let base = FixtureLinuxResourceReader::default()
+            .with(
+                "/proc/meminfo",
+                "MemTotal:       8388608 kB\nMemAvailable:   4194304 kB\n",
+            )
+            .with("/proc/self/cgroup", "5:memory:/docker/test\n")
+            .with(
+                "/proc/self/mountinfo",
+                "31 23 0:28 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n",
+            )
+            .with(
+                "/sys/fs/cgroup/memory/docker/test/memory.limit_in_bytes",
+                "2147483648\n",
+            )
+            .with(
+                "/sys/fs/cgroup/memory/docker/test/memory.usage_in_bytes",
+                "536870912\n",
+            );
+        assert_eq!(
+            linux_memory_bytes_from_reader(&base),
+            (Some(2_147_483_648), Some(1_610_612_736))
+        );
+
+        let unlimited = base.with(
+            "/sys/fs/cgroup/memory/docker/test/memory.limit_in_bytes",
+            "9223372036854771712\n",
+        );
+        assert_eq!(
+            linux_memory_bytes_from_reader(&unlimited),
+            (Some(8_589_934_592), Some(4_294_967_296))
+        );
+    }
+
+    #[test]
+    fn malformed_cgroup_facts_fail_back_to_host_memory_without_inventing_capacity() {
+        let reader = FixtureLinuxResourceReader::default()
+            .with(
+                "/proc/meminfo",
+                "MemTotal:       1048576 kB\nMemAvailable:   524288 kB\n",
+            )
+            .with("/proc/self/cgroup", "0::/broken\n")
+            .with("/sys/fs/cgroup/broken/memory.max", "invalid\n")
+            .with("/sys/fs/cgroup/broken/memory.current", "1\n");
+
+        assert_eq!(
+            linux_memory_bytes_from_reader(&reader),
+            (Some(1_073_741_824), Some(536_870_912))
         );
     }
 }

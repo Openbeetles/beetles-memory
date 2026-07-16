@@ -141,11 +141,12 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::memory::{
-        inspect_archive_recall, inspect_runtime_skill_recall, inspect_shared_factual_recall,
-        inspect_task_recall, ArchiveRecordSource, LongTermMemoryConfidence, LongTermMemoryEntry,
-        LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-        LongTermMemorySourceType, MemoryPrivacyClass, MemoryProfile, MemoryStore, SessionMessage,
-        SessionStore, TurnLedger, TurnLedgerStatus, TurnLedgerStore,
+        governed_memory_recall_candidate_id, inspect_archive_recall, inspect_runtime_skill_recall,
+        inspect_shared_factual_recall, inspect_task_recall, ArchiveRecordSource,
+        GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, LongTermMemoryConfidence,
+        LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind,
+        LongTermMemorySourceScope, LongTermMemorySourceType, MemoryPrivacyClass, MemoryProfile,
+        MemoryStore, SessionMessage, SessionStore, TurnLedger, TurnLedgerStatus, TurnLedgerStore,
     };
     use crate::platform::SkillStorage;
     use crate::skills::{
@@ -692,14 +693,22 @@ mod tests {
             &session_store.load_recent("chat-a", 2).unwrap(),
             420,
         );
+        let shared_candidate_id = governed_memory_recall_candidate_id(
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "fact:network_setup"),
+        );
+        let runtime_skill_candidate_id =
+            governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+                GovernedMemoryOwnerPlane::RuntimeSkill,
+                "runtime_skill__network_setup",
+            ));
 
         let cases = vec![
             RecallBenchmarkCase {
                 name: "shared factual network setup",
                 plane: RecallPlane::SharedFactual,
                 report: shared_report,
-                relevant_candidate_ids: vec!["fact:network_setup".to_string()],
-                expected_top_candidate_id: Some("fact:network_setup".to_string()),
+                relevant_candidate_ids: vec![shared_candidate_id.clone()],
+                expected_top_candidate_id: Some(shared_candidate_id),
                 top_k: 1,
                 min_recall_at_k: 1.0,
                 min_precision_at_k: 1.0,
@@ -733,8 +742,8 @@ mod tests {
                 name: "runtime skill network setup",
                 plane: RecallPlane::RuntimeSkill,
                 report: runtime_report,
-                relevant_candidate_ids: vec!["runtime_skill__network_setup".to_string()],
-                expected_top_candidate_id: Some("runtime_skill__network_setup".to_string()),
+                relevant_candidate_ids: vec![runtime_skill_candidate_id.clone()],
+                expected_top_candidate_id: Some(runtime_skill_candidate_id),
                 top_k: 1,
                 min_recall_at_k: 1.0,
                 min_precision_at_k: 1.0,
@@ -778,6 +787,7 @@ mod tests {
             candidates: vec![crate::memory::RecallCandidate {
                 plane: RecallPlane::Archive,
                 candidate_id: "a".to_string(),
+                owner_ref: None,
                 title: "A".to_string(),
                 excerpt: String::new(),
                 citation: None,

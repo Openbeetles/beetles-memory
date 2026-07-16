@@ -1,11 +1,17 @@
+#[cfg(feature = "nonproduction-replay-harness")]
 use std::path::PathBuf;
+#[cfg(feature = "nonproduction-replay-harness")]
 use std::sync::Arc;
+#[cfg(feature = "nonproduction-replay-harness")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_llm_gateway::GatewayAuditConfig;
 use bm_llm_gateway::{
-    GatewayAuditConfig, GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage,
-    GatewayProjectionAuditStatus, GatewayScopeResolution,
+    GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayProjectionAuditStatus,
+    GatewayScopeResolution,
 };
+#[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::{
     board_subject_scope_id, private_garden_scope_id, MemoryAuditSink, MemoryClock, MemoryIdentity,
     MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
@@ -54,9 +60,13 @@ fn gateway_audit_report_has_stages_without_raw_sensitive_payloads() {
 }
 
 #[test]
+#[cfg(feature = "nonproduction-replay-harness")]
 fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnostics() {
     let platform = MemoryStoreHandle::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).expect("store config"),
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("supported host-native dev-full profile"),
+        )
+        .expect("store config"),
     )
     .expect("store platform");
     platform
@@ -88,7 +98,6 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
-        .profile(ProfileId::ServerLinuxDevFull)
         .store(platform)
         .clock(Arc::new(FixedClock))
         .capability_policy(bm_sdk::MemoryCapabilityPolicy::strict_profile())
@@ -184,6 +193,26 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .expect("diagnostic dir")
         .count();
     assert!(file_count <= config.raw_projection_retention_limit);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&diagnostic_dir)
+                .expect("diagnostic dir metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&diagnostic_path)
+                .expect("diagnostic file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 
     let disabled_config = GatewayAuditConfig {
         record_raw_projection: false,
@@ -216,14 +245,17 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
     assert!(disabled_report.projection_record.block.is_none());
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 struct FixedClock;
 
+#[cfg(feature = "nonproduction-replay-harness")]
 impl MemoryClock for FixedClock {
     fn now_secs(&self) -> u64 {
         1_800_000_000
     }
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 fn unique_audit_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

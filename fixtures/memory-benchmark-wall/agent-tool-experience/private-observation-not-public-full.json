@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "agent-tool-experience-private-observation-not-public-full",
   "class": "agent_tool_experience",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "Private tool observations are not promoted into public agent-tool hints.",

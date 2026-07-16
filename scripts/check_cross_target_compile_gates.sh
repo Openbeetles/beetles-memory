@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+cargo() {
+  command cargo --locked "$@"
+}
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -28,8 +32,11 @@ profiles=(
   profile-esp-standalone-memory
   profile-esp-embedded-sdk
   profile-linux-device-standalone-memory
+  profile-desktop-macos-standalone-memory
   profile-desktop-macos-embedded-sdk
+  profile-desktop-macos-dev-full
   profile-desktop-windows-embedded-sdk
+  profile-desktop-windows-dev-full
   profile-server-linux-memory-gateway
   profile-server-linux-dev-full
 )
@@ -39,6 +46,7 @@ for profile in "${profiles[@]}"; do
 done
 
 gateway_profiles=(
+  profile-desktop-macos-standalone-memory
   profile-server-linux-memory-gateway
   profile-server-linux-dev-full
 )

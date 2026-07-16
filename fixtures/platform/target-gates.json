@@ -20,6 +20,24 @@
       "features": ["profile-linux-device-standalone-memory"]
     },
     {
+      "profile": "profile-desktop-macos-standalone-memory",
+      "target": "aarch64-apple-darwin",
+      "package": "bm-sdk",
+      "features": ["profile-desktop-macos-standalone-memory"]
+    },
+    {
+      "profile": "profile-desktop-macos-embedded-sdk",
+      "target": "aarch64-apple-darwin",
+      "package": "bm-sdk",
+      "features": ["profile-desktop-macos-embedded-sdk"]
+    },
+    {
+      "profile": "profile-desktop-macos-dev-full",
+      "target": "aarch64-apple-darwin",
+      "package": "bm-sdk",
+      "features": ["profile-desktop-macos-dev-full"]
+    },
+    {
       "profile": "profile-server-linux-memory-gateway",
       "target": "x86_64-unknown-linux-gnu",
       "package": "bm-sdk",
@@ -30,6 +48,18 @@
       "target": "x86_64-pc-windows-msvc",
       "package": "bm-sdk",
       "features": ["profile-desktop-windows-embedded-sdk"]
+    },
+    {
+      "profile": "profile-desktop-windows-dev-full",
+      "target": "x86_64-pc-windows-msvc",
+      "package": "bm-sdk",
+      "features": ["profile-desktop-windows-dev-full"]
+    },
+    {
+      "profile": "profile-server-linux-dev-full",
+      "target": "x86_64-unknown-linux-gnu",
+      "package": "bm-sdk",
+      "features": ["profile-server-linux-dev-full"]
     }
   ]
 }

@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "procedural-reuse-compact-baseline",
   "class": "procedural_reuse",
-  "profile": "esp_standalone_memory",
+  "profile": "target-esp+role-standalone-memory",
   "mode": "compact",
   "evaluation_source": "contract_baseline",
   "description": "Compact profile writes and recalls a procedural guard without enabling heavy evolution.",

@@ -1,18 +1,25 @@
 //! Process-level entry runtime for Beetle Memory.
 
+mod accepted_tcp;
 mod auth;
 mod config;
 mod console;
 mod error;
+mod http_ingress;
 mod idempotency;
+mod network_front;
 mod response;
 mod runtime;
 mod source;
 
-pub use auth::{EntryAuthConfig, EntryAuthDecision};
+pub use accepted_tcp::EntryAcceptedTcpStream;
+pub use auth::{
+    EntryAuthConfig, EntryAuthDecision, EntryBearerPrincipal, EntryLocalTransport,
+    EntryOperationCapability,
+};
 pub use config::{
     EntryCapabilityItem, EntryCapabilityView, EntryIdempotencyConfig, EntryIdentity, EntryScope,
-    EntryStoreConfig, EntryTransportConfig,
+    EntryTransportConfig,
 };
 pub use console::{
     EntryConsoleCapabilityRow, EntryConsoleDevice, EntryConsoleDeviceCreate,
@@ -33,10 +40,17 @@ pub use console::{
     EntryConsoleWorkbenchVaultMigration,
 };
 pub use error::EntryErrorKey;
+pub use http_ingress::{
+    read_authorized_http_request, EntryAuthorizedHttpRequest, EntryHttpAuthorization,
+    EntryHttpIngressError, EntryHttpIngressErrorKind, EntryHttpIngressLimits, EntryHttpRequestHead,
+};
 pub use idempotency::EntryIdempotencyCache;
+pub use network_front::{
+    EntryTcpDispatchOutcome, EntryTcpNetworkFront, EntryTcpNetworkFrontConfig,
+};
 pub use response::{EntryResponse, EntryResponseStatus};
 pub use runtime::{
-    entry_capability_view, EntryRuntime, EntryRuntimeBaseConfig, EntryRuntimeConfig,
-    EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope,
+    entry_capability_view, EntryRuntime, EntryRuntimeBaseConfig, EntryRuntimeBudgetLease,
+    EntryRuntimeConfig, EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope,
 };
 pub use source::EntryTransportContext;

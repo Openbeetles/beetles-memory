@@ -1,94 +1,36 @@
 #![cfg(feature = "sqlite-store")]
 
+mod support;
+
 use bm_core::budget::StoreRuntimeBudget;
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
-    build_long_term_memory_facet_index_doc, canonical_evidence_ref_from_source,
-    plan_long_term_memory_upsert, scoped_long_term_memory_storage_key,
-    scoped_memory_facet_owner_storage_key, CanonicalEntityKey, CanonicalEntityKind,
+    canonical_evidence_ref_from_source, CanonicalEntityKey, CanonicalEntityKind,
     CanonicalEntityRef, LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryEntry,
-    LongTermMemoryEntryPlan, LongTermMemoryFreshness, LongTermMemoryKind,
-    LongTermMemorySourceScope, LongTermMemorySourceType, LongTermMemoryStaleHint,
-    MemoryPrivacyClass, MEMORY_FACET_INDEX_NAMESPACE,
+    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryPrivacyClass,
 };
 use bm_core::platform::Platform;
-use bm_sdk::nonproduction_replay_harness::{
-    MemoryStoreEventKind, StoreBackendConfig, StoreEventScope, StoreJsonPrecondition,
-    StoreMutation, StoreMutationBatch, StorePlatform,
-};
+use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StorePlatform};
 
-fn seed_private_archive(
+fn seed_governed_archive(
     platform: &StorePlatform,
     memory_space_id: &str,
     draft: &LongTermMemoryDraft,
     now_secs: u64,
 ) -> LongTermMemoryEntry {
-    let entry = match plan_long_term_memory_upsert(None, draft, now_secs) {
-        LongTermMemoryEntryPlan::Created(entry) => entry,
-        other => panic!("new archive fixture must be created, got {other:?}"),
-    };
-    let subject_id = "subject:test";
-    let owner_key =
-        scoped_long_term_memory_storage_key(memory_space_id, &entry.id).expect("owner key");
-    let facet = build_long_term_memory_facet_index_doc(
-        &entry,
-        memory_space_id,
-        vec![subject_id.to_string()],
-        1,
-    );
-    let facet_key = scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, &entry.id)
-        .expect("facet key");
-    platform
-        .commit_governed_memory_transaction_with_preconditions(
-            StoreMutationBatch {
-                transaction_id: format!("seed-private-archive-{}", entry.id),
-                operation: "test.seed_private_archive".to_string(),
-                scope: StoreEventScope::new("agent:test", "owner:test", "test", "chat-a")
-                    .with_memory_space(memory_space_id)
-                    .with_subject(subject_id),
-                mutations: vec![
-                    StoreMutation::PutJson {
-                        namespace: "long_term".to_string(),
-                        key: owner_key.clone(),
-                        value: serde_json::to_value(&entry).expect("serialize archive owner"),
-                        event_kind: MemoryStoreEventKind::MemoryWrite,
-                        plane: "long_term".to_string(),
-                        record_key: entry.id.clone(),
-                    },
-                    StoreMutation::PutJson {
-                        namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                        key: facet_key.clone(),
-                        value: serde_json::to_value(&facet).expect("serialize archive facet"),
-                        event_kind: MemoryStoreEventKind::MemoryWrite,
-                        plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                        record_key: format!("facet-owner:{}", entry.id),
-                    },
-                ],
-            },
-            &[
-                StoreJsonPrecondition::Absent {
-                    namespace: "long_term".to_string(),
-                    key: owner_key,
-                },
-                StoreJsonPrecondition::Absent {
-                    namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    key: facet_key,
-                },
-            ],
-        )
-        .expect("seed private archive transaction");
-    entry
+    support::seed_scoped_long_term(platform, memory_space_id, draft, now_secs)
 }
 
 fn tiny_store_budget() -> StoreRuntimeBudget {
     StoreRuntimeBudget {
         event_log_max_items: 2,
-        kv_max_entries: 8,
+        kv_max_entries: 256,
         blob_max_bytes: 4,
         snapshot_max_bytes: 1024 * 1024,
         logical_namespace_max_bytes: 64,
-        logical_key_max_bytes: 32,
-        event_record_key_max_bytes: 32,
+        logical_key_max_bytes: 64,
+        event_record_key_max_bytes: 64,
         export_max_bytes: 1024 * 1024,
         import_max_bytes: 1024 * 1024,
     }
@@ -100,20 +42,21 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
         std::env::temp_dir().join(format!("beetle-memory-sqlite-store-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let path = root.join("memory.sqlite3");
-    let config = StoreBackendConfig::sqlite(&path, ProfileId::ServerLinuxMemoryGateway).unwrap();
+    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
 
     {
-        let platform = StorePlatform::open(config.clone()).unwrap();
+        let platform = support::open_store(config.clone()).unwrap();
         platform
             .state_fs()
             .write("runtime/state.json", b"state")
             .unwrap();
-        platform.skill_storage().write("alpha", b"skill").unwrap();
+        let skill = support::seed_runtime_skill(&platform, "runtime_skill__alpha");
+        assert!(!skill.is_empty());
         platform
             .session_store()
             .append("chat-a", "user", "hello")
             .unwrap();
-        seed_private_archive(
+        seed_governed_archive(
             &platform,
             "space:test",
             &LongTermMemoryDraft {
@@ -126,7 +69,7 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
                     "sqlite".to_string(),
                     "reopen".to_string(),
                 ],
-                privacy: MemoryPrivacyClass::PrivateGarden,
+                privacy: MemoryPrivacyClass::SharedWithSubject,
                 source_chat_id: Some("chat-a".to_string()),
                 source_type: Some(LongTermMemorySourceType::Conversation),
                 source_scope: Some(LongTermMemorySourceScope::User),
@@ -160,12 +103,16 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
             .any(|event| event.kind_name == "memory.write"));
     }
 
-    let reopened = StorePlatform::open(config).unwrap();
+    let reopened = support::open_store(config).unwrap();
     assert_eq!(
         reopened.state_fs().read("runtime/state.json").unwrap(),
         Some(b"state".to_vec())
     );
-    assert_eq!(reopened.skill_storage().read("alpha").unwrap(), b"skill");
+    assert!(!reopened
+        .skill_storage()
+        .read("runtime_skill__alpha")
+        .unwrap()
+        .is_empty());
     assert_eq!(
         reopened
             .scoped_long_term_memory_read_store("space:test")
@@ -187,13 +134,17 @@ fn sqlite_store_rejects_profile_mismatch_on_existing_database() {
     let _ = std::fs::remove_dir_all(&root);
     let path = root.join("memory.sqlite3");
 
-    StorePlatform::open(
-        StoreBackendConfig::sqlite(&path, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    support::open_store(
+        StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
 
-    let err = match StorePlatform::open(
-        StoreBackendConfig::sqlite(&path, ProfileId::ServerLinuxMemoryGateway).unwrap(),
+    let err = match support::open_store(
+        StoreBackendConfig::sqlite(
+            &path,
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     ) {
         Ok(_) => panic!("existing sqlite store must reject a different profile"),
         Err(error) => error,
@@ -211,10 +162,11 @@ fn sqlite_store_consumes_event_key_and_blob_budgets() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     let path = root.join("memory.sqlite3");
-    let config = StoreBackendConfig::sqlite(&path, ProfileId::ServerLinuxMemoryGateway)
+    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile())
         .unwrap()
-        .with_runtime_store_budget(tiny_store_budget());
-    let platform = StorePlatform::open(config).unwrap();
+        .try_with_nonproduction_store_budget_limit(tiny_store_budget())
+        .expect("tiny sqlite budget must be a valid semantic contraction");
+    let platform = support::open_store(config).unwrap();
 
     platform
         .state_fs()
@@ -236,10 +188,11 @@ fn sqlite_store_consumes_event_key_and_blob_budgets() {
     let path = root.join("memory.sqlite3");
     let mut blob_budget = tiny_store_budget();
     blob_budget.event_log_max_items = 8;
-    let config = StoreBackendConfig::sqlite(&path, ProfileId::ServerLinuxMemoryGateway)
+    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile())
         .unwrap()
-        .with_runtime_store_budget(blob_budget);
-    let platform = StorePlatform::open(config).unwrap();
+        .try_with_nonproduction_store_budget_limit(blob_budget)
+        .expect("blob sqlite budget must be a valid semantic contraction");
+    let platform = support::open_store(config).unwrap();
 
     platform.state_fs().write("a", b"12").unwrap();
     platform.state_fs().write("b", b"12").unwrap();
@@ -250,7 +203,7 @@ fn sqlite_store_consumes_event_key_and_blob_budgets() {
     assert_eq!(err.stage(), "store_budget_exceeded");
     assert!(err.to_string().contains("blob bytes"));
 
-    let oversized_key = "k".repeat(33);
+    let oversized_key = "k".repeat(65);
     let err = platform
         .state_fs()
         .write(&oversized_key, b"1")

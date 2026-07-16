@@ -6,7 +6,7 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind, MemoryPrivacyClass};
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
-    StoreBackendConfig, StorePathBudget, StorePlatform, StoreRepairPolicy,
+    StoreBackendConfig, StoreEngine, StorePathBudget, StoreRepairPolicy,
 };
 use serde_json::Value;
 use support::seed_scoped_long_term;
@@ -91,15 +91,16 @@ fn current_unix_secs() -> u64 {
 #[test]
 fn file_store_persists_core_runtime_paths_across_reopen() {
     let root = temp_root("persist");
-    let config = StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap();
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
 
     {
-        let platform = StorePlatform::open(config.clone()).unwrap();
+        let platform = support::open_store(config.clone()).unwrap();
         platform
             .state_fs()
             .write("runtime/state.json", b"state")
             .unwrap();
-        platform.skill_storage().write("alpha", b"skill").unwrap();
+        let skill = support::seed_runtime_skill(&platform, "runtime_skill__alpha");
+        assert!(!skill.is_empty());
         platform
             .session_store()
             .append("chat-a", "user", "hello")
@@ -135,12 +136,16 @@ fn file_store_persists_core_runtime_paths_across_reopen() {
             .any(|event| event.kind_name == "memory.write"));
     }
 
-    let reopened = StorePlatform::open(config).unwrap();
+    let reopened = support::open_store(config).unwrap();
     assert_eq!(
         reopened.state_fs().read("runtime/state.json").unwrap(),
         Some(b"state".to_vec())
     );
-    assert_eq!(reopened.skill_storage().read("alpha").unwrap(), b"skill");
+    assert!(!reopened
+        .skill_storage()
+        .read("runtime_skill__alpha")
+        .unwrap()
+        .is_empty());
     assert_eq!(
         reopened.session_store().load_recent("chat-a", 1).unwrap()[0].content,
         "hello"
@@ -160,12 +165,12 @@ fn file_store_persists_core_runtime_paths_across_reopen() {
 #[test]
 fn file_snapshot_import_does_not_remove_preexisting_stage_directories() {
     let root = temp_root("snapshot-stage-collision");
-    let target = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let target = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
-    let source = StorePlatform::open(
-        StoreBackendConfig::in_memory(ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let source = support::open_store(
+        StoreBackendConfig::in_memory(support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     source
@@ -212,8 +217,8 @@ fn file_store_open_retains_repair_report_on_platform() {
     std::fs::create_dir_all(tmp.parent().unwrap()).unwrap();
     std::fs::write(&tmp, b"partial").unwrap();
 
-    let platform = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk)
+    let platform = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile())
             .unwrap()
             .with_repair_policy(StoreRepairPolicy::ReportOnly),
     )
@@ -235,9 +240,13 @@ fn file_store_open_retains_repair_report_on_platform() {
 #[test]
 fn file_store_maps_long_logical_keys_to_profile_bounded_physical_paths() {
     let root = temp_root("bounded-physical-paths");
-    let config = StoreBackendConfig::file(&root, ProfileId::DesktopWindowsEmbeddedSdk).unwrap();
-    let budget = config.path_budget;
-    let platform = StorePlatform::open(config).unwrap();
+    let config = StoreBackendConfig::file(
+        &root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .unwrap();
+    let budget = config.path_budget();
+    let platform = support::open_store(config).unwrap();
     let logical_key = format!("work-room/{}", "long-input-segment-".repeat(32));
 
     platform.state_fs().write(&logical_key, b"state").unwrap();
@@ -257,13 +266,17 @@ fn file_store_maps_long_logical_keys_to_profile_bounded_physical_paths() {
 #[test]
 fn file_store_rejects_profile_mismatch_on_existing_root() {
     let root = temp_root("manifest-profile-mismatch");
-    StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
 
-    let err = match StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).unwrap(),
+    let err = match support::open_store(
+        StoreBackendConfig::file(
+            &root,
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     ) {
         Ok(_) => panic!("existing store root must reject a different profile"),
         Err(error) => error,
@@ -276,8 +289,8 @@ fn file_store_rejects_profile_mismatch_on_existing_root() {
 #[test]
 fn file_store_fails_closed_when_v2_blob_data_is_missing_but_index_remains() {
     let root = temp_root("missing-v2-blob-data");
-    let platform = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let platform = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     platform
@@ -300,8 +313,8 @@ fn file_store_fails_closed_when_v2_blob_data_is_missing_but_index_remains() {
 #[test]
 fn file_store_list_rejects_corrupt_sidecar_key() {
     let root = temp_root("corrupt-sidecar-key");
-    let platform = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let platform = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     platform
@@ -326,13 +339,10 @@ fn file_store_list_rejects_corrupt_sidecar_key() {
 #[test]
 fn file_store_delete_refuses_corrupt_sidecar_without_removing_evidence() {
     let root = temp_root("delete-corrupt-sidecar");
-    let platform = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
-    )
-    .unwrap();
-    platform
-        .state_fs()
-        .write("runtime/state.json", b"state")
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
+    let (engine, _, _) = support::open_file_engine(&config).unwrap();
+    engine
+        .put_blob("state_fs", "runtime/state.json", b"state")
         .unwrap();
 
     let index = find_one_file(&root.join("blob").join("state_fs").join("_keys"), "json");
@@ -341,9 +351,8 @@ fn file_store_delete_refuses_corrupt_sidecar_without_removing_evidence() {
     value["key"] = Value::String("runtime/other.json".to_string());
     std::fs::write(&index, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
-    let err = platform
-        .state_fs()
-        .remove("runtime/state.json")
+    let err = engine
+        .delete_blob("state_fs", "runtime/state.json")
         .expect_err("delete must not wipe corrupt physical evidence");
 
     assert_eq!(err.stage(), "file_store_blob_delete");
@@ -354,8 +363,8 @@ fn file_store_delete_refuses_corrupt_sidecar_without_removing_evidence() {
 #[test]
 fn file_store_list_errors_when_keys_path_is_not_directory() {
     let root = temp_root("keys-path-not-directory");
-    let platform = StorePlatform::open(
-        StoreBackendConfig::file(&root, ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let platform = support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     let key_dir = root.join("blob").join("state_fs").join("_keys");

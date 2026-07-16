@@ -28,7 +28,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 - 从 working、procedural、long-term、continuity 等表面召回记忆。
 - 生成受长度限制的模型上下文 memory block。
 - 检查运行状态、生命周期报告和 operator-safe recovery action。
-- 导出、导入并回放 continuity snapshot。
+- 导出、导入 typed memory-space archive，并回放受治理的 runtime history；continuity snapshot 仅作为内部 Soul recovery 载荷。
 - 通过 SDK、CLI、HTTP、WebSocket、MCP 或 A2A adapter shell 进入同一套记忆语义。
 - 面向 ESP、Linux 硬件设备、macOS 桌面独立 App、macOS/Windows SDK 宿主和 Linux server gateway profile 编译。
 
@@ -68,7 +68,6 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
         .scope(MemoryScope::new("local", "chat-1")?)
-        .profile(profile)
         .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(
             "./skills",
@@ -95,6 +94,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     let recall = runtime.recall(MemoryRecallRequest {
         query: "release artifacts".to_string(),
         limit: 4,
+        structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
     assert!(!recall.procedural_hits.is_empty());
@@ -105,6 +105,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         recent_messages_limit: 8,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
+        structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
     assert!(projection.system_memory_block.len() <= 4096);
@@ -156,11 +157,14 @@ English documentation:
 | `profile-linux-device-standalone-memory` | Linux 硬件设备 | standalone memory runtime | file 或 sqlite |
 | `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file 或 sqlite |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file、sqlite 或 in-memory |
+| `profile-desktop-macos-dev-full` | macOS | 非生产开发 profile | sqlite、file 或 in-memory |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file、sqlite 或 in-memory |
+| `profile-desktop-windows-dev-full` | Windows | 非生产开发 profile | sqlite、file 或 in-memory |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file |
-| `profile-server-linux-dev-full` | Linux server | development profile | sqlite、file 或 in-memory |
+| `profile-server-linux-dev-full` | Linux server | 非生产开发 profile | sqlite、file 或 in-memory |
 
 ESP profile 会在配置时拒绝 file 和 sqlite store。server、desktop 和 Linux-device profile 在启用对应 profile/store feature 后可以使用 sqlite。
+所有 `*-dev-full` profile 都会启用非生产 replay harness，且必须与真实宿主 target 匹配；它们从来不是生产默认值。
 
 ## 示例
 
@@ -178,8 +182,8 @@ cargo run --manifest-path examples/esp-embedded-sdk/Cargo.toml
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 bash scripts/check_profile_matrix.sh
 bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_release_surface.sh

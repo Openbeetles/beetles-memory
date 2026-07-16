@@ -4,14 +4,14 @@ mod support;
 
 use bm_core::{memory::MemoryStore as _, platform::Platform as _};
 use bm_sdk::{
-    compile_runtime_budget, CanonicalTurnDelta, ConversationKey, ConversationScope,
-    DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility,
-    MemoryEvidenceAuthority, MemoryProjectionRequest, MemoryTranscriptAttrWriteRequest,
-    MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest,
-    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    PressureLevel, ProfileId, ProviderModelContextLimit, RuntimeBudgetInput,
-    RuntimeLifecycleModeInput, TranscriptAttrEnvelope, TranscriptAttrGovernance,
-    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
+    HostOpaqueRef, HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority,
+    MemoryProjectionRequest, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    NonproductionRuntimeBudgetLimits, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
     TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptRedactionReason,
     TranscriptReplayView,
@@ -19,9 +19,13 @@ use bm_sdk::{
 use serde_json::json;
 
 use support::{
-    empty_store_platform, seeded_store_platform, test_runtime, test_runtime_with_scope_and_subject,
-    test_runtime_with_scope_subject_and_budget,
+    empty_store_platform, empty_store_platform_with_budget, seeded_store_platform, test_runtime,
+    test_runtime_with_scope_and_subject,
 };
+
+fn dev_profile() -> ProfileId {
+    support::host_test_profile()
+}
 
 fn transcript_budget_turn(turn_id: &str) -> CanonicalTurnDelta {
     CanonicalTurnDelta {
@@ -103,8 +107,8 @@ fn transcript_budget_attr(
 
 #[test]
 fn projection_render_limit_does_not_cut_source_recall() {
-    let platform = seeded_store_platform(ProfileId::ServerLinuxDevFull);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let platform = seeded_store_platform(dev_profile());
+    let runtime = test_runtime(platform, dev_profile());
 
     let projection = runtime
         .project(MemoryProjectionRequest {
@@ -132,11 +136,12 @@ fn projection_render_limit_does_not_cut_source_recall() {
 
 #[test]
 fn runtime_exposes_compiled_budget_report() {
-    let platform = seeded_store_platform(ProfileId::ServerLinuxMemoryGateway);
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxMemoryGateway);
+    let profile = dev_profile();
+    let platform = seeded_store_platform(profile);
+    let runtime = test_runtime(platform, profile);
     let budget = runtime.runtime_budget();
 
-    assert_eq!(budget.profile, ProfileId::ServerLinuxMemoryGateway);
+    assert_eq!(budget.profile, profile);
     assert!(budget.projection_source_budget.context_assembly_max_chars > 0);
     assert!(budget.projection_render_budget.system_block_max_chars > 0);
     assert!(budget.facet_recall_budget.max_query_facets > 0);
@@ -147,155 +152,8 @@ fn runtime_exposes_compiled_budget_report() {
 }
 
 #[test]
-fn graph_expansion_budget_is_profile_owned_and_not_provider_render_owned() {
-    let esp_embedded = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
-        .graph_expansion_budget;
-    let esp_standalone =
-        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspStandaloneMemory)
-            .graph_expansion_budget;
-    let linux_device =
-        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::LinuxDeviceStandaloneMemory)
-            .graph_expansion_budget;
-    let server_gateway =
-        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxMemoryGateway)
-            .graph_expansion_budget;
-    let dev_full = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
-        .graph_expansion_budget;
-
-    assert_eq!(esp_embedded.max_hops, 1);
-    assert_eq!(esp_standalone.max_hops, 1);
-    assert_eq!(linux_device.max_hops, 1);
-    assert!(!esp_embedded.default_recall_multi_hop_allowed);
-    assert!(!esp_standalone.default_recall_multi_hop_allowed);
-    assert!(!linux_device.default_recall_multi_hop_allowed);
-
-    assert_eq!(server_gateway.max_hops, 2);
-    assert_eq!(dev_full.max_hops, 2);
-    assert!(server_gateway.eval_recall_multi_hop_allowed);
-    assert!(dev_full.eval_recall_multi_hop_allowed);
-    assert!(esp_embedded.max_expanded_candidates < server_gateway.max_expanded_candidates);
-    assert!(linux_device.max_graph_nodes_loaded < dev_full.max_graph_nodes_loaded);
-
-    let mut provider_limited_input =
-        RuntimeBudgetInput::static_for_profile(ProfileId::ServerLinuxDevFull);
-    provider_limited_input.provider_model_context_limit = Some(ProviderModelContextLimit {
-        provider: Some("local".to_string()),
-        model: Some("tiny-render".to_string()),
-        max_context_tokens: None,
-        max_prompt_chars: Some(512),
-    });
-    let provider_limited = compile_runtime_budget(provider_limited_input);
-
-    assert_eq!(provider_limited.graph_expansion_budget, dev_full);
-    assert_eq!(
-        provider_limited
-            .projection_render_budget
-            .system_block_max_chars,
-        512
-    );
-}
-
-#[test]
-fn facet_recall_budget_is_profile_owned_and_not_graph_or_render_owned() {
-    let esp_embedded = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
-        .facet_recall_budget;
-    let linux_device =
-        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::LinuxDeviceStandaloneMemory)
-            .facet_recall_budget;
-    let server_gateway =
-        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxMemoryGateway)
-            .facet_recall_budget;
-    let dev_full = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
-        .facet_recall_budget;
-
-    assert!(esp_embedded.max_query_facets > 0);
-    assert!(esp_embedded.max_facet_index_docs_read > 0);
-    assert!(esp_embedded.max_facet_anchor_candidates > 0);
-    assert!(esp_embedded.max_facet_expanded_candidates > 0);
-    assert!(esp_embedded.max_facet_index_docs_read < server_gateway.max_facet_index_docs_read);
-    assert!(linux_device.max_facet_index_docs_read < dev_full.max_facet_index_docs_read);
-    assert!(linux_device.max_facet_anchor_candidates <= dev_full.max_facet_anchor_candidates);
-    assert!(linux_device.max_facet_expanded_candidates <= dev_full.max_facet_expanded_candidates);
-
-    let mut provider_limited_input =
-        RuntimeBudgetInput::static_for_profile(ProfileId::ServerLinuxDevFull);
-    provider_limited_input.provider_model_context_limit = Some(ProviderModelContextLimit {
-        provider: Some("local".to_string()),
-        model: Some("tiny-render".to_string()),
-        max_context_tokens: None,
-        max_prompt_chars: Some(512),
-    });
-    let provider_limited = compile_runtime_budget(provider_limited_input);
-
-    assert_eq!(provider_limited.facet_recall_budget, dev_full);
-    assert_eq!(
-        provider_limited
-            .projection_render_budget
-            .system_block_max_chars,
-        512
-    );
-}
-
-#[test]
-fn recall_delivery_budget_is_profile_owned_and_not_provider_or_graph_owned() {
-    let compact = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
-        .recall_delivery_budget;
-    let device =
-        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::LinuxDeviceStandaloneMemory)
-            .recall_delivery_budget;
-    let full = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
-        .recall_delivery_budget;
-    let full_graph = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
-        .graph_expansion_budget;
-
-    assert!(compact.max_selected_candidates > 0);
-    assert!(compact.max_rendered_capsules > 0);
-    assert!(compact.max_capsule_chars > 0);
-    assert!(compact.max_loss_ledger_entries > 0);
-    assert!(compact.max_selected_candidates < full.max_selected_candidates);
-    assert!(device.max_rendered_capsules < full.max_rendered_capsules);
-    assert_ne!(full.max_selected_candidates, full_graph.max_seed_candidates);
-
-    let mut provider_limited_input =
-        RuntimeBudgetInput::static_for_profile(ProfileId::ServerLinuxDevFull);
-    provider_limited_input.provider_model_context_limit = Some(ProviderModelContextLimit {
-        provider: Some("local".to_string()),
-        model: Some("tiny-render".to_string()),
-        max_context_tokens: None,
-        max_prompt_chars: Some(512),
-    });
-    let provider_limited = compile_runtime_budget(provider_limited_input);
-
-    assert_eq!(provider_limited.recall_delivery_budget, full);
-    assert_eq!(
-        provider_limited
-            .projection_render_budget
-            .system_block_max_chars,
-        512
-    );
-}
-
-#[test]
 fn transcript_governance_budget_is_profile_owned_and_runtime_enforced() {
-    let compact_budget = bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::EspEmbeddedSdk)
-        .transcript_governance_budget;
-    let server_budget =
-        bm_sdk::RuntimeBudgetReport::static_for_profile(ProfileId::ServerLinuxDevFull)
-            .transcript_governance_budget;
-
-    assert!(compact_budget.transcript_page_size > 0);
-    assert!(compact_budget.host_refs_per_turn > 0);
-    assert!(compact_budget.max_attrs_per_turn > 0);
-    assert!(compact_budget.max_attrs_per_message > 0);
-    assert!(compact_budget.redaction_items_per_page > 0);
-    assert!(compact_budget.derived_refs_per_report > 0);
-    assert!(compact_budget.repair_issues_per_report > 0);
-    assert!(compact_budget.transcript_page_size < server_budget.transcript_page_size);
-    assert!(compact_budget.max_attrs_per_turn < server_budget.max_attrs_per_turn);
-    assert!(compact_budget.max_attrs_per_message < server_budget.max_attrs_per_message);
-    assert!(compact_budget.derived_refs_per_report < server_budget.derived_refs_per_report);
-
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = dev_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -308,6 +166,14 @@ fn transcript_governance_budget_is_profile_owned_and_runtime_enforced() {
         .runtime_budget()
         .transcript_governance_budget
         .transcript_page_size;
+    assert!(page_size > 0);
+    assert!(
+        runtime
+            .runtime_budget()
+            .transcript_governance_budget
+            .host_refs_per_turn
+            > 0
+    );
     let turn_count = page_size.saturating_add(2);
     for index in 0..turn_count {
         runtime
@@ -335,22 +201,24 @@ fn transcript_governance_budget_is_profile_owned_and_runtime_enforced() {
 
 #[test]
 fn transcript_report_budgets_limit_derived_refs_and_repair_issues() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut runtime_budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = dev_profile();
+    let mut runtime_budget = empty_store_platform(profile).runtime_budget();
     runtime_budget
         .transcript_governance_budget
         .derived_refs_per_report = 1;
     runtime_budget
         .transcript_governance_budget
         .repair_issues_per_report = 1;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_transcript_governance_budget(runtime_budget.transcript_governance_budget)
+        .expect("valid transcript budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
         profile,
         "llm.gateway",
         "budget-chat",
         "subject-budget",
-        runtime_budget,
     );
     runtime
         .commit_transcript(MemoryTranscriptCommitRequest {
@@ -439,22 +307,24 @@ fn transcript_report_budgets_limit_derived_refs_and_repair_issues() {
 
 #[test]
 fn transcript_replay_budget_limits_visible_host_refs_and_redaction_items() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut runtime_budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = dev_profile();
+    let mut runtime_budget = empty_store_platform(profile).runtime_budget();
     runtime_budget
         .transcript_governance_budget
         .host_refs_per_turn = 1;
     runtime_budget
         .transcript_governance_budget
         .redaction_items_per_page = 1;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_transcript_governance_budget(runtime_budget.transcript_governance_budget)
+        .expect("valid transcript budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "budget-chat",
         "subject-budget",
-        runtime_budget,
     );
     let host_refs = (0..3)
         .map(|index| HostOpaqueRef {
@@ -496,22 +366,24 @@ fn transcript_replay_budget_limits_visible_host_refs_and_redaction_items() {
 
 #[test]
 fn transcript_attr_budget_limits_visible_message_attrs_and_reports_redaction() {
-    let profile = ProfileId::ServerLinuxDevFull;
-    let platform = empty_store_platform(profile);
-    let mut runtime_budget = bm_sdk::RuntimeBudgetReport::static_for_profile(profile);
+    let profile = dev_profile();
+    let mut runtime_budget = empty_store_platform(profile).runtime_budget();
     runtime_budget
         .transcript_governance_budget
         .max_attrs_per_message = 1;
     runtime_budget
         .transcript_governance_budget
         .redaction_items_per_page = 10;
-    let runtime = test_runtime_with_scope_subject_and_budget(
+    let limits = NonproductionRuntimeBudgetLimits::new()
+        .try_with_transcript_governance_budget(runtime_budget.transcript_governance_budget)
+        .expect("valid transcript budget");
+    let platform = empty_store_platform_with_budget(profile, limits);
+    let runtime = test_runtime_with_scope_and_subject(
         platform,
         profile,
         "llm.gateway",
         "budget-chat",
         "subject-budget",
-        runtime_budget,
     );
     runtime
         .commit_transcript(MemoryTranscriptCommitRequest {
@@ -587,7 +459,7 @@ fn transcript_attr_budget_limits_visible_message_attrs_and_reports_redaction() {
 
 #[test]
 fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
-    let platform = seeded_store_platform(ProfileId::ServerLinuxDevFull);
+    let platform = seeded_store_platform(dev_profile());
     platform
         .replay_harness()
         .write_daily_note(
@@ -595,7 +467,7 @@ fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
             "Archive note: release artifact safety passed after checklist verification.",
         )
         .expect("seed archive note");
-    let runtime = test_runtime(platform, ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(platform, dev_profile());
 
     let projection = runtime
         .project(MemoryProjectionRequest {

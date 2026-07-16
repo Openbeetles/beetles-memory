@@ -41,7 +41,8 @@ bm-entry <- bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
 host code
   -> MemoryStoreHandle::open(StoreBackendConfig)
   -> MemoryRuntime::builder().store(handle)
-  -> runtime.write / recall / project / maintain / inspect / replay / export / import / recover / close
+  -> runtime.write / recall / project / maintain / inspect / replay
+  -> runtime.export_memory_space / import_memory_space / recover / close
 ```
 
 独立入口路径：
@@ -67,7 +68,7 @@ transport request
 | Maintain | `MemoryRuntime::maintain` | 显式注入 LLM client 的 SDK host |
 | Inspect | `MemoryRuntime::inspect` | 运维工具和健康检查 |
 | Replay | `MemoryRuntime::replay` | 迁移验证和调试 |
-| Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | Snapshot migration |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Typed scope archive migration |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Runtime lifecycle control |
 
 `Maintain` 不由通用 adapter dispatch 执行，因为它需要显式 LLM/HTTP service injection。协议集成只有在自己拥有这个依赖注入边界后才应暴露 maintain。

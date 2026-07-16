@@ -10,6 +10,8 @@ use bm_sdk::{
 };
 use serde_json::{json, Value};
 
+mod support;
+
 fn gateway_config() -> GatewayConfig {
     let mut config = GatewayConfig::default_for_local_dev();
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -31,11 +33,10 @@ fn gateway_config() -> GatewayConfig {
 
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
-        auth_subject: Some("owner-token".to_string()),
         workspace_root_digest: Some("workspace-digest".to_string()),
         client_conversation_hint: Some("thread-ollama-transparent".to_string()),
         model_alias: Some("local".to_string()),
-        ..GatewayScopeRequest::default()
+        ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
 }
 
@@ -135,7 +136,6 @@ fn chat_and_generate_still_enter_projection_instead_of_passthrough() {
 
     bm_llm_gateway::handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope.clone(),
@@ -150,7 +150,6 @@ fn chat_and_generate_still_enter_projection_instead_of_passthrough() {
     .expect("chat response");
     bm_llm_gateway::handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/generate",
             scope,
@@ -198,7 +197,7 @@ fn transparent_app_endpoints_passthrough_without_projection_or_maintenance() {
     let responses = requests
         .into_iter()
         .map(|request| {
-            bm_llm_gateway::handle_ollama_request(&gateway, &config, request, &mut upstream)
+            bm_llm_gateway::handle_ollama_request(&gateway, request, &mut upstream)
                 .expect("passthrough response")
         })
         .collect::<Vec<_>>();
@@ -237,7 +236,6 @@ fn unknown_api_routes_follow_central_passthrough_policy() {
 
     let response = bm_llm_gateway::handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/future/app-endpoint",
             scope_request(),
@@ -259,7 +257,6 @@ fn unknown_api_routes_follow_central_passthrough_policy() {
 
     let rejected = bm_llm_gateway::handle_ollama_request(
         &gateway,
-        &config,
         OllamaGatewayRequest::get("/internal/not-ollama", scope_request()),
         &mut upstream,
     )

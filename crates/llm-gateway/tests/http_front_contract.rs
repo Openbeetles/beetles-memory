@@ -10,9 +10,11 @@ use std::thread;
 use std::time::Duration;
 
 use bm_llm_gateway::{
-    serve_llm_gateway_http_stream, GatewayConfig, GatewayHttpConnectionHandler, GatewayHttpFront,
-    GatewayHttpFrontConfig, GatewayProviderConfig, GatewayRuntime, OpenAiCompatibleUpstream,
-    OpenAiUpstreamRequest, OpenAiUpstreamResponse, ReqwestOllamaNativeUpstream, Result,
+    serve_llm_gateway_http_accepted_stream_with_services_in_request, GatewayConfig,
+    GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig,
+    GatewayHttpRequestBindings, GatewayProviderConfig, GatewayRequestBudgetContext, GatewayRuntime,
+    OpenAiCompatibleUpstream, OpenAiGatewayServices, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
+    ReqwestOllamaNativeUpstream, Result,
 };
 
 fn gateway_config(upstream_addr: SocketAddr) -> GatewayConfig {
@@ -36,20 +38,22 @@ fn start_front(
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind gateway front");
     let addr = listener.local_addr().expect("gateway front addr");
     let config = gateway_config(upstream_addr);
-    let gateway = Arc::new(GatewayRuntime::open(config.clone()).expect("gateway runtime"));
-    let config = Arc::new(config);
-    let front = GatewayHttpFront::new(GatewayHttpFrontConfig {
-        max_connections: 16,
-        request_timeout,
-        idle_timeout,
-        force_close_client_connections: true,
-    })
+    let gateway = Arc::new(GatewayRuntime::open(config).expect("gateway runtime"));
+    let front = GatewayHttpFront::new(
+        Arc::clone(&gateway),
+        GatewayHttpFrontConfig {
+            worker_count: 4,
+            max_in_flight: 64,
+            request_timeout,
+            idle_timeout,
+            force_close_client_connections: true,
+        },
+    )
     .expect("front config");
     let handle = thread::spawn(move || {
         front.serve_listener_n_with_factory(listener, accept_count, move || {
             Box::new(TestGatewayConnection {
                 gateway: Arc::clone(&gateway),
-                config: Arc::clone(&config),
             })
         })
     });
@@ -76,18 +80,21 @@ impl RunningFront {
 
 struct TestGatewayConnection {
     gateway: Arc<GatewayRuntime>,
-    config: Arc<GatewayConfig>,
 }
 
 impl GatewayHttpConnectionHandler for TestGatewayConnection {
-    fn handle(&mut self, stream: &mut TcpStream) -> Result<()> {
+    fn handle(
+        &mut self,
+        context: &GatewayRequestBudgetContext,
+        stream: &mut bm_entry::EntryAcceptedTcpStream,
+    ) -> Result<()> {
         let mut openai = MockOpenAiUpstream;
         let mut ollama = ReqwestOllamaNativeUpstream::new()?;
-        serve_llm_gateway_http_stream(
+        let mut services = OpenAiGatewayServices::new();
+        serve_llm_gateway_http_accepted_stream_with_services_in_request(
             &self.gateway,
-            &self.config,
-            &mut openai,
-            &mut ollama,
+            context,
+            GatewayHttpRequestBindings::new(&mut openai, &mut ollama, &mut services),
             stream,
         )
     }
@@ -225,12 +232,19 @@ fn idle_timeout_closes_connection_and_releases_front() {
 fn request_timeout_releases_slow_handler_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind timeout front");
     let front_addr = listener.local_addr().expect("timeout front addr");
-    let front = GatewayHttpFront::new(GatewayHttpFrontConfig {
-        max_connections: 1,
-        request_timeout: Duration::from_millis(120),
-        idle_timeout: Duration::from_secs(2),
-        force_close_client_connections: true,
-    })
+    let gateway = Arc::new(
+        GatewayRuntime::open(GatewayConfig::default_for_local_dev()).expect("timeout runtime"),
+    );
+    let front = GatewayHttpFront::new(
+        gateway,
+        GatewayHttpFrontConfig {
+            worker_count: 1,
+            max_in_flight: 1,
+            request_timeout: Duration::from_millis(120),
+            idle_timeout: Duration::from_secs(2),
+            force_close_client_connections: true,
+        },
+    )
     .expect("front config");
     let handle = thread::spawn(move || {
         front.serve_listener_n_with_factory(listener, 1, move || Box::new(SlowConnection))
@@ -308,7 +322,11 @@ fn assert_connection_released(stream: &mut TcpStream) {
 struct SlowConnection;
 
 impl GatewayHttpConnectionHandler for SlowConnection {
-    fn handle(&mut self, _stream: &mut TcpStream) -> Result<()> {
+    fn handle(
+        &mut self,
+        _context: &GatewayRequestBudgetContext,
+        _stream: &mut bm_entry::EntryAcceptedTcpStream,
+    ) -> Result<()> {
         thread::sleep(Duration::from_millis(500));
         Ok(())
     }

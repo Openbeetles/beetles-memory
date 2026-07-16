@@ -49,7 +49,7 @@ NODE
 while IFS=$'\t' read -r profile package features forbidden_needles required_needles store_backend sqlite_allowed server_listener_allowed; do
   [[ -n "$profile" ]] || continue
 
-  tree="$(cargo tree -p "$package" --no-default-features --features "$features")"
+  tree="$(cargo tree --locked -p "$package" --no-default-features --features "$features")"
 
   IFS='|' read -r -a forbidden <<< "$forbidden_needles"
   for needle in "${forbidden[@]}"; do

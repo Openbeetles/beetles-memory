@@ -1,16 +1,19 @@
 #![cfg(feature = "server-std")]
 
+mod support;
+
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
 use bm_http::{
-    console_route_specs, handle_http_request, handle_http_request_with_console,
-    HttpConsoleServices, HttpMethod, HttpRuntimeRequest,
+    console_route_specs, handle_http_in_process_request,
+    handle_http_in_process_request_with_console, HttpConsoleServices, HttpMethod,
+    HttpRuntimeRequest,
 };
 use bm_ollama_transparent::{
     DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, GatewayFrontReport,
@@ -21,8 +24,8 @@ use bm_ollama_transparent::{
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendKind,
+    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    StoreBackendConfig,
 };
 use serde_json::Value;
 
@@ -30,7 +33,6 @@ fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "http-console-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -39,11 +41,9 @@ fn runtime() -> EntryRuntime {
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(support::native_runtime_profile())
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 32 },
@@ -57,7 +57,6 @@ fn runtime_with_file_store(path: &Path) -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "http-console-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -66,11 +65,9 @@ fn runtime_with_file_store(path: &Path) -> EntryRuntime {
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::File,
-            data_path: Some(path.to_path_buf()),
-            fsync: false,
-        },
+        store: StoreBackendConfig::file(path, support::native_runtime_profile())
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 32 },
@@ -222,6 +219,7 @@ fn mock_preflight_report() -> OllamaTransparentPreflightReport {
         public_port: PortBindingReport::empty("127.0.0.1:11434".parse().expect("public bind")),
         upstream_port: PortBindingReport::empty("127.0.0.1:11435".parse().expect("upstream bind")),
         managed_runner: mock_runner_report(),
+        gateway_executable: None,
         stop_plan: None,
         blockers: Vec::new(),
     }
@@ -277,7 +275,7 @@ fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
 fn console_workbench_api_map_route_exposes_entry_owned_report_apis() {
     let runtime = runtime();
 
-    let response = handle_http_request(
+    let response = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::get("/console/workbench/api-map"),
     )
@@ -313,7 +311,7 @@ fn console_workbench_api_map_route_exposes_entry_owned_report_apis() {
 fn console_workbench_report_route_exposes_runtime_report_summaries() {
     let runtime = runtime();
 
-    let response = handle_http_request(
+    let response = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::get("/console/workbench/report"),
     )
@@ -352,7 +350,18 @@ fn console_workbench_report_route_exposes_runtime_report_summaries() {
         report["projectionInspector"]["disclosureIntegrityPassed"],
         true
     );
-    assert_eq!(report["vaultMigration"]["preflightPassed"], true);
+    #[cfg(feature = "nonproduction-replay-harness")]
+    {
+        assert_eq!(report["vaultMigration"]["preflightPassed"], false);
+        assert_eq!(report["vaultMigration"]["status"]["status"], "limited");
+        assert!(report["vaultMigration"]["preflightFailures"]
+            .as_array()
+            .expect("vault preflight failures")
+            .iter()
+            .any(|failure| failure == "scoped_projection_does_not_rewrite_identity"));
+    }
+    #[cfg(not(feature = "nonproduction-replay-harness"))]
+    assert_eq!(report["vaultMigration"]["preflightPassed"], false);
 }
 
 #[test]
@@ -361,7 +370,7 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
     let controller = MockOllamaTransparentController::default();
     let services = HttpConsoleServices::with_ollama_transparent(&controller);
 
-    let capabilities = handle_http_request_with_console(
+    let capabilities = handle_http_in_process_request_with_console(
         &runtime,
         HttpRuntimeRequest::get("/console/capabilities"),
         services,
@@ -387,7 +396,7 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
         "/console/ollama-transparent/status"
     );
 
-    let status = handle_http_request_with_console(
+    let status = handle_http_in_process_request_with_console(
         &runtime,
         HttpRuntimeRequest::get("/console/ollama-transparent/status"),
         services,
@@ -402,7 +411,7 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
         "BeetleMemoryTransparentFront"
     );
 
-    let preflight = handle_http_request_with_console(
+    let preflight = handle_http_in_process_request_with_console(
         &runtime,
         HttpRuntimeRequest::post_json("/console/ollama-transparent/preflight", "{}"),
         services,
@@ -413,7 +422,7 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
     assert_eq!(preflight["status"], "accepted");
     assert_eq!(preflight["preflight"]["accepted"], true);
 
-    let enable = handle_http_request_with_console(
+    let enable = handle_http_in_process_request_with_console(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/console/ollama-transparent/enable",
@@ -427,7 +436,7 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
     assert_eq!(enable["transition"]["outcome"], "Completed");
     assert_eq!(enable["transition"]["toState"], "Active");
 
-    let disable = handle_http_request_with_console(
+    let disable = handle_http_in_process_request_with_console(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/console/ollama-transparent/disable",
@@ -441,7 +450,7 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
     assert_eq!(disable["transition"]["outcome"], "Completed");
     assert_eq!(disable["transition"]["toState"], "Disabled");
 
-    let open_app = handle_http_request_with_console(
+    let open_app = handle_http_in_process_request_with_console(
         &runtime,
         HttpRuntimeRequest::post_json("/console/ollama-transparent/open-app", "{}"),
         services,
@@ -467,8 +476,9 @@ fn console_ollama_transparent_routes_delegate_to_controller_trait() {
 #[test]
 fn console_capabilities_hide_ollama_transparent_when_controller_is_not_wired() {
     let runtime = runtime();
-    let response = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/capabilities"))
-        .expect("capabilities should be available");
+    let response =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/capabilities"))
+            .expect("capabilities should be available");
 
     assert_eq!(response.status_code, 200, "{}", response.body);
     let body: Value = serde_json::from_str(&response.body).expect("capabilities json");
@@ -507,7 +517,7 @@ fn console_ollama_transparent_status_and_actions_fail_when_controller_is_not_wir
         ),
         HttpRuntimeRequest::post_json("/console/ollama-transparent/open-app", "{}"),
     ] {
-        let error = handle_http_request(&runtime, request)
+        let error = handle_http_in_process_request(&runtime, request)
             .expect_err("missing controller should reject mutating transparent routes");
         assert!(
             error
@@ -522,8 +532,9 @@ fn console_ollama_transparent_status_and_actions_fail_when_controller_is_not_wir
 fn console_http_routes_are_served_outside_memory_operation_routes() {
     let runtime = runtime();
 
-    let overview = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
-        .expect("overview");
+    let overview =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
+            .expect("overview");
     assert_eq!(overview.status_code, 200);
     let overview: Value = serde_json::from_str(&overview.body).expect("overview json");
     assert_eq!(overview["status"], "accepted");
@@ -572,13 +583,14 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
         .iter()
         .any(|row| row["label"] == "Chat" && row["value"] == "chat-1"));
 
-    let transports = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/transports"))
-        .expect("transports");
+    let transports =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/transports"))
+            .expect("transports");
     assert_eq!(transports.status_code, 200);
     assert!(transports.body.contains("\"transports\""));
 
     let llm_gateway =
-        handle_http_request(&runtime, HttpRuntimeRequest::get("/console/llm-gateway"))
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/llm-gateway"))
             .expect("llm gateway");
     assert_eq!(llm_gateway.status_code, 200);
     let llm_gateway: Value = serde_json::from_str(&llm_gateway.body).expect("llm gateway json");
@@ -633,7 +645,7 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
                 .as_str()
                 .is_some_and(|command| command.contains("/v1/bm/provider-capabilities"))));
 
-    let smoke_run = handle_http_request(
+    let smoke_run = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/console/llm-gateway/smoke-checks/provider-capabilities/run",
@@ -649,7 +661,7 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
         .as_str()
         .is_some_and(|command| command.contains("/v1/bm/provider-capabilities")));
 
-    let unknown_smoke = handle_http_request(
+    let unknown_smoke = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/console/llm-gateway/smoke-checks/not-a-smoke-check/run",
@@ -664,7 +676,7 @@ fn console_http_routes_are_served_outside_memory_operation_routes() {
 fn console_http_device_keys_are_only_returned_on_create_or_rotate() {
     let runtime = runtime();
 
-    let created = handle_http_request(
+    let created = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/console/devices",
@@ -681,12 +693,13 @@ fn console_http_device_keys_are_only_returned_on_create_or_rotate() {
         Some(app_key_once)
     );
 
-    let listed = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/devices"))
-        .expect("devices");
+    let listed =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/devices"))
+            .expect("devices");
     assert_eq!(listed.status_code, 200);
     assert!(!listed.body.contains(app_key_once));
 
-    let rotated = handle_http_request(
+    let rotated = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json("/console/devices/edge-node-01/rotate-key", "{}"),
     )
@@ -703,7 +716,7 @@ fn console_http_device_keys_are_only_returned_on_create_or_rotate() {
 fn console_http_updates_transport_and_device_state() {
     let runtime = runtime();
 
-    let transport = handle_http_request(
+    let transport = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::patch_json(
             "/console/transports/http",
@@ -714,7 +727,7 @@ fn console_http_updates_transport_and_device_state() {
     assert_eq!(transport.status_code, 200);
     assert!(transport.body.contains("\"endpoint\":\"127.0.0.1:8718\""));
 
-    let device = handle_http_request(
+    let device = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::patch_json(
             "/console/devices/http-console-agent",
@@ -730,12 +743,13 @@ fn console_http_updates_transport_and_device_state() {
 fn console_overview_reflects_real_memory_operations() {
     let runtime = runtime();
 
-    let before = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
-        .expect("overview before");
+    let before =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
+            .expect("overview before");
     let before: Value = serde_json::from_str(&before.body).expect("overview before json");
     assert_eq!(before["overview"]["writesToday"]["value"], "0");
 
-    let write = handle_http_request(
+    let write = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
@@ -745,7 +759,7 @@ fn console_overview_reflects_real_memory_operations() {
     .expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);
 
-    let duplicate_write = handle_http_request(
+    let duplicate_write = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
@@ -755,7 +769,7 @@ fn console_overview_reflects_real_memory_operations() {
     .expect("duplicate write");
     assert_eq!(duplicate_write.status_code, 200, "{}", duplicate_write.body);
 
-    let recall = handle_http_request(
+    let recall = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/recall",
@@ -765,8 +779,9 @@ fn console_overview_reflects_real_memory_operations() {
     .expect("recall");
     assert_eq!(recall.status_code, 200, "{}", recall.body);
 
-    let after = handle_http_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
-        .expect("overview after");
+    let after =
+        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
+            .expect("overview after");
     let after: Value = serde_json::from_str(&after.body).expect("overview after json");
     assert_eq!(after["overview"]["writesToday"]["value"], "1");
     assert_eq!(after["overview"]["recall"]["value"], "100.0%");
@@ -789,7 +804,7 @@ fn console_overview_aggregates_extra_memory_event_store_paths() {
     let event_store_paths = vec![transparent_store_path];
     let services = HttpConsoleServices::none().with_memory_event_store_paths(&event_store_paths);
 
-    let overview = handle_http_request_with_console(
+    let overview = handle_http_in_process_request_with_console(
         &runtime,
         HttpRuntimeRequest::get("/console/overview"),
         services,
@@ -820,7 +835,7 @@ fn console_overview_aggregates_extra_memory_event_store_paths() {
 #[test]
 fn http_parser_accepts_delete_for_console_skill_routes() {
     let runtime = runtime();
-    let response = handle_http_request(
+    let response = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest {
             method: HttpMethod::Delete,
@@ -829,7 +844,7 @@ fn http_parser_accepts_delete_for_console_skill_routes() {
             request_id: "http-delete-req".to_string(),
             idempotency_key: "http-delete-idem".to_string(),
             audit_id: "http-delete-audit".to_string(),
-            authenticated: true,
+            authorization: None,
         },
     )
     .expect("delete");
@@ -840,7 +855,7 @@ fn http_parser_accepts_delete_for_console_skill_routes() {
 fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     let runtime = runtime();
 
-    let create_forbidden = handle_http_request(
+    let create_forbidden = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/console/skills",
@@ -854,7 +869,7 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
         create_forbidden.body
     );
 
-    let seeded = handle_http_request(
+    let seeded = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
@@ -864,13 +879,13 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     .expect("seed runtime skill");
     assert_eq!(seeded.status_code, 200, "{}", seeded.body);
 
-    let list =
-        handle_http_request(&runtime, HttpRuntimeRequest::get("/console/skills")).expect("list");
+    let list = handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/skills"))
+        .expect("list");
     assert_eq!(list.status_code, 200);
     assert!(list.body.contains("Release guard"));
     assert!(list.body.contains("runtimeLearned"));
 
-    let detail = handle_http_request(
+    let detail = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::get("/console/skills/runtime_skill__release"),
     )
@@ -878,7 +893,7 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     assert_eq!(detail.status_code, 200, "{}", detail.body);
     assert!(detail.body.contains("run gates"));
 
-    let edited = handle_http_request(
+    let edited = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::patch_json(
             "/console/skills/runtime_skill__release",
@@ -888,7 +903,7 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     .expect("edit");
     assert_eq!(edited.status_code, 200, "{}", edited.body);
 
-    let disabled = handle_http_request(
+    let disabled = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::patch_json(
             "/console/skills/runtime_skill__release/enabled",
@@ -898,14 +913,14 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     .expect("disable");
     assert_eq!(disabled.status_code, 200, "{}", disabled.body);
 
-    let deleted = handle_http_request(
+    let deleted = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::delete("/console/skills/runtime_skill__release"),
     )
     .expect("delete");
     assert_eq!(deleted.status_code, 200, "{}", deleted.body);
 
-    let detail_after_delete = handle_http_request(
+    let detail_after_delete = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::get("/console/skills/runtime_skill__release"),
     )

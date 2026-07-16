@@ -29,9 +29,23 @@ profile-esp-embedded-sdk = ["target-esp", "role-embedded-sdk"]
 profile-linux-device-standalone-memory = ["target-linux-device", "role-standalone-memory"]
 profile-desktop-macos-standalone-memory = ["target-desktop-macos", "role-standalone-memory"]
 profile-desktop-macos-embedded-sdk = ["target-desktop-macos", "role-embedded-sdk"]
+profile-desktop-macos-dev-full = [
+    "target-desktop-macos",
+    "role-dev-full",
+    "nonproduction-replay-harness",
+]
 profile-desktop-windows-embedded-sdk = ["target-desktop-windows", "role-embedded-sdk"]
+profile-desktop-windows-dev-full = [
+    "target-desktop-windows",
+    "role-dev-full",
+    "nonproduction-replay-harness",
+]
 profile-server-linux-memory-gateway = ["target-server-linux", "role-memory-gateway"]
-profile-server-linux-dev-full = ["target-server-linux", "role-dev-full"]
+profile-server-linux-dev-full = [
+    "target-server-linux",
+    "role-dev-full",
+    "nonproduction-replay-harness",
+]
 
 [dependencies]
 serde.workspace = true

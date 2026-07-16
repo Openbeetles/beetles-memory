@@ -1,4 +1,6 @@
-use bm_sdk::{LlmClient, LlmHttpClient, MemoryProjectionRequest, MemoryRuntime, Result};
+use bm_sdk::{
+    LlmClient, LlmHttpClient, MemoryProjectionRequest, MemoryRuntime, Result, RuntimeBudgetLease,
+};
 
 use crate::{
     AdapterCommand, AdapterEnvelope, AdapterErrorKey, AdapterProjectionReport, AdapterResponse,
@@ -23,17 +25,40 @@ pub fn dispatch_adapter_command(
     runtime: &MemoryRuntime,
     envelope: AdapterEnvelope<AdapterCommand>,
 ) -> Result<AdapterResponse<AdapterSdkReport>> {
-    dispatch_adapter_command_with_services(runtime, envelope, AdapterRuntimeServices::none())
+    let lease = runtime.acquire_runtime_budget_lease()?;
+    dispatch_adapter_command_with_services(
+        runtime,
+        &lease,
+        envelope,
+        AdapterRuntimeServices::none(),
+    )
 }
 
 pub fn project_adapter_report(
     runtime: &MemoryRuntime,
     request: MemoryProjectionRequest,
 ) -> Result<AdapterProjectionReport> {
-    runtime.project(request).map(AdapterProjectionReport::from)
+    let lease = runtime.acquire_runtime_budget_lease()?;
+    runtime.execute_with_runtime_budget_lease(&lease, || {
+        runtime.project(request).map(AdapterProjectionReport::from)
+    })
 }
 
 pub fn dispatch_adapter_command_with_services(
+    runtime: &MemoryRuntime,
+    lease: &RuntimeBudgetLease,
+    mut envelope: AdapterEnvelope<AdapterCommand>,
+    services: AdapterRuntimeServices<'_>,
+) -> Result<AdapterResponse<AdapterSdkReport>> {
+    envelope
+        .payload
+        .pin_accepted_at(runtime.config().clock.now_secs());
+    runtime.execute_with_runtime_budget_lease(lease, || {
+        dispatch_adapter_command_with_services_in_lease(runtime, envelope, services)
+    })
+}
+
+fn dispatch_adapter_command_with_services_in_lease(
     runtime: &MemoryRuntime,
     envelope: AdapterEnvelope<AdapterCommand>,
     services: AdapterRuntimeServices<'_>,
@@ -87,12 +112,6 @@ pub fn dispatch_adapter_command_with_services(
         }
         AdapterCommand::Replay(request) => {
             AdapterSdkReport::Replay(Box::new(runtime.replay(request)?))
-        }
-        AdapterCommand::Export(request) => {
-            AdapterSdkReport::Export(Box::new(runtime.export(request)?))
-        }
-        AdapterCommand::Import(request) => {
-            AdapterSdkReport::Import(Box::new(runtime.import(*request)?))
         }
         AdapterCommand::LongTermList(request) => {
             AdapterSdkReport::LongTermList(Box::new(runtime.list_long_term_memory(request)?))

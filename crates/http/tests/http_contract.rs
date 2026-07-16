@@ -7,7 +7,25 @@ use bm_http::{
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
     let routes = route_specs();
-    assert_eq!(routes.len(), 15);
+    assert_eq!(routes.len(), 13);
+    assert_eq!(
+        routes.iter().map(|route| route.path).collect::<Vec<_>>(),
+        vec![
+            "/memory/profile/capabilities",
+            "/memory/write",
+            "/memory/recall",
+            "/memory/project",
+            "/memory/maintain",
+            "/memory/inspect",
+            "/memory/recover",
+            "/memory/replay",
+            "/memory/long-term/list",
+            "/memory/long-term/detail",
+            "/memory/long-term/mutate",
+            "/memory/long-term/policy",
+            "/memory/transcript/attrs",
+        ]
+    );
     let capabilities = routes
         .iter()
         .find(|route| route.path == "/memory/profile/capabilities")
@@ -129,6 +147,7 @@ fn agent_tool_registry_route_catalog_declares_body_auth_and_profile_gate() {
 fn http_adapter_exposes_stable_error_keys() {
     assert_eq!(bm_http::invalid_json_error(), AdapterErrorKey::InvalidJson);
     assert_eq!(bm_http::unauthorized_error(), AdapterErrorKey::Unauthorized);
+    assert_eq!(bm_http::forbidden_error(), AdapterErrorKey::Forbidden);
     assert_eq!(
         bm_http::duplicate_idempotency_error(),
         AdapterErrorKey::Duplicated

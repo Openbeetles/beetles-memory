@@ -1,6 +1,22 @@
 # LLM Gateway Integrations
 
-`bm-llm-gateway` lets existing IDEs, coding agents, and local model tools connect to Beetle Memory through protocols they already support. This page covers the explicit gateway mode only. Ollama App transparent port takeover is a later mode and is not part of this release surface.
+`bm-llm-gateway` lets existing IDEs, coding agents, and local model tools connect to Beetle Memory through protocols they already support. The release surface includes both explicit gateway mode and the macOS-local Ollama App transparent controller provided by `bm-ollama-transparent`; both route model traffic through the same `bm-llm-gateway` owner.
+
+## Ollama App Transparent Mode
+
+`bm-ollama-transparent` is the published controller for local Ollama App transparent mode. It moves the official listener from `127.0.0.1:11434` to a managed upstream at `127.0.0.1:11435`, then starts `bm-llm-gateway` on the public Ollama endpoint. It does not implement a second model gateway or memory runtime.
+
+Enabling is fail-closed:
+
+- stopping the official listener requires explicit consent;
+- preflight binds the stop plan to the exact port owner PID, process start identity, command, and executable content/device/inode identity, and execution revalidates that receipt immediately before signaling it; process names and classifier results are diagnostic only and never authorize a signal;
+- managed macOS children run as uniquely identified `launchd` jobs. The owner-only control record keeps the diagnostic process receipt separate from the recoverable job authority; after a controller restart, adoption requires the canonical label, current-user bootstrap target, live launchd PID, start identity, and executable identity to match exactly. A PID receipt by itself still cannot authorize a stop;
+- one non-blocking OS file lease fences the complete enable, rollback, or disable flow across controller processes. Its retained lock file stores and read-back-validates the holder PID, start identity, executable path, device/inode, and SHA-256 receipt, so concurrent transitions are rejected rather than interleaved;
+- the managed runner is published without clobbering through retained directories, identified by SHA-256, and launched from a retained descriptor after identity revalidation;
+- the gateway sidecar path is an explicit absolute configuration input. The controller opens it without following symbolic links, verifies SHA-256 and metadata, and executes the retained descriptor; environment, relative-path, and current-directory discovery are not production paths;
+- local HTTP probes have a fixed response-byte budget and reject oversized or non-terminating responses.
+
+The transparent controller is macOS-local and loopback-only. Desktop supplies one typed memory authority (`owner_id`, `agent_id`, `channel`, and one absolute store path) to both its `EntryRuntime` and the transparent gateway. The controller has no fallback owner, agent, federation, or independent store. The caller must inspect the typed preflight and transition reports; it must not infer success from process names or open ports alone.
 
 ## Endpoints
 

@@ -11,6 +11,8 @@ use bm_sdk::{
     StopReason, ToolChoicePolicy, ToolSpec,
 };
 use serde_json::{json, Value};
+
+mod support;
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
@@ -35,11 +37,10 @@ fn gateway_config() -> GatewayConfig {
 
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
-        auth_subject: Some("owner-token".to_string()),
         workspace_root_digest: Some("workspace-digest".to_string()),
         client_conversation_hint: Some("thread-ollama-thinking".to_string()),
         model_alias: Some("local".to_string()),
-        ..GatewayScopeRequest::default()
+        ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
 }
 
@@ -206,7 +207,6 @@ fn chat_forces_think_false_and_strips_thinking_before_response_and_maintenance()
 
     let response = handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope_request(),
@@ -267,7 +267,6 @@ fn streaming_chat_strips_thinking_before_chunks_and_deferred_maintenance() {
 
     let mut response = handle_ollama_request_with_services(
         &gateway,
-        &config,
         OllamaGatewayRequest::post_json(
             "/api/chat",
             scope_request(),

@@ -6,9 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    ContinuitySnapshotImportMode, IngressKind, MemoryExportRequest, MemoryImportRequest,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryStoreHandle, MemoryWriteRequest, PressureLevel, ProfileId,
+    IngressKind, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
+    MemoryRecallRequest, MemorySpaceExportRequest, MemorySpaceImportRequest,
+    MemorySpacePrivateMaterialPolicy, MemorySpaceScope, MemoryWriteRequest, PressureLevel,
     RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
     RuntimeSkillWriteSource, StoreBackendConfig,
 };
@@ -25,12 +25,12 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
             .expect("clock")
             .as_nanos()
     ));
-    let store = MemoryStoreHandle::open(
-        StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config"),
+    let store = support::open_memory_store(
+        StoreBackendConfig::file(&root, support::host_test_profile()).expect("config"),
     )
     .expect("store");
 
-    let runtime = test_runtime(store.clone(), ProfileId::ServerLinuxDevFull);
+    let runtime = test_runtime(store.clone(), support::host_test_profile());
 
     let write = runtime
         .write(MemoryWriteRequest::Procedural {
@@ -115,24 +115,29 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
         .expect("inspection");
     assert_eq!(inspection.working.query, "store backend");
 
+    let runtime_scope = MemorySpaceScope {
+        memory_space_id: runtime.memory_space_id().to_string(),
+        mounted_subject_id: runtime.subject_id().to_string(),
+    };
     let exported = runtime
-        .export(MemoryExportRequest {
-            chat_id: "chat-1".to_string(),
+        .export_memory_space(MemorySpaceExportRequest {
+            scope: runtime_scope.clone(),
+            include_private: true,
         })
         .expect("export");
-    assert_eq!(exported.snapshot.chat_id, "chat-1");
+    assert_eq!(exported.projection_scope.scope, runtime_scope);
 
     let imported = runtime
-        .import(MemoryImportRequest {
-            snapshot: exported.snapshot,
-            target_chat_id: "chat-2".to_string(),
-            mode: ContinuitySnapshotImportMode::FullRestore,
+        .import_memory_space(MemorySpaceImportRequest {
+            scope: runtime_scope.clone(),
+            expected_private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
+            archive: exported.archive,
         })
         .expect("import");
-    assert!(!imported.outcome.decisions.is_empty());
+    assert_eq!(imported.imported_scope, runtime_scope);
 
-    let reopened = MemoryStoreHandle::open(
-        StoreBackendConfig::file(&root, ProfileId::ServerLinuxDevFull).expect("config"),
+    let reopened = support::open_memory_store(
+        StoreBackendConfig::file(&root, support::host_test_profile()).expect("config"),
     )
     .expect("reopen");
     assert!(reopened

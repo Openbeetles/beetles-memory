@@ -19,17 +19,16 @@ transport bytes -> adapter command -> bm-entry -> bm-adapter -> MemoryRuntime ->
 ```rust
 use bm_entry::{
     EntryAuthConfig, EntryIdentity, EntryIdempotencyConfig, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendConfig,
 };
 
 let mut capability = MemoryCapabilityPolicy::strict_profile();
 capability.communication_adapter_enabled = true;
 
 let entry = EntryRuntime::open(EntryRuntimeConfig {
-    profile: ProfileId::ServerLinuxMemoryGateway,
     identity: EntryIdentity {
         agent_id: "gateway-agent".to_string(),
         owner_id: "owner-default".to_string(),
@@ -38,11 +37,8 @@ let entry = EntryRuntime::open(EntryRuntimeConfig {
         channel: "gateway".to_string(),
         chat_id: "chat-1".to_string(),
     },
-    store: EntryStoreConfig {
-        backend: StoreBackendKind::InMemory,
-        data_path: None,
-        fsync: false,
-    },
+    store: StoreBackendConfig::in_memory(ProfileId::ServerLinuxMemoryGateway)?
+        .with_fsync(false),
     transports: EntryTransportConfig::all_enabled(),
     auth: EntryAuthConfig::disabled_for_local(),
     idempotency: EntryIdempotencyConfig { max_keys: 128 },
@@ -66,3 +62,5 @@ Transport helpers use the shared JSON adapter decoder for declared memory operat
 ## Security Boundary
 
 `AdapterAuthContext` and `EntryAuthConfig` represent authentication decisions at the entry layer. They do not replace SDK privacy policy or profile capability checks. Adapter visibility must still come from the runtime capability catalog.
+
+Authentication failure uses the protocol-neutral `AdapterErrorKey::Unauthorized` and maps to HTTP `401`. An authenticated principal that lacks the required operation capability is rejected by `bm-entry` with `AdapterErrorKey::Forbidden`; HTTP transports map that rejection to `403` without redefining authorization semantics.

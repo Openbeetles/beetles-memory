@@ -7,7 +7,7 @@ use bm_core::memory::{
 };
 use bm_sdk::{
     MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel,
-    ProceduralMemoryPromotionInput, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    ProceduralMemoryPromotionInput, RuntimeLifecycleModeInput, RuntimeSkillWrite,
     RuntimeSkillWriteSource,
 };
 
@@ -24,7 +24,7 @@ fn llm_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment 
 
 #[test]
 fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_scope(platform.clone(), profile, "llm.gateway", "chat-a");
 
@@ -83,7 +83,7 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
 
 #[test]
 fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 
@@ -134,7 +134,7 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
 
 #[test]
 fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 
@@ -249,7 +249,7 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
 
 #[test]
 fn direct_runtime_learned_procedural_write_is_rejected_without_promotion_gate() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 

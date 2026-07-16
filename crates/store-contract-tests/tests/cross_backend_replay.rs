@@ -9,10 +9,7 @@ fn seed(platform: &StorePlatform) {
         .state_fs()
         .write("runtime/state.json", b"state")
         .unwrap();
-    platform
-        .skill_storage()
-        .write("runtime-alpha", b"skill")
-        .unwrap();
+    support::seed_runtime_skill(platform, "runtime-alpha");
     platform
         .session_store()
         .append("chat-a", "user", "hello")
@@ -45,10 +42,10 @@ fn seed(platform: &StorePlatform) {
 
 #[test]
 fn snapshot_import_keeps_state_consistent_across_backends() {
-    let (source, open_report) = StorePlatform::open_with_report(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
-    )
-    .unwrap();
+    let source_profile = ProfileId::native_dev_full().expect("native dev-full profile");
+    let source =
+        support::open_store(StoreBackendConfig::in_memory(source_profile).unwrap()).unwrap();
+    let open_report = source.open_report();
     assert_eq!(open_report.backend, "in_memory");
     assert!(open_report.repair.checked);
     seed(&source);
@@ -56,10 +53,7 @@ fn snapshot_import_keeps_state_consistent_across_backends() {
     let expected_state = snapshot.state_fingerprint();
     let expected_events = snapshot.event_fingerprint();
     assert_eq!(snapshot.schema_manifest.backend, "in_memory");
-    assert_eq!(
-        snapshot.schema_manifest.profile,
-        "target-server-linux+role-dev-full"
-    );
+    assert_eq!(snapshot.schema_manifest.profile, source_profile.as_str());
     assert_eq!(export_report.state_fingerprint, expected_state);
     assert_eq!(export_report.event_fingerprint, expected_events);
 
@@ -69,8 +63,8 @@ fn snapshot_import_keeps_state_consistent_across_backends() {
     ));
     let _ = std::fs::remove_dir_all(&root);
 
-    let file = StorePlatform::open(
-        StoreBackendConfig::file(root.join("file"), ProfileId::DesktopMacosEmbeddedSdk).unwrap(),
+    let file = support::open_store(
+        StoreBackendConfig::file(root.join("file"), support::native_persistent_profile()).unwrap(),
     )
     .unwrap();
     file.state_fs().write("stale-target-key", b"stale").unwrap();
@@ -86,7 +80,7 @@ fn snapshot_import_keeps_state_consistent_across_backends() {
     assert_eq!(file.state_fs().read("stale-target-key").unwrap(), None);
 
     let embedded =
-        StorePlatform::open(StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory).unwrap())
+        support::open_store(StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory).unwrap())
             .unwrap();
     let embedded_import_report = embedded
         .import_store_snapshot_with_report(&snapshot)
@@ -99,10 +93,10 @@ fn snapshot_import_keeps_state_consistent_across_backends() {
 
     #[cfg(feature = "sqlite-store")]
     {
-        let sqlite = StorePlatform::open(
+        let sqlite = support::open_store(
             StoreBackendConfig::sqlite(
                 root.join("sqlite").join("memory.sqlite3"),
-                ProfileId::ServerLinuxMemoryGateway,
+                support::native_persistent_profile(),
             )
             .unwrap(),
         )
@@ -118,8 +112,11 @@ fn snapshot_import_keeps_state_consistent_across_backends() {
 
 #[test]
 fn snapshot_import_rejects_bad_lineage_before_touching_target_state() {
-    let source = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let source = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     )
     .unwrap();
     seed(&source);
@@ -127,8 +124,11 @@ fn snapshot_import_rejects_bad_lineage_before_touching_target_state() {
     assert!(snapshot.events.len() >= 2);
     snapshot.events[1].event_id = snapshot.events[0].event_id.clone();
 
-    let target = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let target = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     )
     .unwrap();
     target
@@ -149,17 +149,61 @@ fn snapshot_import_rejects_bad_lineage_before_touching_target_state() {
 }
 
 #[test]
+fn snapshot_import_rejects_pre_p741_store_schema_before_touching_target_state() {
+    let source = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    seed(&source);
+    let mut snapshot = source.export_store_snapshot().unwrap();
+    snapshot.schema_manifest.schema_id = "beetle_memory_store_schema_v1".to_string();
+    snapshot.schema_manifest.schema_version = 1;
+
+    let target = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    target
+        .state_fs()
+        .write("runtime/state.json", b"keep")
+        .unwrap();
+    let before = target.export_store_snapshot().unwrap();
+
+    let err = target
+        .import_store_snapshot(&snapshot)
+        .expect_err("pre-P7.4.1 store schema must be rejected");
+
+    assert_eq!(err.stage(), "store_snapshot_import");
+    assert!(err.to_string().contains("schema"));
+    let after = target.export_store_snapshot().unwrap();
+    assert_eq!(after.state_fingerprint(), before.state_fingerprint());
+    assert_eq!(after.event_fingerprint(), before.event_fingerprint());
+}
+
+#[test]
 fn snapshot_import_rejects_manifest_schema_drift() {
-    let source = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let source = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     )
     .unwrap();
     seed(&source);
     let mut snapshot = source.export_store_snapshot().unwrap();
     snapshot.schema_manifest.schema_version = 999;
 
-    let target = StorePlatform::open_in_memory(
-        StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
+    let target = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
     )
     .unwrap();
     let err = target

@@ -1965,6 +1965,12 @@ fn parse_runtime_skill_record(name: &str, content: &str) -> Option<RuntimeSkillR
     })
 }
 
+pub fn runtime_skill_owner_updated_at(name: &str, content: &[u8]) -> Option<u64> {
+    let content = std::str::from_utf8(content).ok()?;
+    let updated_at = parse_runtime_skill_record(name, content)?.updated_at;
+    (updated_at > 0).then_some(updated_at)
+}
+
 fn collect_runtime_skill_sections(content: &str) -> std::collections::HashMap<String, String> {
     let mut sections = std::collections::HashMap::new();
     let mut current_key: Option<String> = None;

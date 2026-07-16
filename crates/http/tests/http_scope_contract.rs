@@ -3,9 +3,9 @@
 use bm_http::HttpRuntimeRequest;
 
 #[test]
-fn http_runtime_request_defaults_to_local_loopback_auth_not_arbitrary_remote_auth() {
+fn http_runtime_request_does_not_expose_caller_controlled_trust_state() {
     let request = HttpRuntimeRequest::post_json("/memory/recall", r#"{"query":"release"}"#);
 
-    assert!(request.authenticated);
+    assert!(request.authorization.is_none());
     assert_eq!(request.path, "/memory/recall");
 }

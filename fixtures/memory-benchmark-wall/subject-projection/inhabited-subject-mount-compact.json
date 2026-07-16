@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "subject-projection-inhabited-subject-mount-compact",
   "class": "subject_projection",
-  "profile": "esp_standalone_memory",
+  "profile": "target-esp+role-standalone-memory",
   "mode": "compact",
   "evaluation_source": "contract_baseline",
   "description": "Compact profile keeps the Subject Mount shape while allowing budgeted evidence and slot summaries.",

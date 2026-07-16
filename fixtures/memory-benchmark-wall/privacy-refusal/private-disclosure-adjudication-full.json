@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "privacy-refusal-private-disclosure-adjudication-full",
   "class": "privacy_refusal",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "Disclosure adjudication is a pre-reply boundary protocol for the main runtime context, not a final answer writer.",

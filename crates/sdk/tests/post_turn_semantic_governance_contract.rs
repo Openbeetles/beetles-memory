@@ -11,8 +11,7 @@ use bm_core::memory::{
 use bm_core::platform::Platform as _;
 use bm_core::skills::list_runtime_skill_records;
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput,
+    MemoryProjectionRequest, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -55,7 +54,7 @@ fn text_candidate(
 
 #[test]
 fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform.clone(), profile, "llm.gateway", "chat-a");
 
@@ -113,7 +112,7 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
 
 #[test]
 fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate_plane() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform.clone(), profile, "llm.gateway", "chat-a");
 
@@ -156,7 +155,7 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
 
 #[test]
 fn sdk_candidate_write_reports_soul_handoff_without_long_term_or_procedural_mutation() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 
@@ -202,7 +201,7 @@ fn sdk_candidate_write_reports_soul_handoff_without_long_term_or_procedural_muta
 
 #[test]
 fn sdk_candidate_write_keeps_private_garden_out_of_common_candidate_mutation() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 

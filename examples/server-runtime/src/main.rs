@@ -1,16 +1,14 @@
 use bm_entry::{
-    EntryAuthConfig, EntryIdentity, EntryIdempotencyConfig, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
+    EntryScope, EntryTransportConfig,
 };
-use bm_http::{handle_http_request, HttpRuntimeRequest};
-use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendKind,
-};
+use bm_http::{handle_http_in_process_request, HttpRuntimeRequest};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendConfig};
 
 fn main() -> bm_sdk::Result<()> {
-    let runtime = entry_runtime(ProfileId::ServerLinuxDevFull)?;
+    let runtime = entry_runtime(ProfileId::ServerLinuxMemoryGateway)?;
 
-    let write = handle_http_request(
+    let write = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/write",
@@ -25,7 +23,7 @@ fn main() -> bm_sdk::Result<()> {
     )?;
     assert_eq!(write.status_code, 200);
 
-    let recall = handle_http_request(
+    let recall = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json("/memory/recall", r#"{"query":"server entry","limit":4}"#),
     )?;
@@ -40,7 +38,6 @@ fn entry_runtime(profile: ProfileId) -> bm_sdk::Result<EntryRuntime> {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     EntryRuntime::open(EntryRuntimeConfig {
-        profile,
         identity: EntryIdentity {
             agent_id: "server-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -49,11 +46,7 @@ fn entry_runtime(profile: ProfileId) -> bm_sdk::Result<EntryRuntime> {
             channel: "server".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(profile)?.with_fsync(false),
         transports: EntryTransportConfig::all_enabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 64 },

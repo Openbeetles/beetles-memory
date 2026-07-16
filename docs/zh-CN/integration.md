@@ -68,12 +68,11 @@ ESP profile 应使用 `StoreBackendConfig::embedded(profile)` 或 `in_memory(pro
 ## 4. 构建 Runtime
 
 ```rust
-use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId};
+use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope};
 
 let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
     .scope(MemoryScope::new("local", "chat-1")?)
-    .profile(ProfileId::DesktopMacosEmbeddedSdk)
     .store(store)
     .add_agent_skill_dir(AgentSkillDirConfig::read_only("./skills", "host-project"))
     .build()?;
@@ -247,63 +246,55 @@ Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它�
 6. 用 `inspect` 提供运维可见性和安全恢复上下文。
 7. 替换或发布闸口走 memory-space export、迁移 dry-run、apply/import 和 replay。
 
-`fixtures/sdk-host-readiness/` 里的 generic host fixture 与 Beetle-derived fixture 走同一条路径。Beetle-derived 数据只是 legacy-shaped evidence，不是 SDK 特殊分支。
+`fixtures/sdk-host-readiness/` 里的 generic host fixture 与 Beetle-derived fixture 走同一条路径。Beetle-derived 数据只是当前合同的 host evidence，不是 SDK 特殊分支或兼容分支。
 
 ## 11. 迁移 dry-run、Import、Replay
 
 ```rust
 use bm_sdk::{
-    apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
-    ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest,
-    MemoryReplayRequest, MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest,
-    MemorySpaceMigratePreviewRequest,
+    apply_memory_space_migration, preview_memory_space_migration, MemoryReplayRequest,
+    MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest,
 };
 
-let exported = runtime.export(MemoryExportRequest {
-    chat_id: "chat-1".to_string(),
-})?;
-
-runtime.import(MemoryImportRequest {
-    snapshot: exported.snapshot,
-    target_chat_id: "chat-2".to_string(),
-    mode: ContinuitySnapshotImportMode::FullRestore,
-})?;
-
 let replay = runtime.replay(MemoryReplayRequest {
-    chat_id: "chat-2".to_string(),
+    chat_id: "chat-1".to_string(),
     limit: 32,
 })?;
 
-let space = export_memory_space(
-    &store,
-    MemorySpaceExportRequest {
-        memory_space_id: "space-main".to_string(),
-        include_private: true,
+let space = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: bm_sdk::MemorySpaceScope {
+        memory_space_id: runtime.memory_space_id().to_string(),
+        mounted_subject_id: runtime.subject_id().to_string(),
     },
-)?;
+    include_private: true,
+})?;
 let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-    source_memory_space_id: "space-main".to_string(),
-    target_memory_space_id: "space-copy".to_string(),
-    snapshot: space.snapshot.clone(),
-});
-if !preview.loss_risk {
+    source_scope: space.projection_scope.scope.clone(),
+    target_scope: space.projection_scope.scope.clone(),
+    expected_private_material_policy:
+        bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
+    source_profile: profile,
+    target_profile: profile,
+    archive: space.archive,
+})?;
+if preview.vault_preflight.passed {
     apply_memory_space_migration(
         &target_store,
-        MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: "space-copy".to_string(),
-            snapshot: space.snapshot,
-        },
+        MemorySpaceMigrateApplyRequest { plan: preview.plan },
     )?;
 }
 ```
 
-有限启动迁移使用 `BootstrapImport`，完整连续性恢复使用 `FullRestore`。
-替换宿主记忆实现或迁移一份已配置 SDK store 时，使用 memory-space export/preview/apply。
+公开恢复不接受自由拼装的 continuity snapshot。runtime、request 与 typed archive 必须在任何 store read 或 migration/import planning 前声明完全相同的 `(memory_space_id, mounted_subject_id)`。
+
+替换宿主记忆实现或迁移一份已配置 SDK store 时，使用 memory-space export/preview/apply。bootstrap/full continuity mode 只属于内部 Soul-recovery bundle。
+expected private-material policy 属于迁移 authority；它与 archive manifest 不一致时，preview 与 apply 必须 fail closed。
 
 apply 之前必须检查 dry-run report。`loss_risk`、schema id、record count、state fingerprint、event fingerprint 和 privacy redaction count 都属于发布证据。替换自有记忆实现的宿主应在 readiness gate 中保留一个 generic fixture 和一个 host-derived legacy fixture。
-`preview.manifest` 还会报告 whole-space snapshot、plane/privacy counts 和 subject remap 状态。
-当前 apply 仍是 whole-space snapshot 导入；当 source/target memory space 不同时，manifest 会标记
-`subject_remap.required=true` 且 `applied=false`，宿主不能把它误读成已经完成 subject key rewrite。
+`preview.manifest` 还会报告精确的 memory-space/mounted-subject projection scope、
+private-material 模式、plane/privacy counts 和 identity-remap 状态。apply 只在 backend
+transaction fence 内原子替换该 typed scope；source/target scope identity 不同时，manifest 会标记
+`identity_remap.required=true` 且 `applied=false`，并在显式 typed remapper 产出新 archive 前拒绝重标。
 
 ## 11. Operator Inspect
 

@@ -8,7 +8,8 @@ mod policy;
 
 pub use contract::{
     AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterEvent, AdapterOperation,
-    AdapterProjectionAuditSummary, AdapterProjectionReport, AdapterResponse, AdapterSdkReport,
+    AdapterProjectionAuditSummary, AdapterProjectionReport, AdapterRequestIdentity,
+    AdapterRequestIdentityError, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
     AdapterSource, TransportKind, TransportMode,
 };
 pub use dispatch::{

@@ -61,6 +61,24 @@
       "sqlite_allowed": true,
       "server_listener_allowed": true
     },
+    "profile-desktop-macos-standalone-memory": {
+      "package": "bm-sdk",
+      "features": [
+        "profile-desktop-macos-standalone-memory"
+      ],
+      "forbidden_tree_needles": [
+        "esp-idf-svc",
+        "embedded-svc"
+      ],
+      "required_tree_needles": [
+        "bm-core",
+        "bm-sdk",
+        "rusqlite"
+      ],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": true
+    },
     "profile-desktop-macos-embedded-sdk": {
       "package": "bm-sdk",
       "features": [
@@ -79,6 +97,24 @@
       "sqlite_allowed": true,
       "server_listener_allowed": false
     },
+    "profile-desktop-macos-dev-full": {
+      "package": "bm-sdk",
+      "features": [
+        "profile-desktop-macos-dev-full"
+      ],
+      "forbidden_tree_needles": [
+        "esp-idf-svc",
+        "embedded-svc"
+      ],
+      "required_tree_needles": [
+        "bm-core",
+        "bm-sdk",
+        "rusqlite"
+      ],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": true
+    },
     "profile-desktop-windows-embedded-sdk": {
       "package": "bm-sdk",
       "features": [
@@ -96,6 +132,24 @@
       "store_backend": "sqlite-store",
       "sqlite_allowed": true,
       "server_listener_allowed": false
+    },
+    "profile-desktop-windows-dev-full": {
+      "package": "bm-sdk",
+      "features": [
+        "profile-desktop-windows-dev-full"
+      ],
+      "forbidden_tree_needles": [
+        "esp-idf-svc",
+        "embedded-svc"
+      ],
+      "required_tree_needles": [
+        "bm-core",
+        "bm-sdk",
+        "rusqlite"
+      ],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": true
     },
     "profile-server-linux-memory-gateway": {
       "package": "bm-sdk",

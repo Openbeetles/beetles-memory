@@ -38,7 +38,7 @@ fn retention_quota_report_is_owned_by_sdk_runtime_not_host_limits() {
 
 #[test]
 fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_memory() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform.clone(), profile);
     runtime
@@ -126,8 +126,11 @@ fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_mem
         .read_json_namespace("memory_facet_indexes")
         .expect("facet namespace")
         .into_iter()
-        .find(|doc| doc.value["owner_record_id"] == before.id)
+        .find(|doc| doc.value["owner_ref"]["owner_id"] == before.id)
         .expect("owner facet");
+    assert_eq!(facet.value["owner_ref"]["owner_plane"], "long_term");
+    assert!(facet.value.get("owner_record_id").is_none());
+    assert!(facet.value.get("owner_plane").is_none());
     assert_eq!(
         facet
             .value

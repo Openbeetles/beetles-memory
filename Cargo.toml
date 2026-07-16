@@ -38,3 +38,5 @@ indexmap = "2.0"
 rusqlite = { version = "0.37", features = ["bundled"] }
 log = "0.4"
 sha2 = "0.10"
+libc = "0.2"
+windows-sys = "0.61"

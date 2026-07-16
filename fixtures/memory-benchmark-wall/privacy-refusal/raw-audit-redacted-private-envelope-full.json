@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "privacy-refusal-raw-audit-redacted-private-envelope-full",
   "class": "privacy_refusal",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "runtime_replay",
   "description": "Raw projection audit may expose the public skeleton and redacted private envelope metadata, never private raw source text.",

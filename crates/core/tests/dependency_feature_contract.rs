@@ -1,4 +1,6 @@
-use bm_core::feature_gate::{compiled_feature_report, profile_capability_catalog, ProfileId};
+use bm_core::feature_gate::{
+    compiled_feature_report, profile_capability_catalog, profile_compiled, ProfileId,
+};
 
 #[test]
 fn sqlite_index_dependency_is_controlled_by_explicit_feature() {
@@ -62,8 +64,16 @@ fn compiled_feature_report_names_target_role_and_profile_features() {
         cfg!(feature = "profile-desktop-macos-embedded-sdk")
     );
     assert_eq!(
+        report.profile_desktop_macos_dev_full,
+        cfg!(feature = "profile-desktop-macos-dev-full")
+    );
+    assert_eq!(
         report.profile_desktop_windows_embedded_sdk,
         cfg!(feature = "profile-desktop-windows-embedded-sdk")
+    );
+    assert_eq!(
+        report.profile_desktop_windows_dev_full,
+        cfg!(feature = "profile-desktop-windows-dev-full")
     );
     assert_eq!(
         report.profile_server_linux_memory_gateway,
@@ -77,6 +87,37 @@ fn compiled_feature_report_names_target_role_and_profile_features() {
         report.replay_harness_compiled,
         cfg!(feature = "nonproduction-replay-harness")
     );
+}
+
+#[test]
+fn dev_full_profile_features_force_the_nonproduction_compile_contract() {
+    let report = compiled_feature_report();
+    let cases = [
+        (
+            ProfileId::DesktopMacosDevFull,
+            report.profile_desktop_macos_dev_full,
+            report.target_desktop_macos,
+        ),
+        (
+            ProfileId::DesktopWindowsDevFull,
+            report.profile_desktop_windows_dev_full,
+            report.target_desktop_windows,
+        ),
+        (
+            ProfileId::ServerLinuxDevFull,
+            report.profile_server_linux_dev_full,
+            report.target_server_linux,
+        ),
+    ];
+
+    for (profile, profile_feature_compiled, target_compiled) in cases {
+        assert_eq!(profile_compiled(profile), profile_feature_compiled);
+        if profile_feature_compiled {
+            assert!(target_compiled);
+            assert!(report.role_dev_full);
+            assert!(report.replay_harness_compiled);
+        }
+    }
 }
 
 #[test]

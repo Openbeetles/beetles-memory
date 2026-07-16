@@ -14,8 +14,9 @@ mod file;
 mod in_memory;
 mod mutation;
 mod platform;
-mod read_snapshot;
-mod schema;
+pub(crate) mod recall_index;
+pub(crate) mod recall_read;
+pub(crate) mod schema;
 mod snapshot;
 #[cfg(feature = "sqlite-store")]
 mod sqlite;
@@ -28,7 +29,12 @@ pub use config::{
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 pub use embedded::EmbeddedStoreEngine;
-pub use engine::{StoreEngine, StoreSnapshotReplaceReport};
+#[cfg(feature = "nonproduction-replay-harness")]
+pub use engine::StoreSnapshotReplaceReport;
+pub use engine::{
+    StoreEngine, StoreScopedProjection, StoreScopedProjectionReplaceReport,
+    StoreScopedProjectionReplaceRequest, StoreScopedProjectionRequest, StoreScopedProjectionScope,
+};
 pub use error::{StoreOpenReport, StoreRepairReport};
 pub use event::{MemoryStoreEvent, MemoryStoreEventKind, StoreEventLog, StoreEventScope};
 #[cfg(feature = "nonproduction-replay-harness")]
@@ -38,23 +44,36 @@ pub use mutation::{
     StoreJsonPrecondition, StoreMutation, StoreMutationBatch, StoreMutationBatchReport,
     StoreMutationBudgetReport,
 };
-#[cfg(feature = "nonproduction-replay-harness")]
-pub use platform::GovernedRecallSnapshot;
 pub use platform::StorePlatform;
+#[cfg(feature = "nonproduction-replay-harness")]
+pub(crate) use platform::StorePlatformPreparation;
+pub(crate) use platform::{
+    snapshot_json_requires_private_export, snapshot_key_requires_private_export,
+    snapshot_namespace_requires_private_export, transcript_derived_ref_storage_key,
+    transcript_turn_storage_key, validate_scoped_projection_governed_closure,
+    GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
+};
+pub(crate) use schema::{
+    governed_evidence_source_claim_manifest_key,
+    validate_governed_evidence_source_claim_scope_closure, GovernedEvidenceOwnerClaimBinding,
+    GovernedEvidenceSourceClaimManifest, GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
+};
 pub use schema::{StoreSchemaManifest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION};
+#[cfg(any(test, feature = "nonproduction-replay-harness"))]
+pub use snapshot::StoreSnapshotBlob;
 pub use snapshot::{
-    StoreSnapshot, StoreSnapshotBlob, StoreSnapshotExportReport, StoreSnapshotImportReport,
-    StoreSnapshotJsonDoc,
+    StoreSnapshot, StoreSnapshotExportReport, StoreSnapshotImportReport, StoreSnapshotJsonDoc,
 };
 #[cfg(all(feature = "sqlite-store", feature = "nonproduction-replay-harness"))]
 pub use sqlite::SqliteStoreEngine;
-pub(crate) use transaction::GraphRepairAuthority;
+pub(crate) use transaction::StoreReadReceipt;
+pub(crate) use transaction::{
+    scoped_projection_json_addresses, GraphRepairAuthority, StoreGovernedEvidenceExactReadRequest,
+    StoreTransactionAdmission,
+};
 #[cfg(feature = "nonproduction-replay-harness")]
 pub use transaction::{
     StoreBlobAddress, StoreConsistentBlobRead, StoreConsistentJsonRead, StoreConsistentReadRequest,
     StoreConsistentReadResult, StoreJsonAddress,
 };
-pub use transaction::{
-    StoreConsistentNamespaceReadRequest, StoreConsistentNamespaceReadResult, StoreEngineMutation,
-    StoreReadReceipt, StoreTransactionReport, StoreTransactionRequest,
-};
+pub use transaction::{StoreEngineMutation, StoreTransactionReport, StoreTransactionRequest};

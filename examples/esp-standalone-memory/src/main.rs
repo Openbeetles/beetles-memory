@@ -1,18 +1,17 @@
 use bm_adapter::{AdapterCommand, AdapterOperation};
 use bm_entry::{
-    EntryAuthConfig, EntryAuthDecision, EntryIdentity, EntryIdempotencyConfig, EntryRuntime,
-    EntryRuntimeConfig, EntryScope, EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryLocalTransport, EntryRuntime,
+    EntryRuntimeConfig, EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryWriteRequest,
-    ProfileId, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendKind,
+    ProfileId, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 fn main() -> bm_sdk::Result<()> {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     let runtime = EntryRuntime::open(EntryRuntimeConfig {
-        profile: ProfileId::EspStandaloneMemory,
         identity: EntryIdentity {
             agent_id: "esp-memory-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -21,11 +20,7 @@ fn main() -> bm_sdk::Result<()> {
             channel: "device".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::Embedded,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::embedded(ProfileId::EspStandaloneMemory)?.with_fsync(false),
         transports: EntryTransportConfig::all_enabled(),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 16 },
@@ -37,7 +32,7 @@ fn main() -> bm_sdk::Result<()> {
     assert!(!runtime.capability().http_server.visible);
 
     runtime.handle(
-        context(AdapterOperation::Write, "idem-esp-write"),
+        context(&runtime, AdapterOperation::Write, "idem-esp-write"),
         AdapterCommand::Write(MemoryWriteRequest::Procedural {
             writes: vec![RuntimeSkillWrite {
                 name: "runtime_skill__compact_entry_guard".to_string(),
@@ -54,7 +49,7 @@ fn main() -> bm_sdk::Result<()> {
         }),
     )?;
     let recall = runtime.handle(
-        context(AdapterOperation::Recall, "idem-esp-recall"),
+        context(&runtime, AdapterOperation::Recall, "idem-esp-recall"),
         AdapterCommand::Recall(MemoryRecallRequest {
             query: "compact entry".to_string(),
             limit: 2,
@@ -67,16 +62,20 @@ fn main() -> bm_sdk::Result<()> {
     Ok(())
 }
 
-fn context(operation: AdapterOperation, idempotency_key: &str) -> EntryTransportContext {
-    EntryTransportContext {
-        request_id: format!("esp-standalone-{operation:?}"),
-        transport: bm_adapter::TransportKind::Cli,
-        mode: bm_adapter::TransportMode::InProcess,
+fn context(
+    runtime: &EntryRuntime,
+    operation: AdapterOperation,
+    idempotency_key: &str,
+) -> EntryTransportContext {
+    EntryTransportContext::new(
+        format!("esp-standalone-{operation:?}"),
+        bm_adapter::TransportKind::Cli,
+        bm_adapter::TransportMode::InProcess,
         operation,
-        source_id: "esp-standalone".to_string(),
-        source_kind: "local_cli".to_string(),
-        idempotency_key: idempotency_key.to_string(),
-        audit_id: format!("audit-esp-standalone-{operation:?}"),
-        auth: EntryAuthDecision::authenticated("local", "operator"),
-    }
+        "esp-standalone",
+        "local_cli",
+        idempotency_key,
+        format!("audit-esp-standalone-{operation:?}"),
+        runtime.authenticate_local_transport(EntryLocalTransport::InProcess, "operator"),
+    )
 }

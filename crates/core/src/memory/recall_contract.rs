@@ -9,9 +9,10 @@ use crate::util::truncate_content_to_max;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    parse_explicit_long_term_slot_query, score_long_term_memory_recall_breakdown,
-    search_archive_records_detailed, select_archive_hits_for_prompt_with_report,
-    select_long_term_recall_entries, ArchiveSearchQuery, LongTermMemoryEntry,
+    governed_memory_recall_candidate_id, parse_explicit_long_term_slot_query,
+    score_long_term_memory_recall_breakdown, search_archive_records_detailed,
+    select_archive_hits_for_prompt_with_report, select_long_term_recall_entries,
+    ArchiveSearchQuery, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, LongTermMemoryEntry,
     LongTermMemoryReadStore, LongTermMemorySlot, LongTermMemoryStore, MemoryProfile, MemoryStore,
     SessionMessage, SessionStore, TurnLedgerStore,
 };
@@ -107,6 +108,8 @@ pub struct RecallScoreBreakdown {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecallCandidate {
     pub plane: RecallPlane,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_ref: Option<GovernedMemoryOwnerRef>,
     #[serde(default)]
     pub candidate_id: String,
     #[serde(default)]
@@ -219,6 +222,8 @@ fn build_shared_factual_candidate(
     exact_lookup: Option<&LongTermMemorySlot>,
     now_secs: u64,
 ) -> RecallCandidate {
+    let owner_ref =
+        GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id.clone());
     let mut breakdown =
         score_long_term_memory_recall_breakdown(query, Some(chat_id), now_secs, entry);
     let exact_lookup_bonus = exact_lookup
@@ -250,7 +255,8 @@ fn build_shared_factual_candidate(
     ]);
     RecallCandidate {
         plane: RecallPlane::SharedFactual,
-        candidate_id: entry.id.clone(),
+        candidate_id: governed_memory_recall_candidate_id(&owner_ref),
+        owner_ref: Some(owner_ref),
         title: entry.topic.clone(),
         excerpt: normalize_recall_text(&entry.content, 160),
         citation: entry.supporting_citations.first().cloned(),
@@ -323,15 +329,16 @@ where
             Some(entry) => {
                 report.candidate_count = 1;
                 report.selected_count = 1;
-                report.selected_ids.push(entry.id.clone());
-                report.candidates.push(build_shared_factual_candidate(
+                let candidate = build_shared_factual_candidate(
                     &entry,
                     true,
                     chat_id,
                     user_query,
                     exact_lookup.as_ref(),
                     now_secs,
-                ));
+                );
+                report.selected_ids.push(candidate.candidate_id.clone());
+                report.candidates.push(candidate);
             }
             None => {
                 report.miss_reason = Some("exact_slot_not_found".to_string());
@@ -351,7 +358,12 @@ where
     let selected_ids = selection
         .selected
         .iter()
-        .map(|entry| entry.id.clone())
+        .map(|entry| {
+            governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+                GovernedMemoryOwnerPlane::LongTerm,
+                entry.id.clone(),
+            ))
+        })
         .collect::<Vec<_>>();
     report.query.normalized_query = selection.recall_query.clone();
     report.query.requested_limit = selection.desired;
@@ -375,9 +387,13 @@ where
         .map(|entry| {
             build_shared_factual_candidate(
                 entry,
-                selected_ids
-                    .iter()
-                    .any(|selected_id| selected_id == &entry.id),
+                selected_ids.iter().any(|selected_id| {
+                    selected_id
+                        == &governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+                            GovernedMemoryOwnerPlane::LongTerm,
+                            entry.id.clone(),
+                        ))
+                }),
                 chat_id,
                 &selection.recall_query,
                 None,
@@ -469,6 +485,7 @@ pub fn inspect_archive_recall(
             ]);
             RecallCandidate {
                 plane: RecallPlane::Archive,
+                owner_ref: None,
                 candidate_id: hit.record_id.clone(),
                 title: hit.title.clone(),
                 excerpt: normalize_recall_text(&hit.excerpt, 180),
@@ -518,7 +535,12 @@ pub fn inspect_runtime_skill_recall(
     let hits = recall.hits;
     let selected_ids = hits
         .iter()
-        .map(|hit| hit.record.name.clone())
+        .map(|hit| {
+            governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+                GovernedMemoryOwnerPlane::RuntimeSkill,
+                hit.record.name.clone(),
+            ))
+        })
         .collect::<Vec<_>>();
     let miss_reason = hits
         .is_empty()
@@ -545,7 +567,14 @@ pub fn inspect_runtime_skill_recall(
             .into_iter()
             .map(|hit| RecallCandidate {
                 plane: RecallPlane::RuntimeSkill,
-                candidate_id: hit.record.name.clone(),
+                owner_ref: Some(GovernedMemoryOwnerRef::new(
+                    GovernedMemoryOwnerPlane::RuntimeSkill,
+                    hit.record.name.clone(),
+                )),
+                candidate_id: governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+                    GovernedMemoryOwnerPlane::RuntimeSkill,
+                    hit.record.name.clone(),
+                )),
                 title: hit.record.title.clone(),
                 excerpt: normalize_recall_text(&hit.record.summary, 180),
                 citation: hit.record.citations.first().cloned(),
@@ -642,6 +671,7 @@ pub fn inspect_task_recall(
         .into_iter()
         .map(|hit| RecallCandidate {
             plane: RecallPlane::TaskRecall,
+            owner_ref: None,
             candidate_id: hit.record.learning_id.clone(),
             title: hit.record.topic.clone(),
             excerpt: normalize_recall_text(&hit.record.summary, 180),

@@ -1,13 +1,13 @@
 //! Shared memory/operator surface for HTTP and CLI.
 
 use crate::memory::{
-    board_subject_scope_id, compile_subject_shell,
-    derive_personality_runtime_governance_gate_from_inspection, inspect_personality_governance,
-    select_active_continuity_snapshot_chat_ids, select_personality_governance_targets,
-    ContinuitySnapshotManifest, CrossPlaneRerankResult, FeltSignificance, InnerConflict,
-    IntelligenceReplayInspection, LongTermMemoryReadStore, PersonalityGovernanceInspection,
-    PersonalityGovernanceInspectionInput, PersonalityRuntimeGovernanceGate, PromptRecallIntent,
-    RecallSelectionReport, SubjectShellCompileInput, TemperamentContinuity,
+    compile_subject_shell, derive_personality_runtime_governance_gate_from_inspection,
+    inspect_personality_governance, select_active_continuity_snapshot_chat_ids,
+    select_personality_governance_targets, ContinuitySnapshotManifest, CrossPlaneRerankResult,
+    FeltSignificance, InnerConflict, IntelligenceReplayInspection, LongTermMemoryReadStore,
+    PersonalityGovernanceInspection, PersonalityGovernanceInspectionInput,
+    PersonalityRuntimeGovernanceGate, PromptRecallIntent, RecallSelectionReport,
+    SubjectShellCompileInput, TemperamentContinuity,
 };
 use crate::skills::is_runtime_skill_name;
 use crate::tools::ToolRegistry;
@@ -209,12 +209,14 @@ type MemoryOperatorPolicyViewBundle = (
 
 pub fn build_memory_operator_surface(
     platform: &dyn Platform,
+    requested_subject_id: &str,
     long_term_store: &dyn LongTermMemoryReadStore,
     tool_registry: Option<&ToolRegistry>,
     trace_input: Option<&MemoryOperatorTraceInput>,
 ) -> crate::error::Result<MemoryOperatorSurfaceSummary> {
     build_memory_operator_surface_with_capabilities(
         platform,
+        requested_subject_id,
         long_term_store,
         tool_registry.is_some_and(|registry| registry.get("continuity_snapshot").is_some()),
         trace_input,
@@ -223,11 +225,12 @@ pub fn build_memory_operator_surface(
 
 pub fn build_memory_operator_surface_with_capabilities(
     platform: &dyn Platform,
+    requested_subject_id: &str,
     long_term_store: &dyn LongTermMemoryReadStore,
     continuity_snapshot_supported: bool,
     trace_input: Option<&MemoryOperatorTraceInput>,
 ) -> crate::error::Result<MemoryOperatorSurfaceSummary> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = validate_requested_subject_id(requested_subject_id)?;
     let now_secs = crate::util::current_unix_secs();
     let memory_system_kind = platform.memory_system_kind();
     let skill_storage = platform.skill_storage();
@@ -266,6 +269,7 @@ pub fn build_memory_operator_surface_with_capabilities(
     );
     let active_relationship_target = personality_targets.first().map(convert_relationship_target);
     let active_chat_targets = select_active_continuity_snapshot_chat_ids(
+        subject_id,
         platform.session_store().as_ref(),
         platform.self_continuity_store().as_ref(),
         platform.relationship_portfolio_store().as_ref(),
@@ -282,7 +286,7 @@ pub fn build_memory_operator_surface_with_capabilities(
         relationship_constitution,
         recent_persona_evidence,
         latest_turn_soul_feedback,
-    ) = build_policy_view(platform, now_secs, personality_targets.first())?;
+    ) = build_policy_view(platform, subject_id, now_secs, personality_targets.first())?;
     let forge_summary =
         crate::load_idle_memory_forge_operator_summary(platform.state_fs().as_ref())?
             .unwrap_or_default();
@@ -554,6 +558,7 @@ pub fn build_memory_operator_surface_with_capabilities(
             continuity_snapshot_supported,
             reasons: personality_governance.repair_plan.reasons.clone(),
             continuity_snapshot_targets: select_active_continuity_snapshot_chat_ids(
+                subject_id,
                 platform.session_store().as_ref(),
                 platform.self_continuity_store().as_ref(),
                 platform.relationship_portfolio_store().as_ref(),
@@ -688,6 +693,7 @@ pub fn render_memory_operator_surface_text(surface: &MemoryOperatorSurfaceSummar
 
 fn build_policy_view(
     platform: &dyn Platform,
+    subject_id: &str,
     now_secs: u64,
     target: Option<&crate::memory::RelationshipSelectionTarget>,
 ) -> crate::error::Result<MemoryOperatorPolicyViewBundle> {
@@ -696,18 +702,12 @@ fn build_policy_view(
         let gate = derive_personality_runtime_governance_gate_from_inspection(&inspection);
         return Ok((None, inspection, gate, None, None, None));
     };
-    let self_authored_core = platform
-        .self_authored_core_store()
-        .get(board_subject_scope_id())?;
-    let core_revision_ledger = platform
-        .core_revision_ledger_store()
-        .get(board_subject_scope_id())?;
+    let self_authored_core = platform.self_authored_core_store().get(subject_id)?;
+    let core_revision_ledger = platform.core_revision_ledger_store().get(subject_id)?;
     let relationship_constitution = platform
         .relationship_constitution_store()
         .get(target.scope_id.as_str())?;
-    let relationship_topology = platform
-        .relationship_topology_store()
-        .get(board_subject_scope_id())?;
+    let relationship_topology = platform.relationship_topology_store().get(subject_id)?;
     let recent_persona_evidence = platform
         .turn_continuity_evidence_store()
         .recent_persona_evidence(target.scope_id.as_str())?;
@@ -736,6 +736,17 @@ fn build_policy_view(
     ))
 }
 
+fn validate_requested_subject_id(requested_subject_id: &str) -> crate::error::Result<&str> {
+    let requested_subject_id = requested_subject_id.trim();
+    if requested_subject_id.is_empty() {
+        return Err(crate::Error::config(
+            "memory_operator_surface_subject",
+            "requested_subject_id must not be empty",
+        ));
+    }
+    Ok(requested_subject_id)
+}
+
 fn convert_relationship_target(
     target: &crate::memory::RelationshipSelectionTarget,
 ) -> MemoryOperatorRelationshipTarget {
@@ -751,6 +762,17 @@ fn convert_relationship_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_subject_id_is_required_and_trimmed_without_defaulting() {
+        assert_eq!(
+            validate_requested_subject_id("  subject:current  ").unwrap(),
+            "subject:current"
+        );
+        let error = validate_requested_subject_id("  ").unwrap_err();
+        assert_eq!(error.stage(), "memory_operator_surface_subject");
+        assert!(error.to_string().contains("requested_subject_id"));
+    }
 
     #[test]
     fn operator_surface_reports_humanization_spine_state() {

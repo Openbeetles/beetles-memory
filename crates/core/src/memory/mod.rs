@@ -22,6 +22,7 @@ mod core_revision_ledger;
 mod execution_state;
 mod felt_significance;
 mod governed_evidence_document;
+mod governed_memory_owner;
 mod governed_post_image;
 #[cfg(all(
     any(test, feature = "nonproduction-replay-harness"),
@@ -149,14 +150,14 @@ pub use continuity_capsule::{
 pub(crate) use continuity_snapshot::import_continuity_snapshot;
 pub(crate) use continuity_snapshot::select_active_continuity_snapshot_chat_ids;
 pub use continuity_snapshot::{
-    coalesce_continuity_snapshot_import_plans, export_continuity_snapshot,
-    plan_continuity_snapshot_import, render_continuity_snapshot_markdown,
-    select_personality_governance_targets, ContinuitySnapshot, ContinuitySnapshotExportContext,
+    coalesce_continuity_snapshot_import_plans, plan_continuity_snapshot_import,
+    render_continuity_snapshot_markdown, select_personality_governance_targets, ContinuitySnapshot,
     ContinuitySnapshotImportContext, ContinuitySnapshotImportDecision,
     ContinuitySnapshotImportMode, ContinuitySnapshotImportOutcome, ContinuitySnapshotImportPlan,
     ContinuitySnapshotImportWriteSet, ContinuitySnapshotKindCount, ContinuitySnapshotManifest,
     ContinuitySnapshotMode, ContinuitySnapshotPlannedWrite, ContinuitySnapshotSummaryWrite,
 };
+pub(crate) use continuity_snapshot::{export_continuity_snapshot, ContinuitySnapshotExportContext};
 pub(crate) use core_revision_ledger::compact_core_revision_ledger_for_profile;
 pub use core_revision_ledger::{
     append_core_revision_record, build_core_revision_timeline,
@@ -186,14 +187,22 @@ pub use felt_significance::{
     FELT_SIGNIFICANCE_SYSTEM_CONTRACT, FELT_SIGNIFICANCE_TOTAL_CHAR_LIMIT,
 };
 pub use governed_evidence_document::{
-    governed_evidence_document_content_digest, plan_governed_evidence_document_upsert,
-    scoped_governed_evidence_document_key, validate_governed_evidence_document,
-    validate_governed_evidence_document_draft, GovernedEvidenceDocument,
-    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft, GovernedEvidenceDocumentPlan,
-    GovernedEvidenceDocumentReadStore, GovernedEvidenceDocumentRejection,
-    GovernedEvidenceDocumentSourceKind, MAX_GOVERNED_EVIDENCE_DOCUMENT_BODY_BYTES,
+    governed_evidence_document_content_digest, governed_evidence_source_locator_digest,
+    governed_evidence_source_ref_from_document, plan_governed_evidence_document_delete,
+    plan_governed_evidence_document_upsert, scoped_governed_evidence_document_key,
+    scoped_governed_evidence_source_ref_key, validate_governed_evidence_document,
+    validate_governed_evidence_document_draft, validate_governed_evidence_source_ref,
+    GovernedEvidenceDocument, GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDeletePlan,
+    GovernedEvidenceDocumentDraft, GovernedEvidenceDocumentPlan, GovernedEvidenceDocumentReadStore,
+    GovernedEvidenceDocumentRejection, GovernedEvidenceDocumentSourceKind,
+    GovernedEvidenceSourceRef, GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION,
+    GOVERNED_EVIDENCE_SOURCE_REF_SCHEMA_VERSION, MAX_GOVERNED_EVIDENCE_DOCUMENT_BODY_BYTES,
     MAX_GOVERNED_EVIDENCE_DOCUMENT_BYTES, MAX_GOVERNED_EVIDENCE_DOCUMENT_CHUNKS,
     MAX_GOVERNED_EVIDENCE_DOCUMENT_CHUNK_BYTES,
+};
+pub use governed_memory_owner::{
+    governed_long_term_owner_evidence_bindings, governed_memory_recall_candidate_id,
+    GovernedEvidenceBinding, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
 };
 pub use governed_post_image::{GovernedDocumentImage, GovernedPostImageValidation};
 pub(crate) use hygiene::run_memory_hygiene_jobs;
@@ -295,18 +304,20 @@ pub use maintenance::{
     PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome,
 };
 pub use memory_facet::{
-    build_long_term_memory_facet_index_doc, memory_facet_manifest_key, memory_facet_posting_key,
-    scoped_memory_facet_owner_storage_key, validate_memory_facet_manifest,
-    validate_memory_facet_post_image, validate_memory_facet_posting,
-    validate_memory_facet_read_chain, FacetCoverageSelectionReport, FacetIndexRebuildReport,
-    FacetRankFusionCandidateReport, FacetRankFusionReport, FacetReportAudience, FacetReportView,
-    HumanFacetSuggestion, MemoryFacet, MemoryFacetContractValidation, MemoryFacetIndexDoc,
-    MemoryFacetIndexManifest, MemoryFacetNamespace, MemoryFacetOwnerPlane, MemoryFacetOwnerVersion,
-    MemoryFacetPostImageClosure, MemoryFacetPostingDoc, MemoryFacetPostingRevision,
-    MemoryFacetStatus, MemoryFacetValidationError, MemoryFacetValue, QueryFacet, QueryFacetInput,
-    QueryFacetMatchKind, QueryFacetParseOutcome, QueryFacetParser, StructuredFacetParseOutcome,
-    StructuredFacetParser, TemporalAnchor, TemporalAnchorKind, TemporalAnchorPrecision,
-    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
+    build_governed_evidence_document_facet_index_doc, build_long_term_memory_facet_index_doc,
+    memory_facet_manifest_key, memory_facet_posting_key, scoped_memory_facet_owner_storage_key,
+    validate_memory_facet_manifest, validate_memory_facet_post_image,
+    validate_memory_facet_posting, validate_memory_facet_read_chain, FacetCoverageSelectionReport,
+    FacetIndexRebuildReport, FacetRankFusionCandidateReport, FacetRankFusionReport,
+    FacetReportAudience, FacetReportView, HumanFacetSuggestion, MemoryFacet,
+    MemoryFacetContractValidation, MemoryFacetIndexDoc, MemoryFacetIndexManifest,
+    MemoryFacetNamespace, MemoryFacetOwnerVersion, MemoryFacetPostImageClosure,
+    MemoryFacetPostingDoc, MemoryFacetPostingRevision, MemoryFacetStatus,
+    MemoryFacetValidationError, MemoryFacetValue, QueryFacet, QueryFacetInput, QueryFacetMatchKind,
+    QueryFacetParseOutcome, QueryFacetParser, StructuredFacetParseOutcome, StructuredFacetParser,
+    TemporalAnchor, TemporalAnchorKind, TemporalAnchorPrecision,
+    MAX_EVIDENCE_DOCUMENT_FACET_LEXICAL_TERMS, MEMORY_FACET_INDEX_NAMESPACE,
+    MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
 };
 pub(crate) use memory_governance::run_memory_governance_kernel;
 pub use memory_governance::{
@@ -621,9 +632,9 @@ pub use transcript::{
     TranscriptCommitReport, TranscriptConversationAlias, TranscriptEvidenceRef,
     TranscriptLifecycleReport, TranscriptLifecycleRequest, TranscriptLifecycleState,
     TranscriptLifecycleTransition, TranscriptMessageRecord, TranscriptRedactionReason,
-    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairIssue,
-    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
-    TranscriptTurnPage, TranscriptTurnRecord,
+    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairInspection,
+    TranscriptRepairIssue, TranscriptRepairIssueKind, TranscriptRepairReport,
+    TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage, TranscriptTurnRecord,
 };
 pub use turn_commit::{
     canonical_user_delta, commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,

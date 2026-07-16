@@ -8,23 +8,37 @@ fail() {
   exit 1
 }
 
-cargo test -p bm-core --features sqlite-index --test sqlite_index_state_dir_contract
-cargo test -p bm-store-contract-tests --test runtime_store_budget_contract
-cargo test -p bm-store-contract-tests --test file_store_contract
-cargo test -p bm-store-contract-tests --features sqlite-store --test sqlite_store_contract
-cargo test -p bm-entry --test runtime_contract entry_runtime
-cargo test -p bm-mcp --features server-stdio --bin bm-mcp-server mcp_server
-cargo test -p bm-http --features server-std --bin bm-http-console http_console
-cargo test -p bm-llm-gateway --no-default-features --features server-async,client-reqwest --bin bm-llm-gateway llm_gateway
+case "$(uname -s)" in
+  Darwin) gateway_production_feature="profile-desktop-macos-standalone-memory" ;;
+  Linux) gateway_production_feature="profile-server-linux-memory-gateway" ;;
+  *) fail "bm-llm-gateway has no production profile for this hardening target" ;;
+esac
 
-if cargo check -p bm-sdk --no-default-features \
+cargo test --locked -p bm-core --features sqlite-index --test sqlite_index_state_dir_contract
+cargo test --locked -p bm-store-contract-tests --test runtime_store_budget_contract
+cargo test --locked -p bm-store-contract-tests --test file_store_contract
+cargo test --locked -p bm-store-contract-tests --features sqlite-store --test sqlite_store_contract
+cargo test --locked -p bm-entry --test runtime_contract entry_runtime
+cargo test --locked -p bm-mcp --features server-stdio --bin bm-mcp-server mcp_server
+cargo test --locked -p bm-http --features server-std --bin bm-http-console http_console
+cargo check --locked -p bm-llm-gateway --no-default-features \
+  --features "server-async,client-reqwest,$gateway_production_feature" \
+  --bin bm-llm-gateway
+
+if cargo check --locked -p bm-sdk --no-default-features \
   --features profile-server-linux-memory-gateway,nonproduction-replay-harness \
   >/dev/null 2>&1; then
   fail "nonproduction replay harness compiled with a production SDK profile"
 fi
 
-for package in bm-desktop bm-cli bm-llm-gateway bm-http bm-wss bm-mcp bm-a2a; do
-  if cargo tree -p "$package" -e normal,build,features \
+desktop_tree="$(cargo tree --locked -p bm-desktop -e normal,build,features \
+  --no-default-features --features profile-desktop-macos-standalone-memory)"
+if rg -q 'nonproduction-replay-harness|bm-replay' <<<"$desktop_tree"; then
+  fail "production dependency graph contains replay tooling: bm-desktop"
+fi
+
+for package in bm-cli bm-llm-gateway bm-http bm-wss bm-mcp bm-a2a; do
+  if cargo tree --locked -p "$package" -e normal,build,features \
     | rg -q 'nonproduction-replay-harness|bm-replay'; then
     fail "production dependency graph contains replay tooling: $package"
   fi

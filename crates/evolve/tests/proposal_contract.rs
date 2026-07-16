@@ -17,8 +17,9 @@ use bm_sdk::{
 
 #[test]
 fn proposal_commit_uses_sdk_write_governance() {
-    let runtime = test_runtime(ProfileId::ServerLinuxDevFull);
-    let proposal = procedural_proposal(ProfileId::ServerLinuxDevFull);
+    let profile = ProfileId::native_dev_full().expect("supported host-native dev-full profile");
+    let runtime = test_runtime(profile);
+    let proposal = procedural_proposal(profile);
 
     let report = commit_evolution_proposal(&runtime, proposal).expect("proposal commit");
 
@@ -45,10 +46,11 @@ fn proposal_commit_uses_sdk_write_governance() {
 
 #[test]
 fn governance_note_only_proposal_is_report_only_until_sdk_operation_exists() {
-    let runtime = test_runtime(ProfileId::ServerLinuxDevFull);
+    let profile = ProfileId::native_dev_full().expect("supported host-native dev-full profile");
+    let runtime = test_runtime(profile);
     let proposal = EvolutionProposal {
         proposal_id: "governance-note".to_string(),
-        profile: ProfileId::ServerLinuxDevFull,
+        profile,
         candidates: vec![EvolutionCandidate::GovernanceNote {
             target: "self-authored-core".to_string(),
             summary: "Candidate evidence only, not direct write authority.".to_string(),
@@ -112,7 +114,6 @@ fn test_runtime(profile: ProfileId) -> MemoryRuntime {
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("evolve-agent", "evolve-owner").unwrap())
         .scope(MemoryScope::new("evolve", "evolve-chat").unwrap())
-        .profile(profile)
         .store(platform)
         .clock(Arc::new(FixedClock))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())

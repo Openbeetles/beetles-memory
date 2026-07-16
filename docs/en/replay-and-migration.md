@@ -2,28 +2,31 @@
 
 Replay and migration are validation and continuity tools. They do not replace the normal write, recall, project, or maintain path.
 
-## Snapshot Export And Import
+## Governed Memory-Space Export And Import
 
 ```rust
-use bm_sdk::{ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest};
+use bm_sdk::{
+    MemorySpaceExportRequest, MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy,
+    MemorySpaceScope,
+};
 
-let exported = runtime.export(MemoryExportRequest {
-    chat_id: "chat-1".to_string(),
+let scope = MemorySpaceScope {
+    memory_space_id: runtime.memory_space_id().to_string(),
+    mounted_subject_id: runtime.subject_id().to_string(),
+};
+let exported = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: scope.clone(),
+    include_private: false,
 })?;
 
-let imported = runtime.import(MemoryImportRequest {
-    snapshot: exported.snapshot,
-    target_chat_id: "chat-2".to_string(),
-    mode: ContinuitySnapshotImportMode::FullRestore,
+let imported = runtime.import_memory_space(MemorySpaceImportRequest {
+    scope,
+    expected_private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
+    archive: exported.archive,
 })?;
 ```
 
-Available import modes are:
-
-- `ContinuitySnapshotImportMode::BootstrapImport`
-- `ContinuitySnapshotImportMode::FullRestore`
-
-Store import validates schema id, memory system kind, namespace, lineage, state fingerprint, and event fingerprint. Failed imports must surface as a report or error instead of silently truncating data.
+The request scope must exactly match the runtime's mounted `(memory_space_id, mounted_subject_id)`, and the archive must declare that same typed scope and private-material policy. All three identities are validated before store reads, import planning, or replacement. Continuity snapshots are internal Soul-recovery payloads and are not a public SDK transfer format.
 
 ## Replay Inspection
 
@@ -78,35 +81,43 @@ Use memory-space migration when replacing a host memory implementation or moving
 
 ```rust
 use bm_sdk::{
-    apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
+    apply_memory_space_migration, preview_memory_space_migration,
     MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest,
-    MemorySpaceMigratePreviewRequest,
+    MemorySpaceMigratePreviewRequest, MemorySpacePrivateMaterialPolicy, MemorySpaceScope,
 };
 
-let exported = export_memory_space(&store, MemorySpaceExportRequest {
-    memory_space_id: "space-main".to_string(),
+let scope = MemorySpaceScope {
+    memory_space_id: runtime.memory_space_id().to_string(),
+    mounted_subject_id: runtime.subject_id().to_string(),
+};
+let exported = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: scope.clone(),
     include_private: false,
 })?;
 let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-    source_memory_space_id: "space-main".to_string(),
-    target_memory_space_id: "space-copy".to_string(),
-    snapshot: exported.snapshot.clone(),
-});
+    source_scope: scope.clone(),
+    target_scope: scope.clone(),
+    expected_private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
+    source_profile: profile,
+    target_profile: profile,
+    archive: exported.archive,
+})?;
 assert!(!preview.loss_risk);
-assert!(preview.manifest.whole_space_snapshot);
+assert_eq!(preview.manifest.projection_scope.scope, scope);
+assert!(!preview.manifest.identity_remap.required);
 
 apply_memory_space_migration(&target_store, MemorySpaceMigrateApplyRequest {
-    target_memory_space_id: "space-copy".to_string(),
-    snapshot: exported.snapshot,
+    plan: preview.plan,
 })?;
 ```
 
-`include_private=false` must redact private snapshot entries. Beetle-derived replacement fixtures must use the same public migrator as generic fixtures.
-`preview.manifest` is the dry-run diagnostic source of truth. It lists
-plane/privacy counts, schema id, whole-space snapshot mode, conflict/loss risk,
-and subject remap state. Apply does not rewrite subject keys yet; if source and
-target spaces differ, the manifest reports `subject_remap.required=true` and
-`applied=false`.
+`include_private=false` must redact private snapshot entries. Preview, apply, and direct import remain bound to the caller's explicit `expected_private_material_policy`; a policy mismatch fails closed before any write. Beetle-derived replacement fixtures must use the same public migrator as generic fixtures.
+`preview.manifest` is the dry-run diagnostic source of truth. It lists the exact
+`(memory_space_id, mounted_subject_id)` projection scope, private-material mode,
+plane/privacy counts, schema id, conflict/loss risk, and identity-remap state.
+Apply does not relabel identity. If either the memory space or mounted subject
+differs, the manifest reports `identity_remap.required=true` and `applied=false`,
+and preflight fails closed until an explicit typed remapper produces a new archive.
 
 When transcript evidence is present in memory-space storage, `include_private=false` removes raw transcript documents, `conversation_transcript_attr`, and `conversation_transcript_derived_ref` manifests from export by default. Migration diagnostics must preserve the split between raw transcript, redacted transcript slices, accepted memory planes, derived refs, and opaque host refs. Host object payloads are not exported by Beetle Memory; only `HostOpaqueRef` metadata and relation are portable when the ref is visible for the requested view. `RedactedTranscriptSlice` reports message, attr, and host-ref redactions so callers can audit what was omitted without seeing the raw material. `TranscriptLifecycleReport.derived_memory_refs` is the review list for accepted Memory material that came from the affected transcript evidence.
 

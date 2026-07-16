@@ -1,19 +1,21 @@
 use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_entry::{
-    EntryAuthConfig, EntryAuthDecision, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
-    EntryRuntimeConfig, EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope, EntryScope,
-    EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
+    EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope, EntryScope, EntryTransportConfig,
+    EntryTransportContext,
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryWriteRequest,
-    ProfileId, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendKind,
+    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
+
+mod support;
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
+    let profile = support::host_production_profile();
     EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "agent-main".to_string(),
             owner_id: "owner-default".to_string(),
@@ -22,11 +24,9 @@ fn config() -> EntryRuntimeConfig {
             channel: "local".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(profile)
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled().with_cli(true),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 32 },
@@ -36,17 +36,17 @@ fn config() -> EntryRuntimeConfig {
 }
 
 fn context(operation: AdapterOperation, idempotency_key: &str) -> EntryTransportContext {
-    EntryTransportContext {
-        request_id: "req-1".to_string(),
-        transport: bm_adapter::TransportKind::Cli,
-        mode: bm_adapter::TransportMode::InProcess,
+    EntryTransportContext::new(
+        "req-1",
+        bm_adapter::TransportKind::Cli,
+        bm_adapter::TransportMode::InProcess,
         operation,
-        source_id: "source-1".to_string(),
-        source_kind: "local_cli".to_string(),
-        idempotency_key: idempotency_key.to_string(),
-        audit_id: "audit-1".to_string(),
-        auth: EntryAuthDecision::authenticated("local", "operator"),
-    }
+        "source-1",
+        "local_cli",
+        idempotency_key,
+        "audit-1",
+        support::trusted_local_auth("operator"),
+    )
 }
 
 fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
@@ -73,23 +73,14 @@ fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
 }
 
 #[test]
-fn entry_runtime_rejects_relative_persistent_store_path() {
-    let mut file_config = config();
-    file_config.store.backend = StoreBackendKind::File;
-    file_config.store.data_path = Some(std::path::PathBuf::from("target/bm-memory-store"));
-    let error = match EntryRuntime::open(file_config) {
-        Ok(_) => panic!("relative file store path must fail"),
-        Err(error) => error,
-    };
+fn persistent_store_config_rejects_relative_path_before_runtime_open() {
+    let profile = config().store.profile();
+    let error = StoreBackendConfig::file("target/bm-memory-store", profile)
+        .expect_err("relative file store path must fail during config construction");
     assert!(error.to_string().contains("absolute"), "{error}");
 
-    let mut sqlite_config = config();
-    sqlite_config.store.backend = StoreBackendKind::Sqlite;
-    sqlite_config.store.data_path = Some(std::path::PathBuf::from("target/bm-memory.sqlite3"));
-    let error = match EntryRuntime::open(sqlite_config) {
-        Ok(_) => panic!("relative sqlite store path must fail"),
-        Err(error) => error,
-    };
+    let error = StoreBackendConfig::sqlite("target/bm-memory.sqlite3", profile)
+        .expect_err("relative sqlite store path must fail during config construction");
     assert!(error.to_string().contains("absolute"), "{error}");
 }
 
@@ -105,9 +96,9 @@ fn entry_runtime_exposes_store_open_repair_report() {
     std::fs::write(&tmp, b"partial").unwrap();
 
     let mut config = config();
-    config.store.backend = StoreBackendKind::File;
-    config.store.data_path = Some(root);
-    config.store.fsync = false;
+    config.store = StoreBackendConfig::file(root, config.store.profile())
+        .expect("file store config")
+        .with_fsync(false);
     let runtime = EntryRuntime::open(config).expect("entry runtime");
     let report = runtime.store_open_report();
     assert_eq!(report.backend, "file");
@@ -150,6 +141,31 @@ fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
         }
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+#[test]
+fn entry_runtime_response_preserves_the_dispatch_budget_lease() {
+    let runtime = EntryRuntime::open(config()).expect("entry runtime");
+    let lease = runtime.acquire_budget_lease().expect("budget lease");
+    let expected = lease.report().clone();
+    let response = runtime
+        .handle_with_budget_lease(
+            context(AdapterOperation::Recall, "idem-recall-budget-lease"),
+            AdapterCommand::Recall(MemoryRecallRequest {
+                structured_query_facets: Vec::new(),
+                query: "release".to_string(),
+                limit: 2,
+                tool_registry_refs: Vec::new(),
+            }),
+            &lease,
+        )
+        .expect("leased entry handle");
+
+    assert_eq!(response.budget_report.report_id, expected.report_id);
+    assert_eq!(
+        response.budget_report.adapter_budget,
+        expected.adapter_budget
+    );
 }
 
 #[test]
@@ -255,7 +271,9 @@ fn entry_runtime_manager_reuses_scoped_runtime_idempotency_cache() {
 #[test]
 fn entry_runtime_manager_bounds_cache_without_splitting_active_scope() {
     let config = config();
-    let manager = EntryRuntimeManager::with_max_runtimes(config.base_config(), 1).expect("manager");
+    let manager = EntryRuntimeManager::open_with_requested_max_runtimes(config.base_config(), 1)
+        .expect("manager");
+    assert_eq!(manager.max_runtimes(), 1);
     let scope_a = config.runtime_scope();
     let scope_b = EntryRuntimeScope {
         identity: config.identity.clone(),
@@ -302,12 +320,28 @@ fn entry_runtime_manager_bounds_cache_without_splitting_active_scope() {
 #[test]
 fn entry_runtime_manager_rejects_zero_cache_limit() {
     let config = config();
-    let error = match EntryRuntimeManager::with_max_runtimes(config.base_config(), 0) {
+    let error = match EntryRuntimeManager::open_with_requested_max_runtimes(config.base_config(), 0)
+    {
         Ok(_) => panic!("zero cache limit should fail"),
         Err(error) => error,
     };
 
     assert_eq!(error.stage(), "entry_runtime_manager");
+}
+
+#[test]
+fn entry_runtime_manager_uses_the_store_authority_report_and_clamps_requests() {
+    let config = config();
+    let manager =
+        EntryRuntimeManager::open_with_requested_max_runtimes(config.base_config(), usize::MAX)
+            .expect("manager");
+    let budget = manager.runtime_budget();
+
+    assert_eq!(
+        manager.max_runtimes(),
+        budget.llm_gateway_budget.runtime_cache_max_runtimes
+    );
+    assert_eq!(budget.report_id, manager.runtime_budget().report_id);
 }
 
 #[test]

@@ -68,12 +68,11 @@ ESP profiles should use `StoreBackendConfig::embedded(profile)` or `in_memory(pr
 ## 4. Build The Runtime
 
 ```rust
-use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope, ProfileId};
+use bm_sdk::{AgentSkillDirConfig, MemoryIdentity, MemoryRuntime, MemoryScope};
 
 let runtime = MemoryRuntime::builder()
     .identity(MemoryIdentity::new("agent-main", "owner-default")?)
     .scope(MemoryScope::new("local", "chat-1")?)
-    .profile(ProfileId::DesktopMacosEmbeddedSdk)
     .store(store)
     .add_agent_skill_dir(AgentSkillDirConfig::read_only("./skills", "host-project"))
     .build()?;
@@ -255,65 +254,57 @@ A complete SDK host turn uses one public path:
 6. Use `inspect` for operator visibility and safe recovery context.
 7. Use memory-space export, migration dry-run, apply/import, and replay for replacement or release gates.
 
-Generic host fixtures and Beetle-derived fixtures under `fixtures/sdk-host-readiness/` follow this same path. Beetle-derived data is legacy-shaped evidence only, not a special SDK branch.
+Generic host fixtures and Beetle-derived fixtures under `fixtures/sdk-host-readiness/` follow this same path. Beetle-derived data is current-contract host evidence only, not a special SDK or compatibility branch.
 
 ## 11. Migration Dry-Run, Import, And Replay
 
 ```rust
 use bm_sdk::{
-    apply_memory_space_migration, export_memory_space, preview_memory_space_migration,
-    ContinuitySnapshotImportMode, MemoryExportRequest, MemoryImportRequest,
-    MemoryReplayRequest, MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest,
-    MemorySpaceMigratePreviewRequest,
+    apply_memory_space_migration, preview_memory_space_migration, MemoryReplayRequest,
+    MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest,
 };
 
-let exported = runtime.export(MemoryExportRequest {
-    chat_id: "chat-1".to_string(),
-})?;
-
-runtime.import(MemoryImportRequest {
-    snapshot: exported.snapshot,
-    target_chat_id: "chat-2".to_string(),
-    mode: ContinuitySnapshotImportMode::FullRestore,
-})?;
-
 let replay = runtime.replay(MemoryReplayRequest {
-    chat_id: "chat-2".to_string(),
+    chat_id: "chat-1".to_string(),
     limit: 32,
 })?;
 
-let space = export_memory_space(
-    &store,
-    MemorySpaceExportRequest {
-        memory_space_id: "space-main".to_string(),
-        include_private: true,
+let space = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: bm_sdk::MemorySpaceScope {
+        memory_space_id: runtime.memory_space_id().to_string(),
+        mounted_subject_id: runtime.subject_id().to_string(),
     },
-)?;
+    include_private: true,
+})?;
 let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-    source_memory_space_id: "space-main".to_string(),
-    target_memory_space_id: "space-copy".to_string(),
-    snapshot: space.snapshot.clone(),
-});
-if !preview.loss_risk {
+    source_scope: space.projection_scope.scope.clone(),
+    target_scope: space.projection_scope.scope.clone(),
+    expected_private_material_policy:
+        bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
+    source_profile: profile,
+    target_profile: profile,
+    archive: space.archive,
+})?;
+if preview.vault_preflight.passed {
     apply_memory_space_migration(
         &target_store,
-        MemorySpaceMigrateApplyRequest {
-            target_memory_space_id: "space-copy".to_string(),
-            snapshot: space.snapshot,
-        },
+        MemorySpaceMigrateApplyRequest { plan: preview.plan },
     )?;
 }
 ```
 
-Use `BootstrapImport` for limited bootstrap migration and `FullRestore` when restoring full continuity state.
-Use memory-space export/preview/apply when replacing a host memory implementation or moving a configured SDK store.
+Public recovery never accepts a free-form continuity snapshot. The runtime, request, and typed archive must declare the exact same `(memory_space_id, mounted_subject_id)` before any store read or migration/import planning begins.
+
+Use memory-space export/preview/apply when replacing a host memory implementation or moving a configured SDK store. Bootstrap and full continuity modes belong only to the internal Soul-recovery bundle.
+The expected private-material policy is part of the migration authority. Preview and apply fail closed when it differs from the archive manifest.
 
 Dry-run reports must be inspected before apply. Treat `loss_risk`, schema id, record counts, state fingerprint, event fingerprint, and privacy redaction count as release evidence. A host replacing its own memory implementation should keep a generic fixture and one host-derived legacy fixture in the readiness gate.
-`preview.manifest` also reports whole-space snapshot mode, plane/privacy counts,
-and subject remap state. Apply is still a whole-space snapshot import. When
-source and target memory spaces differ, the manifest marks
-`subject_remap.required=true` and `applied=false`; do not treat that as completed
-subject key rewrite.
+`preview.manifest` also reports the exact memory-space/mounted-subject projection
+scope, private-material mode, plane/privacy counts, and identity-remap state.
+Apply atomically replaces only that typed scope. When source and target scope
+identities differ, the manifest marks `identity_remap.required=true` and
+`applied=false`; preflight rejects relabeling until an explicit typed remapper
+produces a new identity-bound archive.
 
 ## 11. Operator Inspect
 

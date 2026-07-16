@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "agent-tool-experience-governed-experience-hint-full",
   "class": "agent_tool_experience",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "runtime_replay",
   "description": "Repeated successful host tool feedback produces a governed AgentToolHint, not full schema injection or automatic execution.",

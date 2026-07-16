@@ -6,10 +6,10 @@ cd "$(dirname "$0")/.."
 cargo fmt --all -- --check
 bash scripts/check_profile_matrix.sh
 
-cargo test -p bm-core --test next_gen_contract
-cargo test -p bm-replay --test benchmark_gate
-cargo test -p bm-replay --test memory_benchmark_wall
-cargo test -p bm-replay --all-features
+cargo test --locked -p bm-core --test next_gen_contract
+cargo test --locked -p bm-replay --test benchmark_gate
+cargo test --locked -p bm-replay --test memory_benchmark_wall
+cargo test --locked -p bm-replay --all-features
 
 test -f fixtures/memory-benchmark-wall/README.md
 test -f fixtures/memory-benchmark-wall/recall-multisession/compact-baseline.json

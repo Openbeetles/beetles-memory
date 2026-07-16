@@ -13,7 +13,10 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
-use super::recall_anchor::{canonical_recall_evidence_group, recall_source_authority_score};
+use super::recall_anchor::{
+    canonical_recall_evidence_group, recall_source_authority_score,
+    CanonicalRecallEvidenceFamilyGroup,
+};
 use super::{
     memory_policy, shared_long_term_governance_policy, LongTermRecallPolicy, MemoryPrivacyClass,
     MemoryProfile, SessionMessage,
@@ -153,6 +156,7 @@ pub struct CanonicalEntityKey {
 pub struct CanonicalEvidenceRef {
     pub source_ref: String,
     pub canonical_evidence_group: String,
+    pub evidence_family_group: Option<String>,
     pub source_kind: String,
     pub source_authority_score: u32,
 }
@@ -177,6 +181,7 @@ pub fn canonical_evidence_ref_from_source(raw: &str) -> Option<CanonicalEvidence
     Some(CanonicalEvidenceRef {
         source_ref: source_ref.to_string(),
         canonical_evidence_group,
+        evidence_family_group: None,
         source_kind: source_ref
             .split([':', '#', '/', '|'])
             .next()
@@ -885,16 +890,32 @@ fn normalize_canonical_entities(
             let Some(recomputed) = canonical_evidence_ref_from_source(&supplied.source_ref) else {
                 return Err(LongTermMemoryEntryRejection::InvalidCanonicalEntity);
             };
-            if supplied != &recomputed
+            if supplied.source_ref != recomputed.source_ref
+                || supplied.canonical_evidence_group != recomputed.canonical_evidence_group
+                || supplied.source_kind != recomputed.source_kind
+                || supplied.source_authority_score != recomputed.source_authority_score
                 || !citation_groups.contains(&recomputed.canonical_evidence_group)
             {
                 return Err(LongTermMemoryEntryRejection::InvalidCanonicalEntity);
             }
+            if supplied
+                .evidence_family_group
+                .as_ref()
+                .is_some_and(|family| {
+                    CanonicalRecallEvidenceFamilyGroup::from_canonical(family.clone()).is_none()
+                })
+            {
+                return Err(LongTermMemoryEntryRejection::InvalidCanonicalEntity);
+            }
+            let normalized = CanonicalEvidenceRef {
+                evidence_family_group: supplied.evidence_family_group.clone(),
+                ..recomputed
+            };
             if !evidence_refs
                 .iter()
-                .any(|existing: &CanonicalEvidenceRef| existing == &recomputed)
+                .any(|existing: &CanonicalEvidenceRef| existing == &normalized)
             {
-                evidence_refs.push(recomputed);
+                evidence_refs.push(normalized);
             }
         }
         if evidence_refs.is_empty() {
@@ -1593,23 +1614,7 @@ where
 pub fn canonicalize_long_term_memory_entry(
     mut entry: LongTermMemoryEntry,
 ) -> Option<LongTermMemoryEntry> {
-    let topic = {
-        let normalized = normalize_topic(&entry.topic);
-        if !normalized.is_empty() {
-            normalized
-        } else {
-            let fallback = entry
-                .keywords
-                .first()
-                .map(|keyword| normalize_topic(keyword))
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| normalize_topic(&entry.content));
-            if fallback.is_empty() {
-                return None;
-            }
-            fallback
-        }
-    };
+    let topic = normalize_topic(&entry.topic);
     if topic.is_empty() {
         return None;
     }
@@ -3258,7 +3263,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_long_term_memory_entry_derives_topic_for_legacy_entries() {
+    fn canonicalize_long_term_memory_entry_rejects_missing_typed_topic() {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             id: "ltm-1".to_string(),
             kind: LongTermMemoryKind::Fact,
@@ -3282,10 +3287,9 @@ mod tests {
             source_revision: None,
             owner_revision: 1,
             last_used_at: 0,
-        })
-        .unwrap();
+        });
 
-        assert_eq!(entry.topic, "location");
+        assert!(entry.is_none());
     }
 
     #[test]

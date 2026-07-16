@@ -7,22 +7,21 @@ pub mod agent_rules;
 use agent_rules::{render_agent_rules_export, AgentRulesExportRequest, AgentRulesTarget};
 use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport};
 use bm_entry::{
-    EntryAuthConfig, EntryAuthDecision, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
-    EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig, EntryScope,
-    EntryStoreConfig, EntryTransportConfig, EntryTransportContext,
+    EntryAuthConfig, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
+    EntryIdempotencyConfig, EntryIdentity, EntryLocalTransport, EntryRuntime, EntryRuntimeConfig,
+    EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
     platform_capability_snapshot, platform_capability_snapshot_file_name,
-    resolve_memory_capabilities, ContinuitySnapshot, ContinuitySnapshotImportMode,
-    LongTermMemoryKind, LongTermMemoryQuery, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
-    MemoryExportRequest, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
-    MemoryGovernanceSuppressionDuration, MemoryImportRequest, MemoryInspectionRequest,
-    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
+    resolve_memory_capabilities, LongTermMemoryKind, LongTermMemoryQuery, MemoryCapabilityCatalog,
+    MemoryCapabilityPolicy, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryInspectionRequest, MemoryLongTermControlView,
+    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
     MemoryTranscriptAttrWriteRequest, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendKind,
-    TranscriptAttrEnvelope,
+    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    StoreBackendKind, TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -59,16 +58,6 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         name: "replay",
         usage: "bm memory replay --chat-id <chat_id> --limit <n>",
         operation: AdapterOperation::Replay,
-    },
-    CommandSpec {
-        name: "export",
-        usage: "bm memory export --chat-id <chat_id> --output <path>",
-        operation: AdapterOperation::Export,
-    },
-    CommandSpec {
-        name: "import",
-        usage: "bm memory import --input <path> --target-chat-id <chat_id>",
-        operation: AdapterOperation::Import,
     },
     CommandSpec {
         name: "write-procedural",
@@ -149,7 +138,9 @@ pub const fn platform_profiles() -> &'static [ProfileId] {
         ProfileId::LinuxDeviceStandaloneMemory,
         ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopMacosDevFull,
         ProfileId::DesktopWindowsEmbeddedSdk,
+        ProfileId::DesktopWindowsDevFull,
         ProfileId::ServerLinuxMemoryGateway,
         ProfileId::ServerLinuxDevFull,
     ]
@@ -221,8 +212,6 @@ pub fn render_capabilities(catalog: &MemoryCapabilityCatalog) -> serde_json::Res
             "maintain_full": catalog.lifecycle.maintain_full.visible,
             "maintain_lightweight": catalog.lifecycle.maintain_lightweight.visible,
             "operator_diagnosis": catalog.lifecycle.operator_diagnosis.visible,
-            "export_snapshot": catalog.lifecycle.export_snapshot.visible,
-            "import_snapshot": catalog.lifecycle.import_snapshot.visible,
             "replay_inspection": catalog.lifecycle.replay_inspection.visible,
         },
         "validation": {
@@ -250,17 +239,20 @@ fn run_memory_cli(args: &[String]) -> Result<String, String> {
     let (command, rest) = args
         .split_first()
         .ok_or_else(|| "usage: bm memory <command> [options]".to_string())?;
+    let operation = command_operation(command)?;
     let options = CliOptions::parse(rest)?;
     let entry = EntryRuntime::open(options.entry_config()).map_err(|err| err.to_string())?;
-    let operation = command_operation(command)?;
     if is_skill_command(command) {
         return run_skill_cli(&entry, command, &options);
     }
     let adapter_command = options.adapter_command(command)?;
     let response = entry
-        .handle(options.transport_context(operation), adapter_command)
+        .handle(
+            options.transport_context(&entry, operation),
+            adapter_command,
+        )
         .map_err(|err| err.to_string())?;
-    render_entry_response(response.adapter, options.output_path.as_deref())
+    render_entry_response(response.adapter)
 }
 
 fn run_agent_rules_cli(args: &[String]) -> Result<String, String> {
@@ -442,7 +434,6 @@ struct CliOptions {
     content: String,
     record_id: String,
     input_path: Option<PathBuf>,
-    output_path: Option<PathBuf>,
     reason: String,
     reason_provided: bool,
 }
@@ -462,7 +453,7 @@ struct CliTranscriptAttrWritePayload {
 
 impl CliOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
-        let mut profile = ProfileId::ServerLinuxDevFull;
+        let mut profile = None;
         let mut store_backend = StoreBackendKind::InMemory;
         let mut store_path = None;
         let mut agent = "agent-main".to_string();
@@ -479,7 +470,6 @@ impl CliOptions {
         let mut content = String::new();
         let mut record_id = String::new();
         let mut input_path = None;
-        let mut output_path = None;
         let mut reason = "cli close".to_string();
         let mut reason_provided = false;
         let mut index = 0;
@@ -489,8 +479,10 @@ impl CliOptions {
             match key {
                 "--profile" => {
                     let raw = next_value(args, &mut index, key)?;
-                    profile = parse_platform_profile_id(raw)
-                        .ok_or_else(|| format!("unsupported platform profile: {raw}"))?;
+                    profile = Some(
+                        parse_platform_profile_id(raw)
+                            .ok_or_else(|| format!("unsupported platform profile: {raw}"))?,
+                    );
                 }
                 "--store-file" => {
                     store_backend = StoreBackendKind::File;
@@ -525,7 +517,6 @@ impl CliOptions {
                 "--content" => content = next_value(args, &mut index, key)?.to_string(),
                 "--record-id" => record_id = next_value(args, &mut index, key)?.to_string(),
                 "--input" => input_path = Some(PathBuf::from(next_value(args, &mut index, key)?)),
-                "--output" => output_path = Some(PathBuf::from(next_value(args, &mut index, key)?)),
                 "--reason" => {
                     reason = next_value(args, &mut index, key)?.to_string();
                     reason_provided = true;
@@ -533,6 +524,9 @@ impl CliOptions {
                 other => return Err(format!("unsupported memory option: {other}")),
             }
         }
+        let profile = profile.ok_or_else(|| {
+            "memory commands require an explicit --profile deployment contract".to_string()
+        })?;
         Ok(Self {
             profile,
             store_backend,
@@ -551,7 +545,6 @@ impl CliOptions {
             content,
             record_id,
             input_path,
-            output_path,
             reason,
             reason_provided,
         })
@@ -561,7 +554,6 @@ impl CliOptions {
         let mut capability = MemoryCapabilityPolicy::strict_profile();
         capability.communication_adapter_enabled = true;
         EntryRuntimeConfig {
-            profile: self.profile,
             identity: EntryIdentity {
                 agent_id: self.agent.clone(),
                 owner_id: self.owner.clone(),
@@ -570,11 +562,12 @@ impl CliOptions {
                 channel: self.channel.clone(),
                 chat_id: self.chat.clone(),
             },
-            store: EntryStoreConfig {
-                backend: self.store_backend,
-                data_path: self.store_path.clone(),
-                fsync: true,
-            },
+            store: StoreBackendConfig::for_backend(
+                self.store_backend,
+                self.store_path.clone(),
+                self.profile,
+            )
+            .expect("validated CLI store configuration"),
             transports: EntryTransportConfig::all_disabled().with_cli(true),
             auth: EntryAuthConfig::disabled_for_local(),
             idempotency: EntryIdempotencyConfig { max_keys: 1024 },
@@ -583,18 +576,22 @@ impl CliOptions {
         }
     }
 
-    fn transport_context(&self, operation: AdapterOperation) -> EntryTransportContext {
-        EntryTransportContext {
-            request_id: format!("cli-{operation:?}-{}", self.chat),
-            transport: bm_adapter::TransportKind::Cli,
-            mode: bm_adapter::TransportMode::InProcess,
+    fn transport_context(
+        &self,
+        runtime: &EntryRuntime,
+        operation: AdapterOperation,
+    ) -> EntryTransportContext {
+        EntryTransportContext::new(
+            format!("cli-{operation:?}-{}", self.chat),
+            bm_adapter::TransportKind::Cli,
+            bm_adapter::TransportMode::InProcess,
             operation,
-            source_id: "bm-cli".to_string(),
-            source_kind: "local_cli".to_string(),
-            idempotency_key: format!("cli-{operation:?}-{}-{}", self.chat, self.name),
-            audit_id: format!("audit-cli-{operation:?}-{}", self.chat),
-            auth: EntryAuthDecision::authenticated("local", "operator"),
-        }
+            "bm-cli",
+            "local_cli",
+            format!("cli-{operation:?}-{}-{}", self.chat, self.name),
+            format!("audit-cli-{operation:?}-{}", self.chat),
+            runtime.authenticate_local_transport(EntryLocalTransport::InProcess, "operator"),
+        )
     }
 
     fn adapter_command(&self, command: &str) -> Result<AdapterCommand, String> {
@@ -708,24 +705,6 @@ impl CliOptions {
                 chat_id: self.chat.clone(),
                 limit: self.limit,
             })),
-            "export" => Ok(AdapterCommand::Export(MemoryExportRequest {
-                chat_id: self.chat.clone(),
-            })),
-            "import" => {
-                let path = self
-                    .input_path
-                    .as_ref()
-                    .ok_or_else(|| "memory import requires --input <path>".to_string())?;
-                let raw = std::fs::read_to_string(path)
-                    .map_err(|err| format!("failed to read import snapshot: {err}"))?;
-                let snapshot: ContinuitySnapshot = serde_json::from_str(&raw)
-                    .map_err(|err| format!("failed to parse import snapshot: {err}"))?;
-                Ok(AdapterCommand::Import(Box::new(MemoryImportRequest {
-                    snapshot,
-                    target_chat_id: self.chat.clone(),
-                    mode: ContinuitySnapshotImportMode::FullRestore,
-                })))
-            }
             "close" => Ok(AdapterCommand::Close(bm_sdk::MemoryCloseRequest {
                 reason: self.reason.clone(),
             })),
@@ -772,12 +751,9 @@ fn non_empty_string(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn render_entry_response(
-    response: AdapterResponse<AdapterSdkReport>,
-    output_path: Option<&std::path::Path>,
-) -> Result<String, String> {
+fn render_entry_response(response: AdapterResponse<AdapterSdkReport>) -> Result<String, String> {
     match response {
-        AdapterResponse::Accepted { report, .. } => render_sdk_report(report, output_path),
+        AdapterResponse::Accepted { report, .. } => render_sdk_report(report),
         AdapterResponse::Rejected {
             error_key, reason, ..
         } => serde_json::to_string_pretty(&json!({
@@ -801,10 +777,7 @@ fn render_entry_response(
     }
 }
 
-fn render_sdk_report(
-    report: AdapterSdkReport,
-    output_path: Option<&std::path::Path>,
-) -> Result<String, String> {
+fn render_sdk_report(report: AdapterSdkReport) -> Result<String, String> {
     let value = match report {
         AdapterSdkReport::Write(report) => json!({
             "status": "accepted",
@@ -845,26 +818,6 @@ fn render_sdk_report(
             "status": "accepted",
             "chat_id": report.chat_id,
             "turns": report.inspection.total_turns,
-            "lifecycle": report.lifecycle_report.result_summary,
-        }),
-        AdapterSdkReport::Export(report) => {
-            if let Some(path) = output_path {
-                let rendered = serde_json::to_string_pretty(&report.snapshot)
-                    .map_err(|err| err.to_string())?;
-                std::fs::write(path, rendered)
-                    .map_err(|err| format!("failed to write export snapshot: {err}"))?;
-            }
-            json!({
-                "status": "accepted",
-                "chat_id": report.snapshot.chat_id,
-                "snapshot_version": report.snapshot.version,
-                "lifecycle": report.lifecycle_report.result_summary,
-            })
-        }
-        AdapterSdkReport::Import(report) => json!({
-            "status": "accepted",
-            "long_term_imported": report.outcome.long_term_imported,
-            "summary_restored": report.outcome.summary_restored,
             "lifecycle": report.lifecycle_report.result_summary,
         }),
         AdapterSdkReport::LongTermList(report) => json!({

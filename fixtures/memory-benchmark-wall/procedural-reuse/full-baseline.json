@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "procedural-reuse-full-baseline",
   "class": "procedural_reuse",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "Full profile proves procedural reuse and keeps evolution proposal-only until governance accepts it.",

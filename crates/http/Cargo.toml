@@ -35,9 +35,21 @@ profile-desktop-macos-embedded-sdk = [
     "bm-adapter/profile-desktop-macos-embedded-sdk",
     "bm-entry?/profile-desktop-macos-embedded-sdk",
 ]
+profile-desktop-macos-standalone-memory = [
+    "bm-adapter/profile-desktop-macos-standalone-memory",
+    "bm-entry?/profile-desktop-macos-standalone-memory",
+]
+profile-desktop-macos-dev-full = [
+    "bm-adapter/profile-desktop-macos-dev-full",
+    "bm-entry?/profile-desktop-macos-dev-full",
+]
 profile-desktop-windows-embedded-sdk = [
     "bm-adapter/profile-desktop-windows-embedded-sdk",
     "bm-entry?/profile-desktop-windows-embedded-sdk",
+]
+profile-desktop-windows-dev-full = [
+    "bm-adapter/profile-desktop-windows-dev-full",
+    "bm-entry?/profile-desktop-windows-dev-full",
 ]
 profile-server-linux-memory-gateway = [
     "bm-adapter/profile-server-linux-memory-gateway",

@@ -837,7 +837,9 @@ fn profile_kind(profile: ProfileId) -> ProfileOperationDefaults {
             full_proposal_sandbox_allowed: true,
             proposal_submission_allowed: true,
         },
-        ProfileId::ServerLinuxDevFull => ProfileOperationDefaults {
+        ProfileId::DesktopMacosDevFull
+        | ProfileId::DesktopWindowsDevFull
+        | ProfileId::ServerLinuxDevFull => ProfileOperationDefaults {
             recover_allowed: true,
             maintenance_allowed: true,
             maintenance_full_allowed: true,

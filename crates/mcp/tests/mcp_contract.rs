@@ -4,6 +4,22 @@ use bm_mcp::{resource_specs, tool_specs};
 #[test]
 fn tool_schema_maps_to_adapter_commands_not_memory_planes() {
     let tools = tool_specs();
+    assert_eq!(
+        tools.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+        vec![
+            "memory_capabilities",
+            "memory_recall",
+            "memory_project",
+            "memory_inspect",
+            "memory_replay",
+            "memory_write_candidate",
+            "memory_long_term_list",
+            "memory_long_term_detail",
+            "memory_long_term_mutate",
+            "memory_long_term_policy",
+            "memory_transcript_attr_write",
+        ]
+    );
     assert!(tools
         .iter()
         .any(|tool| tool.name == "memory_recall" && tool.operation == AdapterOperation::Recall));

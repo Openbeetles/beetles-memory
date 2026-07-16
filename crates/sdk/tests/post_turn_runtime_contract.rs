@@ -82,7 +82,7 @@ fn stable_suffix(user: &str, assistant: &str) -> u64 {
 
 #[test]
 fn finalize_turn_rejects_canonical_turn_scope_mismatch() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -120,7 +120,7 @@ fn finalize_turn_rejects_canonical_turn_scope_mismatch() {
 
 #[test]
 fn finalize_turn_commits_before_maintenance() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -155,7 +155,7 @@ fn finalize_turn_commits_before_maintenance() {
 
 #[test]
 fn finalize_turn_commits_transcript_and_reports_semantic_governance_boundary() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -195,7 +195,7 @@ fn finalize_turn_commits_transcript_and_reports_semantic_governance_boundary() {
 
 #[test]
 fn finalize_turn_commits_transcript_when_maintenance_services_are_unavailable() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -269,7 +269,7 @@ fn finalize_turn_commits_transcript_when_profile_hides_maintenance() {
 
 #[test]
 fn finalize_turn_runs_private_garden_self_work_without_counting_it_as_semantic_memory() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
         platform,
@@ -304,7 +304,7 @@ fn finalize_turn_runs_private_garden_self_work_without_counting_it_as_semantic_m
 
 #[test]
 fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -358,6 +358,33 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
         .expect("projection");
 
     assert!(projection.context.long_term_memory_text.is_none());
+    assert!(projection.graph_index_report.source_candidate_count > 0);
+    assert!(!projection
+        .recall_delivery_report
+        .selection_decisions
+        .is_empty());
+    assert_eq!(
+        projection.recall_delivery_report.governed_candidate_count,
+        projection.recall_delivery_report.selection_decisions.len()
+    );
+    assert!(projection
+        .recall_delivery_report
+        .selection_decisions
+        .iter()
+        .all(|decision| decision.owner_ref.is_some()));
+    assert!(projection
+        .recall_delivery_report
+        .selection_decisions
+        .iter()
+        .any(|decision| decision.selected));
+    assert!(
+        projection
+            .recall_delivery_report
+            .integrity_failures
+            .is_empty(),
+        "{:#?}",
+        projection.recall_delivery_report
+    );
     assert!(projection
         .recall_delivery_report
         .rendered_capsules
@@ -368,7 +395,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
 
 #[test]
 fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -427,7 +454,7 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
 
 #[test]
 fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -494,7 +521,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
 
 #[test]
 fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_scope_and_subject(
         platform.clone(),
@@ -557,7 +584,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
 
 #[test]
 fn finalize_turn_uses_canonical_delta_external_content_boundary() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime_a = test_runtime_with_scope_and_subject(
         platform.clone(),

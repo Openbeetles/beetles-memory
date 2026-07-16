@@ -1,6 +1,22 @@
 # LLM Gateway 集成文档
 
-`bm-llm-gateway` 让现有 IDE、coding agent 和本地模型工具通过它们已经支持的协议接入 Beetle Memory。本页只描述显式 gateway 模式。Ollama App 透明端口接管是后续独立模式，不属于当前发布面。
+`bm-llm-gateway` 让现有 IDE、coding agent 和本地模型工具通过它们已经支持的协议接入 Beetle Memory。当前发布面同时包含显式 gateway 模式，以及由 `bm-ollama-transparent` 提供的 macOS 本地 Ollama App 透明 controller；两种模式的模型流量都进入同一个 `bm-llm-gateway` owner。
+
+## Ollama App 透明模式
+
+`bm-ollama-transparent` 是已发布的本地 Ollama App 透明模式 controller。它把官方 listener 从 `127.0.0.1:11434` 移到 `127.0.0.1:11435` 的 managed upstream，再让 `bm-llm-gateway` 监听公开 Ollama endpoint；它不实现第二套模型 gateway 或 memory runtime。
+
+Enable 流程 fail closed：
+
+- 停止官方 listener 必须获得显式同意；
+- preflight 把 stop plan 绑定到端口 owner 的精确 PID、进程启动身份、command，以及 executable 的内容/device/inode 身份，执行 signal 前会立即重验同一 receipt；进程名和 classifier 只用于诊断，绝不授权 signal；
+- macOS managed child 由唯一 identity 的 `launchd` job 承载。owner-only 控制记录把诊断 process receipt 与可恢复 job authority 分开；controller 重启后，只有 canonical label、当前用户 bootstrap target、launchd live PID、start identity 与 executable identity 全部精确一致才允许重新接管。单独 PID receipt 仍不得授权 stop；
+- 唯一的非阻塞 OS 文件 lease 对完整 enable、rollback 或 disable 流程做跨 controller 进程 fence。retained lock file 会持久化并回读验证 holder 的 PID、启动身份、executable path、device/inode 和 SHA-256 receipt，并发 transition 会被拒绝，不会交错执行；
+- managed runner 通过 retained directory 无覆盖发布，以 SHA-256 标识，并在执行前重验身份后从 retained descriptor 启动；
+- gateway sidecar path 必须由配置显式传入绝对路径。controller 以 no-follow 打开、验证 SHA-256 和 metadata，并从 retained descriptor 执行；环境变量、相对路径和当前目录发现都不是生产路径；
+- 本地 HTTP probe 有固定 response byte budget，会拒绝超限或持续不结束的响应。
+
+透明 controller 仅用于 macOS 本地 loopback。Desktop 把同一个 typed memory authority（`owner_id`、`agent_id`、`channel` 和唯一绝对 store path）同时交给 `EntryRuntime` 与 transparent gateway；controller 不提供 fallback owner、agent、federation 或独立 store。调用方必须消费 typed preflight 和 transition report，不能只根据进程名或端口已打开推断成功。
 
 ## Endpoint
 

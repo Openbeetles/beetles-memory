@@ -33,7 +33,6 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
         .scope(MemoryScope::new("local", "chat-1")?)
-        .profile(profile)
         .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(
             "./skills",
@@ -95,12 +94,20 @@ assert!(projection.system_memory_block.len() <= 4096);
 ## 运行示例
 
 ```bash
+cargo generate-lockfile --manifest-path examples/rust-sdk-embedded/Cargo.toml
+cargo generate-lockfile --manifest-path examples/server-runtime/Cargo.toml
+cargo generate-lockfile --manifest-path examples/linux-device/Cargo.toml
+cargo generate-lockfile --manifest-path examples/esp-standalone-memory/Cargo.toml
+cargo generate-lockfile --manifest-path examples/esp-embedded-sdk/Cargo.toml
+
 cargo run --manifest-path examples/rust-sdk-embedded/Cargo.toml
 cargo run --manifest-path examples/server-runtime/Cargo.toml
 cargo run --manifest-path examples/linux-device/Cargo.toml
 cargo run --manifest-path examples/esp-standalone-memory/Cargo.toml
 cargo run --manifest-path examples/esp-embedded-sdk/Cargo.toml
 ```
+
+每个 standalone example 拥有本机忽略的独立 lockfile。依赖变化后只生成一次，后续执行全部使用 `--locked`；这些 example lockfile 是本机构建产物，不属于 release 输入。
 
 ## 下一步文档
 

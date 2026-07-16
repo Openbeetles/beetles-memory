@@ -1,3 +1,4 @@
+mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -7,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use bm_core::feature_gate::ProfileId;
 use bm_sdk::nonproduction_replay_harness::{
-    FileStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
-    StoreConsistentReadRequest, StoreEngine, StoreEngineMutation, StoreEventLog, StoreEventScope,
-    StoreJsonAddress, StoreTransactionRequest,
+    MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig, StoreConsistentReadRequest,
+    StoreEngine, StoreEngineMutation, StoreEventLog, StoreEventScope, StoreJsonAddress,
+    StoreTransactionRequest,
 };
 use serde_json::json;
 
@@ -31,7 +32,11 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 fn config(root: &Path) -> StoreBackendConfig {
-    StoreBackendConfig::file(root, ProfileId::ServerLinuxDevFull).expect("file config")
+    StoreBackendConfig::file(
+        root,
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("file config")
 }
 
 fn event(id: &str, namespace: &str, key: &str) -> MemoryStoreEvent {
@@ -104,7 +109,7 @@ fn wait_for_pause(child: &mut Child, ready: &Path) {
 #[test]
 fn primitive_json_blob_and_event_share_transaction_lock_and_survive_whole_state_apply() {
     let root = temp_root("whole-state");
-    let (primitive, _, _) = FileStoreEngine::open(&config(&root)).expect("primitive engine");
+    let (primitive, _, _) = support::open_file_engine(&config(&root)).expect("primitive engine");
     let ready = root.join("transaction.pause.ready");
     let release = root.join("transaction.pause.release");
     let mut transaction = spawn_paused_transaction(&root, &ready, &release);
@@ -148,7 +153,7 @@ fn primitive_json_blob_and_event_share_transaction_lock_and_survive_whole_state_
         .expect("primitive writes");
     primitive_writer.join().expect("primitive writer");
 
-    let (reader, _, _) = FileStoreEngine::open(&config(&root)).expect("reader");
+    let (reader, _, _) = support::open_file_engine(&config(&root)).expect("reader");
     let read = reader
         .read_consistent(&StoreConsistentReadRequest {
             json: vec![
@@ -186,7 +191,7 @@ fn file_paused_transaction_worker() {
     if std::env::var_os("BM_FILE_PRIMITIVE_CONCURRENCY_WORKER").is_none() {
         return;
     }
-    FileStoreEngine::open(&config(Path::new(&root)))
+    support::open_file_engine(&config(Path::new(&root)))
         .expect("worker engine")
         .0
         .commit_transaction(&transaction_request())

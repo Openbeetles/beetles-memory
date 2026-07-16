@@ -7,6 +7,6 @@ publish = false
 [workspace]
 
 [dependencies]
-bm-entry = { path = "../../crates/entry", features = ["profile-server-linux-dev-full"] }
-bm-http = { path = "../../crates/http", features = ["profile-server-linux-dev-full", "server-std"] }
-bm-sdk = { path = "../../crates/sdk", features = ["profile-server-linux-dev-full"] }
+bm-entry = { path = "../../crates/entry", features = ["profile-server-linux-memory-gateway"] }
+bm-http = { path = "../../crates/http", features = ["profile-server-linux-memory-gateway", "server-std"] }
+bm-sdk = { path = "../../crates/sdk", features = ["profile-server-linux-memory-gateway"] }

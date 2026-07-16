@@ -56,7 +56,7 @@ logical store key 不是 filesystem path。file backend 会按 profile 的 `Stor
 
 - 选择 backend type、data path、fsync 和 repair policy。
 - 读取 `StoreOpenReport`、`StoreRepairReport`、lifecycle report 和 operator diagnosis。
-- 使用 SDK export/import 做迁移。
+- 使用 `MemoryRuntime::export_memory_space` / `import_memory_space` 和精确 typed scope 做迁移。
 
 不要这样接入：
 

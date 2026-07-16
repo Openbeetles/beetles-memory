@@ -1,41 +1,160 @@
-use std::io::Cursor;
-
-use bm_entry::EntryAuthConfig;
+use bm_entry::{
+    EntryAcceptedTcpStream, EntryAuthConfig, EntryBearerPrincipal, EntryOperationCapability,
+};
 use bm_llm_gateway::{
-    serve_llm_gateway_http_stream, GatewayConfig, GatewayProviderConfig, GatewayRuntime,
+    serve_llm_gateway_http_accepted_stream, GatewayConfig, GatewayProviderConfig, GatewayRuntime,
     OllamaNativeUpstream, OllamaUpstreamRequest, OllamaUpstreamResponse, OpenAiCompatibleUpstream,
     OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 
-#[test]
-fn remote_gateway_missing_token_is_structured_rejection_before_upstream() {
-    let mut config = GatewayConfig::default_for_local_dev();
-    config.server.loopback_only = false;
-    config.server.bind_addr = "0.0.0.0:8787".to_string();
-    config.entry.auth = EntryAuthConfig::disabled_for_local();
-    config.providers.clear();
-    config.providers.insert(
-        "local".to_string(),
-        GatewayProviderConfig::ollama_native("http://127.0.0.1:11435/api"),
-    );
-    config.default_provider = "local".to_string();
-    let runtime = GatewayRuntime::open(config.clone()).expect("gateway runtime");
-    let request = "GET /api/tags HTTP/1.1\r\nhost: gateway\r\n\r\n";
-    let mut stream = Cursor::new(request.as_bytes().to_vec());
+mod support;
 
-    serve_llm_gateway_http_stream(
+#[test]
+fn public_server_entrypoint_consumes_only_runtime_owned_config() {
+    let _serve: fn(
+        &GatewayRuntime,
+        &mut dyn OpenAiCompatibleUpstream,
+        &mut dyn OllamaNativeUpstream,
+        &mut EntryAcceptedTcpStream,
+    ) -> bm_llm_gateway::Result<()> = serve_llm_gateway_http_accepted_stream;
+}
+
+#[test]
+fn authentication_failure_is_unauthorized_not_forbidden() {
+    let mut config = GatewayConfig::default_for_local_dev();
+    config.server.bind_addr = "0.0.0.0:8787".to_string();
+    config.entry.auth = EntryAuthConfig::required_bearer_principal(
+        "gateway-token",
+        EntryBearerPrincipal::new(
+            "service-principal",
+            "memory-owner",
+            EntryOperationCapability::all().iter().copied(),
+        ),
+    );
+    let runtime = GatewayRuntime::open(config).expect("gateway runtime");
+    let request = "GET /v1/models HTTP/1.1\r\nhost: gateway\r\n\r\n";
+    let (mut stream, client) = support::accepted_request(request);
+
+    serve_llm_gateway_http_accepted_stream(
         &runtime,
-        &config,
+        &mut MockOpenAiUpstream,
+        &mut MockOllamaUpstream,
+        &mut stream,
+    )
+    .expect("gateway writes authentication error");
+
+    drop(stream);
+    let output = support::finish_request(client);
+    assert!(output.contains("401 Unauthorized"), "{output}");
+    assert!(output.contains(r#""type":"unauthorized""#), "{output}");
+    assert!(!output.contains("403 Forbidden"), "{output}");
+}
+
+#[test]
+fn runtime_owned_config_a_cannot_be_replaced_by_external_config_b() {
+    let mut config = GatewayConfig::default_for_local_dev();
+    config.server.bind_addr = "0.0.0.0:8787".to_string();
+    config.entry.auth = EntryAuthConfig::required_bearer_principal(
+        "gateway-token",
+        EntryBearerPrincipal::new(
+            "service-principal",
+            "memory-owner",
+            [
+                EntryOperationCapability::LlmGatewayProtocol,
+                EntryOperationCapability::Project,
+            ],
+        ),
+    );
+    let runtime = GatewayRuntime::open(config.clone()).expect("gateway runtime");
+    config.entry.auth = EntryAuthConfig::disabled_for_local();
+    let body = r#"{"model":"local-model","messages":[{"role":"user","content":"hello"}]}"#;
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nhost: gateway\r\ncontent-type: application/json\r\nauthorization: Bearer gateway-token\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (mut stream, client) = support::accepted_request(request);
+
+    serve_llm_gateway_http_accepted_stream(
+        &runtime,
         &mut MockOpenAiUpstream,
         &mut MockOllamaUpstream,
         &mut stream,
     )
     .expect("gateway writes structured error response");
 
-    let output = String::from_utf8(stream.into_inner()).expect("utf8");
-    assert!(output.contains("400 Bad Request"), "{output}");
-    assert!(output.contains("gateway auth rejected request"), "{output}");
-    assert!(output.contains("token_not_configured"), "{output}");
+    drop(stream);
+    let output = support::finish_request(client);
+    assert!(output.contains("403 Forbidden"), "{output}");
+    assert!(output.contains("required capability: maintain"), "{output}");
+}
+
+#[test]
+fn route_capabilities_are_rejected_before_declared_body_is_read() {
+    let mut config = GatewayConfig::default_for_local_dev();
+    config.server.bind_addr = "0.0.0.0:8787".to_string();
+    config.entry.auth = EntryAuthConfig::required_bearer_principal(
+        "gateway-token",
+        EntryBearerPrincipal::new(
+            "service-principal",
+            "memory-owner",
+            [
+                EntryOperationCapability::LlmGatewayProtocol,
+                EntryOperationCapability::Project,
+            ],
+        ),
+    );
+    let runtime = GatewayRuntime::open(config.clone()).expect("gateway runtime");
+    let request = "POST /v1/chat/completions HTTP/1.1\r\nhost: gateway\r\ncontent-type: application/json\r\nauthorization: Bearer gateway-token\r\ncontent-length: 4096\r\n\r\n";
+    let (mut stream, client) = support::accepted_request(request);
+
+    serve_llm_gateway_http_accepted_stream(
+        &runtime,
+        &mut MockOpenAiUpstream,
+        &mut MockOllamaUpstream,
+        &mut stream,
+    )
+    .expect("gateway writes pre-body authorization error");
+
+    drop(stream);
+    let output = support::finish_request(client);
+    assert!(output.contains("403 Forbidden"), "{output}");
+    assert!(output.contains("required capability: maintain"), "{output}");
+    assert!(!output.contains("truncated HTTP body"), "{output}");
+}
+
+#[test]
+fn ollama_route_capabilities_are_rejected_before_declared_body_is_read() {
+    let mut config = GatewayConfig::default_for_local_dev();
+    config.server.bind_addr = "0.0.0.0:8787".to_string();
+    config.entry.auth = EntryAuthConfig::required_bearer_principal(
+        "gateway-token",
+        EntryBearerPrincipal::new(
+            "service-principal",
+            "memory-owner",
+            [
+                EntryOperationCapability::LlmGatewayProtocol,
+                EntryOperationCapability::Project,
+            ],
+        ),
+    );
+    let runtime = GatewayRuntime::open(config.clone()).expect("gateway runtime");
+    let request = "POST /api/chat HTTP/1.1\r\nhost: gateway\r\ncontent-type: application/json\r\nauthorization: Bearer gateway-token\r\ncontent-length: 4096\r\n\r\n";
+    let (mut stream, client) = support::accepted_request(request);
+
+    serve_llm_gateway_http_accepted_stream(
+        &runtime,
+        &mut MockOpenAiUpstream,
+        &mut MockOllamaUpstream,
+        &mut stream,
+    )
+    .expect("gateway writes pre-body authorization error");
+
+    drop(stream);
+    let output = support::finish_request(client);
+    assert!(output.contains("403 Forbidden"), "{output}");
+    assert!(output.contains("required capability: maintain"), "{output}");
+    assert!(!output.contains("truncated HTTP body"), "{output}");
 }
 
 struct MockOpenAiUpstream;

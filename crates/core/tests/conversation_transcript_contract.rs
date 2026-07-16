@@ -651,6 +651,7 @@ impl ConversationTranscriptStore for RepairFixtureStore {
     fn resolve_conversation_alias(
         &self,
         _memory_space_id: &str,
+        _mounted_subject_id: &str,
         _channel_id: &str,
         _chat_id: &str,
     ) -> Result<Option<String>> {
@@ -660,6 +661,7 @@ impl ConversationTranscriptStore for RepairFixtureStore {
     fn get_turn(
         &self,
         _key: &ConversationKey,
+        _mounted_subject_id: &str,
         _turn_id: &str,
     ) -> Result<Option<TranscriptTurnRecord>> {
         unimplemented!("repair fixture is read-only")
@@ -668,6 +670,7 @@ impl ConversationTranscriptStore for RepairFixtureStore {
     fn list_turns(
         &self,
         _key: &ConversationKey,
+        _mounted_subject_id: &str,
         _limit: usize,
     ) -> Result<Vec<TranscriptTurnRecord>> {
         Ok(self.turns.clone())
@@ -684,6 +687,7 @@ impl ConversationTranscriptStore for RepairFixtureStore {
     fn list_derived_memory_refs(
         &self,
         _key: &ConversationKey,
+        _mounted_subject_id: &str,
         _turn_id: Option<&str>,
     ) -> Result<Vec<DerivedMemoryRef>> {
         Ok(self.derived_refs.clone())
@@ -691,6 +695,7 @@ impl ConversationTranscriptStore for RepairFixtureStore {
 
     fn apply_lifecycle_request(
         &self,
+        _mounted_subject_id: &str,
         _request: &TranscriptLifecycleRequest,
     ) -> Result<TranscriptLifecycleReport> {
         unimplemented!("repair fixture is read-only")
@@ -738,7 +743,7 @@ fn transcript_repair_report_flags_mismatched_orphan_duplicate_and_corrupt_record
         derived_refs: vec![derived],
     };
 
-    let report = store.repair_report(&key).unwrap();
+    let report = store.repair_report(&key, "subject-agent").unwrap();
     let kinds = report
         .issues
         .iter()

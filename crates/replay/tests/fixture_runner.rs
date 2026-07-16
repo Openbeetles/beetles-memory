@@ -3,14 +3,11 @@ use bm_sdk::{ProfileId, StoreBackendConfig};
 
 #[test]
 fn fixture_runner_executes_sdk_operations_across_store_backends() {
-    let fixture =
-        build_sdk_memory_harness_fixture(ProfileId::ServerLinuxDevFull).expect("harness fixture");
+    let profile = ProfileId::native_dev_full().expect("host-native dev-full profile");
+    let fixture = build_sdk_memory_harness_fixture(profile).expect("harness fixture");
     let in_memory = run_replay_fixture(
         &fixture,
-        ReplayRunnerConfig::for_backend(
-            StoreBackendConfig::in_memory(ProfileId::ServerLinuxDevFull).unwrap(),
-        )
-        .unwrap(),
+        ReplayRunnerConfig::for_backend(StoreBackendConfig::in_memory(profile).unwrap()).unwrap(),
     )
     .expect("in-memory replay");
     assert!(in_memory.passed, "{:?}", in_memory.failures);
@@ -23,10 +20,7 @@ fn fixture_runner_executes_sdk_operations_across_store_backends() {
     let _ = std::fs::remove_dir_all(&root);
     let file = run_replay_fixture(
         &fixture,
-        ReplayRunnerConfig::for_backend(
-            StoreBackendConfig::file(root, ProfileId::ServerLinuxDevFull).unwrap(),
-        )
-        .unwrap(),
+        ReplayRunnerConfig::for_backend(StoreBackendConfig::file(root, profile).unwrap()).unwrap(),
     )
     .expect("file replay");
     assert!(file.passed, "{:?}", file.failures);
@@ -36,8 +30,10 @@ fn fixture_runner_executes_sdk_operations_across_store_backends() {
 
 #[test]
 fn fixture_runner_rejects_profile_backend_mismatch_before_runtime_work() {
-    let fixture =
-        build_sdk_memory_harness_fixture(ProfileId::ServerLinuxDevFull).expect("harness fixture");
+    let fixture = build_sdk_memory_harness_fixture(
+        ProfileId::native_dev_full().expect("host-native dev-full profile"),
+    )
+    .expect("harness fixture");
     let report = run_replay_fixture(
         &fixture,
         ReplayRunnerConfig::for_backend(

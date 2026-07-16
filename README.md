@@ -28,7 +28,7 @@ The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-
 - Recall memory across working, procedural, long-term, and continuity surfaces.
 - Project a bounded memory block for model context assembly.
 - Inspect runtime state, lifecycle reports, and operator-safe recovery actions.
-- Export, import, and replay continuity snapshots.
+- Export and import typed memory-space archives, and replay governed runtime history; continuity snapshots remain internal Soul-recovery payloads.
 - Run through SDK, CLI, HTTP, WebSocket, MCP, or A2A adapter shells without duplicating memory semantics.
 - Compile for ESP, Linux hardware devices, the macOS standalone desktop app, macOS/Windows SDK hosts, and Linux server gateway profiles.
 
@@ -68,7 +68,6 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default")?)
         .scope(MemoryScope::new("local", "chat-1")?)
-        .profile(profile)
         .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(
             "./skills",
@@ -159,11 +158,14 @@ The documentation index is [docs/README.md](docs/README.md).
 | `profile-linux-device-standalone-memory` | Linux hardware device | standalone memory runtime | file or sqlite |
 | `profile-desktop-macos-standalone-memory` | macOS | standalone desktop app | file or sqlite |
 | `profile-desktop-macos-embedded-sdk` | macOS | embedded SDK | file, sqlite, or in-memory |
+| `profile-desktop-macos-dev-full` | macOS | nonproduction development profile | sqlite, file, or in-memory |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory |
+| `profile-desktop-windows-dev-full` | Windows | nonproduction development profile | sqlite, file, or in-memory |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file |
-| `profile-server-linux-dev-full` | Linux server | development profile | sqlite, file, or in-memory |
+| `profile-server-linux-dev-full` | Linux server | nonproduction development profile | sqlite, file, or in-memory |
 
 ESP profiles reject file and sqlite stores at configuration time. Server, desktop, and Linux-device profiles can use sqlite when the matching profile/store feature is enabled.
+Every `*-dev-full` profile enables the nonproduction replay harness and must match the actual host target; it is never a production default.
 
 ## Examples
 
@@ -181,8 +183,8 @@ Common local checks:
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 bash scripts/check_profile_matrix.sh
 bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_release_surface.sh

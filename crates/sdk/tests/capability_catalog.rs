@@ -217,6 +217,7 @@ fn llm_gateway_entry_is_limited_to_server_profiles() {
     for profile in [
         ProfileId::ServerLinuxMemoryGateway,
         ProfileId::ServerLinuxDevFull,
+        ProfileId::DesktopMacosStandaloneMemory,
     ] {
         let catalog =
             resolve_memory_capabilities(profile, &policy, &privacy).expect("server catalog");
@@ -231,7 +232,6 @@ fn llm_gateway_entry_is_limited_to_server_profiles() {
         ProfileId::EspStandaloneMemory,
         ProfileId::EspEmbeddedSdk,
         ProfileId::LinuxDeviceStandaloneMemory,
-        ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
     ] {

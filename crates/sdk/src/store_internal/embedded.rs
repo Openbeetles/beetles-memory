@@ -1,27 +1,38 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use bm_core::{Error, Result};
 use serde_json::Value;
 
 #[cfg(feature = "nonproduction-replay-harness")]
-use crate::store_internal::transaction::read_consistent_from_state;
+use crate::enforce_event_key_budget;
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::store_budget_error;
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::store_internal::transaction::{
+    read_consistent_from_state, validate_restore_post_image_blob_bytes,
+};
 use crate::{
-    enforce_event_key_budget, enforce_logical_key_budget, store_budget_error,
+    enforce_logical_key_budget,
     store_internal::transaction::{
-        apply_transaction, read_consistent_namespaces_from_state, BackendTransactionState,
-        EventOverflowPolicy,
+        apply_transaction, read_bounded_known_keys_from_parts, read_scoped_projection_from_parts,
+        validate_scoped_projection_post_image, BackendTransactionState, StoreAdmissionAuthority,
+        StoreBackendUsage, StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead,
+        StoreBoundedKnownKeyReadResult, StoreImmutableReadSession, StoreReadReceipt,
+        StoreReadSessionState, StoreTransactionAdmission, StoreTransactionContext,
     },
-    MemoryStoreEvent, StoreCapacityBudget, StoreConsistentNamespaceReadRequest,
-    StoreConsistentNamespaceReadResult, StoreEngine, StoreEventLog, StoreSnapshotBlob,
-    StoreSnapshotJsonDoc, StoreSnapshotReplaceReport, StoreTransactionReport,
+    MemoryStoreEvent, StoreCapacityBudget, StoreEngine, StoreEventLog, StoreTransactionReport,
     StoreTransactionRequest,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
-use crate::{StoreConsistentReadRequest, StoreConsistentReadResult};
+use crate::{
+    StoreConsistentReadRequest, StoreConsistentReadResult, StoreSnapshotBlob, StoreSnapshotJsonDoc,
+    StoreSnapshotReplaceReport,
+};
 
 pub struct EmbeddedStoreEngine {
     capacity: StoreCapacityBudget,
+    admission_authority: StoreAdmissionAuthority,
     state: Mutex<EmbeddedStoreState>,
 }
 
@@ -33,16 +44,121 @@ struct EmbeddedStoreState {
     event_ids: BTreeSet<String>,
 }
 
+struct EmbeddedImmutableReadSession<'a> {
+    state: MutexGuard<'a, EmbeddedStoreState>,
+    read: StoreReadSessionState,
+}
+
+impl StoreImmutableReadSession for EmbeddedImmutableReadSession<'_> {
+    fn read_json_known_keys(
+        &mut self,
+        addresses: &[(String, String)],
+    ) -> Result<Vec<StoreBoundedKnownJsonRead>> {
+        addresses
+            .iter()
+            .map(|(namespace, key)| {
+                self.read.record_json(
+                    namespace,
+                    key,
+                    self.state
+                        .json
+                        .get(&(namespace.clone(), key.clone()))
+                        .cloned(),
+                )
+            })
+            .collect()
+    }
+
+    fn read_blob_known_keys(
+        &mut self,
+        addresses: &[(String, String)],
+    ) -> Result<Vec<StoreBoundedKnownBlobRead>> {
+        addresses
+            .iter()
+            .map(|(namespace, key)| {
+                self.read.record_blob(
+                    namespace,
+                    key,
+                    self.state
+                        .blobs
+                        .get(&(namespace.clone(), key.clone()))
+                        .cloned(),
+                )
+            })
+            .collect()
+    }
+
+    fn receipt(&self) -> Result<StoreReadReceipt> {
+        self.read.receipt()
+    }
+}
+
 impl EmbeddedStoreEngine {
+    #[cfg(feature = "nonproduction-replay-harness")]
     pub fn new(capacity: StoreCapacityBudget) -> Self {
+        Self::new_with_admission_authority(capacity, StoreAdmissionAuthority::new())
+    }
+
+    pub(crate) fn new_with_admission_authority(
+        capacity: StoreCapacityBudget,
+        admission_authority: StoreAdmissionAuthority,
+    ) -> Self {
         Self {
             capacity,
+            admission_authority,
             state: Mutex::new(EmbeddedStoreState::default()),
         }
     }
 }
 
+fn apply_embedded_transaction_plan(
+    state: &mut EmbeddedStoreState,
+    mutations: &[crate::StoreEngineMutation],
+) -> Result<()> {
+    for mutation in mutations {
+        match mutation {
+            crate::StoreEngineMutation::PutJson {
+                namespace,
+                key,
+                value,
+            } => {
+                state
+                    .json
+                    .insert((namespace.clone(), key.clone()), value.clone());
+            }
+            crate::StoreEngineMutation::DeleteJson { namespace, key } => {
+                state.json.remove(&(namespace.clone(), key.clone()));
+            }
+            crate::StoreEngineMutation::PutBlob {
+                namespace,
+                key,
+                value,
+            } => {
+                state
+                    .blobs
+                    .insert((namespace.clone(), key.clone()), value.clone());
+            }
+            crate::StoreEngineMutation::DeleteBlob { namespace, key } => {
+                state.blobs.remove(&(namespace.clone(), key.clone()));
+            }
+            crate::StoreEngineMutation::AppendEvent { event } => {
+                state.event_ids.insert(event.event_id.clone());
+                state.events.push((**event).clone());
+            }
+            crate::StoreEngineMutation::DeleteJsonIfPresent { .. }
+            | crate::StoreEngineMutation::DeleteBlobIfPresent { .. } => {
+                return Err(Error::config(
+                    "memory_write_transaction",
+                    "conditional mutation reached embedded primitive execution",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl StoreEventLog for EmbeddedStoreEngine {
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
         enforce_event_key_budget(self.capacity, &event, "embedded_store_event")?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -73,31 +189,81 @@ impl StoreEventLog for EmbeddedStoreEngine {
 }
 
 impl StoreEngine for EmbeddedStoreEngine {
-    fn commit_transaction(
+    fn admission_authority(&self) -> &StoreAdmissionAuthority {
+        &self.admission_authority
+    }
+    #[cfg(feature = "nonproduction-replay-harness")]
+    fn store_capacity(&self) -> StoreCapacityBudget {
+        self.capacity
+    }
+
+    fn commit_transaction_admitted(
         &self,
         request: &StoreTransactionRequest,
+        admission: &StoreTransactionAdmission,
     ) -> Result<StoreTransactionReport> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let current = BackendTransactionState {
-            json: state.json.clone(),
-            blobs: state.blobs.clone(),
-            events: state.events.clone(),
+        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        let mut touched = BackendTransactionState {
+            json: request
+                .read_set()
+                .json
+                .iter()
+                .filter_map(|address| {
+                    state
+                        .json
+                        .get(address)
+                        .cloned()
+                        .map(|value| (address.clone(), value))
+                })
+                .collect(),
+            blobs: request
+                .read_set()
+                .blobs
+                .iter()
+                .filter_map(|address| {
+                    state
+                        .blobs
+                        .get(address)
+                        .cloned()
+                        .map(|value| (address.clone(), value))
+                })
+                .collect(),
+            events: Vec::new(),
         };
-        let (next, report) = apply_transaction(
-            self.capacity,
-            request,
-            &current,
-            EventOverflowPolicy::DropOldest,
-        )?;
-        state.json = next.json;
-        state.blobs = next.blobs;
-        state.events = next.events;
-        state.event_ids = state
-            .events
+        for (namespace, prefix) in &request.read_set().json_prefixes {
+            touched.json.extend(
+                state
+                    .json
+                    .iter()
+                    .filter(|((candidate_namespace, key), _)| {
+                        candidate_namespace == namespace && key.starts_with(prefix)
+                    })
+                    .map(|(address, value)| (address.clone(), value.clone())),
+            );
+        }
+        let existing_event_ids = request
+            .mutations
             .iter()
-            .map(|event| event.event_id.clone())
+            .filter_map(crate::store_internal::transaction::mutation_event_id)
+            .filter(|event_id| state.event_ids.contains(*event_id))
+            .map(str::to_string)
             .collect();
-        Ok(report)
+        let plan = apply_transaction(
+            admission,
+            request,
+            &StoreTransactionContext {
+                touched,
+                usage: StoreBackendUsage {
+                    kv_entries: state.json.len().saturating_add(state.blobs.len()),
+                    blob_bytes: state.blobs.values().map(Vec::len).sum(),
+                    event_count: state.events.len(),
+                },
+                existing_event_ids,
+            },
+        )?;
+        apply_embedded_transaction_plan(&mut state, &plan.effective_request.mutations)?;
+        Ok(plan.report)
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -116,19 +282,146 @@ impl StoreEngine for EmbeddedStoreEngine {
         ))
     }
 
-    fn read_consistent_namespaces(
+    fn read_consistent_known_keys(
         &self,
-        request: &StoreConsistentNamespaceReadRequest,
-    ) -> Result<StoreConsistentNamespaceReadResult> {
+        json_keys: &[(String, String)],
+        blob_keys: &[(String, String)],
+        include_events: bool,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreBoundedKnownKeyReadResult> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        read_consistent_namespaces_from_state(
-            request,
-            &BackendTransactionState {
-                json: state.json.clone(),
-                blobs: state.blobs.clone(),
-                events: state.events.clone(),
-            },
+        read_bounded_known_keys_from_parts(
+            json_keys,
+            blob_keys,
+            include_events,
+            capacity,
+            &state.json,
+            &state.blobs,
+            &state.events,
         )
+    }
+
+    fn open_immutable_read_session<'a>(
+        &'a self,
+        capacity: StoreCapacityBudget,
+    ) -> Result<Box<dyn StoreImmutableReadSession + 'a>> {
+        Ok(Box::new(EmbeddedImmutableReadSession {
+            state: self.state.lock().unwrap_or_else(|error| error.into_inner()),
+            read: StoreReadSessionState::new(capacity),
+        }))
+    }
+
+    fn read_scoped_projection(
+        &self,
+        request: &crate::StoreScopedProjectionRequest,
+        capacity: StoreCapacityBudget,
+    ) -> Result<crate::StoreScopedProjection> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        read_scoped_projection_from_parts(request, capacity, &state.json, &state.events)
+    }
+
+    fn replace_scoped_projection(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        let deleted_json = crate::store_internal::transaction::scoped_projection_json_addresses(
+            &request.json_namespaces,
+            &state.json,
+            &request.scope,
+            admission.operation_capacity(),
+        )?;
+        let deleted_events = state
+            .events
+            .iter()
+            .filter(|event| {
+                crate::store_internal::transaction::event_matches_scoped_projection(
+                    event,
+                    &request.scope,
+                )
+            })
+            .count();
+        let next_entries = state
+            .json
+            .len()
+            .saturating_add(state.blobs.len())
+            .saturating_sub(deleted_json.len())
+            .saturating_add(request.json_docs.len());
+        let next_events = state
+            .events
+            .len()
+            .saturating_sub(deleted_events)
+            .saturating_add(request.events.len());
+        for doc in &request.json_docs {
+            let address = (doc.namespace.clone(), doc.key.clone());
+            if state.json.contains_key(&address) && !deleted_json.contains(&address) {
+                return Err(Error::config(
+                    "store_scoped_projection",
+                    format!(
+                        "replacement address {}/{} is owned by another projection scope",
+                        doc.namespace, doc.key
+                    ),
+                ));
+            }
+        }
+        let retained_event_ids = state
+            .events
+            .iter()
+            .filter(|event| {
+                !crate::store_internal::transaction::event_matches_scoped_projection(
+                    event,
+                    &request.scope,
+                )
+            })
+            .map(|event| event.event_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if request
+            .events
+            .iter()
+            .any(|event| retained_event_ids.contains(event.event_id.as_str()))
+        {
+            return Err(Error::config(
+                "store_scoped_projection",
+                "replacement would create a duplicate event id",
+            ));
+        }
+        validate_scoped_projection_post_image(
+            admission,
+            request,
+            next_entries,
+            state.blobs.values().map(Vec::len),
+            std::iter::empty(),
+            next_events,
+        )?;
+        for address in &deleted_json {
+            state.json.remove(address);
+        }
+        state.events.retain(|event| {
+            !crate::store_internal::transaction::event_matches_scoped_projection(
+                event,
+                &request.scope,
+            )
+        });
+        for doc in &request.json_docs {
+            state
+                .json
+                .insert((doc.namespace.clone(), doc.key.clone()), doc.value.clone());
+        }
+        state.events.extend(request.events.iter().cloned());
+        state.event_ids = state
+            .events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect();
+        Ok(crate::StoreScopedProjectionReplaceReport {
+            admission_report_id: admission.report_id().to_string(),
+            deleted_json: deleted_json.len(),
+            inserted_json: request.json_docs.len(),
+            deleted_events,
+            inserted_events: request.events.len(),
+        })
     }
 
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
@@ -142,6 +435,7 @@ impl StoreEngine for EmbeddedStoreEngine {
             .cloned())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn put_json_value(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
         enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_json_write")?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -159,6 +453,7 @@ impl StoreEngine for EmbeddedStoreEngine {
         Ok(())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
         enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_json_delete")?;
         Ok(self
@@ -196,6 +491,7 @@ impl StoreEngine for EmbeddedStoreEngine {
             .cloned())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
         enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_blob_write")?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -220,6 +516,7 @@ impl StoreEngine for EmbeddedStoreEngine {
         Ok(())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
         enforce_logical_key_budget(self.capacity, namespace, key, "embedded_store_blob_delete")?;
         Ok(self
@@ -246,6 +543,7 @@ impl StoreEngine for EmbeddedStoreEngine {
         Ok(keys)
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn replace_snapshot(
         &self,
         json_namespaces: &[&str],
@@ -312,20 +610,17 @@ impl StoreEngine for EmbeddedStoreEngine {
                 final_json_entries, self.capacity.kv_max_entries
             )));
         }
-        let retained_blob_bytes = state
-            .blobs
-            .iter()
-            .filter(|((namespace, _key), _value)| !blob_namespace_set.contains(namespace.as_str()))
-            .map(|(_key, value)| value.len())
-            .sum::<usize>();
-        let snapshot_blob_bytes = blobs.iter().map(|blob| blob.value.len()).sum::<usize>();
-        if retained_blob_bytes.saturating_add(snapshot_blob_bytes) > self.capacity.blob_max_bytes {
-            return Err(store_budget_error(format!(
-                "blob bytes {} exceed {}",
-                retained_blob_bytes.saturating_add(snapshot_blob_bytes),
-                self.capacity.blob_max_bytes
-            )));
-        }
+        validate_restore_post_image_blob_bytes(
+            self.capacity,
+            state
+                .blobs
+                .iter()
+                .filter(|((namespace, _key), _value)| {
+                    !blob_namespace_set.contains(namespace.as_str())
+                })
+                .map(|(_key, value)| value.len()),
+            blobs.iter().map(|blob| blob.value.len()),
+        )?;
 
         let json_deleted = state
             .json
@@ -372,6 +667,7 @@ impl StoreEngine for EmbeddedStoreEngine {
     }
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 fn namespace_set(namespaces: &[&str]) -> BTreeSet<String> {
     namespaces
         .iter()

@@ -1,10 +1,10 @@
+mod support;
 use std::fs;
 use std::path::PathBuf;
 
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemoryStoreHandle, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, StoreBackendConfig,
+    MemoryRuntime, MemoryScope, PressureLevel, RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -22,14 +22,13 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 }
 
 fn runtime_with_agent_skill_dir(root: PathBuf) -> MemoryRuntime {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let store =
-        MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile).expect("store config"))
+        support::open_memory_store(StoreBackendConfig::in_memory(profile).expect("store config"))
             .expect("store");
     MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-skill-test", "owner-default").expect("identity"))
         .scope(MemoryScope::new("console", "chat-1").expect("scope"))
-        .profile(profile)
         .store(store)
         .add_agent_skill_dir(AgentSkillDirConfig::read_only(root, "host"))
         .build()

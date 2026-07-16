@@ -15,6 +15,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | `bm-entry` | 进程级 runtime opening、profile/auth/source/idempotency 归一化和 adapter response envelope。 |
 | `bm-cli` | CLI 命令、capability rendering、platform snapshot 和 memory command execution。 |
 | `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` | 消费 `bm-entry` 或 `bm-adapter` 的轻量 transport shell，不拥有记忆语义。 |
+| `bm-ollama-transparent` | 已发布的 macOS 本地 Ollama App 透明模式 controller，负责跨进程 OS transition lease、精确 PID/start/executable receipt、经验证的 executable 启动与可恢复 `launchd` job authority，以及有界 process/probe report。调用方必须显式提供绝对 gateway path 与 typed memory authority；模型与记忆语义仍由 `bm-llm-gateway` 持有。 |
 
 ## Runtime 操作
 
@@ -34,7 +35,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Agent Tool Registry | `MemoryRuntimeBuilder::agent_tool_registry` / `MemoryRuntime::upsert_agent_tool_registry` | 宿主注册工具索引和 fingerprint；SDK 只基于已治理工具经验返回 `agent_tool_hints`，无经验返回空，不做工具路由。 |
 | Replay | `MemoryRuntime::replay` | 检查某个 chat 的 turn ledger 历史。 |
 | Transcript Attr Write | `MemoryRuntime::record_transcript_attrs` | 给 transcript evidence 追加受治理的 turn/message metadata，用于 replay、export、redaction、repair 和 profile budget。 |
-| Export / Import | `MemoryRuntime::export` / `MemoryRuntime::import` | 在 scope 间迁移 continuity snapshot。 |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | 在显式 private-material policy 下迁移 typed `(memory_space_id, mounted_subject_id)` archive。 |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | 控制 runtime lifecycle 并产生 lifecycle report。 |
 
 ## Memory Evidence System
@@ -100,8 +101,10 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 | `MemoryWriteRequest::Procedural` | `writes`, `source` | 每个 `RuntimeSkillWrite` 包含 `name`、`topic`、`title`、`summary`、`content`、`citations`、`source_chat_id`、`observed_at`。 |
 | `MemoryWriteRequest::AgentToolUsageFeedback` | `feedback` | 宿主执行工具后回传 `registry_ref` 和 observation 摘要；SDK 治理后才可能沉淀工具经验。 |
 | `MemoryWriteRequest::LongTermExtraction` | `extraction` | 用于 extraction pipeline 已经产出 validated long-term memory extraction 的场景。 |
-| `MemoryRecallRequest` | `query`, `limit`, `tool_registry_refs` | 返回运行时 Skill hits、标准 Agent Skill hits、working recall inspection 和经验型 `agent_tool_hints`；无治理经验时 `agent_tool_hints=[]`。 |
-| `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `tool_registry_refs` | 返回受 `system_max_len` 限制的 `system_memory_block`；标准 Agent Skill 只以只读提示摘要进入上下文，Agent Tool 只以经验 hint 进入，不包含完整 schema。 |
+| `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | 在同一事务中创建、修订或删除 governed evidence owner、source claim 和派生索引。`Upsert` 携带有界 `GovernedEvidenceDocumentDraft`；`Delete` 必须携带 expected owner revision。 |
+| `MemoryRecallRequest` | `query`, `limit`, `structured_query_facets`, `tool_registry_refs` | 返回运行时 Skill hits、标准 Agent Skill hits、working recall inspection 和经验型 `agent_tool_hints`；structured facets 是 typed query constraint，无治理经验时 `agent_tool_hints=[]`。 |
+| `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | 返回受 `system_max_len` 限制的 `system_memory_block`；structured facets 与 recall 共用受治理 query 合同，标准 Agent Skill 只以只读提示摘要进入上下文，Agent Tool 只以经验 hint 进入，不包含完整 schema。 |
+| `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | 通过 `MemoryRuntime::read_governed_evidence_documents(request)` 精确、有界地读取 governed evidence documents。runtime 会拒绝 memory-space 不一致、空/重复 document id 和超过当前 profile read budget 的请求；结果经过 privacy filter，并携带 typed owner identity、revision、canonical evidence binding、安全 source metadata 与有界 body/chunks。 |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | 返回 capability、lifecycle、operator inspection 数据、Agent Skill 目录扫描报告和 Agent Tool registry 报告。 |
 | `RuntimeSkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | 返回 `RuntimeSkillListReport`，含 total、active、disabled、runtime_skills 和运行时 Skill 摘要。 |
 | `RuntimeSkillDetailRequest` | `name` | 返回 `RuntimeSkillDetailReport`，含 summary/procedure/citations/lineage/strategy diffs/raw content。 |
@@ -114,12 +117,12 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 | `MemoryLongTermPolicyRequest` | `operation`, `reason`, `dry_run`, `mode_input` | 执行 pause、resume、suppress 或 remove_suppression；被 policy 拦截的后续写入会进入 SDK governance report。 |
 | `MemoryTranscriptAttrWriteRequest` | `memory_space_id`, `channel_id`, `conversation_id`, `attrs`, `dry_run` | 把受治理的 `TranscriptAttrEnvelope` metadata 写到已存在的 transcript turn/message。`idempotency_key` 用于宿主/adapter 关联；dry-run 只校验 target 存在和 attr envelope 规则，不落库，并返回 rejected attrs 与 `redactions_preview`。 |
 | `MemoryReplayRequest` | `chat_id`, `limit` | 只做 inspection 的 replay surface。 |
-| `MemoryExportRequest` | `chat_id` | 导出 continuity snapshot。 |
-| `MemoryImportRequest` | `snapshot`, `target_chat_id`, `mode` | Import mode 是 `BootstrapImport` 或 `FullRestore`。 |
+| `MemorySpaceExportRequest` | `scope`, `include_private` | 只导出与 runtime 精确一致的 typed memory-space 与 mounted-subject projection。 |
+| `MemorySpaceImportRequest` | `scope`, `expected_private_material_policy`, `archive` | 仅当 runtime、request、archive scope 与 private-material policy 在 store access 前全部一致时导入。 |
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | 执行可恢复 lifecycle recovery。 |
 | `MemoryCloseRequest` | `reason` | 发出 close lifecycle report。 |
 
-通用 adapter dispatch 支持 write、recall、project、inspect、recover、replay、export、import、long-term list/detail/mutate/policy、transcript attr write、capabilities、close。Maintain 只在调用方通过 `AdapterRuntimeServices` 显式提供 LLM/HTTP services 时执行；未注入 services 的 dispatch 会返回结构化拒绝。
+通用 adapter dispatch 支持 write、recall、project、inspect、recover、replay、long-term list/detail/mutate/policy、transcript attr write、capabilities、close。受治理的 memory-space export/import 绑定 runtime，不再通过旧的自由 snapshot 命令暴露。Maintain 只在调用方通过 `AdapterRuntimeServices` 显式提供 LLM/HTTP services 时执行；未注入 services 的 dispatch 会返回结构化拒绝。
 
 Transport helper crates 会对其声明的 memory operations 使用共享 JSON adapter decoder；subscribe 这类 stream-only operation 仍属于 transport-specific 行为。每种协议的 route/frame/tool/message 表面见 [部署文档](deployment.md)。
 
@@ -237,7 +240,8 @@ assert!(capabilities.transcript_replay.visible);
 通过 CLI 输出稳定 platform snapshot：
 
 ```bash
-cargo run -p bm-cli --bin bm -- \
+cargo run --locked -p bm-cli --bin bm --no-default-features \
+  --features profile-server-linux-memory-gateway -- \
   platform capability-snapshot \
   --profile profile-server-linux-memory-gateway
 ```

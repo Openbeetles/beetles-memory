@@ -1,8 +1,7 @@
 use bm_replay::{
-    evaluate_w4_external_noisy_wall, load_memory_benchmark_fixture_dir,
-    preflight_p7_runner_release, run_memory_benchmark_wall, verify_w4_external_noisy_summary_files,
-    w4_external_noisy_summary_with_provenance, MemoryBenchmarkClass, MemoryBenchmarkEvalRecall,
-    MemoryBenchmarkEvalRecallAtK, MemoryBenchmarkEvalRecallDiagnostics,
+    evaluate_w4_external_noisy_wall, load_memory_benchmark_fixture_dir, run_memory_benchmark_wall,
+    verify_p7_wall_input_context, w4_external_noisy_summary_with_provenance, MemoryBenchmarkClass,
+    MemoryBenchmarkEvalRecall, MemoryBenchmarkEvalRecallAtK, MemoryBenchmarkEvalRecallDiagnostics,
     MemoryBenchmarkEvalRecallEvidenceRefIndexEntry, MemoryBenchmarkEvalRecallGoldRank,
     MemoryBenchmarkEvalRecallGraphDistanceToGold, MemoryBenchmarkEvalRecallMetrics,
     MemoryBenchmarkMode, MemoryBenchmarkSemanticDimension, W4ExternalNoisyBenchmarkSummary,
@@ -1317,7 +1316,8 @@ fn external_noisy_wall_rejects_complete_but_unverified_p7_release_evidence() {
     assert!(report.p7_ablation_effect_proven);
     assert!(report.p7_no_render_growth);
     assert!(report.p7_index_no_full_scan);
-    assert!(report.p7_no_privacy_or_soul_regression);
+    assert!(report.p7_no_privacy_regression);
+    assert!(!report.p7_soul_regression_gate.passed);
     assert!(report.p7_no_p6_regression);
     assert!(report.p7_production_delivery_proven);
     assert!(report
@@ -1345,9 +1345,9 @@ fn external_noisy_wall_rejects_mixed_run_cohorts() {
     for (index, summary) in summaries.iter_mut().enumerate() {
         let run_id = if index == 3 { "run-b" } else { "run-a" };
         summary.run_id = run_id.to_string();
-        summary.p7_provenance = Some(bm_replay::W4ExternalNoisyP7Provenance {
+        summary.p7_provenance = Some(bm_replay::P7MergedProvenance {
             run_id: run_id.to_string(),
-            ..bm_replay::W4ExternalNoisyP7Provenance::default()
+            ..bm_replay::P7MergedProvenance::default()
         });
     }
 
@@ -1395,12 +1395,6 @@ fn p7_runner_preflight_cli_rejects_untrusted_runner_before_wall() {
         fs::set_permissions(&executable, permissions).expect("runner executable permissions");
     }
 
-    assert!(preflight_p7_runner_release(&root, "test-run").is_err());
-    assert!(
-        !executed_marker.exists(),
-        "untrusted runner must not be executed"
-    );
-
     let operator =
         std::env::var("CARGO_BIN_EXE_bm-w4-external-noisy-wall").expect("operator binary path");
     let output = Command::new(operator)
@@ -1413,6 +1407,10 @@ fn p7_runner_preflight_cli_rejects_untrusted_runner_before_wall() {
     let stderr = String::from_utf8(output.stderr).expect("operator stderr utf8");
     assert!(stderr.contains("preflight"), "{stderr}");
     assert!(!stderr.contains("unknown argument"), "{stderr}");
+    assert!(
+        !executed_marker.exists(),
+        "untrusted runner must not be executed"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -1860,19 +1858,31 @@ fn w4_external_noisy_operator_rejects_self_consistent_untrusted_fingerprints() {
     let merged_path = root
         .join("results")
         .join("longmemeval_oracle.merged.summary.json");
+    let producer_identity = fixture_recorded_producer_identity();
     let merged_json = serde_json::json!({
         "suite": "longmemeval_oracle",
+        "run_id": "run-1",
         "completed": true,
         "shards": ["longmemeval_oracle.shard-0-of-1.summary.json"],
         "p7_provenance": {
+        "schema_version": bm_replay::P7_MERGED_PROVENANCE_SCHEMA_VERSION,
+        "run_id": "run-1",
         "contract_version": "p7_recall_delivery_v2",
         "sdk_report_schema_version": bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
         "sdk_build_fingerprint": "a".repeat(64),
         "runner_build_fingerprint": "b".repeat(64),
         "runner_lock_fingerprint": "c".repeat(64),
         "executable_sha256": "d".repeat(64),
+        "gate_attestation_sha256": "1".repeat(64),
+        "release_metadata_sha256": "3".repeat(64),
+        "gate_source_fingerprint": "2".repeat(64),
+        "gate_source_manifest_sha256": "4".repeat(64),
+        "gate_ids": bm_replay::P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+        "cohort_admission_sha256": "5".repeat(64),
         "build_profile": "release",
         "input_sha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+        "detail_schema_version": "p7_question_detail_v1",
+        "producer_identity": producer_identity,
         "merged_detail_sha256": "e".repeat(64),
         "ordered_shard_digest_manifest": [{
             "shard": "longmemeval_oracle.shard-0-of-1.summary.json",
@@ -1882,36 +1892,56 @@ fn w4_external_noisy_operator_rejects_self_consistent_untrusted_fingerprints() {
     }});
     let merged_body = serde_json::to_string(&merged_json).expect("serialize merged summary");
     fs::write(&merged_path, &merged_body).expect("write merged summary");
-    let mut summary =
+    let summary =
         w4_external_noisy_summary_with_provenance(&merged_body).expect("parse merged summary");
-    assert!(verify_w4_external_noisy_summary_files(&mut summary, &merged_path).is_err());
+    assert!(verify_p7_wall_input_context(
+        std::slice::from_ref(&merged_path),
+        &root.join("results/runs/run-1/preflight-report.json"),
+    )
+    .is_err());
     assert!(!summary.operator_content_hash_verified());
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn w4_external_noisy_operator_rejects_changed_dataset_hash_claim() {
+    let producer_identity = fixture_recorded_producer_identity();
     let body = serde_json::json!({
         "suite": "longmemeval_oracle",
+        "run_id": "run-1",
         "shards": ["longmemeval_oracle.shard-0-of-1.summary.json"],
         "p7_provenance": {
+            "schema_version": bm_replay::P7_MERGED_PROVENANCE_SCHEMA_VERSION,
+            "run_id": "run-1",
             "contract_version": "p7_recall_delivery_v2",
             "sdk_report_schema_version": bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
             "sdk_build_fingerprint": "a".repeat(64),
             "runner_build_fingerprint": "b".repeat(64),
             "runner_lock_fingerprint": "c".repeat(64),
             "executable_sha256": "d".repeat(64),
+            "gate_attestation_sha256": "1".repeat(64),
+            "release_metadata_sha256": "3".repeat(64),
+            "gate_source_fingerprint": "2".repeat(64),
+            "gate_source_manifest_sha256": "4".repeat(64),
+            "gate_ids": bm_replay::P7_REQUIRED_RELEASE_GATE_IDS.map(str::to_string).to_vec(),
+            "cohort_admission_sha256": "5".repeat(64),
             "build_profile": "release",
             "input_sha256": "0".repeat(64),
+            "detail_schema_version": "p7_question_detail_v1",
+            "producer_identity": producer_identity,
             "merged_detail_sha256": "e".repeat(64),
             "ordered_shard_digest_manifest": []
         }
     })
     .to_string();
-    let mut summary = w4_external_noisy_summary_with_provenance(&body).expect("parse summary");
+    let summary = w4_external_noisy_summary_with_provenance(&body).expect("parse summary");
     let path = std::env::temp_dir().join("longmemeval_oracle.merged.summary.json");
 
-    assert!(verify_w4_external_noisy_summary_files(&mut summary, &path).is_err());
+    assert!(verify_p7_wall_input_context(
+        std::slice::from_ref(&path),
+        &std::env::temp_dir().join("results/runs/run-1/preflight-report.json"),
+    )
+    .is_err());
     assert!(!summary.operator_content_hash_verified());
 }
 
@@ -2057,6 +2087,7 @@ fn memory_write_transaction_gate_runs_durability_and_concurrency_contracts() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn p7_operator_rejects_invalid_run_id_before_building_cohort_paths() {
     use std::os::unix::fs::PermissionsExt;
@@ -2138,6 +2169,17 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     let operator_cli =
         fs::read_to_string(repo_root.join("crates/replay/src/bin/bm-w4-external-noisy-wall.rs"))
             .expect("operator CLI");
+    let replay_bench = fs::read_to_string(repo_root.join("crates/replay/src/bench.rs"))
+        .expect("replay benchmark verifier");
+    let replay_lib = fs::read_to_string(repo_root.join("crates/replay/src/lib.rs"))
+        .expect("replay public contract");
+    let secure_fs = fs::read_to_string(repo_root.join("crates/replay/src/p7_secure_fs.rs"))
+        .expect("retained cohort filesystem owner");
+    let frozen_identity_owner = fs::read_to_string(
+        repo_root
+            .join("crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs"),
+    )
+    .expect("operator-private frozen runner identity owner");
     let runner_wall = fs::read_to_string(
         repo_root
             .parent()
@@ -2145,16 +2187,120 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
             .join(".beetle-memory-external-bench/runner/run_full_p7_wall.sh"),
     )
     .expect("external runner wall script");
+    let runner_rss = fs::read_to_string(
+        repo_root
+            .parent()
+            .expect("hardware root")
+            .join(".beetle-memory-external-bench/runner/run_p7_max_rss.sh"),
+    )
+    .expect("external runner maximum RSS script");
+    let runner_main = fs::read_to_string(
+        repo_root
+            .parent()
+            .expect("hardware root")
+            .join(".beetle-memory-external-bench/runner/src/main.rs"),
+    )
+    .expect("external runner release contract");
 
     assert!(!operator.contains("BM_W4_EXTERNAL_REPORT_PATH"));
-    assert!(operator.contains("${results_dir}/operator-report.json"));
-    assert!(operator.contains("operator-report.json.tmp-"));
-    assert!(operator.contains("mv -n"));
-    assert!(operator_cli.contains("create_new(true)"));
-    assert!(operator_cli.contains("fs::hard_link"));
+    assert!(!operator.contains("operator-report.json.tmp-"));
+    assert!(!operator.contains("mv -n"));
+    assert!(operator_cli
+        .contains("cohort_dir.join(format!(\"operator-report-{verifier_digest}.json\"))"));
+    assert!(operator_cli.contains("verify_p7_wall_input_context"));
+    assert!(!operator_cli.contains("fs::read_to_string(&path)"));
+    assert!(operator_cli.contains("publish_immutable_report"));
+    assert!(operator_cli.contains("open_p7_cohort_artifact_owner"));
+    assert!(operator_cli.contains("publish_immutable_bytes"));
+    assert!(!operator_cli.contains("fs::hard_link"));
+    assert!(!operator_cli.contains("OpenOptions::new()"));
+    let wall_verifier = replay_bench
+        .split("pub fn verify_p7_wall_input_context")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("fn validate_p7_release_identity_against_disk")
+                .next()
+        })
+        .expect("final wall verifier body");
+    assert!(wall_verifier.contains("verify_p7_wall_cohort_evidence_in_session"));
+    let cohort_verifier = replay_bench
+        .split("fn verify_p7_wall_cohort_evidence_in_session")
+        .nth(1)
+        .and_then(|source| source.split("pub fn verify_p7_cohort_admission").next())
+        .expect("cohort evidence verifier body");
+    assert!(cohort_verifier.contains("verify_p7_maximum_rss_evidence_in_session"));
+    for required in [
+        "p7_verifier_performance_v2",
+        "unique_artifact_count",
+        "full_read_pass_count",
+        "admitted_artifact_bytes",
+        "artifact_bytes_read",
+        "detail_artifact_bytes_read",
+        "duplicate_artifact_count",
+        "P7_VERIFIER_MAX_GLOBAL_ARTIFACT_BYTES",
+        "checked_add",
+        "verify_retained_handle_unchanged",
+    ] {
+        assert!(
+            replay_bench.contains(required),
+            "missing verifier single-read performance contract: {required}"
+        );
+    }
+    assert!(!replay_lib.contains("verify_w4_external_noisy_summary_files"));
+    assert!(replay_lib.contains("verify_p7_wall_cohort_evidence_with_receipt"));
+    assert!(!replay_lib.contains("verify_p7_wall_cohort_evidence,"));
+    for required in [
+        "p7_maximum_rss_evidence_v3",
+        "p7_maximum_rss_measurement_v3",
+        "maximum-rss-measurement.json",
+        "child_exit_status",
+        "measurement_elapsed_millis",
+        "supervisor_receipt",
+        "runner_stderr_sha256",
+    ] {
+        assert!(
+            replay_bench.contains(required),
+            "missing replay-owned maximum RSS artifact contract: {required}"
+        );
+    }
+    assert!(replay_lib.contains("P7MaximumRssMeasurementReport"));
+    assert!(!replay_lib.contains("mod p7_frozen_runner_identity;"));
+    assert!(replay_lib.contains("P7_FROZEN_RUNNER_IDENTITY_RELATIVE_PATH"));
+    assert!(replay_bench
+        .contains("crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs"));
+    assert!(!replay_bench.contains("const P7_FROZEN_RUNNER_IDENTITY:"));
+    assert!(frozen_identity_owner.contains("const P7_FROZEN_RUNNER_IDENTITY:"));
+    assert!(!frozen_identity_owner.contains("fn "));
+    assert!(!frozen_identity_owner.contains("validate"));
+    assert!(replay_bench.contains("P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES"));
+    assert!(replay_bench.contains("P7_RUNNER_RELEASE_GATE_EXCLUDED_DIRECTORIES"));
+    assert!(runner_main.contains("bm_replay::p7_release_gate_source_manifest"));
+    assert!(runner_main
+        .contains("crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs"));
+    assert!(replay_bench.contains("p7_release_gate_attestation_v2"));
+    assert!(replay_bench.contains("p7_content_addressed_release_metadata_v2"));
+    assert!(replay_bench.contains("p7_release_gate_source_sha256_v3"));
+    for required in ["openat", "linkat", "O_NOFOLLOW", "publish_immutable_bytes"] {
+        assert!(
+            secure_fs.contains(required),
+            "retained cohort publisher is missing {required}"
+        );
+    }
     assert!(!operator_cli.contains("fs::write(&report_path"));
     assert!(!runner_wall.contains("--overwrite"));
     assert!(!runner_wall.contains("BM_W4_EXTERNAL_REPORT_PATH"));
+    assert!(operator.contains("BM_P7_VERIFY_MAX_RSS"));
+    assert!(operator.contains("--verify-max-rss"));
+    assert!(runner_rss.contains("BM_P7_ORCHESTRATOR_BIN"));
+    assert!(runner_rss.contains("--orchestrate-max-rss"));
+    assert!(runner_wall.contains("BM_P7_ORCHESTRATOR_BIN"));
+    assert!(runner_wall.contains("--orchestrate-full-wall"));
+    assert!(!runner_rss.contains("cargo "));
+    assert!(!runner_wall.contains("cargo "));
+    assert!(runner_rss.contains("BM_P7_RUN_ID must match ASCII [A-Za-z0-9._-]+"));
+    assert!(!runner_rss.contains("maximum-rss.report"));
+    assert!(!runner_rss.contains("/usr/bin/plutil"));
 }
 
 #[test]
@@ -2237,6 +2383,7 @@ fn external_summary(
     summary.samples = samples;
     summary.questions = questions;
     summary.evidence_questions = evidence_questions;
+    summary.no_gold_questions = questions.saturating_sub(evidence_questions);
     summary.any_evidence_hit = any_evidence_hit;
     summary.all_evidence_hit = all_evidence_hit;
     summary
@@ -2385,61 +2532,65 @@ fn attach_facet_ablation(
     mut summary: W4ExternalNoisyBenchmarkSummary,
     render_growth: usize,
 ) -> W4ExternalNoisyBenchmarkSummary {
+    let applicable_questions = summary.evidence_questions;
     summary.facet_ablation = Some(bm_replay::W4ExternalNoisyFacetAblationDiagnostics {
-        questions_with_ablation_report: summary.questions,
-        method_counts: [("sdk_eval_recall_off_run_v1".to_string(), summary.questions)]
-            .into_iter()
-            .collect(),
-        delivery_contribution_proven_questions: summary.questions,
+        questions_with_ablation_report: applicable_questions,
+        method_counts: [(
+            "sdk_eval_recall_off_run_v1".to_string(),
+            applicable_questions,
+        )]
+        .into_iter()
+        .collect(),
+        delivery_contribution_proven_questions: applicable_questions,
         render_growth,
         required_slice_counts: [
-            ("facet_off".to_string(), summary.questions),
-            ("rank_fusion_off".to_string(), summary.questions),
-            ("coverage_selection_off".to_string(), summary.questions),
+            ("facet_off".to_string(), applicable_questions),
+            ("rank_fusion_off".to_string(), applicable_questions),
+            ("coverage_selection_off".to_string(), applicable_questions),
             (
                 "delivery_relevance_fusion_off".to_string(),
-                summary.questions,
+                applicable_questions,
             ),
             (
                 "evidence_family_rotation_off".to_string(),
-                summary.questions,
+                applicable_questions,
             ),
-            ("render_capsule_off".to_string(), summary.questions),
-            ("capsule_dedupe_off".to_string(), summary.questions),
+            ("render_capsule_off".to_string(), applicable_questions),
+            ("capsule_dedupe_off".to_string(), applicable_questions),
         ]
         .into_iter()
         .collect(),
         report_available_slice_counts: [
-            ("facet_off".to_string(), summary.questions),
-            ("rank_fusion_off".to_string(), summary.questions),
-            ("coverage_selection_off".to_string(), summary.questions),
+            ("facet_off".to_string(), applicable_questions),
+            ("rank_fusion_off".to_string(), applicable_questions),
+            ("coverage_selection_off".to_string(), applicable_questions),
             (
                 "delivery_relevance_fusion_off".to_string(),
-                summary.questions,
+                applicable_questions,
             ),
             (
                 "evidence_family_rotation_off".to_string(),
-                summary.questions,
+                applicable_questions,
             ),
-            ("render_capsule_off".to_string(), summary.questions),
-            ("capsule_dedupe_off".to_string(), summary.questions),
+            ("render_capsule_off".to_string(), applicable_questions),
+            ("capsule_dedupe_off".to_string(), applicable_questions),
         ]
         .into_iter()
         .collect(),
         delivery_contribution_proven_slice_counts: [
-            ("facet_off".to_string(), summary.questions),
-            ("rank_fusion_off".to_string(), summary.questions),
-            ("coverage_selection_off".to_string(), summary.questions),
+            ("facet_off".to_string(), applicable_questions),
+            ("rank_fusion_off".to_string(), applicable_questions),
+            ("coverage_selection_off".to_string(), applicable_questions),
             (
                 "delivery_relevance_fusion_off".to_string(),
-                summary.questions,
+                applicable_questions,
             ),
             (
                 "evidence_family_rotation_off".to_string(),
-                summary.questions,
+                applicable_questions,
             ),
-            ("render_capsule_off".to_string(), summary.questions),
-            ("capsule_dedupe_off".to_string(), summary.questions),
+            ("render_capsule_off".to_string(), applicable_questions),
+            ("capsule_dedupe_off".to_string(), applicable_questions),
         ]
         .into_iter()
         .collect(),
@@ -2516,8 +2667,8 @@ fn attach_p7_release_evidence(
         });
     summary.summary_sha256 = Some("a".repeat(64));
     summary.runner_source_sha256 = Some("b".repeat(64));
-    summary.p7_provenance = Some(bm_replay::W4ExternalNoisyP7Provenance {
-        run_id: summary.run_id.clone(),
+    let producer_identity = bm_replay::P7ProducerIdentity {
+        schema_version: "p7_producer_identity_v2".to_string(),
         contract_version: "p7_recall_delivery_v2".to_string(),
         sdk_report_schema_version: bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
         sdk_build_fingerprint: "c".repeat(64),
@@ -2526,6 +2677,30 @@ fn attach_p7_release_evidence(
         executable_sha256: "8".repeat(64),
         build_profile: "release".to_string(),
         input_sha256: "7".repeat(64),
+        detail_schema_version: "p7_question_detail_v1".to_string(),
+    };
+    summary.p7_provenance = Some(bm_replay::P7MergedProvenance {
+        schema_version: bm_replay::P7_MERGED_PROVENANCE_SCHEMA_VERSION.to_string(),
+        run_id: summary.run_id.clone(),
+        contract_version: "p7_recall_delivery_v2".to_string(),
+        sdk_report_schema_version: bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+        sdk_build_fingerprint: "c".repeat(64),
+        runner_build_fingerprint: "b".repeat(64),
+        runner_lock_fingerprint: "9".repeat(64),
+        executable_sha256: "8".repeat(64),
+        gate_attestation_sha256: "6".repeat(64),
+        release_metadata_sha256: "4".repeat(64),
+        gate_source_fingerprint: "5".repeat(64),
+        gate_source_manifest_sha256: "3".repeat(64),
+        gate_ids: bm_replay::P7_REQUIRED_RELEASE_GATE_IDS
+            .map(str::to_string)
+            .to_vec(),
+        build_profile: "release".to_string(),
+        cohort_admission_sha256: "2".repeat(64),
+        input_sha256: "7".repeat(64),
+        detail_schema_version: "p7_question_detail_v1".to_string(),
+        producer_identity: bm_replay::P7RecordedProducerIdentity::record(&producer_identity)
+            .expect("record producer identity"),
         merged_detail_sha256: "d".repeat(64),
         ordered_shard_digest_manifest: summary
             .shards
@@ -2539,6 +2714,22 @@ fn attach_p7_release_evidence(
             .collect(),
     });
     summary
+}
+
+fn fixture_recorded_producer_identity() -> bm_replay::P7RecordedProducerIdentity {
+    bm_replay::P7RecordedProducerIdentity::record(&bm_replay::P7ProducerIdentity {
+        schema_version: "p7_producer_identity_v2".to_string(),
+        contract_version: "p7_recall_delivery_v2".to_string(),
+        sdk_report_schema_version: bm_sdk::MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
+        sdk_build_fingerprint: "a".repeat(64),
+        runner_build_fingerprint: "b".repeat(64),
+        runner_lock_fingerprint: "c".repeat(64),
+        executable_sha256: "d".repeat(64),
+        build_profile: "release".to_string(),
+        input_sha256: "7".repeat(64),
+        detail_schema_version: "p7_question_detail_v1".to_string(),
+    })
+    .expect("record fixture producer identity")
 }
 
 fn fixture_root() -> String {

@@ -1,8 +1,5 @@
 use bm_sdk::nonproduction_replay_harness::StoreSnapshot;
-use bm_sdk::{
-    ContinuitySnapshot, ContinuitySnapshotImportMode, IngressKind, PressureLevel, ProfileId,
-    RuntimeSkillWrite,
-};
+use bm_sdk::{IngressKind, PressureLevel, ProfileId, RuntimeSkillWrite};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -43,14 +40,6 @@ pub enum ReplayOperation {
     Replay {
         chat_id: String,
         limit: usize,
-    },
-    Export {
-        chat_id: String,
-    },
-    Import {
-        snapshot: Box<ContinuitySnapshot>,
-        target_chat_id: String,
-        mode: ContinuitySnapshotImportMode,
     },
 }
 

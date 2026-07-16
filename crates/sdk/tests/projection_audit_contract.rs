@@ -10,14 +10,14 @@ use bm_core::memory::{
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, MemoryProjectionRequest, PressureLevel,
-    ProfileId, ProjectionSourceAuthority, RuntimeLifecycleModeInput,
+    ProjectionSourceAuthority, RuntimeLifecycleModeInput,
 };
 
 use support::{empty_store_platform, seeded_store_platform, test_runtime_with_scope};
 
 #[test]
 fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = seeded_store_platform(profile);
     platform
         .replay_harness()
@@ -239,7 +239,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
 
 #[test]
 fn projection_runtime_envelope_replaces_flat_internal_sections() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = seeded_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "chat-a");
 
@@ -339,7 +339,7 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
 
 #[test]
 fn projection_report_exposes_disclosure_integrity_for_runtime_surfaces() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = seeded_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "chat-a");
 
@@ -391,7 +391,7 @@ fn projection_report_exposes_disclosure_integrity_for_runtime_surfaces() {
 
 #[test]
 fn empty_store_projection_degrades_subject_mount_without_inventing_personality() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "empty-chat");
 
@@ -446,7 +446,7 @@ fn empty_store_projection_degrades_subject_mount_without_inventing_personality()
 
 #[test]
 fn empty_store_greeting_projection_does_not_leak_identity_meta_terms() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "empty-chat");
 

@@ -2,7 +2,7 @@
   "schema": "beetle-memory.memory-benchmark-wall.v1",
   "fixture_id": "agent-tool-experience-gateway-host-tools-no-cold-route-full",
   "class": "agent_tool_experience",
-  "profile": "server_linux_dev_full",
+  "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
   "description": "Gateway and API hosts may register tool indexes, but Beetle Memory does not route cold-start tool choices from descriptions.",

@@ -4,13 +4,13 @@ mod support;
 
 use bm_core::memory::{board_subject_scope_id, SelfAuthoredCore};
 use bm_core::platform::Platform as _;
-use bm_sdk::{MemoryProjectionRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput};
+use bm_sdk::{MemoryProjectionRequest, PressureLevel, RuntimeLifecycleModeInput};
 
 use support::{empty_store_platform, test_runtime_with_scope};
 
 #[test]
 fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     platform
         .replay_harness()

@@ -1,20 +1,22 @@
 use bm_entry::{
     EntryAuthConfig, EntryConsoleDeviceCreate, EntryConsoleDeviceUpdate,
     EntryConsoleTransportUpdate, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
-    EntryRuntimeConfig, EntryScope, EntryStoreConfig, EntryTransportConfig,
+    EntryRuntimeConfig, EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendKind,
+    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    StoreBackendConfig,
 };
 use std::fs;
+
+mod support;
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
+    let profile = support::host_production_profile();
     EntryRuntimeConfig {
-        profile: ProfileId::ServerLinuxDevFull,
         identity: EntryIdentity {
             agent_id: "console-agent".to_string(),
             owner_id: "owner-default".to_string(),
@@ -23,11 +25,9 @@ fn config() -> EntryRuntimeConfig {
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
-        store: EntryStoreConfig {
-            backend: StoreBackendKind::InMemory,
-            data_path: None,
-            fsync: false,
-        },
+        store: StoreBackendConfig::in_memory(profile)
+            .expect("store config")
+            .with_fsync(false),
         transports: EntryTransportConfig::all_disabled().with_cli(true),
         auth: EntryAuthConfig::disabled_for_local(),
         idempotency: EntryIdempotencyConfig { max_keys: 16 },
@@ -119,8 +119,9 @@ fn console_storage_metric_reports_memory_store_usage_over_host_total_storage() {
         .expect("marker len");
 
     let mut config = config();
-    config.store.backend = StoreBackendKind::File;
-    config.store.data_path = Some(store_path);
+    config.store = StoreBackendConfig::file(store_path, config.store.profile())
+        .expect("file store config")
+        .with_fsync(false);
 
     let runtime = EntryRuntime::open(config).expect("runtime");
     let overview = runtime.console_overview();

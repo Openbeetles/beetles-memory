@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::GovernedEvidenceBinding;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecallDeliveryCandidate {
     pub candidate_id: String,
-    pub canonical_evidence_groups: Vec<String>,
-    pub evidence_family_groups: Vec<String>,
+    pub evidence_bindings: Vec<GovernedEvidenceBinding>,
     pub owner_available: bool,
+    pub governed_binding_eligible: bool,
     pub citation_eligible: bool,
     pub privacy_eligible: bool,
     pub temporal_eligible: bool,
@@ -35,6 +37,7 @@ pub struct RecallDeliveryLexicalScore {
 pub enum RecallDeliverySelectionDropReason {
     CitationMissing,
     DuplicateEvidenceGroup,
+    GovernedBindingInvalid,
     OwnerRecordUnavailable,
     ProfileBudgetExhausted,
     PrivacyScopeBlocked,
@@ -47,6 +50,7 @@ impl RecallDeliverySelectionDropReason {
         match self {
             Self::CitationMissing => "citation_missing",
             Self::DuplicateEvidenceGroup => "duplicate_evidence_group",
+            Self::GovernedBindingInvalid => "governed_binding_invalid",
             Self::OwnerRecordUnavailable => "owner_record_unavailable",
             Self::ProfileBudgetExhausted => "profile_budget_exhausted",
             Self::PrivacyScopeBlocked => "privacy_scope_blocked",
@@ -66,8 +70,10 @@ pub enum RecallDeliveryOrderingPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecallDeliverySelectionDecision {
     pub candidate_id: String,
-    pub canonical_evidence_groups: Vec<String>,
-    pub evidence_family_groups: Vec<String>,
+    /// Complete authoritative owner binding. Selection never rewrites this set.
+    pub evidence_bindings: Vec<GovernedEvidenceBinding>,
+    /// Owner bindings newly contributed at this decision point and safe to render.
+    pub renderable_evidence_bindings: Vec<GovernedEvidenceBinding>,
     pub selected: bool,
     pub drop_reason: Option<RecallDeliverySelectionDropReason>,
 }
@@ -77,7 +83,8 @@ pub struct RecallDeliverySelectionReport {
     pub selected_candidate_ids: Vec<String>,
     pub decisions: Vec<RecallDeliverySelectionDecision>,
     pub covered_evidence_groups: Vec<String>,
-    pub covered_evidence_family_groups: Vec<String>,
+    pub selected_owner_evidence_family_groups: Vec<String>,
+    pub renderable_evidence_family_groups: Vec<String>,
     pub ordering_policy: RecallDeliveryOrderingPolicy,
 }
 
@@ -88,12 +95,15 @@ pub fn allocate_recall_delivery_candidates(
 ) -> RecallDeliverySelectionReport {
     let mut selected_candidate_ids = Vec::new();
     let mut covered_groups = BTreeSet::new();
-    let mut covered_families = BTreeSet::new();
+    let mut selected_owner_families = BTreeSet::new();
+    let mut renderable_families = BTreeSet::new();
+    let mut decisions = vec![None; candidates.len()];
     let eligible = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
             candidate.owner_available
+                && candidate.governed_binding_eligible
                 && candidate_has_governed_citation(candidate)
                 && candidate.privacy_eligible
                 && candidate.temporal_eligible
@@ -114,48 +124,52 @@ pub fn allocate_recall_delivery_candidates(
     };
     for index in ordered.drain(..) {
         if selected_candidate_ids.len() >= limit {
-            break;
+            decisions[index] = Some(selection_decision(
+                &candidates[index],
+                false,
+                Vec::new(),
+                Some(RecallDeliverySelectionDropReason::ProfileBudgetExhausted),
+            ));
+            continue;
         }
         let candidate = &candidates[index];
-        if candidate_overlaps_covered_evidence_group(candidate, &covered_groups) {
+        let renderable_evidence_bindings = uncovered_evidence_bindings(candidate, &covered_groups);
+        if renderable_evidence_bindings.is_empty() {
+            decisions[index] = Some(selection_decision(
+                candidate,
+                false,
+                Vec::new(),
+                Some(RecallDeliverySelectionDropReason::DuplicateEvidenceGroup),
+            ));
             continue;
         }
         select_delivery_candidate(
             candidate,
             &mut selected_candidate_ids,
             &mut covered_groups,
-            &mut covered_families,
+            &mut selected_owner_families,
+            &mut renderable_families,
+            &renderable_evidence_bindings,
         );
+        decisions[index] = Some(selection_decision(
+            candidate,
+            true,
+            renderable_evidence_bindings,
+            None,
+        ));
     }
     let decisions = candidates
         .iter()
-        .map(|candidate| {
-            let selected = selected_candidate_ids
-                .iter()
-                .any(|selected| selected == &candidate.candidate_id);
-            let duplicate_group =
-                candidate_overlaps_covered_evidence_group(candidate, &covered_groups);
-            RecallDeliverySelectionDecision {
-                candidate_id: candidate.candidate_id.clone(),
-                canonical_evidence_groups: candidate.canonical_evidence_groups.clone(),
-                evidence_family_groups: candidate.evidence_family_groups.clone(),
-                selected,
-                drop_reason: if selected {
-                    None
-                } else if !candidate.owner_available {
-                    Some(RecallDeliverySelectionDropReason::OwnerRecordUnavailable)
-                } else if !candidate.privacy_eligible {
-                    Some(RecallDeliverySelectionDropReason::PrivacyScopeBlocked)
-                } else if !candidate.temporal_eligible {
-                    Some(RecallDeliverySelectionDropReason::TemporalSuperseded)
-                } else if !candidate_has_governed_citation(candidate) {
-                    Some(RecallDeliverySelectionDropReason::CitationMissing)
-                } else if duplicate_group {
-                    Some(RecallDeliverySelectionDropReason::DuplicateEvidenceGroup)
-                } else {
-                    Some(RecallDeliverySelectionDropReason::ProfileBudgetExhausted)
-                },
-            }
+        .enumerate()
+        .map(|(index, candidate)| {
+            decisions[index].clone().unwrap_or_else(|| {
+                selection_decision(
+                    candidate,
+                    false,
+                    Vec::new(),
+                    Some(ineligible_drop_reason(candidate)),
+                )
+            })
         })
         .collect();
 
@@ -163,23 +177,59 @@ pub fn allocate_recall_delivery_candidates(
         selected_candidate_ids,
         decisions,
         covered_evidence_groups: covered_groups.into_iter().collect(),
-        covered_evidence_family_groups: covered_families.into_iter().collect(),
+        selected_owner_evidence_family_groups: selected_owner_families.into_iter().collect(),
+        renderable_evidence_family_groups: renderable_families.into_iter().collect(),
         ordering_policy,
     }
 }
 
 fn candidate_has_governed_citation(candidate: &RecallDeliveryCandidate) -> bool {
-    candidate.citation_eligible && !candidate.canonical_evidence_groups.is_empty()
+    candidate.citation_eligible && !candidate.evidence_bindings.is_empty()
 }
 
-fn candidate_overlaps_covered_evidence_group(
+fn uncovered_evidence_bindings(
     candidate: &RecallDeliveryCandidate,
     covered_groups: &BTreeSet<String>,
-) -> bool {
+) -> Vec<GovernedEvidenceBinding> {
     candidate
-        .canonical_evidence_groups
+        .evidence_bindings
         .iter()
-        .any(|group| covered_groups.contains(group))
+        .filter(|binding| !covered_groups.contains(binding.canonical_evidence_group()))
+        .cloned()
+        .collect()
+}
+
+fn ineligible_drop_reason(
+    candidate: &RecallDeliveryCandidate,
+) -> RecallDeliverySelectionDropReason {
+    if !candidate.owner_available {
+        RecallDeliverySelectionDropReason::OwnerRecordUnavailable
+    } else if !candidate.governed_binding_eligible {
+        RecallDeliverySelectionDropReason::GovernedBindingInvalid
+    } else if !candidate_has_governed_citation(candidate) {
+        RecallDeliverySelectionDropReason::CitationMissing
+    } else if !candidate.privacy_eligible {
+        RecallDeliverySelectionDropReason::PrivacyScopeBlocked
+    } else if !candidate.temporal_eligible {
+        RecallDeliverySelectionDropReason::TemporalSuperseded
+    } else {
+        RecallDeliverySelectionDropReason::ProfileBudgetExhausted
+    }
+}
+
+fn selection_decision(
+    candidate: &RecallDeliveryCandidate,
+    selected: bool,
+    renderable_evidence_bindings: Vec<GovernedEvidenceBinding>,
+    drop_reason: Option<RecallDeliverySelectionDropReason>,
+) -> RecallDeliverySelectionDecision {
+    RecallDeliverySelectionDecision {
+        candidate_id: candidate.candidate_id.clone(),
+        evidence_bindings: candidate.evidence_bindings.clone(),
+        renderable_evidence_bindings,
+        selected,
+        drop_reason,
+    }
 }
 
 pub fn score_recall_delivery_texts(
@@ -375,10 +425,9 @@ fn hierarchical_family_order(
 
 fn delivery_candidate_family(candidate: &RecallDeliveryCandidate) -> String {
     candidate
-        .evidence_family_groups
+        .evidence_bindings
         .first()
-        .or_else(|| candidate.canonical_evidence_groups.first())
-        .cloned()
+        .map(|binding| binding.effective_evidence_family_group().to_string())
         .unwrap_or_else(|| format!("candidate:{}", candidate.candidate_id))
 }
 
@@ -414,9 +463,25 @@ fn select_delivery_candidate(
     candidate: &RecallDeliveryCandidate,
     selected_candidate_ids: &mut Vec<String>,
     covered_groups: &mut BTreeSet<String>,
-    covered_families: &mut BTreeSet<String>,
+    selected_owner_families: &mut BTreeSet<String>,
+    renderable_families: &mut BTreeSet<String>,
+    renderable_evidence_bindings: &[GovernedEvidenceBinding],
 ) {
     selected_candidate_ids.push(candidate.candidate_id.clone());
-    covered_groups.extend(candidate.canonical_evidence_groups.iter().cloned());
-    covered_families.extend(candidate.evidence_family_groups.iter().cloned());
+    covered_groups.extend(
+        renderable_evidence_bindings
+            .iter()
+            .map(|binding| binding.canonical_evidence_group().to_string()),
+    );
+    selected_owner_families.extend(
+        candidate
+            .evidence_bindings
+            .iter()
+            .map(|binding| binding.effective_evidence_family_group().to_string()),
+    );
+    renderable_families.extend(
+        renderable_evidence_bindings
+            .iter()
+            .map(|binding| binding.effective_evidence_family_group().to_string()),
+    );
 }

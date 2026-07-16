@@ -1,9 +1,4 @@
-use std::path::PathBuf;
-
-use bm_sdk::{
-    AdapterTransportVisibility, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId,
-    StoreBackendKind,
-};
+use bm_sdk::{AdapterTransportVisibility, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EntryIdentity {
@@ -15,13 +10,6 @@ pub struct EntryIdentity {
 pub struct EntryScope {
     pub channel: String,
     pub chat_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EntryStoreConfig {
-    pub backend: StoreBackendKind,
-    pub data_path: Option<PathBuf>,
-    pub fsync: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

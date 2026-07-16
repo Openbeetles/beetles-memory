@@ -275,7 +275,10 @@ pub fn commit_canonical_turn_delta_with_transcript(
 ) -> Result<CanonicalTurnTranscriptCommitReport> {
     let key = ConversationKey::from_delta(memory_space_id, delta)?;
     let before_count = session_store.message_count(&delta.conversation.chat_id)?;
-    if transcript_store.get_turn(&key, &delta.turn_id)?.is_some() {
+    if transcript_store
+        .get_turn(&key, &delta.subject, &delta.turn_id)?
+        .is_some()
+    {
         let session_commit = SessionTurnCommitReport {
             attempted: true,
             committed: false,
@@ -285,7 +288,9 @@ pub fn commit_canonical_turn_delta_with_transcript(
             committed_messages: Vec::new(),
             skipped_reason: Some("conversation_transcript_turn_already_committed".to_string()),
         };
-        let transcript_count = transcript_store.list_turns(&key, usize::MAX)?.len();
+        let transcript_count = transcript_store
+            .list_turns(&key, &delta.subject, usize::MAX)?
+            .len();
         return Ok(CanonicalTurnTranscriptCommitReport {
             session_commit,
             transcript_commit: Some(TranscriptCommitReport {
@@ -323,7 +328,7 @@ pub fn commit_canonical_turn_delta_with_transcript(
             let backfill = committed_transcript_backfill_from_session_shadow(session_store, delta)?;
             if let Some((backfill_inputs, backfill_committed)) = backfill {
                 let next_sequence = transcript_store
-                    .list_turns(&key, usize::MAX)?
+                    .list_turns(&key, &delta.subject, usize::MAX)?
                     .len()
                     .saturating_add(1);
                 let record = TranscriptTurnRecord::from_committed_messages(
@@ -354,7 +359,7 @@ pub fn commit_canonical_turn_delta_with_transcript(
         ));
     }
     let next_sequence = transcript_store
-        .list_turns(&key, usize::MAX)?
+        .list_turns(&key, &delta.subject, usize::MAX)?
         .len()
         .saturating_add(1);
     let record = TranscriptTurnRecord::from_committed_messages(

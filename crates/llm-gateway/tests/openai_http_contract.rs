@@ -1,10 +1,10 @@
-use std::io::{Cursor, Read, Write};
-
 use bm_llm_gateway::{
-    serve_openai_http_stream, GatewayConfig, GatewayRuntime, OpenAiCompatibleUpstream,
+    serve_openai_http_accepted_stream, GatewayConfig, GatewayRuntime, OpenAiCompatibleUpstream,
     OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 use serde_json::json;
+
+mod support;
 
 fn gateway_config() -> GatewayConfig {
     GatewayConfig::default_for_local_dev()
@@ -44,41 +44,6 @@ impl OpenAiCompatibleUpstream for MockOpenAiUpstream {
     }
 }
 
-struct MemoryStream {
-    read: Cursor<Vec<u8>>,
-    written: Vec<u8>,
-}
-
-impl MemoryStream {
-    fn new(input: String) -> Self {
-        Self {
-            read: Cursor::new(input.into_bytes()),
-            written: Vec::new(),
-        }
-    }
-
-    fn written_string(&self) -> String {
-        String::from_utf8(self.written.clone()).expect("utf8 response")
-    }
-}
-
-impl Read for MemoryStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.read.read(buf)
-    }
-}
-
-impl Write for MemoryStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.written.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[test]
 fn http_chat_route_writes_sse_chunks_without_buffering_as_json() {
     let config = gateway_config();
@@ -94,13 +59,14 @@ fn http_chat_route_writes_sse_chunks_without_buffering_as_json() {
         body.len(),
         body
     );
-    let mut stream = MemoryStream::new(request);
+    let (mut stream, client) = support::accepted_request(request);
     let mut upstream = MockOpenAiUpstream::default();
 
-    serve_openai_http_stream(&gateway, &config, &mut upstream, &mut stream)
+    serve_openai_http_accepted_stream(&gateway, &mut upstream, &mut stream)
         .expect("serve openai request");
 
-    let response = stream.written_string();
+    drop(stream);
+    let response = support::finish_request(client);
     assert_eq!(upstream.chat_calls, 1);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("content-type: text/event-stream\r\n"));

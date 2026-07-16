@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(scriptDir, "../../..");
 const targetDir = path.join(workspaceRoot, "target");
-const releaseDir = path.join(targetDir, "release");
+const sidecarDir = path.join(targetDir, "release");
 const gatewayName = process.platform === "win32" ? "bm-llm-gateway.exe" : "bm-llm-gateway";
 
 function run(command, args, options = {}) {
@@ -48,21 +48,32 @@ function targetTriple() {
 }
 
 run("npm", ["--prefix", path.join(workspaceRoot, "apps/console"), "run", "build"]);
+if (process.platform !== "darwin") {
+  throw new Error(
+    `desktop release sidecars have no governed production profile for ${process.platform}`,
+  );
+}
+const triple = targetTriple();
+if (!triple.endsWith("-apple-darwin")) {
+  throw new Error(`macOS standalone sidecar profile cannot build target ${triple}`);
+}
 run("cargo", [
   "build",
+  "--locked",
   "-p",
   "bm-llm-gateway",
   "--no-default-features",
   "--features",
-  "server-async,client-reqwest",
+  "server-async,client-reqwest,profile-desktop-macos-standalone-memory",
   "--release",
+  "--target",
+  triple,
 ]);
 
-mkdirSync(releaseDir, { recursive: true });
-const triple = targetTriple();
-const source = path.join(releaseDir, gatewayName);
+mkdirSync(sidecarDir, { recursive: true });
+const source = path.join(targetDir, triple, "release", gatewayName);
 const sidecar = path.join(
-  releaseDir,
+  sidecarDir,
   process.platform === "win32"
     ? `bm-llm-gateway-${triple}.exe`
     : `bm-llm-gateway-${triple}`,

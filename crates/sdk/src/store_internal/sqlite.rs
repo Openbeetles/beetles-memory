@@ -1,5 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "nonproduction-replay-harness")]
@@ -12,28 +13,205 @@ use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBeha
 use serde_json::Value;
 
 #[cfg(feature = "nonproduction-replay-harness")]
-use crate::store_internal::transaction::read_consistent_from_state;
+use crate::enforce_event_key_budget;
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::store_internal::transaction::{
+    read_consistent_from_state, validate_restore_post_image_blob_bytes,
+};
 use crate::{
-    enforce_event_key_budget, enforce_logical_key_budget, store_budget_error,
+    enforce_logical_key_budget, store_budget_error,
     store_internal::transaction::{
-        apply_transaction, read_consistent_namespaces_from_state, BackendTransactionState,
-        EventOverflowPolicy,
+        apply_transaction, read_bounded_known_keys_from_parts,
+        scoped_projection_dependency_addresses, scoped_projection_root_addresses,
+        validate_scoped_projection_post_image, BackendTransactionState, StoreAdmissionAuthority,
+        StoreBackendUsage, StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead,
+        StoreBoundedKnownKeyReadResult, StoreImmutableReadSession, StoreReadReceipt,
+        StoreReadSessionState, StoreTransactionAdmission, StoreTransactionContext,
     },
-    MemoryStoreEvent, StoreBackendConfig, StoreCapacityBudget, StoreConsistentNamespaceReadRequest,
-    StoreConsistentNamespaceReadResult, StoreEngine, StoreEngineMutation, StoreEventLog,
-    StoreSchemaManifest, StoreSnapshotBlob, StoreSnapshotJsonDoc, StoreSnapshotReplaceReport,
-    StoreTransactionReport, StoreTransactionRequest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
+    MemoryStoreEvent, StoreBackendConfig, StoreCapacityBudget, StoreEngine, StoreEngineMutation,
+    StoreEventLog, StoreSchemaManifest, StoreTransactionReport, StoreTransactionRequest,
+    STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::{StoreConsistentReadRequest, StoreConsistentReadResult};
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::{StoreSnapshotBlob, StoreSnapshotJsonDoc, StoreSnapshotReplaceReport};
 
 pub struct SqliteStoreEngine {
     capacity: StoreCapacityBudget,
+    admission_authority: StoreAdmissionAuthority,
     connection: Mutex<Connection>,
 }
 
+struct ScopedJsonRead {
+    documents: BTreeMap<(String, String), Value>,
+    logical_bytes: usize,
+}
+
+fn read_scoped_json_exact(
+    connection: &Connection,
+    request: &crate::StoreScopedProjectionRequest,
+    capacity: StoreCapacityBudget,
+) -> Result<ScopedJsonRead> {
+    let mut documents = BTreeMap::new();
+    let mut logical_bytes = 0_usize;
+    let mut observed = BTreeSet::new();
+    let mut pending = scoped_projection_root_addresses(&request.json_namespaces, &request.scope)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    while let Some((namespace, key)) = pending.pop_first() {
+        if !observed.insert((namespace.clone(), key.clone())) {
+            continue;
+        }
+        if observed.len() > capacity.kv_max_entries {
+            return Err(Error::config(
+                "store_scoped_projection_budget_exceeded",
+                "scoped projection exact-key reads exceed the pinned operation entry budget",
+            ));
+        }
+        let raw = connection
+            .query_row(
+                "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                params![&namespace, &key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        let Some(raw) = raw else { continue };
+        let value = serde_json::from_str::<Value>(&raw)
+            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+        let value_bytes = serde_json::to_vec(&value)
+            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?
+            .len();
+        logical_bytes = logical_bytes
+            .checked_add(value_bytes)
+            .ok_or_else(|| store_budget_error("scoped projection JSON byte overflow"))?;
+        if logical_bytes > capacity.snapshot_max_bytes {
+            return Err(Error::config(
+                "store_scoped_projection_budget_exceeded",
+                "scoped projection exceeds the pinned operation byte budget",
+            ));
+        }
+        documents.insert((namespace, key), value);
+        for dependency in scoped_projection_dependency_addresses(
+            &documents,
+            &request.json_namespaces,
+            &request.scope,
+        )? {
+            if !observed.contains(&dependency) {
+                pending.insert(dependency);
+            }
+        }
+    }
+    crate::store_internal::transaction::validate_scoped_recall_manifest_documents(
+        &documents,
+        &BTreeMap::new(),
+        &request.scope,
+    )?;
+    crate::store_internal::transaction::validate_scoped_control_plane_documents(
+        &documents,
+        &request.scope,
+        capacity.kv_max_entries,
+    )?;
+    Ok(ScopedJsonRead {
+        documents,
+        logical_bytes,
+    })
+}
+
+struct SqliteImmutableReadSession<'a> {
+    connection: MutexGuard<'a, Connection>,
+    read: StoreReadSessionState,
+}
+
+impl Drop for SqliteImmutableReadSession<'_> {
+    fn drop(&mut self) {
+        let _ = self.connection.execute_batch("ROLLBACK");
+    }
+}
+
+impl StoreImmutableReadSession for SqliteImmutableReadSession<'_> {
+    fn read_json_known_keys(
+        &mut self,
+        addresses: &[(String, String)],
+    ) -> Result<Vec<StoreBoundedKnownJsonRead>> {
+        let mut reads = Vec::with_capacity(addresses.len());
+        for (namespace, key) in addresses {
+            let raw: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("store_immutable_read_session", error))?;
+            let value = raw
+                .map(|raw| {
+                    if raw.len() > self.read.remaining_json_bytes() {
+                        return Err(Error::config(
+                            "store_consistent_read_budget_exceeded",
+                            "SQLite JSON value exceeds remaining immutable session ceiling",
+                        ));
+                    }
+                    serde_json::from_str(&raw).map_err(|error| {
+                        Error::config("store_immutable_read_session", error.to_string())
+                    })
+                })
+                .transpose()?;
+            reads.push(self.read.record_json(namespace, key, value)?);
+        }
+        Ok(reads)
+    }
+
+    fn read_blob_known_keys(
+        &mut self,
+        addresses: &[(String, String)],
+    ) -> Result<Vec<StoreBoundedKnownBlobRead>> {
+        let mut reads = Vec::with_capacity(addresses.len());
+        for (namespace, key) in addresses {
+            let value: Option<Vec<u8>> = self
+                .connection
+                .query_row(
+                    "SELECT value_blob FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("store_immutable_read_session", error))?;
+            if value
+                .as_ref()
+                .is_some_and(|value| value.len() > self.read.remaining_blob_bytes())
+            {
+                return Err(Error::config(
+                    "store_consistent_read_budget_exceeded",
+                    "SQLite blob exceeds remaining immutable session ceiling",
+                ));
+            }
+            reads.push(self.read.record_blob(namespace, key, value)?);
+        }
+        Ok(reads)
+    }
+
+    fn receipt(&self) -> Result<StoreReadReceipt> {
+        self.read.receipt()
+    }
+}
+
 impl SqliteStoreEngine {
-    pub fn open(config: &StoreBackendConfig) -> Result<(Self, StoreSchemaManifest)> {
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn open_with_capacity(
+        config: &StoreBackendConfig,
+        capacity: StoreCapacityBudget,
+    ) -> Result<(Self, StoreSchemaManifest)> {
+        Self::open_with_capacity_and_authority(config, capacity, StoreAdmissionAuthority::new())
+    }
+
+    pub(crate) fn open_with_capacity_and_authority(
+        config: &StoreBackendConfig,
+        capacity: StoreCapacityBudget,
+        admission_authority: StoreAdmissionAuthority,
+    ) -> Result<(Self, StoreSchemaManifest)> {
         let path = config
             .data_path
             .clone()
@@ -48,7 +226,8 @@ impl SqliteStoreEngine {
             .busy_timeout(config.lock_timeout)
             .map_err(|error| Error::storage("sqlite_store_open", error))?;
         let engine = Self {
-            capacity: config.capacity,
+            capacity,
+            admission_authority,
             connection: Mutex::new(connection),
         };
         let manifest = engine.init_schema(config, path)?;
@@ -60,11 +239,14 @@ impl SqliteStoreEngine {
         config: &StoreBackendConfig,
         path: PathBuf,
     ) -> Result<StoreSchemaManifest> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|error| Error::config("sqlite_store_open", error.to_string()))?;
-        connection
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+        transaction
             .execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS bm_schema (
@@ -96,7 +278,7 @@ impl SqliteStoreEngine {
                 "#,
             )
             .map_err(|error| Error::storage("sqlite_store_schema", error))?;
-        let incompatible_schema: Option<String> = connection
+        let incompatible_schema: Option<String> = transaction
             .query_row(
                 "SELECT schema_id FROM bm_schema WHERE schema_id <> ?1 LIMIT 1",
                 params![STORE_SCHEMA_ID],
@@ -110,7 +292,7 @@ impl SqliteStoreEngine {
                 format!("unsupported schema {} in {}", schema_id, path.display()),
             ));
         }
-        let existing: Option<String> = connection
+        let existing: Option<String> = transaction
             .query_row(
                 "SELECT manifest_json FROM bm_schema WHERE schema_id = ?1",
                 params![STORE_SCHEMA_ID],
@@ -142,19 +324,44 @@ impl SqliteStoreEngine {
                 manifest.touch_opened(now_secs);
                 manifest
             }
-            None => StoreSchemaManifest::new(config.backend, config.profile, now_secs),
+            None => {
+                let persistent_state_exists: bool = transaction
+                    .query_row(
+                        r#"
+                        SELECT
+                            EXISTS(SELECT 1 FROM bm_event_log) OR
+                            EXISTS(SELECT 1 FROM bm_kv) OR
+                            EXISTS(SELECT 1 FROM bm_blob) OR
+                            EXISTS(SELECT 1 FROM bm_snapshot_manifest)
+                        "#,
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+                if persistent_state_exists {
+                    return Err(Error::config(
+                        "sqlite_store_schema",
+                        format!("schema is missing for non-empty store {}", path.display()),
+                    ));
+                }
+                StoreSchemaManifest::new(config.backend, config.profile, now_secs)
+            }
         };
         let raw = serde_json::to_string(&manifest)
             .map_err(|error| Error::config("sqlite_store_schema", error.to_string()))?;
-        connection
+        transaction
             .execute(
                 "INSERT OR REPLACE INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
                 params![STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, raw],
             )
             .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+        transaction
+            .commit()
+            .map_err(|error| Error::storage("sqlite_store_schema", error))?;
         Ok(manifest)
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn ensure_can_insert_event(
         capacity: StoreCapacityBudget,
         connection: &Connection,
@@ -185,6 +392,7 @@ impl SqliteStoreEngine {
         Ok(())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn ensure_json_entry_budget(
         capacity: StoreCapacityBudget,
         connection: &Connection,
@@ -216,6 +424,7 @@ impl SqliteStoreEngine {
         Ok(())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn ensure_blob_budget(
         capacity: StoreCapacityBudget,
         connection: &Connection,
@@ -251,71 +460,153 @@ impl SqliteStoreEngine {
         Ok(())
     }
 
-    fn load_transaction_state(connection: &Connection) -> Result<BackendTransactionState> {
-        let mut state = BackendTransactionState::default();
-        {
-            let mut statement = connection
-                .prepare("SELECT namespace, key, value_json FROM bm_kv ORDER BY namespace, key")
+    fn load_transaction_context(
+        connection: &Connection,
+        request: &StoreTransactionRequest,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreTransactionContext> {
+        let mut touched = BackendTransactionState::default();
+        let mut json_bytes = 0_usize;
+        for (namespace, key) in &request.read_set().json {
+            enforce_logical_key_budget(capacity, namespace, key, "memory_write_transaction")?;
+            let row: Option<(usize, String)> = connection
+                .query_row(
+                    "SELECT length(value_json), value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
                 .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-            for row in rows {
-                let (namespace, key, raw) =
-                    row.map_err(|error| map_transaction_error("memory_write_transaction", error))?;
+            if let Some((bytes, raw)) = row {
+                json_bytes = json_bytes.checked_add(bytes).ok_or_else(|| {
+                    store_budget_error("transaction touched JSON byte count overflow")
+                })?;
+                if json_bytes > capacity.snapshot_max_bytes {
+                    return Err(store_budget_error(format!(
+                        "transaction touched JSON bytes {json_bytes} exceed {}",
+                        capacity.snapshot_max_bytes
+                    )));
+                }
                 let value = serde_json::from_str(&raw).map_err(|error| {
                     Error::config("memory_write_transaction", error.to_string())
                 })?;
-                state.json.insert((namespace, key), value);
+                touched.json.insert((namespace.clone(), key.clone()), value);
             }
         }
-        {
+        for (namespace, prefix) in &request.read_set().json_prefixes {
+            enforce_logical_key_budget(capacity, namespace, prefix, "memory_write_transaction")?;
             let mut statement = connection
-                .prepare("SELECT namespace, key, value_blob FROM bm_blob ORDER BY namespace, key")
+                .prepare(
+                    "SELECT key, length(value_json), value_json FROM bm_kv \
+                     WHERE namespace = ?1 AND substr(key, 1, length(?2)) = ?2 ORDER BY key",
+                )
                 .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
-                })
+            let mut rows = statement
+                .query(params![namespace, prefix])
                 .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-            for row in rows {
-                let (namespace, key, value) =
-                    row.map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-                state.blobs.insert((namespace, key), value);
+            while let Some(row) = rows
+                .next()
+                .map_err(|error| map_transaction_error("memory_write_transaction", error))?
+            {
+                let key: String = row
+                    .get(0)
+                    .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
+                if touched.json.contains_key(&(namespace.clone(), key.clone())) {
+                    continue;
+                }
+                let bytes: usize = row
+                    .get(1)
+                    .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
+                let raw: String = row
+                    .get(2)
+                    .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
+                json_bytes = json_bytes.checked_add(bytes).ok_or_else(|| {
+                    store_budget_error("transaction touched JSON byte count overflow")
+                })?;
+                if json_bytes > capacity.snapshot_max_bytes {
+                    return Err(store_budget_error(format!(
+                        "transaction touched JSON bytes {json_bytes} exceed {}",
+                        capacity.snapshot_max_bytes
+                    )));
+                }
+                let value = serde_json::from_str(&raw).map_err(|error| {
+                    Error::config("memory_write_transaction", error.to_string())
+                })?;
+                touched.json.insert((namespace.clone(), key), value);
             }
         }
-        {
-            let mut statement = connection
-                .prepare("SELECT event_json FROM bm_event_log ORDER BY sequence ASC")
+        let mut touched_blob_bytes = 0_usize;
+        for (namespace, key) in &request.read_set().blobs {
+            enforce_logical_key_budget(capacity, namespace, key, "memory_write_transaction")?;
+            let row: Option<(usize, Vec<u8>)> = connection
+                .query_row(
+                    "SELECT length(value_blob), value_blob FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
                 .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-            let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-            for row in rows {
-                let raw =
-                    row.map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-                state
-                    .events
-                    .push(serde_json::from_str(&raw).map_err(|error| {
-                        Error::config("memory_write_transaction", error.to_string())
-                    })?);
+            if let Some((bytes, value)) = row {
+                touched_blob_bytes = touched_blob_bytes.checked_add(bytes).ok_or_else(|| {
+                    store_budget_error("transaction touched blob byte count overflow")
+                })?;
+                if touched_blob_bytes > capacity.blob_max_bytes {
+                    return Err(store_budget_error(format!(
+                        "transaction touched blob bytes {touched_blob_bytes} exceed {}",
+                        capacity.blob_max_bytes
+                    )));
+                }
+                touched
+                    .blobs
+                    .insert((namespace.clone(), key.clone()), value);
             }
         }
-        Ok(state)
+        let event_ids = request
+            .mutations
+            .iter()
+            .filter_map(crate::store_internal::transaction::mutation_event_id)
+            .collect::<BTreeSet<_>>();
+        let mut existing_event_ids = BTreeSet::new();
+        for event_id in event_ids {
+            let exists: Option<String> = connection
+                .query_row(
+                    "SELECT event_id FROM bm_event_log WHERE event_id = ?1",
+                    params![event_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
+            existing_event_ids.extend(exists);
+        }
+        let usage = StoreBackendUsage {
+            kv_entries: connection
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM bm_kv) + (SELECT COUNT(*) FROM bm_blob)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| map_transaction_error("memory_write_transaction", error))?,
+            blob_bytes: connection
+                .query_row(
+                    "SELECT COALESCE(SUM(length(value_blob)), 0) FROM bm_blob",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| map_transaction_error("memory_write_transaction", error))?,
+            event_count: connection
+                .query_row("SELECT COUNT(*) FROM bm_event_log", [], |row| row.get(0))
+                .map_err(|error| map_transaction_error("memory_write_transaction", error))?,
+        };
+        Ok(StoreTransactionContext {
+            touched,
+            usage,
+            existing_event_ids,
+        })
     }
 }
 
 impl StoreEventLog for SqliteStoreEngine {
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
         let raw = serde_json::to_string(&event)
             .map_err(|error| Error::config("store_event_log", error.to_string()))?;
@@ -372,9 +663,18 @@ impl StoreEventLog for SqliteStoreEngine {
 }
 
 impl StoreEngine for SqliteStoreEngine {
-    fn commit_transaction(
+    fn admission_authority(&self) -> &StoreAdmissionAuthority {
+        &self.admission_authority
+    }
+    #[cfg(feature = "nonproduction-replay-harness")]
+    fn store_capacity(&self) -> StoreCapacityBudget {
+        self.capacity
+    }
+
+    fn commit_transaction_admitted(
         &self,
         request: &StoreTransactionRequest,
+        admission: &StoreTransactionAdmission,
     ) -> Result<StoreTransactionReport> {
         let mut connection = self
             .connection
@@ -385,15 +685,11 @@ impl StoreEngine for SqliteStoreEngine {
             .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
         #[cfg(feature = "nonproduction-replay-harness")]
         replay_harness_pause_after_begin_immediate()?;
-        let current = Self::load_transaction_state(&tx)?;
-        let (_next, report) = apply_transaction(
-            self.capacity,
-            request,
-            &current,
-            EventOverflowPolicy::Reject,
-        )?;
+        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        let context = Self::load_transaction_context(&tx, request, admission.operation_capacity())?;
+        let plan = apply_transaction(admission, request, &context)?;
 
-        for mutation in &request.mutations {
+        for mutation in &plan.effective_request.mutations {
             match mutation {
                 StoreEngineMutation::PutJson {
                     namespace,
@@ -442,11 +738,18 @@ impl StoreEngine for SqliteStoreEngine {
                     )
                     .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
                 }
+                StoreEngineMutation::DeleteJsonIfPresent { .. }
+                | StoreEngineMutation::DeleteBlobIfPresent { .. } => {
+                    return Err(Error::config(
+                        "memory_write_transaction",
+                        "conditional mutation reached SQLite primitive execution",
+                    ));
+                }
             }
         }
         tx.commit()
             .map_err(|error| map_transaction_error("memory_write_transaction", error))?;
-        Ok(report)
+        Ok(plan.report)
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -517,10 +820,36 @@ impl StoreEngine for SqliteStoreEngine {
         Ok(result)
     }
 
-    fn read_consistent_namespaces(
+    fn read_consistent_known_keys(
         &self,
-        request: &StoreConsistentNamespaceReadRequest,
-    ) -> Result<StoreConsistentNamespaceReadResult> {
+        json_keys: &[(String, String)],
+        blob_keys: &[(String, String)],
+        include_events: bool,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreBoundedKnownKeyReadResult> {
+        let requested_entries = json_keys.len().saturating_add(blob_keys.len());
+        if requested_entries > capacity.kv_max_entries {
+            return Err(Error::config(
+                "store_consistent_read_budget_exceeded",
+                format!(
+                    "requested entries {requested_entries} exceed {}",
+                    capacity.kv_max_entries
+                ),
+            ));
+        }
+        let mut addresses = BTreeSet::new();
+        for (kind, keys) in [("json", json_keys), ("blob", blob_keys)] {
+            for (namespace, key) in keys {
+                enforce_logical_key_budget(capacity, namespace, key, "store_consistent_read")?;
+                if !addresses.insert((kind, namespace.as_str(), key.as_str())) {
+                    return Err(Error::config(
+                        "store_consistent_read",
+                        format!("duplicate {kind} known-key address {namespace}/{key}"),
+                    ));
+                }
+            }
+        }
+
         let mut connection = self
             .connection
             .lock()
@@ -528,60 +857,320 @@ impl StoreEngine for SqliteStoreEngine {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-        let mut state = BackendTransactionState::default();
-        for namespace in &request.json_namespaces {
-            let mut statement = tx
-                .prepare("SELECT key, value_json FROM bm_kv WHERE namespace = ?1 ORDER BY key")
+        let mut json = std::collections::BTreeMap::new();
+        let mut json_bytes = 0_usize;
+        for (namespace, key) in json_keys {
+            let bytes: Option<usize> = tx
+                .query_row(
+                    "SELECT length(value_json) FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| row.get(0),
+                )
+                .optional()
                 .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-            let rows = statement
-                .query_map(params![namespace], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-            for row in rows {
-                let (key, raw) =
-                    row.map_err(|error| map_transaction_error("store_consistent_read", error))?;
+            if let Some(bytes) = bytes {
+                json_bytes = json_bytes.checked_add(bytes).ok_or_else(|| {
+                    store_budget_error("consistent known-key JSON byte count overflow")
+                })?;
+                if json_bytes > capacity.snapshot_max_bytes {
+                    return Err(Error::config(
+                        "store_consistent_read_budget_exceeded",
+                        format!(
+                            "JSON bytes {json_bytes} exceed {}",
+                            capacity.snapshot_max_bytes
+                        ),
+                    ));
+                }
+                let raw: String = tx
+                    .query_row(
+                        "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                        params![namespace, key],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
                 let value = serde_json::from_str(&raw)
                     .map_err(|error| Error::config("store_consistent_read", error.to_string()))?;
-                state.json.insert((namespace.clone(), key), value);
+                json.insert((namespace.clone(), key.clone()), value);
             }
         }
-        for namespace in &request.blob_namespaces {
-            let mut statement = tx
-                .prepare("SELECT key, value_blob FROM bm_blob WHERE namespace = ?1 ORDER BY key")
+        let mut blobs = std::collections::BTreeMap::new();
+        let mut blob_bytes = 0_usize;
+        for (namespace, key) in blob_keys {
+            let bytes: Option<usize> = tx
+                .query_row(
+                    "SELECT length(value_blob) FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| row.get(0),
+                )
+                .optional()
                 .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-            let rows = statement
-                .query_map(params![namespace], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-            for row in rows {
-                let (key, value) =
-                    row.map_err(|error| map_transaction_error("store_consistent_read", error))?;
-                state.blobs.insert((namespace.clone(), key), value);
+            if let Some(bytes) = bytes {
+                blob_bytes = blob_bytes.checked_add(bytes).ok_or_else(|| {
+                    store_budget_error("consistent known-key blob byte count overflow")
+                })?;
+                if blob_bytes > capacity.blob_max_bytes {
+                    return Err(Error::config(
+                        "store_consistent_read_budget_exceeded",
+                        format!("blob bytes {blob_bytes} exceed {}", capacity.blob_max_bytes),
+                    ));
+                }
+                let value: Vec<u8> = tx
+                    .query_row(
+                        "SELECT value_blob FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                        params![namespace, key],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
+                blobs.insert((namespace.clone(), key.clone()), value);
             }
         }
-        if request.include_events {
-            let mut statement = tx
-                .prepare("SELECT event_json FROM bm_event_log ORDER BY sequence ASC")
-                .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-            let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-            for row in rows {
-                let raw =
-                    row.map_err(|error| map_transaction_error("store_consistent_read", error))?;
-                state.events.push(
-                    serde_json::from_str(&raw).map_err(|error| {
+        let events =
+            if include_events {
+                let (event_count, event_bytes): (usize, usize) = tx
+                    .query_row(
+                        "SELECT COUNT(*), COALESCE(SUM(length(event_json)), 0) FROM bm_event_log",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
+                if event_count > capacity.event_log_max_items
+                    || json_bytes.saturating_add(event_bytes) > capacity.snapshot_max_bytes
+                {
+                    return Err(Error::config(
+                        "store_consistent_read_budget_exceeded",
+                        "event log exceeds the consistent known-key read budget",
+                    ));
+                }
+                let mut statement = tx
+                    .prepare("SELECT event_json FROM bm_event_log ORDER BY sequence ASC")
+                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
+                let mut events = Vec::with_capacity(event_count);
+                for row in rows {
+                    let raw =
+                        row.map_err(|error| map_transaction_error("store_consistent_read", error))?;
+                    events.push(serde_json::from_str(&raw).map_err(|error| {
                         Error::config("store_consistent_read", error.to_string())
-                    })?,
-                );
-            }
-        }
-        let result = read_consistent_namespaces_from_state(request, &state)?;
+                    })?);
+                }
+                events
+            } else {
+                Vec::new()
+            };
+        let result = read_bounded_known_keys_from_parts(
+            json_keys,
+            blob_keys,
+            include_events,
+            capacity,
+            &json,
+            &blobs,
+            &events,
+        )?;
         tx.commit()
             .map_err(|error| map_transaction_error("store_consistent_read", error))?;
         Ok(result)
+    }
+
+    fn open_immutable_read_session<'a>(
+        &'a self,
+        capacity: StoreCapacityBudget,
+    ) -> Result<Box<dyn StoreImmutableReadSession + 'a>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|error| Error::config("store_immutable_read_session", error.to_string()))?;
+        connection
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|error| map_transaction_error("store_immutable_read_session", error))?;
+        Ok(Box::new(SqliteImmutableReadSession {
+            connection,
+            read: StoreReadSessionState::new(capacity),
+        }))
+    }
+
+    fn read_scoped_projection(
+        &self,
+        request: &crate::StoreScopedProjectionRequest,
+        capacity: StoreCapacityBudget,
+    ) -> Result<crate::StoreScopedProjection> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        let scoped_json = read_scoped_json_exact(&tx, request, capacity)?;
+        let events = if request.include_events {
+            let (count, bytes): (usize, usize) = tx
+                .query_row(
+                    r#"SELECT COUNT(*), COALESCE(SUM(length(event_json)), 0)
+                       FROM bm_event_log
+                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
+                         AND json_extract(event_json, '$.scope.subject_id') = ?2"#,
+                    params![
+                        &request.scope.memory_space_id,
+                        &request.scope.mounted_subject_id
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            if count > capacity.event_log_max_items
+                || scoped_json.logical_bytes.saturating_add(bytes) > capacity.snapshot_max_bytes
+            {
+                return Err(Error::config(
+                    "store_scoped_projection_budget_exceeded",
+                    "scoped projection events exceed the pinned operation budget",
+                ));
+            }
+            let mut statement = tx
+                .prepare(
+                    r#"SELECT event_json FROM bm_event_log
+                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
+                         AND json_extract(event_json, '$.scope.subject_id') = ?2
+                       ORDER BY sequence"#,
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        &request.scope.memory_space_id,
+                        &request.scope.mounted_subject_id
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let mut events = Vec::with_capacity(count);
+            for row in rows {
+                let raw =
+                    row.map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+                events.push(serde_json::from_str(&raw).map_err(|error| {
+                    Error::config("store_scoped_projection", error.to_string())
+                })?);
+            }
+            events
+        } else {
+            Vec::new()
+        };
+        let projection = crate::store_internal::transaction::read_scoped_projection_from_parts(
+            request,
+            capacity,
+            &scoped_json.documents,
+            &events,
+        )?;
+        tx.commit()
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        Ok(projection)
+    }
+
+    fn replace_scoped_projection(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        let projection_request = crate::StoreScopedProjectionRequest {
+            scope: request.scope.clone(),
+            json_namespaces: request.json_namespaces.clone(),
+            include_events: false,
+        };
+        let scoped_json =
+            read_scoped_json_exact(&tx, &projection_request, admission.operation_capacity())?;
+        let deleted_addresses = scoped_json
+            .documents
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for doc in &request.json_docs {
+            let address = (doc.namespace.clone(), doc.key.clone());
+            let exists = tx
+                .query_row(
+                    "SELECT 1 FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![&doc.namespace, &doc.key],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
+                .is_some();
+            if exists && !deleted_addresses.contains(&address) {
+                return Err(Error::config(
+                    "store_scoped_projection",
+                    format!(
+                        "replacement address {}/{} is owned by another projection scope",
+                        doc.namespace, doc.key
+                    ),
+                ));
+            }
+        }
+        for (namespace, key) in &deleted_addresses {
+            tx.execute(
+                "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_json = deleted_addresses.len();
+        for doc in &request.json_docs {
+            let raw = serde_json::to_string(&doc.value)
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            tx.execute(
+                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
+                params![&doc.namespace, &doc.key, raw],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_events = tx
+            .execute(
+                r#"DELETE FROM bm_event_log
+                   WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
+                     AND json_extract(event_json, '$.scope.subject_id') = ?2"#,
+                params![
+                    &request.scope.memory_space_id,
+                    &request.scope.mounted_subject_id
+                ],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        for event in &request.events {
+            let raw = serialize_event(event)?;
+            tx.execute(
+                "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
+                params![&event.event_id, raw],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let (entries, blob_bytes, event_count): (usize, usize, usize) = tx
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM bm_kv) + (SELECT COUNT(*) FROM bm_blob), COALESCE((SELECT SUM(length(value_blob)) FROM bm_blob), 0), (SELECT COUNT(*) FROM bm_event_log)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        validate_scoped_projection_post_image(
+            admission,
+            request,
+            entries,
+            std::iter::once(blob_bytes),
+            std::iter::empty(),
+            event_count,
+        )?;
+        tx.commit()
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        Ok(crate::StoreScopedProjectionReplaceReport {
+            admission_report_id: admission.report_id().to_string(),
+            deleted_json,
+            inserted_json: request.json_docs.len(),
+            deleted_events,
+            inserted_events: request.events.len(),
+        })
     }
 
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
@@ -605,6 +1194,7 @@ impl StoreEngine for SqliteStoreEngine {
         .transpose()
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn put_json_value(&self, namespace: &str, key: &str, value: Value) -> Result<()> {
         let raw = serde_json::to_string(&value)
             .map_err(|error| Error::config("sqlite_store_json_write", error.to_string()))?;
@@ -622,40 +1212,7 @@ impl StoreEngine for SqliteStoreEngine {
         Ok(())
     }
 
-    fn put_json_value_and_event(
-        &self,
-        namespace: &str,
-        key: &str,
-        value: Value,
-        event: MemoryStoreEvent,
-    ) -> Result<()> {
-        let raw = serde_json::to_string(&value)
-            .map_err(|error| Error::config("sqlite_store_json_write", error.to_string()))?;
-        let event_raw = serialize_event(&event)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|error| Error::config("sqlite_store_json_write", error.to_string()))?;
-        let tx = connection
-            .transaction()
-            .map_err(|error| Error::storage("sqlite_store_json_write", error))?;
-        Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
-        Self::ensure_json_entry_budget(self.capacity, &tx, namespace, key)?;
-        tx.execute(
-            "INSERT OR REPLACE INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
-            params![namespace, key, raw],
-        )
-        .map_err(|error| Error::storage("sqlite_store_json_write", error))?;
-        tx.execute(
-            "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
-            params![event.event_id, event_raw],
-        )
-        .map_err(map_event_insert_error)?;
-        tx.commit()
-            .map_err(|error| Error::storage("sqlite_store_json_write", error))?;
-        Ok(())
-    }
-
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
         enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_json_delete")?;
         let connection = self
@@ -667,40 +1224,6 @@ impl StoreEngine for SqliteStoreEngine {
                 "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
                 params![namespace, key],
             )
-            .map_err(|error| Error::storage("sqlite_store_json_delete", error))?;
-        Ok(rows > 0)
-    }
-
-    fn delete_json_value_and_event(
-        &self,
-        namespace: &str,
-        key: &str,
-        event: MemoryStoreEvent,
-    ) -> Result<bool> {
-        let event_raw = serialize_event(&event)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|error| Error::config("sqlite_store_json_delete", error.to_string()))?;
-        let tx = connection
-            .transaction()
-            .map_err(|error| Error::storage("sqlite_store_json_delete", error))?;
-        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_json_delete")?;
-        let rows = tx
-            .execute(
-                "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
-                params![namespace, key],
-            )
-            .map_err(|error| Error::storage("sqlite_store_json_delete", error))?;
-        if rows > 0 {
-            Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
-            tx.execute(
-                "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
-                params![event.event_id, event_raw],
-            )
-            .map_err(map_event_insert_error)?;
-        }
-        tx.commit()
             .map_err(|error| Error::storage("sqlite_store_json_delete", error))?;
         Ok(rows > 0)
     }
@@ -740,6 +1263,7 @@ impl StoreEngine for SqliteStoreEngine {
             .map_err(|error| Error::storage("sqlite_store_blob_read", error))
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
         let connection = self
             .connection
@@ -755,38 +1279,7 @@ impl StoreEngine for SqliteStoreEngine {
         Ok(())
     }
 
-    fn put_blob_and_event(
-        &self,
-        namespace: &str,
-        key: &str,
-        value: &[u8],
-        event: MemoryStoreEvent,
-    ) -> Result<()> {
-        let event_raw = serialize_event(&event)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|error| Error::config("sqlite_store_blob_write", error.to_string()))?;
-        let tx = connection
-            .transaction()
-            .map_err(|error| Error::storage("sqlite_store_blob_write", error))?;
-        Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
-        Self::ensure_blob_budget(self.capacity, &tx, namespace, key, value.len())?;
-        tx.execute(
-            "INSERT OR REPLACE INTO bm_blob(namespace, key, value_blob) VALUES (?1, ?2, ?3)",
-            params![namespace, key, value],
-        )
-        .map_err(|error| Error::storage("sqlite_store_blob_write", error))?;
-        tx.execute(
-            "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
-            params![event.event_id, event_raw],
-        )
-        .map_err(map_event_insert_error)?;
-        tx.commit()
-            .map_err(|error| Error::storage("sqlite_store_blob_write", error))?;
-        Ok(())
-    }
-
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
         enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_blob_delete")?;
         let connection = self
@@ -798,40 +1291,6 @@ impl StoreEngine for SqliteStoreEngine {
                 "DELETE FROM bm_blob WHERE namespace = ?1 AND key = ?2",
                 params![namespace, key],
             )
-            .map_err(|error| Error::storage("sqlite_store_blob_delete", error))?;
-        Ok(rows > 0)
-    }
-
-    fn delete_blob_and_event(
-        &self,
-        namespace: &str,
-        key: &str,
-        event: MemoryStoreEvent,
-    ) -> Result<bool> {
-        let event_raw = serialize_event(&event)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|error| Error::config("sqlite_store_blob_delete", error.to_string()))?;
-        let tx = connection
-            .transaction()
-            .map_err(|error| Error::storage("sqlite_store_blob_delete", error))?;
-        enforce_logical_key_budget(self.capacity, namespace, key, "sqlite_store_blob_delete")?;
-        let rows = tx
-            .execute(
-                "DELETE FROM bm_blob WHERE namespace = ?1 AND key = ?2",
-                params![namespace, key],
-            )
-            .map_err(|error| Error::storage("sqlite_store_blob_delete", error))?;
-        if rows > 0 {
-            Self::ensure_can_insert_event(self.capacity, &tx, &event)?;
-            tx.execute(
-                "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
-                params![event.event_id, event_raw],
-            )
-            .map_err(map_event_insert_error)?;
-        }
-        tx.commit()
             .map_err(|error| Error::storage("sqlite_store_blob_delete", error))?;
         Ok(rows > 0)
     }
@@ -855,6 +1314,7 @@ impl StoreEngine for SqliteStoreEngine {
         Ok(out)
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn replace_snapshot(
         &self,
         json_namespaces: &[&str],
@@ -936,16 +1396,13 @@ impl StoreEngine for SqliteStoreEngine {
                 final_json_entries, self.capacity.kv_max_entries
             )));
         }
-        let retained_blob_bytes =
-            count_retained_blob_bytes(&tx, "sqlite_store_snapshot_import", blob_namespaces)?;
-        let snapshot_blob_bytes = blobs.iter().map(|blob| blob.value.len()).sum::<usize>();
-        let final_blob_bytes = retained_blob_bytes.saturating_add(snapshot_blob_bytes);
-        if final_blob_bytes > self.capacity.blob_max_bytes {
-            return Err(store_budget_error(format!(
-                "blob bytes {} exceed {}",
-                final_blob_bytes, self.capacity.blob_max_bytes
-            )));
-        }
+        let retained_blob_lengths =
+            retained_blob_lengths(&tx, "sqlite_store_snapshot_import", blob_namespaces)?;
+        validate_restore_post_image_blob_bytes(
+            self.capacity,
+            retained_blob_lengths,
+            blobs.iter().map(|blob| blob.value.len()),
+        )?;
 
         let mut json_deleted = 0usize;
         for namespace in json_namespaces {
@@ -1101,6 +1558,7 @@ fn serialize_event(event: &MemoryStoreEvent) -> Result<String> {
         .map_err(|error| Error::config("store_event_log", error.to_string()))
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 fn count_retained_rows(
     connection: &Connection,
     table: &'static str,
@@ -1127,11 +1585,12 @@ fn count_retained_rows(
     Ok(count)
 }
 
-fn count_retained_blob_bytes(
+#[cfg(feature = "nonproduction-replay-harness")]
+fn retained_blob_lengths(
     connection: &Connection,
     stage: &'static str,
     replaced_namespaces: &[&str],
-) -> Result<usize> {
+) -> Result<Vec<usize>> {
     let replaced = replaced_namespaces
         .iter()
         .copied()
@@ -1144,16 +1603,17 @@ fn count_retained_blob_bytes(
             Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
         })
         .map_err(|error| Error::storage(stage, error))?;
-    let mut bytes = 0usize;
+    let mut lengths = Vec::new();
     for row in rows {
         let (namespace, len) = row.map_err(|error| Error::storage(stage, error))?;
         if !replaced.contains(namespace.as_str()) {
-            bytes = bytes.saturating_add(len);
+            lengths.push(len);
         }
     }
-    Ok(bytes)
+    Ok(lengths)
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 fn map_event_insert_error(error: rusqlite::Error) -> Error {
     if error.to_string().contains("UNIQUE") {
         Error::config("store_event_log", "duplicate event id")

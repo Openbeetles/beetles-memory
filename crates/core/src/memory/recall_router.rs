@@ -356,6 +356,7 @@ mod tests {
                 vec![RecallCandidate {
                     plane,
                     candidate_id: "c1".to_string(),
+                    owner_ref: None,
                     title: "candidate".to_string(),
                     excerpt: String::new(),
                     citation: None,

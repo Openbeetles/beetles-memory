@@ -5,8 +5,9 @@ mod support;
 use bm_sdk::{
     apply_memory_space_migration, export_memory_space, import_memory_space,
     preview_memory_space_migration, MemorySpaceExportRequest, MemorySpaceImportRequest,
-    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest, MemoryWriteCandidate,
-    MemoryWriteRequest, ProfileId,
+    MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest,
+    MemorySpacePrivateMaterialPolicy, MemorySpaceScope, MemoryWriteCandidate, MemoryWriteRequest,
+    ProfileId,
 };
 use serde::Deserialize;
 
@@ -15,7 +16,6 @@ use support::{empty_store_platform, test_runtime_with_scope};
 #[derive(Debug, Deserialize)]
 struct SdkHostMigrationFixture {
     fixture_id: String,
-    source_memory_space_id: String,
     target_memory_space_id: String,
     channel: String,
     chat_id: String,
@@ -23,7 +23,7 @@ struct SdkHostMigrationFixture {
 }
 
 #[test]
-fn generic_and_beetle_derived_fixtures_fail_closed_until_facet_remap() {
+fn generic_and_beetle_derived_fixtures_reject_cross_identity_restore() {
     let generic = load_fixture(include_str!(
         "../../../fixtures/sdk-host-readiness/generic-rust-host/host-turn-lifecycle.json"
     ));
@@ -69,7 +69,7 @@ fn load_fixture(raw: &str) -> SdkHostMigrationFixture {
 }
 
 fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> FixtureExerciseReport {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let source = empty_store_platform(profile);
     let source_runtime =
         test_runtime_with_scope(source.clone(), profile, &fixture.channel, &fixture.chat_id);
@@ -93,10 +93,18 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
     let soul_handoffs = semantic.soul_candidate_handoffs.len();
     let deferred_candidates = semantic.deferred_count;
 
+    let source_scope = MemorySpaceScope {
+        memory_space_id: source_runtime.memory_space_id().to_string(),
+        mounted_subject_id: source_runtime.subject_id().to_string(),
+    };
+    let target_scope = MemorySpaceScope {
+        memory_space_id: fixture.target_memory_space_id.clone(),
+        mounted_subject_id: source_runtime.subject_id().to_string(),
+    };
     let exported = export_memory_space(
         &source,
         MemorySpaceExportRequest {
-            memory_space_id: fixture.source_memory_space_id.clone(),
+            scope: source_scope.clone(),
             include_private: true,
         },
     )
@@ -106,12 +114,14 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         .contains_json_namespace("memory_facet_indexes");
 
     let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-        source_memory_space_id: fixture.source_memory_space_id.clone(),
-        target_memory_space_id: fixture.target_memory_space_id.clone(),
+        source_scope,
+        target_scope: target_scope.clone(),
+        expected_private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
         source_profile: profile,
         target_profile: ProfileId::DesktopMacosEmbeddedSdk,
         archive: exported.archive.clone(),
-    });
+    })
+    .expect("preview migration");
     assert!(
         !preview.loss_risk,
         "fixture {} has loss risk",
@@ -134,12 +144,13 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
             plan: preview.plan.clone(),
         },
     )
-    .expect_err("facet index remap preflight must fail closed");
+    .expect_err("identity remap preflight must fail closed");
 
     let import_error = import_memory_space(
         &target,
         MemorySpaceImportRequest {
-            memory_space_id: fixture.target_memory_space_id.clone(),
+            scope: target_scope,
+            expected_private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
             archive: exported.archive,
         },
     )
@@ -150,7 +161,7 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         .expect("after");
 
     FixtureExerciseReport {
-        helper_path: "public-sdk-write-export-preview-facet-remap-preflight",
+        helper_path: "public-sdk-write-export-preview-identity-remap-preflight",
         preview_json_docs: preview.json_docs,
         soul_handoffs,
         deferred_candidates,

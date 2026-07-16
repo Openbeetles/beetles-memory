@@ -7,11 +7,11 @@ use bm_core::llm::{
 use bm_core::platform::ResponseBody;
 use bm_core::runtime::RuntimeLifecycleReport;
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryImportRequest,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest, MemoryRuntime, MemoryScope,
-    MemoryStoreHandle, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
-    RuntimeSkillReuseOutcome, RuntimeSkillWriteSource, StoreBackendConfig,
+    MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
+    MemoryMaintenanceRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryReplayRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryWriteRequest,
+    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWriteSource,
+    StoreBackendConfig,
 };
 
 use crate::{ReplayFailure, ReplayFixture, ReplayOperation, ReplayRunReport};
@@ -43,7 +43,7 @@ pub fn run_replay_fixture(
     fixture: &ReplayFixture,
     config: ReplayRunnerConfig,
 ) -> bm_core::Result<ReplayRunReport> {
-    if fixture.profile != config.backend.profile {
+    if fixture.profile != config.backend.profile() {
         return Ok(ReplayRunReport {
             passed: false,
             failures: vec![ReplayFailure::new(
@@ -51,13 +51,13 @@ pub fn run_replay_fixture(
                 format!(
                     "fixture profile {} does not match backend profile {}",
                     fixture.profile.as_str(),
-                    config.backend.profile.as_str()
+                    config.backend.profile().as_str()
                 ),
             )],
             ..ReplayRunReport::new(
                 fixture.fixture_id.clone(),
                 fixture.profile,
-                config.backend.backend.as_str().to_string(),
+                config.backend.backend().as_str().to_string(),
             )
         });
     }
@@ -67,7 +67,6 @@ pub fn run_replay_fixture(
     let runtime = MemoryRuntime::builder()
         .identity(config.identity)
         .scope(config.scope)
-        .profile(fixture.profile)
         .store(platform.clone())
         .clock(Arc::new(FixedReplayClock {
             now_secs: config.now_secs,
@@ -79,7 +78,7 @@ pub fn run_replay_fixture(
     let mut report = ReplayRunReport::new(
         fixture.fixture_id.clone(),
         fixture.profile,
-        platform.config().backend.as_str().to_string(),
+        platform.config().backend().as_str().to_string(),
     );
 
     for operation in &fixture.operations {
@@ -240,37 +239,6 @@ fn run_operation(
                 ),
             ))
         }
-        ReplayOperation::Export { chat_id } => {
-            let report = runtime.export(bm_sdk::MemoryExportRequest {
-                chat_id: chat_id.clone(),
-            })?;
-            Ok(OperationReport::new(
-                &report.lifecycle_report,
-                format!(
-                    "export chat_id={} kind_counts={}",
-                    chat_id,
-                    report.snapshot.manifest.long_term_kind_counts.len()
-                ),
-            ))
-        }
-        ReplayOperation::Import {
-            snapshot,
-            target_chat_id,
-            mode,
-        } => {
-            let report = runtime.import(MemoryImportRequest {
-                snapshot: snapshot.as_ref().clone(),
-                target_chat_id: target_chat_id.clone(),
-                mode: *mode,
-            })?;
-            Ok(OperationReport::new(
-                &report.lifecycle_report,
-                format!(
-                    "import target_chat_id={} long_term_imported={}",
-                    target_chat_id, report.outcome.long_term_imported
-                ),
-            ))
-        }
     }
 }
 
@@ -283,8 +251,6 @@ impl ReplayOperation {
             Self::Maintain { .. } => "maintain",
             Self::Inspect { .. } => "inspect",
             Self::Replay { .. } => "replay",
-            Self::Export { .. } => "export",
-            Self::Import { .. } => "import",
         }
     }
 }

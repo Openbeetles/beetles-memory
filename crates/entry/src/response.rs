@@ -1,4 +1,5 @@
 use bm_adapter::{AdapterResponse, AdapterSdkReport};
+use bm_sdk::RuntimeBudgetReport;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryResponseStatus {
@@ -22,16 +23,24 @@ impl EntryResponseStatus {
 pub struct EntryResponse {
     pub status: EntryResponseStatus,
     pub adapter: AdapterResponse<AdapterSdkReport>,
+    pub budget_report: RuntimeBudgetReport,
 }
 
 impl EntryResponse {
-    pub(crate) fn from_adapter(adapter: AdapterResponse<AdapterSdkReport>) -> Self {
+    pub(crate) fn from_adapter(
+        adapter: AdapterResponse<AdapterSdkReport>,
+        budget_report: RuntimeBudgetReport,
+    ) -> Self {
         let status = match &adapter {
             AdapterResponse::Accepted { .. } => EntryResponseStatus::Accepted,
             AdapterResponse::Rejected { .. } => EntryResponseStatus::Rejected,
             AdapterResponse::Queued { .. } => EntryResponseStatus::Queued,
             AdapterResponse::Duplicated { .. } => EntryResponseStatus::Duplicated,
         };
-        Self { status, adapter }
+        Self {
+            status,
+            adapter,
+            budget_report,
+        }
     }
 }

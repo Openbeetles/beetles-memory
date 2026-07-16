@@ -11,3 +11,6 @@ bm-core.workspace = true
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+bm-sdk = { workspace = true, features = ["nonproduction-replay-harness"] }

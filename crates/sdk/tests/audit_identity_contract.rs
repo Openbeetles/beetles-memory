@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, MemoryAuditEvent, MemoryAuditSink,
     MemoryIdentity, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest,
-    NoopMemoryAuditSink, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    NoopMemoryAuditSink, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite,
     RuntimeSkillWriteSource,
 };
 
@@ -30,13 +30,12 @@ impl MemoryAuditSink for CapturingAuditSink {
 
 #[test]
 fn sdk_audit_events_bind_operation_to_memory_identity_and_scope() {
-    let profile = ProfileId::ServerLinuxDevFull;
+    let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let audit = Arc::new(CapturingAuditSink::default());
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-a", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .profile(profile)
         .store(platform)
         .audit_sink(audit.clone())
         .build()
@@ -95,7 +94,7 @@ fn noop_audit_sink_keeps_public_contract_constructible() {
     let sink: Arc<dyn MemoryAuditSink> = Arc::new(NoopMemoryAuditSink);
     sink.record(MemoryAuditEvent::for_runtime_operation(
         "inspect",
-        ProfileId::ServerLinuxDevFull,
+        support::host_test_profile(),
         MemoryIdentity::new("agent-a", "owner-a").expect("identity"),
         MemoryScope::new("sdk.direct", "chat-a").expect("scope"),
         "owner-a",

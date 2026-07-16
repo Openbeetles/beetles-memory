@@ -65,6 +65,7 @@ pub enum StoreMutation {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoreMutationBudgetReport {
+    pub admission_report_id: String,
     pub required_events: usize,
     pub remaining_events: usize,
     pub required_kv_entries: usize,

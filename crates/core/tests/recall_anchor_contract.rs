@@ -9,12 +9,13 @@ fn benchmark_locator_strings_do_not_determine_production_evidence_family() {
     let session_group = canonical_recall_evidence_group("external_eval:D1:12|session_1");
     let conversation_group = canonical_recall_evidence_group("external_eval:D1:12|conversation_9");
 
-    assert_eq!(session_group, canonical);
-    assert_eq!(conversation_group, canonical);
+    assert_ne!(session_group, canonical);
+    assert_ne!(conversation_group, canonical);
+    assert_ne!(session_group, conversation_group);
     for group in [session_group, conversation_group] {
-        let governed = CanonicalRecallEvidenceGroup::from_canonical(group)
+        let governed = CanonicalRecallEvidenceGroup::from_canonical(group.clone())
             .expect("canonical evidence group must cross the production boundary");
-        assert_eq!(recall_evidence_family_group(governed.into()), canonical);
+        assert_eq!(recall_evidence_family_group(governed.into()), group);
     }
     assert!(
         CanonicalRecallEvidenceGroup::from_canonical("external_eval:D1:12|session_1").is_none()
@@ -24,9 +25,10 @@ fn benchmark_locator_strings_do_not_determine_production_evidence_family() {
 
 #[test]
 fn governed_canonical_family_is_used_without_locator_parsing() {
-    let canonical_family = format!("opaque:recall-family:sha256:{}", "a".repeat(64));
-    let governed = CanonicalRecallEvidenceFamilyGroup::from_canonical(canonical_family.clone())
-        .expect("canonical family group must cross the production boundary");
+    let governed =
+        CanonicalRecallEvidenceFamilyGroup::from_structured_identity("conversation:conversation_9")
+            .expect("structured family identity must close at the owner boundary");
+    let canonical_family = governed.as_str().to_string();
 
     assert_eq!(
         recall_evidence_family_group(governed.into()),
