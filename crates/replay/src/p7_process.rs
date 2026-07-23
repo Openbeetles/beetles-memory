@@ -537,6 +537,26 @@ mod tests {
         assert!(error.to_string().contains("execution broker"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn sealed_execution_fails_closed_without_a_windows_execution_broker() {
+        let executable = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical test executable");
+        let error = run_p7_bounded_retained_executable(
+            &executable,
+            &["--list"],
+            P7ProcessLimits {
+                stdout_bytes: 1024,
+                stderr_bytes: 1024,
+                total_bytes: 2048,
+                timeout: Duration::from_secs(2),
+            },
+        )
+        .expect_err("Windows pathname execution must not claim sealed-byte authority");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("execution broker"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn retained_descriptor_executes_admitted_bytes_after_path_replacement() {
@@ -545,26 +565,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir(&root).expect("create retained launch fixture");
         let root = std::fs::canonicalize(root).expect("canonical retained launch fixture");
-        let executable = root.join("runner.sh");
-        std::fs::write(&executable, b"#!/bin/sh\nprintf original\n")
-            .expect("write admitted executable");
+        let executable = root.join("runner");
+        std::fs::copy(
+            std::env::current_exe().expect("test executable"),
+            &executable,
+        )
+        .expect("copy admitted executable");
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
             .expect("make admitted executable runnable");
 
         let mut retained =
             P7RetainedFile::open_executable(&executable).expect("retain admitted executable");
+        let args = vec!["--list".to_string()];
         let (mut command, inherited_guard, _) = retained
-            .executable_command(&[])
+            .executable_command(&args)
             .expect("build retained descriptor command");
-        std::fs::rename(&executable, root.join("admitted.sh")).expect("displace admitted path");
-        std::fs::write(&executable, b"#!/bin/sh\nprintf replacement\n")
+        std::fs::rename(&executable, root.join("admitted")).expect("displace admitted path");
+        std::fs::write(&executable, b"replacement executable bytes")
             .expect("write replacement executable");
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
             .expect("make replacement executable runnable");
 
         let output = command.output().expect("execute retained descriptor");
         assert!(output.status.success());
-        assert_eq!(output.stdout, b"original");
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("retained_descriptor_executes_admitted_bytes_after_path_replacement"));
         assert!(
             retained.verify_unchanged().is_err(),
             "path replacement must be detected after retained execution"

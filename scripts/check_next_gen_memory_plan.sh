@@ -4,7 +4,28 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cargo() {
-  command cargo --locked "$@"
+  local subcommand="$1"
+  shift
+  if [[ "$subcommand" == "fmt" ]]; then
+    command cargo fmt "$@"
+  else
+    local has_locked=0
+    local has_no_default_features=0
+    local arg
+    for arg in "$@"; do
+      [[ "$arg" == "--locked" ]] && has_locked=1
+      [[ "$arg" == "--no-default-features" ]] && has_no_default_features=1
+    done
+    if [[ "$has_locked" -eq 1 && "$has_no_default_features" -eq 1 ]]; then
+      command cargo "$subcommand" "$@"
+    elif [[ "$has_locked" -eq 1 ]]; then
+      command cargo "$subcommand" --no-default-features "$@"
+    elif [[ "$has_no_default_features" -eq 1 ]]; then
+      command cargo "$subcommand" --locked "$@"
+    else
+      command cargo "$subcommand" --locked --no-default-features "$@"
+    fi
+  fi
 }
 export -f cargo
 
@@ -287,6 +308,16 @@ require_in_file "不是 release 硬门槛" dev-docs/governed-memory-facet-index-
 require_in_all "--run-id" scripts/check_w4_external_noisy_wall_preflight.sh crates/replay/src/bin/bm-w4-external-noisy-wall.rs
 require_in_all "--preflight-report" scripts/check_w4_external_noisy_wall_operator.sh crates/replay/src/bin/bm-w4-external-noisy-wall.rs
 require_in_all "preflight-report.json" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md scripts/check_w4_external_noisy_wall_operator.sh crates/replay/src/bin/bm-w4-external-noisy-wall.rs
+require_in_all "p7_operator_routes_verifier_publisher_through_retained_launcher" dev-docs/governed-memory-facet-index-plan.md crates/replay/tests/memory_benchmark_wall.rs
+require_in_all "p7_linux_real_publisher_and_verifier_use_sealed_execution_authority" dev-docs/governed-memory-facet-index-plan.md crates/replay/tests/memory_benchmark_wall.rs
+require_in_all "p7_sealed_execution_identity_binds_memfd_bytes_to_release_manifest" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/bench.rs
+require_in_all "p7_retained_launcher_replaces_reserved_execution_authority_environment" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/p7_secure_fs.rs
+require_in_all "p7_inherited_execution_authority_rejects_partial_seals_and_wrong_sha" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/p7_secure_fs.rs
+require_in_all "check_p7_linux_execution_authority.sh" dev-docs/governed-memory-facet-index-plan.md scripts/check_p7_linux_execution_authority.sh
+require_in_all "p7_inherited_execution_authority_rejects_direct_path_and_foreign_fd" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/p7_secure_fs.rs
+require_in_all "p7_direct_publisher_fails_before_external_write_without_execution_broker" dev-docs/governed-memory-facet-index-plan.md crates/replay/tests/memory_benchmark_wall.rs
+require_in_all "F_GET_SEALS" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/p7_secure_fs.rs
+require_in_all "bm-replay" dev-docs/governed-memory-facet-index-plan.md scripts/check_cross_target_compile_gates.sh
 ! rg -n 'rg .*preflight-report|rg .*operator-report|"p7_provenance_valid": true' scripts/check_w4_external_noisy_wall_preflight.sh scripts/check_w4_external_noisy_wall_operator.sh
 ! rg -n 'contains\([^)]*capsule\.content' crates/sdk/src
 require_in_all "MemoryGraphScopeManifest" dev-docs/temporal-memory-graph-plan.md dev-docs/governed-memory-facet-index-plan.md crates/core/src/memory/next_gen_contract.rs crates/sdk/src/runtime.rs

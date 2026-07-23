@@ -4,11 +4,121 @@ use bm_replay::{
     MemoryBenchmarkEvalRecall, MemoryBenchmarkEvalRecallAtK, MemoryBenchmarkEvalRecallDiagnostics,
     MemoryBenchmarkEvalRecallEvidenceRefIndexEntry, MemoryBenchmarkEvalRecallGoldRank,
     MemoryBenchmarkEvalRecallGraphDistanceToGold, MemoryBenchmarkEvalRecallMetrics,
-    MemoryBenchmarkMode, MemoryBenchmarkSemanticDimension, W4ExternalNoisyBenchmarkSummary,
-    W4ExternalNoisyIndexDiagnostics, W4ExternalNoisyStageHitCounts,
+    MemoryBenchmarkMode, MemoryBenchmarkSemanticDimension, P7RetainedFile,
+    W4ExternalNoisyBenchmarkSummary, W4ExternalNoisyIndexDiagnostics,
+    W4ExternalNoisyStageHitCounts,
 };
 use bm_sdk::ProfileId;
-use std::{fs, process::Command};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+const P7_AUTHORITY_PROBE_SCHEMA_VERSION: &str = "p7_runner_authority_probe_v1";
+const P7_AUTHORITY_PROBE_EXECUTABLE_NAME: &str = "beetle-memory-external-bench-runner";
+const P7_AUTHORITY_PROBE_MANIFEST_NAME: &str = "authority-probe.json";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P7RunnerAuthorityProbeReport {
+    canonical_path: PathBuf,
+    executable_sha256: String,
+    manifest_sha256: String,
+    publish_outcome: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P7RunnerAuthorityProbeManifest {
+    schema_version: String,
+    executable_file_name: String,
+    executable_sha256: String,
+    executable_bytes: u64,
+}
+
+fn p7_test_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn p7_is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn verify_p7_runner_authority_probe(root: &Path, report_json: &[u8]) -> Result<(), String> {
+    let root = fs::canonicalize(root)
+        .map_err(|error| format!("failed to canonicalize authority probe root: {error}"))?;
+    let report: P7RunnerAuthorityProbeReport = serde_json::from_slice(report_json)
+        .map_err(|error| format!("invalid authority probe report JSON: {error}"))?;
+    if !p7_is_lowercase_sha256(&report.executable_sha256)
+        || !p7_is_lowercase_sha256(&report.manifest_sha256)
+    {
+        return Err("authority probe report contains an invalid SHA256".to_string());
+    }
+    if !matches!(
+        report.publish_outcome.as_str(),
+        "published" | "reused-identical"
+    ) {
+        return Err("authority probe report contains an invalid publish outcome".to_string());
+    }
+
+    let expected_directory = root
+        .join("runner/authority-probes")
+        .join(&report.executable_sha256);
+    let expected_executable = expected_directory.join(P7_AUTHORITY_PROBE_EXECUTABLE_NAME);
+    let canonical_executable = fs::canonicalize(&expected_executable)
+        .map_err(|error| format!("failed to retain authority probe executable: {error}"))?;
+    if report.canonical_path != canonical_executable
+        || canonical_executable.parent() != Some(expected_directory.as_path())
+        || expected_directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(report.executable_sha256.as_str())
+    {
+        return Err(
+            "authority probe canonical path escaped its content-addressed directory".to_string(),
+        );
+    }
+
+    let executable_identity = P7RetainedFile::open_executable(&canonical_executable)
+        .and_then(P7RetainedFile::hash_once)
+        .map_err(|error| format!("failed to retain authority probe executable: {error}"))?;
+    if executable_identity.sha256 != report.executable_sha256 {
+        return Err("authority probe executable digest differs from its report".to_string());
+    }
+
+    let manifest_path = expected_directory.join(P7_AUTHORITY_PROBE_MANIFEST_NAME);
+    let retained_manifest = P7RetainedFile::open(&manifest_path)
+        .map_err(|error| format!("failed to retain authority probe manifest: {error}"))?;
+    if retained_manifest.admitted_len() > 64 * 1024 {
+        return Err("authority probe manifest exceeds its byte budget".to_string());
+    }
+    let (manifest_bytes, manifest_identity) = retained_manifest
+        .consume_once(|reader| {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+        .map_err(|error| format!("failed to read authority probe manifest bytes: {error}"))?;
+    if manifest_identity.sha256 != report.manifest_sha256 {
+        return Err("authority probe manifest digest differs from its report".to_string());
+    }
+    let manifest: P7RunnerAuthorityProbeManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("invalid authority probe manifest JSON: {error}"))?;
+    if manifest.schema_version != P7_AUTHORITY_PROBE_SCHEMA_VERSION
+        || manifest.executable_file_name != P7_AUTHORITY_PROBE_EXECUTABLE_NAME
+        || manifest.executable_sha256 != report.executable_sha256
+        || manifest.executable_bytes != executable_identity.byte_len
+    {
+        return Err("authority probe manifest does not bind the executable bytes".to_string());
+    }
+    Ok(())
+}
 
 #[test]
 fn memory_benchmark_wall_reports_all_next_gen_metrics() {
@@ -2061,6 +2171,10 @@ fn w4_external_noisy_operator_script_has_no_blocked_success_override() {
     assert!(operator.contains("--preflight-report"));
     assert!(!operator.contains("rg "));
     assert!(!preflight.contains("rg "));
+    assert!(preflight.contains("bm-p7-retained-launch"));
+    assert!(preflight.contains("\"$launcher\" --executable \"$publisher\" --"));
+    assert!(preflight.contains("--publish-verifier-release"));
+    assert!(preflight.contains("\"$launcher\" --executable \"$verifier\" --"));
     assert!(!operator_cli.contains("ExitCode::from(10)"));
 }
 
@@ -2157,6 +2271,396 @@ fn p7_operator_rejects_invalid_run_id_before_building_cohort_paths() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn p7_operator_routes_verifier_publisher_through_retained_launcher() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let script = repo_root.join("scripts/check_w4_external_noisy_wall_operator.sh");
+    let preflight_script = repo_root.join("scripts/check_w4_external_noisy_wall_preflight.sh");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bm-p7-retained-publisher-contract-{}-{nonce}",
+        std::process::id()
+    ));
+    let fake_bin = root.join("bin");
+    let target_release = root.join("target/release");
+    let bench_root = root.join("bench");
+    let launcher_log = root.join("launcher.log");
+    let direct_publisher_marker = root.join("publisher-directly-executed");
+    let fake_cargo = fake_bin.join("cargo");
+    let publisher = target_release.join("bm-w4-external-noisy-wall");
+    let launcher = target_release.join("bm-p7-retained-launch");
+    let verifier = root.join("published-verifier");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    fs::create_dir_all(&target_release).expect("create fake target");
+    fs::create_dir_all(&bench_root).expect("create benchmark root");
+
+    fs::write(&fake_cargo, "#!/bin/sh\nexit 0\n").expect("write fake cargo");
+    fs::write(
+        &publisher,
+        "#!/bin/sh\ntouch \"$BM_P7_DIRECT_PUBLISHER_MARKER\"\nexit 97\n",
+    )
+    .expect("write direct publisher trap");
+    fs::write(
+        &launcher,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BM_P7_LAUNCHER_LOG"
+[ "$1" = "--executable" ]
+executable="$2"
+shift 2
+[ "$1" = "--" ]
+shift
+if [ "$executable" = "$BM_P7_EXPECTED_PUBLISHER" ]; then
+  [ "$1" = "--publish-verifier-release" ]
+  printf '%s\n' "$BM_P7_FAKE_VERIFIER"
+  exit 0
+fi
+[ "$executable" = "$BM_P7_FAKE_VERIFIER" ]
+[ "$1" = "--preflight-report" ] || [ "$1" = "--preflight" ]
+exit 0
+"#,
+    )
+    .expect("write fake retained launcher");
+    fs::write(&verifier, "#!/bin/sh\nexit 98\n").expect("write fake verifier");
+    for executable in [&fake_cargo, &publisher, &launcher, &verifier] {
+        let mut permissions = fs::metadata(executable)
+            .expect("fake executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(executable, permissions).expect("fake executable permissions");
+    }
+    let publisher = fs::canonicalize(publisher).expect("canonical fake publisher");
+    let verifier = fs::canonicalize(verifier).expect("canonical fake verifier");
+    let bench_root = fs::canonicalize(bench_root).expect("canonical benchmark root");
+
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").expect("test PATH")
+    );
+    let output = Command::new("bash")
+        .arg(&script)
+        .env("BM_W4_EXTERNAL_BENCH_ROOT", &bench_root)
+        .env("BM_P7_RUN_ID", "retained-publisher-contract")
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env("BM_P7_LAUNCHER_LOG", &launcher_log)
+        .env("BM_P7_DIRECT_PUBLISHER_MARKER", &direct_publisher_marker)
+        .env("BM_P7_EXPECTED_PUBLISHER", &publisher)
+        .env("BM_P7_FAKE_VERIFIER", &verifier)
+        .env("PATH", path)
+        .output()
+        .expect("run operator script");
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        !direct_publisher_marker.exists(),
+        "publisher bypassed retained launcher"
+    );
+    let launches = fs::read_to_string(&launcher_log).expect("retained launcher log");
+    let launches = launches.lines().collect::<Vec<_>>();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert_eq!(
+        launches[0],
+        format!(
+            "--executable {} -- --publish-verifier-release --benchmark-root {}",
+            publisher.display(),
+            bench_root.display()
+        )
+    );
+    let results = bench_root.join("results/runs/retained-publisher-contract");
+    assert_eq!(
+        launches[1],
+        format!(
+            "--executable {} -- --preflight-report {} --summary {} --summary {} --summary {} --summary {}",
+            verifier.display(),
+            results.join("preflight-report.json").display(),
+            results.join("locomo.merged.summary.json").display(),
+            results.join("longmemeval_oracle.merged.summary.json").display(),
+            results.join("longmemeval_s_cleaned.merged.summary.json").display(),
+            results.join("longmemeval_m_cleaned.merged.summary.json").display()
+        )
+    );
+
+    fs::write(&launcher_log, "").expect("reset retained launcher log");
+    let preflight_output = Command::new("bash")
+        .arg(&preflight_script)
+        .env("BM_W4_EXTERNAL_BENCH_ROOT", &bench_root)
+        .env("BM_P7_RUN_ID", "retained-publisher-contract")
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env("BM_P7_LAUNCHER_LOG", &launcher_log)
+        .env("BM_P7_DIRECT_PUBLISHER_MARKER", &direct_publisher_marker)
+        .env("BM_P7_EXPECTED_PUBLISHER", &publisher)
+        .env("BM_P7_FAKE_VERIFIER", &verifier)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake_bin.display(),
+                std::env::var("PATH").expect("test PATH")
+            ),
+        )
+        .output()
+        .expect("run preflight script");
+    assert!(preflight_output.status.success(), "{preflight_output:?}");
+    assert!(!direct_publisher_marker.exists());
+    let preflight_launches = fs::read_to_string(&launcher_log).expect("preflight launcher log");
+    let preflight_launches = preflight_launches.lines().collect::<Vec<_>>();
+    assert_eq!(preflight_launches.len(), 2, "{preflight_launches:?}");
+    assert_eq!(preflight_launches[0], launches[0]);
+    assert_eq!(
+        preflight_launches[1],
+        format!(
+            "--executable {} -- --preflight --benchmark-root {} --run-id retained-publisher-contract",
+            verifier.display(),
+            bench_root.display()
+        )
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn p7_direct_publisher_fails_before_external_write_without_execution_broker() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bm-p7-direct-publisher-fail-closed-{}-{nonce}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).expect("create direct publisher benchmark root");
+    let root = fs::canonicalize(root).expect("canonical direct publisher benchmark root");
+    let operator = fs::canonicalize(
+        std::env::var("CARGO_BIN_EXE_bm-w4-external-noisy-wall").expect("operator binary path"),
+    )
+    .expect("canonical operator binary");
+
+    let output = Command::new(&operator)
+        .args(["--publish-verifier-release", "--benchmark-root"])
+        .arg(&root)
+        .env("BM_P7_RETAINED_EXECUTABLE_PATH", &operator)
+        .env_remove("BM_P7_RETAINED_EXECUTABLE_FD")
+        .env_remove("BM_P7_RETAINED_EXECUTABLE_SHA256")
+        .output()
+        .expect("run direct publisher without execution broker");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("execution authority"),
+        "{output:?}"
+    );
+    assert!(
+        !root.join("verifier").exists(),
+        "failed authority admission must precede release store creation"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn p7_runner_authority_probe_verifier_recomputes_artifact_identities() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bm-p7-runner-authority-probe-fixture-{}-{nonce}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).expect("create authority probe fixture root");
+    let root = fs::canonicalize(root).expect("canonical authority probe fixture root");
+
+    let executable_bytes = b"sealed-runner-authority-probe";
+    let executable_sha256 = p7_test_sha256(executable_bytes);
+    let release_directory = root
+        .join("runner/authority-probes")
+        .join(&executable_sha256);
+    fs::create_dir_all(&release_directory).expect("create authority probe release directory");
+    let executable_path = release_directory.join(P7_AUTHORITY_PROBE_EXECUTABLE_NAME);
+    fs::write(&executable_path, executable_bytes).expect("write authority probe executable");
+    let executable_path =
+        fs::canonicalize(executable_path).expect("canonical authority probe executable");
+
+    let mut manifest_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version": P7_AUTHORITY_PROBE_SCHEMA_VERSION,
+        "executable_file_name": P7_AUTHORITY_PROBE_EXECUTABLE_NAME,
+        "executable_sha256": executable_sha256,
+        "executable_bytes": executable_bytes.len(),
+    }))
+    .expect("serialize authority probe manifest");
+    manifest_bytes.push(b'\n');
+    fs::write(
+        release_directory.join(P7_AUTHORITY_PROBE_MANIFEST_NAME),
+        &manifest_bytes,
+    )
+    .expect("write authority probe manifest");
+    let report = serde_json::to_vec_pretty(&serde_json::json!({
+        "canonical_path": executable_path,
+        "executable_sha256": executable_sha256,
+        "manifest_sha256": p7_test_sha256(&manifest_bytes),
+        "publish_outcome": "published",
+    }))
+    .expect("serialize authority probe report");
+
+    verify_p7_runner_authority_probe(&root, &report)
+        .expect("independently verify authority probe fixture");
+    fs::write(
+        release_directory.join(P7_AUTHORITY_PROBE_EXECUTABLE_NAME),
+        b"tampered-runner",
+    )
+    .expect("tamper authority probe executable");
+    let error = verify_p7_runner_authority_probe(&root, &report)
+        .expect_err("tampered executable must fail independent verification");
+    assert!(error.contains("executable digest differs"), "{error}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the trusted Linux release-profile execution gate"]
+fn p7_linux_real_runner_authority_probe_binds_sealed_execution_bytes() {
+    let runner = fs::canonicalize(
+        std::env::var_os("BM_P7_AUTHORITY_PROBE_RUNNER")
+            .expect("BM_P7_AUTHORITY_PROBE_RUNNER must name the release runner"),
+    )
+    .expect("canonical release runner");
+    let launcher = fs::canonicalize(
+        std::env::var_os("BM_P7_AUTHORITY_PROBE_LAUNCHER")
+            .expect("BM_P7_AUTHORITY_PROBE_LAUNCHER must name the retained launcher"),
+    )
+    .expect("canonical retained launcher");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bm-p7-real-runner-authority-probe-{}-{nonce}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).expect("create real runner authority probe root");
+    let root = fs::canonicalize(root).expect("canonical real runner authority probe root");
+
+    let result = (|| -> Result<(), String> {
+        let direct = Command::new(&runner)
+            .arg("--publish-release")
+            .arg("--root")
+            .arg(&root)
+            .output()
+            .map_err(|error| format!("failed to run direct pathname runner: {error}"))?;
+        if direct.status.success() {
+            return Err("direct pathname runner unexpectedly acquired execution authority".into());
+        }
+        if root.join("runner").exists() || root.join("results").exists() {
+            return Err("direct pathname runner wrote artifacts before authority admission".into());
+        }
+
+        let sealed = Command::new(&launcher)
+            .arg("--executable")
+            .arg(&runner)
+            .arg("--")
+            .arg("--publish-authority-probe")
+            .arg("--root")
+            .arg(&root)
+            .output()
+            .map_err(|error| format!("failed to run sealed runner authority probe: {error}"))?;
+        if !sealed.status.success() {
+            return Err(format!(
+                "sealed runner authority probe failed: status={:?} stderr={}",
+                sealed.status.code(),
+                String::from_utf8_lossy(&sealed.stderr)
+            ));
+        }
+        verify_p7_runner_authority_probe(&root, &sealed.stdout)?;
+        if root.join("runner/releases").exists() || root.join("results").exists() {
+            return Err("authority probe polluted formal release or cohort artifacts".into());
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(root);
+    result.expect("verify real sealed runner authority probe");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the trusted Linux release-profile execution gate"]
+fn p7_linux_real_publisher_and_verifier_use_sealed_execution_authority() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bm-p7-real-publisher-{}-{nonce}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).expect("create publisher benchmark root");
+    let root = fs::canonicalize(root).expect("canonical publisher benchmark root");
+    let publisher = fs::canonicalize(
+        std::env::var("CARGO_BIN_EXE_bm-w4-external-noisy-wall").expect("operator binary path"),
+    )
+    .expect("canonical publisher");
+    let launcher = fs::canonicalize(
+        std::env::var("CARGO_BIN_EXE_bm-p7-retained-launch").expect("launcher binary path"),
+    )
+    .expect("canonical launcher");
+
+    let first = Command::new(&launcher)
+        .arg("--executable")
+        .arg(&publisher)
+        .arg("--")
+        .arg("--publish-verifier-release")
+        .arg("--benchmark-root")
+        .arg(&root)
+        .output()
+        .expect("run sealed verifier publisher");
+    assert!(first.status.success(), "{first:?}");
+    let published = String::from_utf8(first.stdout)
+        .expect("publisher stdout UTF-8")
+        .trim()
+        .to_string();
+    let published = fs::canonicalize(published).expect("canonical published verifier");
+    assert!(published.starts_with(root.join("verifier/releases")));
+    let (identity, receipt) =
+        bm_replay::verify_p7_verifier_release_manifest_with_receipt(&published)
+            .expect("verify published release from retained disk handles");
+    assert_eq!(identity.build_profile, "release");
+    assert!(receipt.passed);
+
+    let cohort = root.join("results/runs/verifier-smoke");
+    fs::create_dir_all(&cohort).expect("create verifier smoke cohort");
+    let summary = cohort.join("invalid.merged.summary.json");
+    fs::write(&summary, b"{invalid\n").expect("write invalid summary after identity boundary");
+    let verifier = Command::new(&launcher)
+        .arg("--executable")
+        .arg(&published)
+        .arg("--")
+        .arg("--preflight-report")
+        .arg(cohort.join("preflight-report.json"))
+        .arg("--summary")
+        .arg(&summary)
+        .output()
+        .expect("run sealed production verifier mode");
+    assert_eq!(verifier.status.code(), Some(2), "{verifier:?}");
+    let stderr = String::from_utf8(verifier.stderr).expect("verifier stderr UTF-8");
+    assert!(stderr.contains("p7_wall_parse_merged_summary"), "{stderr}");
+    assert!(!stderr.contains("execution authority failed"), "{stderr}");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2201,6 +2705,19 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
             .join(".beetle-memory-external-bench/runner/src/main.rs"),
     )
     .expect("external runner release contract");
+    let linux_execution_authority =
+        fs::read_to_string(repo_root.join("scripts/check_p7_linux_execution_authority.sh"))
+            .expect("Linux execution authority gate");
+    let recursive_gate_scripts = [
+        "scripts/check_next_gen_memory_plan.sh",
+        "scripts/check_memory_benchmark_wall.sh",
+        "scripts/check_memory_write_transaction_contract.sh",
+        "scripts/check_sdk_host_integration_readiness.sh",
+    ]
+    .map(|relative| {
+        fs::read_to_string(repo_root.join(relative))
+            .unwrap_or_else(|error| panic!("read {relative}: {error}"))
+    });
 
     assert!(!operator.contains("BM_W4_EXTERNAL_REPORT_PATH"));
     assert!(!operator.contains("operator-report.json.tmp-"));
@@ -2210,12 +2727,16 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     assert!(operator_cli.contains("verify_p7_wall_input_context"));
     assert!(!operator_cli.contains("fs::read_to_string(&path)"));
     assert!(operator_cli.contains("publish_immutable_report"));
-    assert!(operator_cli.contains("open_p7_cohort_artifact_owner"));
+    assert!(operator_cli.contains("run_p7_soul_regression_gate(sdk_root)"));
+    assert!(!operator_cli.contains("release_attested_soul_gate"));
+    assert!(!operator_cli.contains("inspect_contract_passed: true"));
+    assert!(operator_cli.matches(".open_cohort(").count() >= 4);
+    assert!(!operator_cli.contains("open_p7_cohort_artifact_owner"));
     assert!(operator_cli.contains("publish_immutable_bytes"));
     assert!(!operator_cli.contains("fs::hard_link"));
     assert!(!operator_cli.contains("OpenOptions::new()"));
     let wall_verifier = replay_bench
-        .split("pub fn verify_p7_wall_input_context")
+        .split("pub fn verify_p7_wall_input_context_with_authority")
         .nth(1)
         .and_then(|source| {
             source
@@ -2224,6 +2745,10 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
         })
         .expect("final wall verifier body");
     assert!(wall_verifier.contains("verify_p7_wall_cohort_evidence_in_session"));
+    assert!(runner_wall.contains("BM_P7_LAUNCHER_BIN"));
+    assert!(runner_wall.contains("--executable \"$orchestrator\" --"));
+    assert!(runner_rss.contains("BM_P7_LAUNCHER_BIN"));
+    assert!(runner_rss.contains("--executable \"$orchestrator\" --"));
     let cohort_verifier = replay_bench
         .split("fn verify_p7_wall_cohort_evidence_in_session")
         .nth(1)
@@ -2276,6 +2801,53 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     assert!(replay_bench.contains("P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES"));
     assert!(replay_bench.contains("P7_RUNNER_RELEASE_GATE_EXCLUDED_DIRECTORIES"));
     assert!(runner_main.contains("bm_replay::p7_release_gate_source_manifest"));
+    assert!(runner_main.contains("P7ProcessExecutionAuthority::claim()"));
+    assert!(runner_main.contains("run_with_execution_authority"));
+    assert!(runner_main.contains("execution.verify_retained()?"));
+    assert!(runner_main.contains("AuthorityBoundArtifactTransaction"));
+    assert!(runner_main.contains("AuthorityBoundReleaseTransaction"));
+    assert!(runner_main.contains("--publish-authority-probe"));
+    assert!(runner_main.contains("p7_runner_authority_probe_v1"));
+    assert!(linux_execution_authority
+        .contains("p7_linux_real_runner_authority_probe_binds_sealed_execution_bytes"));
+    assert!(linux_execution_authority.contains("BM_P7_AUTHORITY_PROBE_RUNNER"));
+    assert!(linux_execution_authority.contains("BM_P7_AUTHORITY_PROBE_LAUNCHER"));
+    assert!(linux_execution_authority
+        .contains("cargo build --release --locked --no-default-features --manifest-path"));
+    for source in recursive_gate_scripts {
+        assert!(source.contains("local has_locked=0"));
+        assert!(source.contains("local has_no_default_features=0"));
+        assert!(
+            source.contains("[[ \"$has_locked\" -eq 1 && \"$has_no_default_features\" -eq 1 ]]")
+        );
+        assert!(source.contains("command cargo \"$subcommand\" --no-default-features \"$@\""));
+        assert!(source.contains("command cargo \"$subcommand\" --locked \"$@\""));
+        assert!(
+            source.contains("command cargo \"$subcommand\" --locked --no-default-features \"$@\"")
+        );
+    }
+    for forbidden in ["node ", "sha256sum", "awk ", "mktemp", "realpath"] {
+        assert!(
+            !linux_execution_authority.contains(forbidden),
+            "Linux execution authority gate uses unattested parser or digest tool: {forbidden}"
+        );
+    }
+    assert!(secure_fs.contains("Mutex<P7ExecutionAuthorityClaimState>"));
+    assert!(secure_fs.contains("open_or_create_p7_runner_authority_probe_store_with_authority"));
+    assert!(secure_fs.contains("pub(crate) struct P7CohortArtifactOwner"));
+    assert!(!replay_lib.contains("P7CohortArtifactOwner,"));
+    for forbidden in [
+        "BM_P7_RETAINED_EXECUTABLE_FD",
+        "BM_P7_RETAINED_EXECUTABLE_PATH",
+        "BM_P7_RETAINED_EXECUTABLE_SHA256",
+        "BM_P7_RETAINED_EXECUTABLE_HELD",
+        "env::current_exe",
+    ] {
+        assert!(
+            !runner_main.contains(forbidden),
+            "external runner bypasses the opaque execution authority: {forbidden}"
+        );
+    }
     assert!(runner_main
         .contains("crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs"));
     assert!(replay_bench.contains("p7_release_gate_attestation_v2"));

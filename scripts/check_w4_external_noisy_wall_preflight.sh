@@ -18,12 +18,21 @@ case "$target_root" in
   *) target_root="$PWD/$target_root" ;;
 esac
 cargo build --release --locked -p bm-replay \
+  --no-default-features \
   --bin bm-w4-external-noisy-wall --bin bm-p7-retained-launch
-operator_bin="$(realpath -- "${target_root}/release/bm-w4-external-noisy-wall")"
+bench_root="$(realpath -- "${BM_W4_EXTERNAL_BENCH_ROOT}")"
+publisher="$(realpath -- "${target_root}/release/bm-w4-external-noisy-wall")"
+launcher="$(realpath -- "${target_root}/release/bm-p7-retained-launch")"
+verifier="$("$launcher" --executable "$publisher" -- \
+  --publish-verifier-release --benchmark-root "$bench_root")"
+if [[ -z "$verifier" || "$verifier" == *$'\n'* || "$(realpath -- "$verifier")" != "$verifier" ]]; then
+  echo "P7 verifier publisher must return one canonical release path" >&2
+  exit 2
+fi
 
-"$operator_bin" \
+"$launcher" --executable "$verifier" -- \
   --preflight \
-  --benchmark-root "$BM_W4_EXTERNAL_BENCH_ROOT" \
+  --benchmark-root "$bench_root" \
   --run-id "$BM_P7_RUN_ID"
 
 echo "check_w4_external_noisy_wall_preflight: ok" >&2

@@ -44,10 +44,12 @@ case "$target_root" in
   *) target_root="$PWD/$target_root" ;;
 esac
 cargo build --release --locked -p bm-replay \
+  --no-default-features \
   --bin bm-w4-external-noisy-wall --bin bm-p7-retained-launch
 publisher="$(realpath -- "${target_root}/release/bm-w4-external-noisy-wall")"
 launcher="$(realpath -- "${target_root}/release/bm-p7-retained-launch")"
-verifier="$("$publisher" --publish-verifier-release --benchmark-root "$bench_root")"
+verifier="$("$launcher" --executable "$publisher" -- \
+  --publish-verifier-release --benchmark-root "$bench_root")"
 if [[ -z "$verifier" || "$verifier" == *$'\n'* || "$(realpath -- "$verifier")" != "$verifier" ]]; then
   echo "P7 verifier publisher must return one canonical release path" >&2
   exit 2

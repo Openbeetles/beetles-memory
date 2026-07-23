@@ -15,6 +15,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+readonly RELEASE_SURFACE_MIN_AVAILABLE_KIB=$((32 * 1024 * 1024))
+release_surface_available_kib="$(df -Pk "$gate_tmp" | awk 'END { print $4 }')"
+if [[ ! "$release_surface_available_kib" =~ ^[0-9]+$ ]]; then
+  echo "release surface storage probe did not return canonical available KiB" >&2
+  exit 1
+fi
+if ((release_surface_available_kib < RELEASE_SURFACE_MIN_AVAILABLE_KIB)); then
+  printf 'release surface requires at least 32 GiB free on the temporary target filesystem; available=%s KiB path=%s\n' \
+    "$release_surface_available_kib" "$gate_tmp" >&2
+  exit 1
+fi
+
 export CARGO_TARGET_DIR="$gate_tmp/cargo-target"
 export CARGO_INCREMENTAL=0
 
@@ -161,15 +173,27 @@ locked_cargo_gates=(
   scripts/check_sdk_host_integration_readiness.sh
   scripts/emit_platform_capability_snapshots.sh
 )
+
+gate_enforces_locked_cargo() {
+  local gate="$1"
+  if rg -F -q 'command cargo --locked "$@"' "$gate"; then
+    return 0
+  fi
+  rg -F -q 'local has_locked=0' "$gate" \
+    && rg -F -q '[[ "$arg" == "--locked" ]] && has_locked=1' "$gate" \
+    && rg -F -q 'command cargo "$subcommand" --locked "$@"' "$gate" \
+    && rg -F -q 'command cargo "$subcommand" --locked --no-default-features "$@"' "$gate"
+}
+
 for gate in "${locked_cargo_gates[@]}"; do
-  rg -F -q 'command cargo --locked "$@"' "$gate" || {
+  gate_enforces_locked_cargo "$gate" || {
     echo "Cargo gate does not enforce Cargo.lock: $gate" >&2
     exit 1
   }
 done
 
 for gate in scripts/*.sh; do
-  if rg -F -q 'command cargo --locked "$@"' "$gate"; then
+  if gate_enforces_locked_cargo "$gate"; then
     continue
   fi
   if rg -n '(^|[[:space:]])cargo (check|test|clippy|build|tree|run|doc|publish)([[:space:]]|$)' "$gate" \
@@ -414,9 +438,9 @@ publish_dry_run() {
   esac
 
   if ((${#extra[@]} == 0)); then
-    cargo publish --locked --dry-run -p "$crate"
+    cargo publish --locked --dry-run --allow-dirty -p "$crate"
   else
-    cargo publish --locked --dry-run -p "$crate" "${extra[@]}"
+    cargo publish --locked --dry-run --allow-dirty -p "$crate" "${extra[@]}"
   fi
 }
 

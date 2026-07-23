@@ -12,21 +12,19 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, Metadata},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read},
     path::{Component, Path, PathBuf},
     process::Command,
     rc::Rc,
     time::{Duration, SystemTime},
 };
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::p7_process::{
     run_p7_bounded_command, run_p7_bounded_retained_executable, P7ProcessLimits,
     P7ProcessTermination,
 };
 use crate::p7_secure_fs::P7RetainedDirectoryOwner;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -82,7 +80,7 @@ const P7_OPERATOR_BUILD_FEATURES: &str = env!("BM_P7_OPERATOR_BUILD_FEATURES");
 #[cfg(test)]
 const P7_OPERATOR_BUILD_FINGERPRINT_CONTRACT: &str = "p7_operator_build_inputs_sha256_v1";
 #[cfg(test)]
-const P7_OPERATOR_BUILD_INPUTS: [&str; 12] = [
+const P7_OPERATOR_BUILD_INPUTS: [&str; 13] = [
     "Cargo.toml",
     "Cargo.lock",
     "crates/replay/Cargo.toml",
@@ -94,6 +92,7 @@ const P7_OPERATOR_BUILD_INPUTS: [&str; 12] = [
     "crates/replay/src/p7_process.rs",
     "crates/replay/src/p7_secure_fs.rs",
     "crates/replay/src/runner.rs",
+    "crates/replay/src/bin/bm-p7-retained-launch.rs",
     "crates/replay/src/bin/bm-w4-external-noisy-wall.rs",
 ];
 const P7_RUNNER_RELEASES_DIR: &str = "releases";
@@ -105,8 +104,8 @@ pub const P7_RELEASE_GATE_ATTESTATION_SCHEMA_VERSION: &str = "p7_release_gate_at
 pub const P7_RELEASE_GATE_SOURCE_MANIFEST_SCHEMA_VERSION: &str =
     "p7_release_gate_source_manifest_v2";
 pub const P7_RELEASE_GATE_ORCHESTRATOR_CONTRACT: &str =
-    "p7_content_addressed_release_gate_orchestrator_v2";
-pub const P7_RELEASE_GATE_PLAN_SCHEMA_VERSION: &str = "p7_release_gate_plan_v1";
+    "p7_content_addressed_release_gate_orchestrator_v3";
+pub const P7_RELEASE_GATE_PLAN_SCHEMA_VERSION: &str = "p7_release_gate_plan_v2";
 pub const P7_RELEASE_METADATA_SCHEMA_VERSION: &str = "p7_content_addressed_release_metadata_v2";
 pub const P7_RELEASE_GATE_SOURCE_FINGERPRINT_CONTRACT: &str = "p7_release_gate_source_sha256_v3";
 pub const P7_PRODUCER_SEMANTIC_SOURCE_MANIFEST_SCHEMA_VERSION: &str =
@@ -120,13 +119,15 @@ pub const P7_COHORT_ADMISSION_SCHEMA_VERSION: &str = "p7_cohort_admission_v1";
 pub const P7_COHORT_ADMISSION_FILE_NAME: &str = "cohort-admission.json";
 pub const P7_SHARD_PRODUCER_PROVENANCE_SCHEMA_VERSION: &str = "p7_shard_producer_provenance_v2";
 pub const P7_MERGED_PROVENANCE_SCHEMA_VERSION: &str = "p7_merged_provenance_v2";
-pub const P7_REQUIRED_RELEASE_GATE_IDS: [&str; 12] = [
+pub const P7_REQUIRED_RELEASE_GATE_IDS: [&str; 14] = [
     "agent-memory-fmt",
     "agent-memory-check",
     "agent-memory-clippy",
     "agent-memory-test",
     "agent-memory-write-transaction-contract",
     "agent-memory-next-gen-plan-contract",
+    "agent-memory-cross-target-compile-contract",
+    "agent-memory-linux-execution-authority",
     "runner-fmt",
     "runner-test",
     "runner-clippy",
@@ -1445,6 +1446,71 @@ pub struct P7VerifierReleasePublishReport {
     pub executable_sha256: String,
     pub manifest_sha256: String,
     pub reused_identical: bool,
+}
+
+pub struct P7VerifierExecutionAuthority {
+    identity: P7VerifierIdentity,
+    process_authority: crate::p7_secure_fs::P7ProcessExecutionAuthority,
+    release_session: P7ArtifactReadSession,
+}
+
+impl P7VerifierExecutionAuthority {
+    pub fn identity(&self) -> &P7VerifierIdentity {
+        &self.identity
+    }
+
+    pub fn release_executable_path(&self) -> &Path {
+        self.process_authority.locator()
+    }
+
+    pub fn verify_retained(&mut self) -> Result<()> {
+        self.process_authority
+            .verify_retained()
+            .map_err(|source| Error::Io {
+                source,
+                stage: "p7_verifier_revalidate_process_execution_authority",
+            })?;
+        self.release_session.verify_retained()
+    }
+
+    pub fn initialize_cohort<'authority>(
+        &'authority mut self,
+        root: &Path,
+        run_id: &str,
+    ) -> Result<crate::p7_secure_fs::P7AuthorityBoundArtifactTransaction<'authority>> {
+        crate::p7_secure_fs::initialize_authority_bound_p7_cohort(self, root, run_id).map_err(
+            |source| Error::Io {
+                source,
+                stage: "p7_verifier_initialize_authority_bound_cohort",
+            },
+        )
+    }
+
+    pub fn open_cohort<'authority>(
+        &'authority mut self,
+        root: &Path,
+        run_id: &str,
+    ) -> Result<crate::p7_secure_fs::P7AuthorityBoundArtifactTransaction<'authority>> {
+        crate::p7_secure_fs::open_authority_bound_p7_cohort(self, root, run_id).map_err(|source| {
+            Error::Io {
+                source,
+                stage: "p7_verifier_open_authority_bound_cohort",
+            }
+        })
+    }
+}
+
+impl crate::p7_secure_fs::P7ExternalWriteAuthority for P7VerifierExecutionAuthority {
+    fn verify_external_write_authority(&mut self) -> std::io::Result<()> {
+        P7VerifierExecutionAuthority::verify_retained(self)
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))
+    }
+
+    fn process_execution_authority(
+        &mut self,
+    ) -> &mut crate::p7_secure_fs::P7ProcessExecutionAuthority {
+        &mut self.process_authority
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3043,26 +3109,38 @@ fn p7_operator_build_features() -> Vec<String> {
         .collect()
 }
 
-fn p7_current_verifier_identity_with_session(
-    session: &mut P7ArtifactReadSession,
-) -> Result<P7VerifierIdentity> {
+pub fn attest_p7_current_verifier_execution() -> Result<P7VerifierExecutionAuthority> {
+    let mut process_authority =
+        crate::p7_secure_fs::P7ProcessExecutionAuthority::claim().map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_attest_inherited_execution_authority",
+        })?;
+    let current_executable = process_authority.locator().to_path_buf();
     p7_require_workspace_build_source_attestation()?;
-    let current_executable = p7_retained_verifier_executable_locator()?;
-    let inherited = p7_inherited_verifier_executable()?;
-    p7_verifier_identity_for_executable_with_session(&current_executable, inherited, session)
-}
-
-fn p7_retained_verifier_executable_locator() -> Result<PathBuf> {
-    let locator = std::env::var_os("BM_P7_RETAINED_EXECUTABLE_PATH").ok_or_else(|| {
-        p7_provenance_error("P7 verifier is missing its retained release locator")
-    })?;
-    let locator = PathBuf::from(locator);
-    if !locator.is_absolute() {
+    process_authority
+        .verify_retained()
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_bind_execution_to_release_locator",
+        })?;
+    let execution_identity = process_authority.execution_identity().clone();
+    let mut session = P7ArtifactReadSession::default();
+    let identity = p7_verifier_identity_for_executable_with_session(
+        &current_executable,
+        P7VerifierExecutableEvidence::SealedExecution(execution_identity.clone()),
+        &mut session,
+    )?;
+    if identity.operator_executable_sha256 != execution_identity.sha256 {
         return Err(p7_provenance_error(
-            "P7 retained verifier release locator must be absolute",
+            "P7 verifier executable differs from its launcher-issued SHA256",
         ));
     }
-    Ok(locator)
+    session.verify_retained()?;
+    Ok(P7VerifierExecutionAuthority {
+        identity,
+        process_authority,
+        release_session: session,
+    })
 }
 
 pub fn verify_p7_verifier_release_manifest_with_receipt(
@@ -3074,14 +3152,10 @@ pub fn verify_p7_verifier_release_manifest_with_receipt(
             source,
             stage: "p7_verifier_retain_release_executable",
         })?;
-    let executable = retained.clone_file().map_err(|source| Error::Io {
-        source,
-        stage: "p7_verifier_clone_release_executable",
-    })?;
     let mut session = P7ArtifactReadSession::default();
     let identity = p7_verifier_identity_for_executable_with_session(
         verifier_executable,
-        Some(executable),
+        P7VerifierExecutableEvidence::RetainedRelease,
         &mut session,
     )?;
     retained.verify_unchanged().map_err(|source| Error::Io {
@@ -3095,14 +3169,18 @@ pub fn verify_p7_verifier_release_manifest_with_receipt(
 
 pub fn publish_p7_verifier_release(
     benchmark_root: &Path,
-    _current_executable: &Path,
 ) -> Result<P7VerifierReleasePublishReport> {
+    let mut execution_authority = crate::p7_secure_fs::P7ProcessExecutionAuthority::claim()
+        .map_err(|source| Error::Io {
+            source,
+            stage: "p7_verifier_publish_attest_execution_authority",
+        })?;
+    let verifier_executable = execution_authority.locator().to_path_buf();
     p7_require_workspace_build_source_attestation()?;
     p7_require_canonical_real_directory(benchmark_root)?;
-    let verifier_executable = p7_retained_verifier_executable_locator()?;
-    if !verifier_executable.is_absolute() {
+    if P7_OPERATOR_BUILD_PROFILE != "release" {
         return Err(p7_provenance_error(
-            "P7 verifier publisher executable locator must be absolute",
+            "P7 verifier publisher requires a release-profile executable",
         ));
     }
     let executable_name = verifier_executable
@@ -3110,65 +3188,25 @@ pub fn publish_p7_verifier_release(
         .and_then(|name| name.to_str())
         .ok_or_else(|| p7_provenance_error("P7 verifier executable name is not UTF-8"))?
         .to_string();
-    let releases = crate::p7_secure_fs::open_or_create_p7_verifier_release_store(benchmark_root)
+    let mut transaction = execution_authority
+        .begin_verifier_release(benchmark_root)
         .map_err(|source| Error::Io {
             source,
-            stage: "p7_verifier_publish_open_releases_owner",
+            stage: "p7_verifier_publish_begin_authority_bound_release",
         })?;
-    let releases_path = releases.path().to_path_buf();
+    let releases_path = transaction.releases_path().to_path_buf();
     if releases_path != benchmark_root.join(P7_VERIFIER_RELEASES_DIR) {
         return Err(p7_provenance_error(
             "P7 verifier release owner escaped the canonical benchmark root",
         ));
     }
-    let _guard = releases
-        .lock_bundle(".verifier-release-publish.lock")
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_publish_lock_releases",
-        })?;
-    let staging_name = format!(
-        ".staging-verifier-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|_| p7_provenance_error("P7 verifier publish clock is before epoch"))?
-            .as_nanos()
-    );
-    let staging = releases
-        .create_directory(&staging_name)
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_publish_create_staging",
-        })?;
     let publish = (|| -> Result<P7VerifierReleasePublishReport> {
-        let mut staged_executable =
-            staging
-                .create_new_file(&executable_name)
-                .map_err(|source| Error::Io {
-                    source,
-                    stage: "p7_verifier_publish_create_executable",
-                })?;
-        let executable_identity = p7_copy_inherited_verifier_executable(&mut staged_executable)?;
-        staged_executable.sync_all().map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_publish_sync_executable",
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            staged_executable
-                .set_permissions(fs::Permissions::from_mode(0o555))
-                .map_err(|source| Error::Io {
-                    source,
-                    stage: "p7_verifier_publish_mode_executable",
-                })?;
-            staged_executable.sync_all().map_err(|source| Error::Io {
+        let executable_identity = transaction
+            .copy_execution(&executable_name, 0o555)
+            .map_err(|source| Error::Io {
                 source,
-                stage: "p7_verifier_publish_resync_executable",
+                stage: "p7_verifier_publish_copy_authority_execution",
             })?;
-        }
-        drop(staged_executable);
 
         let mut build_features = p7_operator_build_features();
         build_features.sort();
@@ -3192,34 +3230,36 @@ pub fn publish_p7_verifier_release(
             })?;
         manifest_bytes.push(b'\n');
         let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
-        let mut manifest_file = staging
-            .create_new_file(P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME)
+        transaction
+            .publish_immutable_bytes(
+                &manifest_bytes,
+                ".verifier-release-manifest.tmp",
+                P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME,
+            )
             .map_err(|source| Error::Io {
                 source,
-                stage: "p7_verifier_publish_create_manifest",
+                stage: "p7_verifier_publish_manifest",
             })?;
-        manifest_file
-            .write_all(&manifest_bytes)
-            .and_then(|_| manifest_file.sync_all())
-            .map_err(|source| Error::Io {
-                source,
-                stage: "p7_verifier_publish_write_manifest",
-            })?;
-        drop(manifest_file);
 
         let release_path = releases_path.join(&executable_identity.sha256);
         let final_executable = release_path.join(&executable_name);
-        let reused_identical = match releases
-            .install_staged_directory(&staging_name, &executable_identity.sha256)
-        {
+        let reused_identical = match transaction.install(&executable_identity.sha256) {
             Ok(()) => false,
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                p7_cleanup_verifier_staging(&releases, &staging, &staging_name, &executable_name)?;
+            Err(source)
+                if source.cleanup_permitted()
+                    && source.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                transaction
+                    .cleanup_uncommitted()
+                    .map_err(|source| Error::Io {
+                        source,
+                        stage: "p7_verifier_publish_cleanup_reused_staging",
+                    })?;
                 true
             }
             Err(source) => {
                 return Err(Error::Io {
-                    source,
+                    source: source.into_inner(),
                     stage: "p7_verifier_publish_install_release",
                 });
             }
@@ -3245,162 +3285,10 @@ pub fn publish_p7_verifier_release(
             reused_identical,
         })
     })();
-    if publish.is_err() {
-        let _ = p7_cleanup_verifier_staging(&releases, &staging, &staging_name, &executable_name);
+    if publish.is_err() && !transaction.committed() {
+        let _ = transaction.cleanup_uncommitted();
     }
     publish
-}
-
-fn p7_cleanup_verifier_staging(
-    releases: &crate::p7_secure_fs::P7CohortArtifactOwner,
-    staging: &crate::p7_secure_fs::P7CohortArtifactOwner,
-    staging_name: &str,
-    executable_name: &str,
-) -> Result<()> {
-    for file_name in [executable_name, P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME] {
-        staging
-            .discard_uncommitted_file(file_name)
-            .map_err(|source| Error::Io {
-                source,
-                stage: "p7_verifier_publish_cleanup_staging_file",
-            })?;
-    }
-    releases
-        .discard_empty_directory(staging_name, staging)
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_publish_cleanup_staging_directory",
-        })?;
-    Ok(())
-}
-
-fn p7_copy_inherited_verifier_executable(
-    destination: &mut File,
-) -> Result<crate::p7_secure_fs::P7ContentIdentity> {
-    let mut source = p7_inherited_verifier_executable()?.ok_or_else(|| {
-        p7_provenance_error("P7 verifier publisher requires a retained executable descriptor")
-    })?;
-    let before = source.metadata().map_err(|source| Error::Io {
-        source,
-        stage: "p7_verifier_publish_stat_inherited_executable",
-    })?;
-    if !before.file_type().is_file() {
-        return Err(p7_provenance_error(
-            "P7 inherited verifier executable is not a regular file",
-        ));
-    }
-    #[cfg(unix)]
-    if before.mode() & 0o111 == 0 {
-        return Err(p7_provenance_error(
-            "P7 inherited verifier executable is not executable",
-        ));
-    }
-    source
-        .seek(SeekFrom::Start(0))
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_publish_rewind_inherited_executable",
-        })?;
-    let limit = before
-        .len()
-        .checked_add(1)
-        .ok_or_else(|| p7_provenance_error("P7 inherited verifier length overflow"))?;
-    let mut reader = (&mut source).take(limit);
-    let mut hasher = Sha256::new();
-    let mut copied = 0_u64;
-    let mut buffer = vec![0_u8; P7_FINGERPRINT_READ_BUFFER_BYTES];
-    loop {
-        let read = reader.read(&mut buffer).map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_publish_read_inherited_executable",
-        })?;
-        if read == 0 {
-            break;
-        }
-        destination
-            .write_all(&buffer[..read])
-            .map_err(|source| Error::Io {
-                source,
-                stage: "p7_verifier_publish_copy_executable",
-            })?;
-        hasher.update(&buffer[..read]);
-        copied =
-            copied
-                .checked_add(u64::try_from(read).map_err(|_| {
-                    p7_provenance_error("P7 inherited verifier byte count overflow")
-                })?)
-                .ok_or_else(|| p7_provenance_error("P7 inherited verifier byte count overflow"))?;
-    }
-    let after = source.metadata().map_err(|source| Error::Io {
-        source,
-        stage: "p7_verifier_publish_restat_inherited_executable",
-    })?;
-    let sha256 = format!("{:x}", hasher.finalize());
-    let expected_sha256 = std::env::var("BM_P7_RETAINED_EXECUTABLE_SHA256").map_err(|_| {
-        p7_provenance_error("P7 verifier publisher is missing retained executable identity")
-    })?;
-    if copied != before.len()
-        || P7RegularFileFreshness::from_metadata(&before)
-            != P7RegularFileFreshness::from_metadata(&after)
-        || sha256 != expected_sha256
-        || !is_sha256(&sha256)
-    {
-        return Err(p7_provenance_error(
-            "P7 inherited verifier executable changed or differs from its sealed identity",
-        ));
-    }
-    source
-        .seek(SeekFrom::Start(0))
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_publish_restore_inherited_executable_offset",
-        })?;
-    Ok(crate::p7_secure_fs::P7ContentIdentity {
-        byte_len: copied,
-        sha256,
-    })
-}
-
-pub fn build_p7_verifier_release_manifest(
-    verifier_executable: &Path,
-) -> Result<P7VerifierReleaseManifest> {
-    p7_require_workspace_build_source_attestation()?;
-    if P7_OPERATOR_BUILD_PROFILE != "release" {
-        return Err(p7_provenance_error(
-            "P7 verifier release manifest can only be built by a release-profile verifier",
-        ));
-    }
-    let executable_file_name = verifier_executable
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| p7_provenance_error("P7 verifier executable name is not UTF-8"))?;
-    let executable = crate::p7_secure_fs::P7RetainedFile::open_executable(verifier_executable)
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_manifest_retain_executable",
-        })?;
-    let executable_sha256 = executable
-        .hash_once()
-        .map_err(|source| Error::Io {
-            source,
-            stage: "p7_verifier_manifest_hash_executable",
-        })?
-        .sha256;
-    let mut build_features = p7_operator_build_features();
-    build_features.sort();
-    build_features.dedup();
-    Ok(P7VerifierReleaseManifest {
-        schema_version: P7_VERIFIER_RELEASE_MANIFEST_SCHEMA_VERSION.to_string(),
-        executable_file_name: executable_file_name.to_string(),
-        executable_sha256,
-        build_profile: P7_OPERATOR_BUILD_PROFILE.to_string(),
-        build_features,
-        verification_policy_contract: P7_VERIFICATION_POLICY_CONTRACT.to_string(),
-        verification_schema_version: P7_VERIFICATION_RECEIPT_SCHEMA_VERSION.to_string(),
-        source_anchor_sha256: P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT.to_string(),
-        frozen_anchor_sha256: P7_FROZEN_ANCHOR_SHA256.to_string(),
-        anchor_generator_receipt_sha256: P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256.to_string(),
-    })
 }
 
 fn p7_require_workspace_build_source_attestation() -> Result<()> {
@@ -3416,9 +3304,14 @@ fn p7_validate_build_source_attestation(attestation: &str) -> Result<()> {
     Ok(())
 }
 
+enum P7VerifierExecutableEvidence {
+    RetainedRelease,
+    SealedExecution(crate::p7_secure_fs::P7ContentIdentity),
+}
+
 fn p7_verifier_identity_for_executable_with_session(
     current_executable: &Path,
-    inherited_executable: Option<File>,
+    executable_evidence: P7VerifierExecutableEvidence,
     session: &mut P7ArtifactReadSession,
 ) -> Result<P7VerifierIdentity> {
     if !current_executable.is_absolute() {
@@ -3442,33 +3335,26 @@ fn p7_verifier_identity_for_executable_with_session(
             "P7 verifier release owner must be canonical",
         ));
     }
-    let (executable_sha256, _) = if let Some(file) = inherited_executable {
-        let owner = session.owner_for(parent, root)?;
-        let (artifact, file) =
-            P7OpenedArtifact::from_open_file(current_executable, owner.as_ref(), file)?;
-        let (_, digest, bytes) = session.consume_opened(
-            artifact,
-            file,
-            owner,
-            None,
-            P7ArtifactReadKind::Operator,
-            |reader, _| {
-                std::io::copy(reader, &mut std::io::sink()).map_err(|source| Error::Io {
-                    source,
-                    stage: "p7_verifier_hash_inherited_executable",
-                })?;
-                Ok(())
-            },
-        )?;
-        (digest, bytes)
-    } else {
-        session.read_raw(
-            current_executable,
-            parent,
-            root,
-            None,
-            P7ArtifactReadKind::Operator,
-        )?
+    let executable_sha256 = match executable_evidence {
+        P7VerifierExecutableEvidence::RetainedRelease => {
+            session
+                .read_raw(
+                    current_executable,
+                    parent,
+                    root,
+                    None,
+                    P7ArtifactReadKind::Operator,
+                )?
+                .0
+        }
+        P7VerifierExecutableEvidence::SealedExecution(identity) => {
+            if identity.byte_len == 0 || !is_sha256(&identity.sha256) {
+                return Err(p7_provenance_error(
+                    "P7 sealed verifier execution identity is invalid",
+                ));
+            }
+            identity.sha256
+        }
     };
     let manifest_path = parent.join(P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME);
     let (manifest, release_manifest_sha256) = session.read_json::<P7VerifierReleaseManifest>(
@@ -3541,36 +3427,6 @@ fn p7_validate_verifier_release_manifest(
         ));
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn p7_inherited_verifier_executable() -> Result<Option<File>> {
-    use std::os::fd::{FromRawFd, OwnedFd};
-
-    let raw = std::env::var("BM_P7_RETAINED_EXECUTABLE_FD")
-        .map_err(|_| {
-            p7_provenance_error(
-                "P7 verifier must be launched from a retained executable descriptor",
-            )
-        })?
-        .parse::<i32>()
-        .map_err(|_| p7_provenance_error("P7 retained executable descriptor is invalid"))?;
-    // SAFETY: F_DUPFD_CLOEXEC validates raw and returns a new descriptor on success.
-    let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
-    if duplicate < 0 {
-        return Err(Error::Io {
-            source: std::io::Error::last_os_error(),
-            stage: "p7_verifier_duplicate_inherited_executable",
-        });
-    }
-    // SAFETY: fcntl returned a new descriptor owned by this function.
-    let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
-    Ok(Some(File::from(owned)))
-}
-
-#[cfg(windows)]
-fn p7_inherited_verifier_executable() -> Result<Option<File>> {
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -3703,13 +3559,15 @@ pub fn attach_p7_verifier_performance(
 }
 
 pub fn run_p7_soul_regression_gate(sdk_root: &Path) -> Result<P7SoulRegressionGateReport> {
-    let contracts: [(&str, &[&str]); 4] = [
+    let contracts: [(&str, &str, &[&str]); 4] = [
         (
             "inspect",
+            "runtime::soul_kernel::tests::inspect_marks_bootstrap_empty_when_no_kernel_assets_exist",
             &[
                 "test",
                 "--release",
                 "--locked",
+                "--no-default-features",
                 "-p",
                 "bm-core",
                 "runtime::soul_kernel::tests::inspect_marks_bootstrap_empty_when_no_kernel_assets_exist",
@@ -3719,10 +3577,12 @@ pub fn run_p7_soul_regression_gate(sdk_root: &Path) -> Result<P7SoulRegressionGa
         ),
         (
             "continuity",
+            "runtime::soul_kernel::tests::restore_runtime_bundle_repairs_missing_core_and_continuity",
             &[
                 "test",
                 "--release",
                 "--locked",
+                "--no-default-features",
                 "-p",
                 "bm-core",
                 "runtime::soul_kernel::tests::restore_runtime_bundle_repairs_missing_core_and_continuity",
@@ -3732,10 +3592,14 @@ pub fn run_p7_soul_regression_gate(sdk_root: &Path) -> Result<P7SoulRegressionGa
         ),
         (
             "recovery",
+            "runtime_lifecycle_inspect_recover_and_close_are_sdk_level_operations",
             &[
                 "test",
                 "--release",
                 "--locked",
+                "--no-default-features",
+                "--features",
+                "nonproduction-replay-harness",
                 "-p",
                 "bm-sdk",
                 "--test",
@@ -3747,10 +3611,14 @@ pub fn run_p7_soul_regression_gate(sdk_root: &Path) -> Result<P7SoulRegressionGa
         ),
         (
             "revision",
+            "runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically",
             &[
                 "test",
                 "--release",
                 "--locked",
+                "--no-default-features",
+                "--features",
+                "nonproduction-replay-harness",
                 "-p",
                 "bm-sdk",
                 "--test",
@@ -3763,14 +3631,17 @@ pub fn run_p7_soul_regression_gate(sdk_root: &Path) -> Result<P7SoulRegressionGa
     ];
     let mut receipts = Vec::with_capacity(contracts.len());
     let mut passed = BTreeMap::new();
-    for (contract, args) in contracts {
+    for (contract, exact_test_name, args) in contracts {
         let output = p7_run_supervised(
             Command::new("cargo").args(args).current_dir(sdk_root),
             Duration::from_secs(30 * 60),
             "p7_soul_regression_gate_execute",
         )?;
         let exit_code = output.status.code().unwrap_or(-1);
-        passed.insert(contract, output.succeeded());
+        passed.insert(
+            contract,
+            p7_exact_test_contract_passed(&output, exact_test_name),
+        );
         receipts.push(P7SoulRegressionCommandReceipt {
             contract: contract.to_string(),
             argv: std::iter::once("cargo".to_string())
@@ -3806,6 +3677,23 @@ pub fn run_p7_soul_regression_gate(sdk_root: &Path) -> Result<P7SoulRegressionGa
         passed: blocked_reasons.is_empty(),
         blocked_reasons,
     })
+}
+
+fn p7_exact_test_contract_passed(
+    output: &crate::p7_process::P7ProcessOutput,
+    exact_test_name: &str,
+) -> bool {
+    output.succeeded() && p7_exact_test_stdout_passed(&output.stdout, exact_test_name)
+}
+
+fn p7_exact_test_stdout_passed(stdout: &[u8], exact_test_name: &str) -> bool {
+    let stdout = String::from_utf8_lossy(stdout);
+    stdout
+        .lines()
+        .any(|line| line == format!("test {exact_test_name} ... ok"))
+        && stdout
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;"))
 }
 
 fn p7_run_supervised(
@@ -4196,6 +4084,7 @@ pub struct P7VerifiedWallInputContext {
     maximum_rss: P7MaximumRssEvidence,
     verifier_identity: P7VerifierIdentity,
     session: P7ArtifactReadSession,
+    execution_authority: P7VerifierExecutionAuthority,
 }
 
 impl P7VerifiedWallInputContext {
@@ -4207,26 +4096,48 @@ impl P7VerifiedWallInputContext {
         &self.verifier_identity
     }
 
-    pub fn finish(
-        self,
+    pub fn release_inputs(
+        &self,
         elapsed: Duration,
-    ) -> Result<(
+    ) -> (
         P7RunnerPreflightReport,
         P7MaximumRssEvidence,
         P7VerifierPerformanceReport,
-    )> {
-        self.session.verify_retained()?;
-        Ok((
-            self.preflight,
-            self.maximum_rss,
+    ) {
+        (
+            self.preflight.clone(),
+            self.maximum_rss.clone(),
             self.session.performance(elapsed),
-        ))
+        )
+    }
+
+    pub fn verify_before_external_write(&mut self) -> Result<()> {
+        self.execution_authority.verify_retained()?;
+        self.session.verify_retained()
+    }
+
+    pub fn open_cohort<'authority>(
+        &'authority mut self,
+        root: &Path,
+        run_id: &str,
+    ) -> Result<crate::p7_secure_fs::P7AuthorityBoundArtifactTransaction<'authority>> {
+        self.verify_before_external_write()?;
+        self.execution_authority.open_cohort(root, run_id)
     }
 }
 
 pub fn verify_p7_wall_input_context(
     summary_paths: &[PathBuf],
     preflight_report_path: &Path,
+) -> Result<P7VerifiedWallInputContext> {
+    let authority = attest_p7_current_verifier_execution()?;
+    verify_p7_wall_input_context_with_authority(summary_paths, preflight_report_path, authority)
+}
+
+pub fn verify_p7_wall_input_context_with_authority(
+    summary_paths: &[PathBuf],
+    preflight_report_path: &Path,
+    mut execution_authority: P7VerifierExecutionAuthority,
 ) -> Result<P7VerifiedWallInputContext> {
     if summary_paths.is_empty() {
         return Err(p7_provenance_error(
@@ -4259,6 +4170,8 @@ pub fn verify_p7_wall_input_context(
         ));
     }
     p7_require_canonical_real_directory(benchmark_root)?;
+    execution_authority.verify_retained()?;
+    let verifier_identity = execution_authority.identity().clone();
 
     let mut session = P7ArtifactReadSession::default();
     let mut summaries = Vec::with_capacity(summary_paths.len());
@@ -4341,14 +4254,13 @@ pub fn verify_p7_wall_input_context(
         )?;
     }
 
-    let verifier_identity = p7_current_verifier_identity_with_session(&mut session)?;
-
     Ok(P7VerifiedWallInputContext {
         summaries,
         preflight: cohort_evidence.preflight,
         maximum_rss: cohort_evidence.maximum_rss,
         verifier_identity,
         session,
+        execution_authority,
     })
 }
 
@@ -6203,14 +6115,21 @@ struct P7ReleaseGateSpec {
 }
 
 pub fn p7_release_gate_plan() -> P7ReleaseGatePlan {
-    let commands: [(P7ReleaseGateOwner, &[&str]); 12] = [
+    let commands: [(P7ReleaseGateOwner, &[&str]); 14] = [
         (
             P7ReleaseGateOwner::AgentMemory,
             &["cargo", "fmt", "--all", "--", "--check"],
         ),
         (
             P7ReleaseGateOwner::AgentMemory,
-            &["cargo", "check", "--locked", "--workspace", "--all-targets"],
+            &[
+                "cargo",
+                "check",
+                "--locked",
+                "--workspace",
+                "--all-targets",
+                "--no-default-features",
+            ],
         ),
         (
             P7ReleaseGateOwner::AgentMemory,
@@ -6220,6 +6139,7 @@ pub fn p7_release_gate_plan() -> P7ReleaseGatePlan {
                 "--locked",
                 "--workspace",
                 "--all-targets",
+                "--no-default-features",
                 "--",
                 "-D",
                 "warnings",
@@ -6227,7 +6147,13 @@ pub fn p7_release_gate_plan() -> P7ReleaseGatePlan {
         ),
         (
             P7ReleaseGateOwner::AgentMemory,
-            &["cargo", "test", "--locked", "--workspace"],
+            &[
+                "cargo",
+                "test",
+                "--locked",
+                "--workspace",
+                "--no-default-features",
+            ],
         ),
         (
             P7ReleaseGateOwner::AgentMemory,
@@ -6238,12 +6164,24 @@ pub fn p7_release_gate_plan() -> P7ReleaseGatePlan {
             &["bash", "scripts/check_next_gen_memory_plan.sh"],
         ),
         (
+            P7ReleaseGateOwner::AgentMemory,
+            &[
+                "bash",
+                "scripts/check_cross_target_compile_gates.sh",
+                "--strict",
+            ],
+        ),
+        (
+            P7ReleaseGateOwner::AgentMemory,
+            &["bash", "scripts/check_p7_linux_execution_authority.sh"],
+        ),
+        (
             P7ReleaseGateOwner::ExternalRunner,
             &["cargo", "fmt", "--", "--check"],
         ),
         (
             P7ReleaseGateOwner::ExternalRunner,
-            &["cargo", "test", "--locked"],
+            &["cargo", "test", "--locked", "--no-default-features"],
         ),
         (
             P7ReleaseGateOwner::ExternalRunner,
@@ -6252,6 +6190,7 @@ pub fn p7_release_gate_plan() -> P7ReleaseGatePlan {
                 "clippy",
                 "--locked",
                 "--all-targets",
+                "--no-default-features",
                 "--",
                 "-D",
                 "warnings",
@@ -11193,6 +11132,19 @@ fn add_p7_production_delivery(
 mod p7_operator_unit_tests {
     use super::*;
 
+    #[test]
+    fn soul_exact_contract_rejects_zero_test_cargo_success() {
+        let exact = "runtime_lifecycle_contract";
+        assert!(!p7_exact_test_stdout_passed(
+            b"running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n",
+            exact,
+        ));
+        assert!(p7_exact_test_stdout_passed(
+            b"running 1 test\ntest runtime_lifecycle_contract ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n",
+            exact,
+        ));
+    }
+
     fn expected_question(question_id: &str, question_index: usize) -> P7ExpectedQuestionIdentity {
         P7ExpectedQuestionIdentity {
             case_id: "case-1".to_string(),
@@ -12029,9 +11981,101 @@ mod p7_operator_unit_tests {
 
     #[test]
     fn current_operator_rejects_non_retained_test_process_launch() {
-        let mut session = P7ArtifactReadSession::default();
-        assert!(p7_current_verifier_identity_with_session(&mut session).is_err());
-        assert_eq!(session.performance(Duration::ZERO).full_read_pass_count, 0);
+        assert!(attest_p7_current_verifier_execution().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires the trusted Linux release-profile execution gate"]
+    fn p7_sealed_execution_identity_binds_memfd_bytes_to_release_manifest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(P7_OPERATOR_BUILD_PROFILE, "release");
+        let source = fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical test executable");
+        let source_identity = crate::p7_secure_fs::P7RetainedFile::open_executable(&source)
+            .expect("retain release test executable")
+            .hash_once()
+            .expect("hash release test executable");
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp root")
+            .join(format!(
+                "bm-p7-sealed-identity-{}-{nonce}",
+                std::process::id()
+            ));
+        let release = root.join(&source_identity.sha256);
+        fs::create_dir_all(&release).expect("create content-addressed release");
+        let executable_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("test executable name");
+        let executable = release.join(executable_name);
+        fs::copy(&source, &executable).expect("copy release test executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o555))
+            .expect("set release executable mode");
+        let mut build_features = p7_operator_build_features();
+        build_features.sort();
+        build_features.dedup();
+        let manifest = P7VerifierReleaseManifest {
+            schema_version: P7_VERIFIER_RELEASE_MANIFEST_SCHEMA_VERSION.to_string(),
+            executable_file_name: executable_name.to_string(),
+            executable_sha256: source_identity.sha256.clone(),
+            build_profile: P7_OPERATOR_BUILD_PROFILE.to_string(),
+            build_features,
+            verification_policy_contract: P7_VERIFICATION_POLICY_CONTRACT.to_string(),
+            verification_schema_version: P7_VERIFICATION_RECEIPT_SCHEMA_VERSION.to_string(),
+            source_anchor_sha256: P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT.to_string(),
+            frozen_anchor_sha256: P7_FROZEN_ANCHOR_SHA256.to_string(),
+            anchor_generator_receipt_sha256: P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256.to_string(),
+        };
+        let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+        manifest_bytes.push(b'\n');
+        fs::write(
+            release.join(P7_VERIFIER_RELEASE_MANIFEST_FILE_NAME),
+            manifest_bytes,
+        )
+        .expect("write release manifest");
+
+        let mut retained = crate::p7_secure_fs::P7RetainedFile::open_executable(&executable)
+            .expect("retain published verifier");
+        let args = vec![
+            "bench::p7_operator_unit_tests::p7_sealed_execution_identity_child".to_string(),
+            "--exact".to_string(),
+            "--ignored".to_string(),
+            "--nocapture".to_string(),
+        ];
+        let (mut command, guard, _) = retained
+            .executable_command(&args)
+            .expect("build sealed verifier command");
+        let output = command.output().expect("run sealed verifier child");
+        drop(guard);
+        assert!(
+            output.status.success(),
+            "status={:?} stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "subprocess child"]
+    fn p7_sealed_execution_identity_child() {
+        let expected_sha256 =
+            std::env::var("BM_P7_RETAINED_EXECUTABLE_SHA256").expect("launcher executable SHA256");
+        let mut authority = attest_p7_current_verifier_execution()
+            .expect("sealed execution must bind to release manifest");
+        let identity = authority.identity();
+        assert_eq!(identity.operator_executable_sha256, expected_sha256);
+        authority
+            .verify_retained()
+            .expect("retained release manifest and locator");
     }
 
     #[test]

@@ -4,7 +4,28 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cargo() {
-  command cargo --locked "$@"
+  local subcommand="$1"
+  shift
+  if [[ "$subcommand" == "fmt" ]]; then
+    command cargo fmt "$@"
+  else
+    local has_locked=0
+    local has_no_default_features=0
+    local arg
+    for arg in "$@"; do
+      [[ "$arg" == "--locked" ]] && has_locked=1
+      [[ "$arg" == "--no-default-features" ]] && has_no_default_features=1
+    done
+    if [[ "$has_locked" -eq 1 && "$has_no_default_features" -eq 1 ]]; then
+      command cargo "$subcommand" "$@"
+    elif [[ "$has_locked" -eq 1 ]]; then
+      command cargo "$subcommand" --no-default-features "$@"
+    elif [[ "$has_no_default_features" -eq 1 ]]; then
+      command cargo "$subcommand" --locked "$@"
+    else
+      command cargo "$subcommand" --locked --no-default-features "$@"
+    fi
+  fi
 }
 export -f cargo
 

@@ -15,7 +15,7 @@ const WORKSPACE_OPERATOR_FROZEN_IDENTITY_RELATIVE_PATH: &str =
     "crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs";
 const CRATE_OPERATOR_FROZEN_IDENTITY_RELATIVE_PATH: &str =
     "src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs";
-const OPERATOR_BUILD_INPUTS: [&str; 12] = [
+const OPERATOR_BUILD_INPUTS: [&str; 13] = [
     "Cargo.toml",
     "Cargo.lock",
     "crates/replay/Cargo.toml",
@@ -27,6 +27,7 @@ const OPERATOR_BUILD_INPUTS: [&str; 12] = [
     "crates/replay/src/p7_process.rs",
     "crates/replay/src/p7_secure_fs.rs",
     "crates/replay/src/runner.rs",
+    "crates/replay/src/bin/bm-p7-retained-launch.rs",
     "crates/replay/src/bin/bm-w4-external-noisy-wall.rs",
 ];
 const FROZEN_ANCHOR_GENERATOR_CONTRACT: &str = "p7_frozen_anchor_generator_receipt_v1";

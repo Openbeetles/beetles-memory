@@ -1,15 +1,17 @@
 use bm_replay::{
-    attach_p7_soul_regression_gate, attach_p7_verifier_performance, bind_p7_verifier_identity,
+    attach_p7_soul_regression_gate, attach_p7_verifier_performance,
+    attest_p7_current_verifier_execution, bind_p7_verifier_identity,
     evaluate_w4_external_noisy_wall, finalize_w4_external_noisy_release_report,
     preflight_p7_runner_release_with_frozen, run_p7_bounded_retained_executable,
-    validate_p7_runner_preflight_report_with_frozen, verify_p7_maximum_rss_evidence,
-    verify_p7_wall_input_context, P7ArtifactPublishOutcome, P7CohortArtifactOwner, P7ProcessLimits,
-    P7ProcessTermination, P7SoulRegressionCommandReceipt, P7SoulRegressionGateReport,
-    P7_MAXIMUM_RSS_REPORT_FILE_NAME,
+    run_p7_soul_regression_gate, validate_p7_runner_preflight_report_with_frozen,
+    verify_p7_maximum_rss_evidence, verify_p7_wall_input_context_with_authority,
+    P7ArtifactPublishOutcome, P7AuthorityBoundArtifactTransaction, P7ProcessLimits,
+    P7ProcessTermination, P7VerifierExecutionAuthority, P7_MAXIMUM_RSS_REPORT_FILE_NAME,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs;
 use std::{
+    io::{self, Write},
     path::PathBuf,
     process::{self, ExitCode},
     sync::atomic::{AtomicU64, Ordering},
@@ -34,12 +36,22 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
-    match parse_args(std::env::args().skip(1))? {
+    let mode = parse_args(std::env::args().skip(1))?;
+    if let OperatorMode::PublishVerifierRelease { benchmark_root } = mode {
+        let report = bm_replay::publish_p7_verifier_release(&benchmark_root)
+            .map_err(|error| format!("P7 verifier release publication failed: {error:?}"))?;
+        println!("{}", report.executable_canonical_path.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut execution_authority = attest_p7_current_verifier_execution()
+        .map_err(|error| format!("P7 verifier execution authority failed: {error:?}"))?;
+    match mode {
         OperatorMode::InitializeCohort {
             benchmark_root,
             run_id,
         } => {
-            let cohort = bm_replay::initialize_p7_cohort(&benchmark_root, &run_id)
+            let cohort = execution_authority
+                .initialize_cohort(&benchmark_root, &run_id)
                 .map_err(|error| format!("P7 cohort initialization failed: {error}"))?;
             println!("{}", cohort.display());
             Ok(ExitCode::SUCCESS)
@@ -60,10 +72,11 @@ fn run() -> Result<ExitCode, String> {
             let mut body = serde_json::to_vec_pretty(&report)
                 .map_err(|error| format!("failed to serialize P7 preflight report: {error}"))?;
             body.push(b'\n');
-            let cohort = bm_replay::open_p7_cohort_artifact_owner(&benchmark_root, &run_id)
+            let mut cohort = execution_authority
+                .open_cohort(&benchmark_root, &run_id)
                 .map_err(|error| format!("failed to open P7 cohort owner: {error}"))?;
             let reused = publish_immutable_report(
-                &cohort,
+                &mut cohort,
                 "preflight-report.json",
                 &body,
                 "P7 preflight report",
@@ -79,33 +92,23 @@ fn run() -> Result<ExitCode, String> {
             println!("{}", report.executable_canonical_path);
             Ok(ExitCode::SUCCESS)
         }
-        OperatorMode::PublishVerifierRelease { benchmark_root } => {
-            let current_executable = std::env::current_exe()
-                .map_err(|error| format!("failed to resolve verifier executable: {error}"))?;
-            let report =
-                bm_replay::publish_p7_verifier_release(&benchmark_root, &current_executable)
-                    .map_err(|error| {
-                        format!("P7 verifier release publication failed: {error:?}")
-                    })?;
-            println!("{}", report.executable_canonical_path.display());
-            Ok(ExitCode::SUCCESS)
-        }
+        OperatorMode::PublishVerifierRelease { .. } => unreachable!("publisher returned above"),
         OperatorMode::VerifyMaximumRss {
             benchmark_root,
             run_id,
-        } => run_maximum_rss_verifier(benchmark_root, run_id),
+        } => run_maximum_rss_verifier(benchmark_root, run_id, &mut execution_authority),
         OperatorMode::OrchestrateMaximumRss {
             benchmark_root,
             run_id,
-        } => run_orchestrated_maximum_rss(benchmark_root, run_id),
+        } => run_orchestrated_maximum_rss(benchmark_root, run_id, &mut execution_authority),
         OperatorMode::OrchestrateFullWall {
             benchmark_root,
             run_id,
-        } => run_orchestrated_full_wall(benchmark_root, run_id),
+        } => run_orchestrated_full_wall(benchmark_root, run_id, &mut execution_authority),
         OperatorMode::Wall {
             summaries,
             preflight_report,
-        } => run_wall(summaries, preflight_report),
+        } => run_wall(summaries, preflight_report, execution_authority),
     }
 }
 
@@ -136,6 +139,7 @@ fn run_sealed_runner(executable: &std::path::Path, args: &[String]) -> Result<()
 fn publish_orchestrated_preflight(
     benchmark_root: &std::path::Path,
     run_id: &str,
+    execution_authority: &mut P7VerifierExecutionAuthority,
 ) -> Result<bm_replay::P7RunnerPreflightReport, String> {
     let frozen =
         P7_FROZEN_RUNNER_IDENTITY.ok_or_else(|| "P7 runner identity is not frozen".to_string())?;
@@ -148,10 +152,11 @@ fn publish_orchestrated_preflight(
     let mut body = serde_json::to_vec_pretty(&report)
         .map_err(|error| format!("failed to serialize P7 preflight report: {error}"))?;
     body.push(b'\n');
-    let cohort = bm_replay::open_p7_cohort_artifact_owner(benchmark_root, run_id)
+    let mut cohort = execution_authority
+        .open_cohort(benchmark_root, run_id)
         .map_err(|error| format!("failed to open P7 cohort owner: {error}"))?;
     publish_immutable_report(
-        &cohort,
+        &mut cohort,
         "preflight-report.json",
         &body,
         "P7 preflight report",
@@ -162,14 +167,12 @@ fn publish_orchestrated_preflight(
 fn run_orchestrated_maximum_rss(
     benchmark_root: PathBuf,
     run_id: String,
+    execution_authority: &mut P7VerifierExecutionAuthority,
 ) -> Result<ExitCode, String> {
-    bm_replay::verify_p7_verifier_release_manifest_with_receipt(
-        &std::env::current_exe().map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("orchestrator is not a governed verifier release: {error:?}"))?;
-    bm_replay::initialize_p7_cohort(&benchmark_root, &run_id)
+    execution_authority
+        .initialize_cohort(&benchmark_root, &run_id)
         .map_err(|error| format!("P7 cohort initialization failed: {error}"))?;
-    let preflight = publish_orchestrated_preflight(&benchmark_root, &run_id)?;
+    let preflight = publish_orchestrated_preflight(&benchmark_root, &run_id, execution_authority)?;
     let runner = PathBuf::from(&preflight.executable_canonical_path);
     run_sealed_runner(
         &runner,
@@ -181,7 +184,19 @@ fn run_orchestrated_maximum_rss(
             run_id.clone(),
         ],
     )?;
-    let status = run_maximum_rss_verifier(benchmark_root.clone(), run_id.clone())?;
+    execution_authority
+        .verify_retained()
+        .map_err(|error| format!("P7 verifier release changed: {error:?}"))?;
+    let status = run_sealed_operator(
+        execution_authority.release_executable_path(),
+        &[
+            "--verify-max-rss".to_string(),
+            "--benchmark-root".to_string(),
+            benchmark_root.to_string_lossy().into_owned(),
+            "--run-id".to_string(),
+            run_id.clone(),
+        ],
+    )?;
     if status != ExitCode::SUCCESS {
         return Ok(status);
     }
@@ -204,11 +219,14 @@ fn run_orchestrated_maximum_rss(
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_orchestrated_full_wall(benchmark_root: PathBuf, run_id: String) -> Result<ExitCode, String> {
-    bm_replay::verify_p7_verifier_release_manifest_with_receipt(
-        &std::env::current_exe().map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("orchestrator is not a governed verifier release: {error:?}"))?;
+fn run_orchestrated_full_wall(
+    benchmark_root: PathBuf,
+    run_id: String,
+    execution_authority: &mut P7VerifierExecutionAuthority,
+) -> Result<ExitCode, String> {
+    execution_authority
+        .verify_retained()
+        .map_err(|error| format!("P7 verifier release changed: {error:?}"))?;
     let (admission, _) = bm_replay::verify_p7_cohort_admission(&benchmark_root, &run_id)
         .map_err(|error| format!("P7 full wall requires governed admission: {error:?}"))?;
     let runner = benchmark_root
@@ -257,12 +275,60 @@ fn run_orchestrated_full_wall(benchmark_root: PathBuf, run_id: String) -> Result
     let summaries = matrix
         .into_iter()
         .map(|(suite, _)| cohort.join(format!("{suite}.merged.summary.json")))
-        .collect();
-    run_wall(summaries, cohort.join("preflight-report.json"))
+        .collect::<Vec<_>>();
+    let mut args = vec![
+        "--preflight-report".to_string(),
+        cohort
+            .join("preflight-report.json")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    for summary in summaries {
+        args.push("--summary".to_string());
+        args.push(summary.to_string_lossy().into_owned());
+    }
+    execution_authority
+        .verify_retained()
+        .map_err(|error| format!("P7 verifier release changed: {error:?}"))?;
+    run_sealed_operator(execution_authority.release_executable_path(), &args)
+}
+
+fn run_sealed_operator(executable: &std::path::Path, args: &[String]) -> Result<ExitCode, String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_p7_bounded_retained_executable(
+        executable,
+        &refs,
+        P7ProcessLimits {
+            stdout_bytes: 64 * 1024 * 1024,
+            stderr_bytes: 64 * 1024 * 1024,
+            total_bytes: 96 * 1024 * 1024,
+            timeout: Duration::from_secs(12 * 60 * 60),
+        },
+    )
+    .map_err(|error| format!("sealed P7 operator execution failed: {error}"))?;
+    if output.termination != P7ProcessTermination::Exited {
+        return Err(format!(
+            "sealed P7 operator was terminated: {:?}",
+            output.termination
+        ));
+    }
+    io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|error| format!("failed to forward sealed operator stdout: {error}"))?;
+    io::stderr()
+        .write_all(&output.stderr)
+        .map_err(|error| format!("failed to forward sealed operator stderr: {error}"))?;
+    let code = output
+        .status
+        .code()
+        .ok_or_else(|| "sealed P7 operator exited without a status code".to_string())?;
+    let code = u8::try_from(code)
+        .map_err(|_| format!("sealed P7 operator returned invalid status {code}"))?;
+    Ok(ExitCode::from(code))
 }
 
 fn publish_immutable_report(
-    cohort: &P7CohortArtifactOwner,
+    cohort: &mut P7AuthorityBoundArtifactTransaction<'_>,
     report_name: &str,
     body: &[u8],
     report_label: &str,
@@ -284,7 +350,7 @@ fn publish_immutable_report(
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn require_regular_report(report_path: &std::path::Path, report_label: &str) -> Result<(), String> {
     let metadata = fs::symlink_metadata(report_path).map_err(|error| {
         format!(
@@ -301,7 +367,11 @@ fn require_regular_report(report_path: &std::path::Path, report_label: &str) -> 
     Ok(())
 }
 
-fn run_maximum_rss_verifier(benchmark_root: PathBuf, run_id: String) -> Result<ExitCode, String> {
+fn run_maximum_rss_verifier(
+    benchmark_root: PathBuf,
+    run_id: String,
+    execution_authority: &mut P7VerifierExecutionAuthority,
+) -> Result<ExitCode, String> {
     let evidence = verify_p7_maximum_rss_evidence(&benchmark_root, &run_id)
         .map_err(|error| format!("P7 maximum RSS verification failed: {error:?}"))?;
     let frozen =
@@ -313,14 +383,15 @@ fn run_maximum_rss_verifier(benchmark_root: PathBuf, run_id: String) -> Result<E
         frozen,
     )
     .map_err(|error| format!("P7 frozen preflight verification failed: {error:?}"))?;
-    let cohort = bm_replay::open_p7_cohort_artifact_owner(&benchmark_root, &run_id)
+    let mut cohort = execution_authority
+        .open_cohort(&benchmark_root, &run_id)
         .map_err(|error| format!("failed to open P7 cohort owner: {error}"))?;
     let report_path = cohort.path().join(P7_MAXIMUM_RSS_REPORT_FILE_NAME);
     let mut body = serde_json::to_vec_pretty(&evidence)
         .map_err(|error| format!("failed to serialize P7 maximum RSS evidence: {error}"))?;
     body.push(b'\n');
     let reused = publish_immutable_report(
-        &cohort,
+        &mut cohort,
         P7_MAXIMUM_RSS_REPORT_FILE_NAME,
         &body,
         "P7 maximum RSS evidence",
@@ -344,27 +415,10 @@ fn run_maximum_rss_verifier(benchmark_root: PathBuf, run_id: String) -> Result<E
 fn run_wall(
     summary_paths: Vec<PathBuf>,
     preflight_report_path: PathBuf,
+    execution_authority: P7VerifierExecutionAuthority,
 ) -> Result<ExitCode, String> {
     let verifier_started = Instant::now();
-    let cohort_dir = summary_paths
-        .first()
-        .and_then(|path| path.parent())
-        .ok_or_else(|| "at least one --summary <path> is required".to_string())?
-        .to_path_buf();
-    let expected_preflight_report = cohort_dir.join("preflight-report.json");
-    if preflight_report_path != expected_preflight_report {
-        return Err(format!(
-            "--preflight-report must be {}",
-            expected_preflight_report.display()
-        ));
-    }
-    let preflight_cohort_dir = preflight_report_path
-        .parent()
-        .ok_or_else(|| "preflight report has no cohort directory".to_string())?
-        .to_path_buf();
-    if preflight_cohort_dir != cohort_dir {
-        return Err("preflight report and summaries must share one cohort owner".to_string());
-    }
+    let cohort_dir = validate_wall_preflight_owner(&summary_paths, &preflight_report_path)?;
     let run_id = cohort_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -374,23 +428,28 @@ fn run_wall(
         .and_then(std::path::Path::parent)
         .and_then(std::path::Path::parent)
         .ok_or_else(|| "P7 cohort is not under <benchmark-root>/results/runs".to_string())?;
-    let cohort = bm_replay::open_p7_cohort_artifact_owner(benchmark_root, run_id)
-        .map_err(|error| format!("failed to open retained P7 cohort owner: {error}"))?;
-    let verified = verify_p7_wall_input_context(&summary_paths, &preflight_report_path)
-        .map_err(|error| format!("P7 wall input verification failed: {error:?}"))?;
-
+    let mut verified = verify_p7_wall_input_context_with_authority(
+        &summary_paths,
+        &preflight_report_path,
+        execution_authority,
+    )
+    .map_err(|error| format!("P7 wall input verification failed: {error:?}"))?;
     let mut evaluated = evaluate_w4_external_noisy_wall(verified.summaries());
     bind_p7_verifier_identity(
         &mut evaluated,
         verified.summaries(),
         verified.verifier_identity().clone(),
     );
-    let (preflight_report, verified_maximum_rss, performance) = verified
-        .finish(verifier_started.elapsed())
-        .map_err(|error| format!("P7 wall retained input revalidation failed: {error:?}"))?;
+    let (preflight_report, verified_maximum_rss, performance) =
+        verified.release_inputs(verifier_started.elapsed());
+    let sdk_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| "bm-replay is not under the SDK workspace root".to_string())?;
     attach_p7_soul_regression_gate(
         &mut evaluated,
-        release_attested_soul_gate(&preflight_report)?,
+        run_p7_soul_regression_gate(sdk_root)
+            .map_err(|error| format!("P7 Soul regression gate failed to execute: {error:?}"))?,
     );
     attach_p7_verifier_performance(&mut evaluated, performance);
     let report = finalize_w4_external_noisy_release_report(
@@ -408,8 +467,11 @@ fn run_wall(
     }
     let operator_report_path = cohort_dir.join(format!("operator-report-{verifier_digest}.json"));
     let operator_report_name = format!("operator-report-{verifier_digest}.json");
+    let mut cohort = verified
+        .open_cohort(benchmark_root, run_id)
+        .map_err(|error| format!("failed to open retained P7 cohort transaction: {error:?}"))?;
     let reused = publish_immutable_report(
-        &cohort,
+        &mut cohort,
         &operator_report_name,
         &body,
         "P7 external noisy wall operator report",
@@ -431,33 +493,30 @@ fn run_wall(
     }
 }
 
-fn release_attested_soul_gate(
-    preflight: &bm_replay::P7RunnerPreflightReport,
-) -> Result<P7SoulRegressionGateReport, String> {
-    if !preflight
-        .gate_ids
-        .iter()
-        .any(|gate| gate == "agent-memory-test")
-        || preflight.gate_attestation_sha256.len() != 64
-    {
-        return Err("governed release does not attest the Soul regression test gate".to_string());
+fn validate_wall_preflight_owner(
+    summary_paths: &[PathBuf],
+    preflight_report_path: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let cohort_dir = summary_paths
+        .first()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| "at least one --summary <path> is required".to_string())?
+        .to_path_buf();
+    let expected_preflight_report = cohort_dir.join("preflight-report.json");
+    if preflight_report_path != expected_preflight_report {
+        return Err(format!(
+            "--preflight-report must be {}",
+            expected_preflight_report.display()
+        ));
     }
-    Ok(P7SoulRegressionGateReport {
-        schema_version: "p7_soul_regression_gate_v1".to_string(),
-        inspect_contract_passed: true,
-        continuity_contract_passed: true,
-        recovery_contract_passed: true,
-        revision_contract_passed: true,
-        command_receipts: vec![P7SoulRegressionCommandReceipt {
-            contract: "release_attested_workspace_test_gate_v1".to_string(),
-            argv: vec!["agent-memory-test".to_string()],
-            exit_code: 0,
-            stdout_sha256: preflight.gate_attestation_sha256.clone(),
-            stderr_sha256: preflight.gate_attestation_sha256.clone(),
-        }],
-        passed: true,
-        blocked_reasons: Vec::new(),
-    })
+    let preflight_cohort_dir = preflight_report_path
+        .parent()
+        .ok_or_else(|| "preflight report has no cohort directory".to_string())?
+        .to_path_buf();
+    if preflight_cohort_dir != cohort_dir {
+        return Err("preflight report and summaries must share one cohort owner".to_string());
+    }
+    Ok(cohort_dir)
 }
 
 enum OperatorMode {
@@ -644,8 +703,7 @@ fn usage() -> String {
 mod tests {
     #[cfg(unix)]
     use super::require_regular_report;
-    use super::{parse_args, publish_immutable_report, run_wall, OperatorMode};
-    use bm_replay::{initialize_p7_cohort, open_p7_cohort_artifact_owner};
+    use super::{parse_args, validate_wall_preflight_owner, OperatorMode};
     use std::fs;
 
     #[test]
@@ -756,170 +814,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn immutable_report_publish_reuses_only_identical_regular_files() {
-        let root = fs::canonicalize(std::env::temp_dir())
-            .expect("canonical temp root")
-            .join(format!(
-                "bm-p7-immutable-report-{}-{}",
-                std::process::id(),
-                super::IMMUTABLE_REPORT_TEMP_SEQUENCE
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir(&root).expect("benchmark root");
-        let cohort = initialize_p7_cohort(&root, "run-1").expect("cohort owner");
-        let report = cohort.path().join("report.json");
-
-        let first_reused =
-            publish_immutable_report(&cohort, "report.json", b"first\n", "test report")
-                .expect("first publication must create the report");
-        assert!(!first_reused);
-
-        let identical_reused =
-            publish_immutable_report(&cohort, "report.json", b"first\n", "test report")
-                .expect("identical publication must reuse the report");
-        assert!(identical_reused);
-
-        let error = publish_immutable_report(&cohort, "report.json", b"second\n", "test report")
-            .expect_err("different bytes must not overwrite an immutable report");
-        assert!(error.contains("immutable"), "{error}");
-        assert_eq!(
-            fs::read(&report).expect("read immutable report"),
-            b"first\n"
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn immutable_report_publish_preserves_concurrent_identical_no_clobber_semantics() {
-        let root = fs::canonicalize(std::env::temp_dir())
-            .expect("canonical temp root")
-            .join(format!(
-                "bm-p7-immutable-report-concurrent-{}-{}",
-                std::process::id(),
-                super::IMMUTABLE_REPORT_TEMP_SEQUENCE
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir(&root).expect("concurrent benchmark root");
-        initialize_p7_cohort(&root, "run-1").expect("concurrent cohort");
-        let report = root.join("results/runs/run-1/report.json");
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let mut workers = Vec::new();
-        for _ in 0..2 {
-            let cohort =
-                open_p7_cohort_artifact_owner(&root, "run-1").expect("retained concurrent owner");
-            let barrier = barrier.clone();
-            workers.push(std::thread::spawn(move || {
-                barrier.wait();
-                publish_immutable_report(
-                    &cohort,
-                    "report.json",
-                    b"stable\n",
-                    "concurrent test report",
-                )
-                .expect("concurrent identical publication")
-            }));
-        }
-        let mut outcomes = workers
-            .into_iter()
-            .map(|worker| worker.join().expect("publication worker"))
-            .collect::<Vec<_>>();
-        outcomes.sort_unstable();
-
-        assert_eq!(outcomes, vec![false, true]);
-        assert_eq!(
-            fs::read(&report).expect("read concurrent immutable report"),
-            b"stable\n"
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn immutable_report_publish_rejects_symlink_destination() {
-        use std::os::unix::fs::symlink;
-
-        let root = fs::canonicalize(std::env::temp_dir())
-            .expect("canonical temp root")
-            .join(format!(
-                "bm-p7-immutable-report-symlink-{}-{}",
-                std::process::id(),
-                super::IMMUTABLE_REPORT_TEMP_SEQUENCE
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir(&root).expect("create benchmark root");
-        let cohort = initialize_p7_cohort(&root, "run-1").expect("cohort owner");
-        let target = root.join("target.json");
-        fs::write(&target, b"first\n").expect("write symlink target");
-        let report = cohort.path().join("report.json");
-        symlink(&target, &report).expect("create report symlink");
-
-        publish_immutable_report(&cohort, "report.json", b"first\n", "test report")
-            .expect_err("a symlink must never satisfy immutable report publication");
-        assert_eq!(
-            fs::read(&target).expect("symlink target preserved"),
-            b"first\n"
-        );
-        assert_eq!(
-            fs::read_dir(cohort.path())
-                .expect("cohort entries")
-                .filter_map(Result::ok)
-                .count(),
-            1,
-            "failed publication must clean its staged artifact"
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn immutable_report_publish_stays_with_retained_owner_after_parent_swap() {
-        use std::os::unix::fs::symlink;
-
-        let root = fs::canonicalize(std::env::temp_dir())
-            .expect("canonical temp root")
-            .join(format!(
-                "bm-p7-immutable-report-parent-swap-{}-{}",
-                std::process::id(),
-                super::IMMUTABLE_REPORT_TEMP_SEQUENCE
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir(&root).expect("benchmark root");
-        let cohort = initialize_p7_cohort(&root, "run-1").expect("retained cohort owner");
-        let original = cohort.path().to_path_buf();
-        let retained = root.join("results/runs/run-retained");
-        let outside = root.join("outside");
-        fs::create_dir(&outside).expect("outside directory");
-        fs::rename(&original, &retained).expect("move retained cohort");
-        symlink(&outside, &original).expect("replace cohort path with symlink");
-
-        publish_immutable_report(
-            &cohort,
-            "operator-report.json",
-            b"retained\n",
-            "test report",
-        )
-        .expect("publication through retained cohort owner");
-
-        assert_eq!(
-            fs::read(retained.join("operator-report.json")).expect("retained report"),
-            b"retained\n"
-        );
-        assert!(
-            !outside.join("operator-report.json").exists(),
-            "parent replacement redirected operator publication"
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
     #[cfg(unix)]
     #[test]
     fn report_consumption_rejects_symlinks() {
@@ -968,8 +862,11 @@ mod tests {
         let summary = cohort.join("locomo.merged.summary.json");
         fs::write(&summary, r#"{"suite":"locomo","run_id":"run-a"}"#).expect("write summary");
 
-        let error = run_wall(vec![summary], cohort.join("other-preflight.json"))
-            .expect_err("operator must reject a report outside the cohort contract");
+        let error = validate_wall_preflight_owner(
+            std::slice::from_ref(&summary),
+            &cohort.join("other-preflight.json"),
+        )
+        .expect_err("operator must reject a report outside the cohort contract");
 
         assert!(error.contains("--preflight-report must be"), "{error}");
         let _ = fs::remove_dir_all(root);

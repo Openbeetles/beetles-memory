@@ -124,6 +124,15 @@ while IFS=$'\t' read -r profile target package features; do
     echo "target compile gate failed: profile=$profile target=$target package=$package features=$features" >&2
     status=1
   fi
+
+  case "$profile" in
+    profile-desktop-windows-dev-full|profile-server-linux-dev-full)
+      if ! RUSTFLAGS="-D warnings" cargo check --locked -p bm-replay --target "$target" --all-targets --no-default-features; then
+        echo "P7 replay target compile gate failed: profile=$profile target=$target" >&2
+        status=1
+      fi
+      ;;
+  esac
 done <<< "$gate_rows"
 
 if [[ "$status" -ne 0 ]]; then

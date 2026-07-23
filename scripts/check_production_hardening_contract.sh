@@ -46,12 +46,23 @@ done
 
 bash -n scripts/check_release_surface.sh
 
-if rg -n "target/bm-memory-gateway-store|target/bm-http-console-store|--allow-dirty" \
+if rg -n "target/bm-memory-gateway-store|target/bm-http-console-store" \
   scripts docs dev-docs \
   --glob '!scripts/check_production_hardening_contract.sh' \
   --glob '!dev-docs/production-hardening-audit-plan.md'; then
-  fail "production docs or gates still mention repository-local target store defaults or --allow-dirty"
+  fail "production docs or gates still mention repository-local target store defaults"
 fi
+
+while IFS=: read -r file _ line; do
+  if [[ "$file" == "scripts/check_release_surface.sh" \
+    && "$line" == *"cargo publish"* \
+    && "$line" == *"--dry-run"* ]]; then
+    continue
+  fi
+  fail "--allow-dirty is only permitted for the release-surface package dry-run: $file"
+done < <(rg -n --no-heading \
+  --glob '!scripts/check_production_hardening_contract.sh' \
+  -- '--allow-dirty' scripts || true)
 
 if rg -n 'target/bm-memory-gateway-store|target/bm-http-console-store' crates scripts docs dev-docs \
   --glob '!scripts/check_production_hardening_contract.sh' \
