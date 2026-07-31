@@ -29,7 +29,10 @@ pub mod task_execution;
 pub mod tools;
 pub mod util;
 
-pub use budget::{EvidenceDocumentRuntimeBudget, RuntimeBudgetAuthority, RuntimeBudgetReport};
-pub use error::{Error, Result};
+pub use budget::{
+    EvidenceDocumentRuntimeBudget, GovernedStateRuntimeBudget, RuntimeBudgetAuthority,
+    RuntimeBudgetReport,
+};
+pub use error::{Error, ErrorClass, Result};
 pub use platform::Platform;
 pub use reasoning::{load_idle_memory_forge_operator_summary, IdleMemoryForgeAdjudicationState};

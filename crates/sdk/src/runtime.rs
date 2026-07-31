@@ -2,53 +2,65 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::store_internal::recall_index::{
-    ActiveTaskRunByChatIndex, ArchiveRecallManifest, ContinuityCapsuleScopeIndex,
-    ConversationRecallManifest, RecallIndexAddressKind, RuntimeSkillRecallManifest,
-    TaskLearningByChatIndex, TypedRecallIndex,
+    decode_typed_recall_index, ActiveTaskRunByChatIndex, ArchiveRecallManifest,
+    ContinuityCapsuleScopeIndex, ConversationRecallManifest, ConversationTranscriptAuxManifest,
+    ConversationTranscriptPageIndex, RecallIndexAddressKind, TaskLearningByChatIndex,
+    TypedRecallIndex,
 };
-use crate::store_internal::recall_read::{RecallImmutableReadContext, RecallReadView};
+use crate::store_internal::recall_read::{
+    RecallImmutableReadContext, RecallReadSetClosureEvidence, RecallReadView,
+};
 use crate::store_internal::{
-    governed_evidence_source_claim_manifest_key,
+    governed_evidence_source_claim_manifest_key, materialize_runtime_lifecycle_store_event,
     validate_governed_evidence_source_claim_scope_closure, GovernedEvidenceOwnerClaimBinding,
     GovernedEvidenceSourceClaimManifest, GraphRepairAuthority, MemoryStoreEvent,
-    MemoryStoreEventKind, StoreEventScope, StoreGovernedEvidenceExactReadRequest,
-    StoreJsonPrecondition, StoreMutation, StoreMutationBatch, StoreMutationBatchReport,
-    StorePlatform, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
-    GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
+    MemoryStoreEventKind, RuntimeLifecycleStoreBinding, StoreBackendKind, StoreEventScope,
+    StoreGovernedEvidenceExactReadRequest, StoreJsonPrecondition, StoreMutation,
+    StoreMutationBatch, StoreMutationBatchReport, StorePlatform, StoreReadReceipt,
+    GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
+    GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
 };
 use bm_core::budget::{RuntimeBudgetAuthority, RuntimeBudgetReport, TranscriptGovernanceBudget};
-use bm_core::feature_gate::ProfileId;
+use bm_core::feature_gate::{profile_capability_catalog, ProfileCapabilityCatalogEntry, ProfileId};
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
 use bm_core::memory::{
-    allocate_recall_delivery_candidates, build_deferred_governance_queue_report,
-    build_governed_evidence_document_facet_index_doc, build_long_term_memory_facet_index_doc,
-    build_memory_graph_persistence_plan, build_temporal_memory_graph_from_evidence,
+    allocate_recall_delivery_candidates, build_current_dynamic_state_resolution_report,
+    build_deferred_governance_queue_report, build_governed_evidence_document_facet_index_doc,
+    build_governed_recall_eligibility_report, build_historical_dynamic_state_resolution_report,
+    build_long_term_memory_facet_index_doc, build_memory_graph_persistence_plan,
+    build_procedural_memory_delivery_report, build_temporal_memory_graph_from_evidence,
     build_temporal_memory_graph_from_parts, canonical_recall_evidence_group,
     coalesce_continuity_snapshot_import_plans, commit_canonical_turn_delta_with_transcript,
     compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
-    filter_host_refs_for_transcript_view, govern_write_candidates,
-    governed_evidence_source_ref_from_document, governed_long_term_owner_evidence_bindings,
-    governed_memory_recall_candidate_id, inspect_intelligence_replay, inspect_memory_hygiene,
-    inspect_working_recall, load_prompt_memory_context, memory_facet_manifest_key,
-    memory_facet_posting_key, memory_graph_backlink_key, memory_graph_integrity_incident_token,
+    filter_host_refs_for_transcript_view, finalize_procedural_memory_delivery_report,
+    govern_write_candidates, governed_evidence_source_ref_from_document,
+    governed_long_term_owner_evidence_bindings, governed_memory_recall_candidate_id,
+    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
+    load_prompt_memory_context, long_term_version_head_key, long_term_version_material_key,
+    long_term_version_scope_manifest_key, memory_facet_manifest_key, memory_facet_posting_key,
+    memory_graph_backlink_key, memory_graph_integrity_incident_token,
     memory_graph_recall_index_key, memory_graph_scope_digest, memory_graph_scope_manifest_key,
     normalize_private_garden_doc_path, plan_continuity_snapshot_import,
     plan_governed_evidence_document_delete, plan_governed_evidence_document_upsert,
     plan_governed_shared_memory_in_space, plan_long_term_memory_control_mutation,
     plan_long_term_memory_governance_policy_mutation, plan_long_term_memory_owner_mutation,
     plan_long_term_memory_upsert, plan_temporal_memory_graph_write,
-    promote_task_experience_to_procedure, relationship_scope, rerank_recall_with_temporal_graph,
+    project_current_long_term_recall_lifecycle_facts,
+    project_historical_long_term_recall_lifecycle_facts, promote_task_experience_to_procedure,
+    relationship_scope, rerank_recall_with_temporal_graph,
     rerank_recall_with_temporal_graph_and_facets, run_long_term_memory_refresh,
     run_memory_retention_compaction, run_post_reply_memory_maintenance,
     run_private_garden_governance, scoped_governed_evidence_document_key,
     scoped_governed_evidence_source_ref_key, scoped_long_term_control_storage_key,
     scoped_long_term_memory_storage_key, scoped_memory_facet_owner_storage_key,
-    score_recall_delivery_texts, validate_governed_evidence_document,
+    score_recall_delivery_texts, select_long_term_current_recall_query_time,
+    select_long_term_historical_recall_query_time, validate_governed_evidence_document,
     validate_governed_evidence_source_ref, validate_memory_facet_manifest,
     validate_memory_facet_posting, validate_memory_facet_read_chain,
     validate_memory_graph_read_chain, validate_memory_graph_revision_doc,
@@ -56,43 +68,49 @@ use bm_core::memory::{
     ContinuitySnapshotImportContext, ContinuitySnapshotImportPlan, ConversationKey,
     ConversationTranscriptStore, DeferredGovernanceJob, DeferredGovernanceJobStatus,
     DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef,
-    DroppedProjectionCandidate, EvidenceBacklink, FacetCoverageSelectionReport,
-    FacetRankFusionCandidateReport, FacetRankFusionReport, FacetReportAudience,
-    GovernedEvidenceBinding, GovernedEvidenceDocument, GovernedEvidenceDocumentDeletePlan,
-    GovernedEvidenceDocumentPlan, GovernedEvidenceSourceRef, GovernedMemoryOwnerPlane,
-    GovernedMemoryOwnerRef, GovernedWriteDecision, GraphFacetPropagationContext,
-    GraphRecallCandidateScore, GraphRecallExpansionBudget, GraphRecallRerankReport, IngressKind,
-    InhabitedSubjectProjection, InhabitedSubjectProjectionInput, LongTermMemoryControlAuditEvent,
+    DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
+    FacetCoverageSelectionReport, FacetRankFusionCandidateReport, FacetRankFusionReport,
+    FacetReportAudience, GovernedEvidenceBinding, GovernedEvidenceDocument,
+    GovernedEvidenceDocumentDeletePlan, GovernedEvidenceDocumentPlan, GovernedEvidenceSourceRef,
+    GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedProfileBudgetDrop,
+    GovernedRecallAuthorityGates, GovernedRecallDisclosure, GovernedRecallEligibility,
+    GovernedRecallEligibilityDecision, GovernedRecallEligibilityReason,
+    GovernedRecallEligibilityReport, GovernedRecallTemporalQuery, GovernedRequiredPremiseGate,
+    GovernedWriteDecision, GraphFacetPropagationContext, GraphRecallCandidateScore,
+    GraphRecallExpansionBudget, GraphRecallRerankReport, IngressKind, InhabitedSubjectProjection,
+    InhabitedSubjectProjectionInput, LongTermMemoryControlAuditEvent,
     LongTermMemoryControlDetailRequest as CoreLongTermMemoryControlDetailRequest,
     LongTermMemoryControlListRequest as CoreLongTermMemoryControlListRequest,
     LongTermMemoryControlMutationRequest as CoreLongTermMemoryControlMutationRequest,
     LongTermMemoryControlReadStore, LongTermMemoryControlWrite, LongTermMemoryDraft,
     LongTermMemoryDraftAdmissionPolicy, LongTermMemoryEntry, LongTermMemoryEntryPlan,
-    LongTermMemoryExtractionState, LongTermMemoryKind, LongTermMemoryOwnerMutation,
-    LongTermMemoryOwnerWrite, LongTermMemoryQuery, LongTermMemoryReadStore,
-    LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
-    LongTermMemoryRefreshRequestOutcome, LongTermMemorySourceScope, LongTermMemoryStore,
-    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryFacet, MemoryFacetIndexDoc,
-    MemoryFacetIndexManifest, MemoryFacetOwnerVersion, MemoryFacetPostingDoc,
-    MemoryFacetPostingRevision, MemoryFacetStatus, MemoryGraphBacklinkMembership,
-    MemoryGraphDependencyRef, MemoryGraphEdge, MemoryGraphEdgeMembership, MemoryGraphEvidence,
-    MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphNodeMembership, MemoryGraphOwnerBinding,
-    MemoryGraphPersistencePlan, MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc,
-    MemoryGraphScopeManifest, MemoryGraphWritePlan, MemoryHygieneContext,
-    MemoryLongTermAffectedFacetDoc, MemoryLongTermGovernancePolicy, MemoryLongTermMutation,
-    MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemoryWriteAuthority, MemoryWriteCandidate,
+    LongTermMemoryExtractionState, LongTermMemoryHeadManifest, LongTermMemoryKind,
+    LongTermMemoryOwnerMutation, LongTermMemoryOwnerWrite, LongTermMemoryQuery,
+    LongTermMemoryReadStore, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
+    LongTermMemoryRefreshRequestOutcome, LongTermMemoryRetainedRevisionDigest,
+    LongTermMemorySourceScope, LongTermMemoryStore, LongTermMemoryVersionMaterial,
+    LongTermMemoryVersionReadProjection, LongTermMemoryVersionScopeManifest, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryFacet, MemoryFacetIndexDoc, MemoryFacetIndexManifest,
+    MemoryFacetOwnerVersion, MemoryFacetPostingDoc, MemoryFacetPostingRevision, MemoryFacetStatus,
+    MemoryGraphBacklinkMembership, MemoryGraphDependencyRef, MemoryGraphEdge,
+    MemoryGraphEdgeMembership, MemoryGraphEvidence, MemoryGraphNode, MemoryGraphNodeKind,
+    MemoryGraphNodeMembership, MemoryGraphOwnerBinding, MemoryGraphPersistencePlan,
+    MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
+    MemoryGraphWritePlan, MemoryHygieneContext, MemoryLongTermAffectedFacetDoc,
+    MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryPlaneGovernanceReport,
+    MemoryPrivacyClass, MemoryUpdateLineageReport, MemoryWriteAuthority, MemoryWriteCandidate,
     MemoryWriteDomain, ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
     PostReplyMemoryMaintenanceInput, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    PrivateGardenDoc, PrivateGardenDocRecord, PrivateGardenGovernanceContext,
+    PremiseTypedSource, PrivateGardenDoc, PrivateGardenDocRecord, PrivateGardenGovernanceContext,
     PrivateGardenGovernanceInput, PrivateGardenGovernanceManifestEntry,
-    PrivateGardenGovernanceOutcome, PrivateGardenStore, ProceduralMemoryPromotionPolicy,
-    ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
-    ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
-    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, QueryFacet,
-    QueryFacetInput, QueryFacetParser, RecallCandidate, RecallDeliveryCandidate,
-    RecallDeliveryOrderingPolicy, RecallDeliveryText, RecallSelectionReport,
-    RedactedTranscriptSlice, SessionMessage, SessionMessageRecord, SessionStore,
-    SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
+    PrivateGardenGovernanceOutcome, PrivateGardenStore, ProceduralMemoryDeliveryReport,
+    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProjectionBudgetDecision,
+    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, PromptMemoryContextParams,
+    PromptParticipationPlan, PromptProjectionSource, PromptProjectionSurfaceRole,
+    PromptRecallIntent, QueryFacet, QueryFacetInput, QueryFacetParser, RecallCandidate,
+    RecallDeliveryCandidate, RecallDeliveryOrderingPolicy, RecallDeliveryText,
+    RecallSelectionReport, RedactedTranscriptSlice, SessionMessage, SessionMessageRecord,
+    SessionStore, SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
     SharedMemoryWriteOutcome, SharedMemoryWriteSource, SkillEvolutionReport, SubjectKind,
     SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
     SubjectProjectionWorkIntegrityReport, SubjectRegistry, SubjectRelationshipGraph,
@@ -108,7 +126,10 @@ use bm_core::memory::{
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MAX_LONG_TERM_MEMORY_ITEMS,
     MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, PRIVATE_GARDEN_MAX_DOC_BYTES,
 };
-use bm_core::metrics::{OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricsReport};
+use bm_core::metrics::{
+    OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricEventKind, RuntimeMetricsQuery,
+    RuntimeMetricsReport,
+};
 use bm_core::platform::{Platform, SkillStorage};
 use bm_core::resource::RuntimeResourceSnapshot;
 use bm_core::runtime::soul_kernel::{
@@ -123,20 +144,39 @@ use bm_core::runtime::{
 };
 use bm_core::skills::{
     build_agent_skill_registry_snapshot, build_agent_tool_registry_report,
-    build_projected_agent_skill_hints, get_disabled_skills, govern_agent_tool_usage_feedback,
-    is_runtime_skill_name, list_agent_tool_experience_records, list_runtime_skill_records,
-    plan_agent_tool_experience_record, plan_governed_runtime_skills, retrieve_agent_skill_hits,
-    retrieve_runtime_skill_hits, select_agent_tool_hints, validate_agent_tool_registry_snapshot,
-    AgentSkillDirConfig, AgentSkillProjectionAudit, AgentSkillRegistrySnapshot,
-    AgentToolProjectionAudit, AgentToolRegistryReport, AgentToolRegistrySnapshot,
-    RuntimeSkillRecord, RuntimeSkillStatus, RuntimeSkillStorageMutation, RuntimeSkillWriteAction,
+    build_projected_agent_skill_hints, build_runtime_skill_projection_material,
+    build_runtime_skill_recall_plan, govern_agent_tool_usage_feedback,
+    govern_runtime_skill_write_shapes, is_runtime_skill_name, list_agent_tool_experience_records,
+    plan_agent_tool_experience_record, retrieve_agent_skill_hits,
+    runtime_skill_projection_candidate_ref, runtime_skill_scope_manifest_key,
+    select_agent_tool_hints, validate_agent_tool_registry_snapshot, AgentSkillDirConfig,
+    AgentSkillProjectionAudit, AgentSkillRegistrySnapshot, AgentToolProjectionAudit,
+    AgentToolRegistryReport, AgentToolRegistrySnapshot, RuntimeSkillApplicability,
+    RuntimeSkillApplicabilityContext, RuntimeSkillAvailability, RuntimeSkillCreationRef,
+    RuntimeSkillDeliveryDropReason, RuntimeSkillEvidenceBinding, RuntimeSkillEvidenceKind,
+    RuntimeSkillFailureMode, RuntimeSkillIntrinsicContract, RuntimeSkillLifecycle,
+    RuntimeSkillLifecycleState, RuntimeSkillOperationAuthorityRef, RuntimeSkillOwnerBinding,
+    RuntimeSkillOwnerLocator, RuntimeSkillOwnerRecord, RuntimeSkillOwningScope,
+    RuntimeSkillPremise, RuntimeSkillPremiseObservation, RuntimeSkillProceduralContent,
+    RuntimeSkillProjectionMaterial, RuntimeSkillProjectionPolicy,
+    RuntimeSkillProjectionRenderReceipt, RuntimeSkillRecallAuthority,
+    RuntimeSkillRecallBudgetAuthority, RuntimeSkillRecallPlan, RuntimeSkillRecallQuery,
+    RuntimeSkillScopeManifest, RuntimeSkillStorageMutation, RuntimeSkillTrigger,
+    RuntimeSkillTriggerKind, RuntimeSkillWriteAction,
+    RUNTIME_SKILL_GOVERNED_CONTRACT_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
+use crate::ops::{
+    LLMRuntimeProjectionEnvelope, MemoryProjectionDeliveryDigestContentEntry,
+    MemoryProjectionDeliveryDigestEntry, MemoryProjectionDeliveryDigestManifest,
+    MemoryProjectionProceduralDigestContentEntry, MemoryProjectionProceduralDigestReceipt,
+    MemoryProjectionSurfaceSet, RuntimeProjectionSourceBlock,
+};
 use crate::{
-    resolve_memory_capabilities, Error, LLMRuntimeProjectionEnvelope, LlmClient,
-    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
+    Error, GovernedRuntimeSkillWriteInput, LlmClient, MemoryArchiveScope, MemoryCapabilityCatalog,
+    MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
     MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest,
     MemoryEvalEvidenceApplicability, MemoryEvalQuestionEvaluation, MemoryEvalRecallAtK,
     MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
@@ -156,31 +196,29 @@ use crate::{
     MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
     MemoryMaintenanceRequest, MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryProfile,
-    MemoryProjectionAuditReport, MemoryProjectionDeliveryDigestContentEntry,
-    MemoryProjectionDeliveryDigestEntry, MemoryProjectionDeliveryDigestManifest,
+    MemoryProjectionAuditReport, MemoryProjectionGatewayAuditView, MemoryProjectionOutput,
     MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
-    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryProjectionSurfaceSet,
-    MemoryRecallDeliveryReport, MemoryRecallRenderDecision, MemoryRecallRenderDropReason,
-    MemoryRecallReport, MemoryRecallRequest, MemoryRecallSelectionDecision,
-    MemoryRecallSelectionDropReason, MemoryRecoverReport, MemoryRecoverRequest,
-    MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
+    MemoryProjectionSafeAuditReport, MemoryProjectionSectionAudit, MemoryProjectionSourceAudit,
+    MemoryRecallDeliveryReport, MemoryRecallDeliverySafeView, MemoryRecallRenderDecision,
+    MemoryRecallRenderDropReason, MemoryRecallReport, MemoryRecallRequest,
+    MemoryRecallSelectionDecision, MemoryRecallSelectionDropReason, MemoryRecoverReport,
+    MemoryRecoverRequest, MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
     MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest, MemoryRuntimeSystemKind,
     MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
-    MemorySpaceImportRequest, MemorySpaceMigrateApplyReport, MemorySpaceMigrateApplyRequest,
-    MemorySpaceMigratePreviewReport, MemorySpaceMigratePreviewRequest, MemorySpaceScope,
-    MemoryStoreHandle, MemoryTranscriptAttrWriteReport, MemoryTranscriptAttrWriteRequest,
-    MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest, MemoryTranscriptExportReport,
-    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
+    MemorySpaceImportRequest, MemoryStoreHandle, MemoryTranscriptAttrWriteReport,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
+    MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
     MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport,
-    PressureLevel, PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport, Result,
-    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
-    RuntimeProjectionSourceBlock, RuntimeSkillDeleteRequest, RuntimeSkillDetailReport,
-    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListReport,
-    RuntimeSkillListRequest, RuntimeSkillMutationReport, RuntimeSkillReuseOutcome,
-    RuntimeSkillSetEnabledRequest, RuntimeSkillSummary, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    SoulLifeProjectionReport, TemporalMemoryGraphMutationReport, TemporalMemoryGraphNodeOwnerRef,
+    PressureLevel, PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport,
+    ProceduralMemoryDeliveryView, ProviderProjectionMaintenanceCarry, ProviderProjectionPayload,
+    Result, RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    RuntimeSkillDetailReport, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
+    RuntimeSkillListReport, RuntimeSkillListRequest, RuntimeSkillMutationReport,
+    RuntimeSkillRetireRequest, RuntimeSkillReuseOutcome, RuntimeSkillSetEnabledRequest,
+    RuntimeSkillSummary, RuntimeSkillWrite, RuntimeSkillWriteSource, SoulLifeProjectionReport,
+    TemporalMemoryGraphMutationReport, TemporalMemoryGraphNodeOwnerRef,
     TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
     MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION,
 };
@@ -385,6 +423,67 @@ fn test_host_profile() -> ProfileId {
     #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "linux"))]
     {
         ProfileId::ServerLinuxMemoryGateway
+    }
+}
+
+#[cfg(test)]
+mod historical_as_of_profile_admission_tests {
+    use super::*;
+
+    fn obsolete_decision(owner_id: &str) -> GovernedRecallEligibilityDecision {
+        GovernedRecallEligibilityDecision {
+            eligibility: GovernedRecallEligibility::Excluded,
+            primary_reason: Some(GovernedRecallEligibilityReason::Obsolete),
+            reasons: vec![GovernedRecallEligibilityReason::Obsolete],
+            owner_revision_ref: bm_core::memory::GovernedOwnerRevisionRef::try_new(
+                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner_id),
+                1,
+            )
+            .expect("owner revision"),
+            query_time: 2,
+            effective_time: 2,
+            premise_decision_ref: None,
+            profile_budget_drop: GovernedProfileBudgetDrop::None,
+        }
+    }
+
+    #[test]
+    fn all_three_nonparticipating_profiles_fail_the_runtime_gate() {
+        for profile in [
+            ProfileId::EspStandaloneMemory,
+            ProfileId::EspEmbeddedSdk,
+            ProfileId::LinuxDeviceStandaloneMemory,
+        ] {
+            let error = ensure_historical_as_of_profile_participation(profile)
+                .expect_err("nonparticipating historical profile must fail closed");
+            assert_eq!(error.stage(), "governed_historical_recall");
+        }
+    }
+
+    #[test]
+    fn all_seven_participating_profiles_pass_the_runtime_gate() {
+        for profile in [
+            ProfileId::DesktopMacosStandaloneMemory,
+            ProfileId::DesktopMacosEmbeddedSdk,
+            ProfileId::DesktopMacosDevFull,
+            ProfileId::DesktopWindowsEmbeddedSdk,
+            ProfileId::DesktopWindowsDevFull,
+            ProfileId::ServerLinuxMemoryGateway,
+            ProfileId::ServerLinuxDevFull,
+        ] {
+            ensure_historical_as_of_profile_participation(profile)
+                .expect("participating historical profile");
+        }
+    }
+
+    #[test]
+    fn obsolete_decision_budget_accepts_exact_ceiling_and_rejects_n_plus_one() {
+        let decisions = [obsolete_decision("owner-a"), obsolete_decision("owner-b")];
+        enforce_historical_obsolete_decision_budget(decisions.iter().take(1), 1)
+            .expect("exact obsolete ceiling");
+        let error = enforce_historical_obsolete_decision_budget(decisions.iter(), 1)
+            .expect_err("obsolete N+1 must fail closed");
+        assert_eq!(error.stage(), "governed_historical_recall");
     }
 }
 
@@ -839,6 +938,14 @@ struct MemoryWriteTransactionCommit<'a> {
     changed_count: usize,
 }
 
+struct LongTermMutationExecution {
+    report: MemoryLongTermMutationReport,
+    #[cfg(feature = "nonproduction-replay-harness")]
+    transaction: Option<MemoryWriteTransactionReport>,
+    #[cfg(feature = "nonproduction-replay-harness")]
+    deleted_raw_addresses: Vec<(String, String)>,
+}
+
 #[derive(Default)]
 struct MemoryStoreMutationPlan {
     mutations: Vec<StoreMutation>,
@@ -1006,18 +1113,22 @@ struct EvalRecallStageDiagnosticInput<'a> {
 }
 
 struct RecallDeliveryBuildContext<'a> {
+    runtime_budget: &'a RuntimeBudgetReport,
     read_view: &'a RecallReadView,
     long_term_memory_store: &'a dyn LongTermMemoryReadStore,
+    long_term_owner_states: &'a BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermRecallState>,
     query: &'a str,
     requested_limit: usize,
     graph_rerank: &'a GraphRecallRerankReport,
     candidate_owner_refs: &'a BTreeMap<String, GovernedMemoryOwnerRef>,
+    temporal_operation: crate::MemoryRecallTemporalOperation,
     feature_flags: RecallFeatureFlags,
 }
 
 struct RecallPrivacyBuildContext<'a> {
     read_view: &'a RecallReadView,
     long_term_memory_store: &'a dyn LongTermMemoryReadStore,
+    long_term_owner_states: &'a BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermRecallState>,
     candidate_owner_refs: &'a BTreeMap<String, GovernedMemoryOwnerRef>,
     source_candidate_ids: &'a [String],
     graph_anchor_candidate_ids: &'a [String],
@@ -1027,6 +1138,7 @@ struct RecallPrivacyBuildContext<'a> {
 }
 
 struct FacetRecallBuildContext<'a> {
+    runtime_budget: &'a RuntimeBudgetReport,
     read_view: &'a RecallReadView,
     long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     query_facets: &'a [QueryFacet],
@@ -1169,11 +1281,14 @@ pub struct MemoryRuntimeConfig {
     pub audit_sink: Arc<dyn MemoryAuditSink>,
     runtime_budget_authority: Arc<RuntimeBudgetAuthority>,
     pub agent_skill_registry: AgentSkillRegistrySnapshot,
+    runtime_skill_applicability_context: RuntimeSkillApplicabilityContext,
+    runtime_skill_premise_observations: Vec<RuntimeSkillPremiseObservation>,
 }
 
 pub struct MemoryRuntime {
     pub(crate) config: MemoryRuntimeConfig,
     pub(crate) capabilities: MemoryCapabilityCatalog,
+    runtime_skill_materializer_resolver: RuntimeSkillRecallMaterializerResolver,
     lifecycle: RuntimeLifecycleEngine,
     agent_tool_registries: Mutex<Vec<AgentToolRegistrySnapshot>>,
     last_conversation_id: Mutex<Option<String>>,
@@ -1241,9 +1356,1390 @@ impl LongTermMemoryReadStore for GovernedLongTermMemoryReadView<'_> {
     }
 }
 
+#[derive(Clone)]
+struct MaterializedLongTermRecallState {
+    projection: LongTermMemoryVersionReadProjection,
+    dynamic_state_resolution: DynamicStateResolutionReport,
+    lineage_report: Option<MemoryUpdateLineageReport>,
+    selected_decision: GovernedRecallEligibilityDecision,
+}
+
+struct MaterializedLongTermRecallClosure {
+    owner_states: BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermRecallState>,
+    eligibility_report: GovernedRecallEligibilityReport,
+    #[cfg(feature = "nonproduction-replay-harness")]
+    p8_counterfactual_inputs: Vec<crate::P8SemanticLongTermCounterfactualInput>,
+}
+
+struct MaterializedRuntimeSkillProjection {
+    plan: RuntimeSkillRecallPlan,
+    report: ProceduralMemoryDeliveryReport,
+    material: Option<RuntimeSkillProjectionMaterial>,
+    render_receipt: RuntimeSkillProjectionRenderReceipt,
+}
+
+struct MaterializedProductionRecall {
+    report: MemoryRecallReport,
+    long_term: MaterializedLongTermRecallClosure,
+    procedural: Vec<MaterializedRuntimeSkillProjection>,
+    runtime_skill_materializer: Option<RuntimeSkillMaterializerObservation>,
+    manifest_closure: ValidatedRecallManifestClosure,
+}
+
+enum ProductionRecallReadViewMaterialization {
+    Ready {
+        read_view: RecallReadView,
+        runtime_skill_materializer: Option<RuntimeSkillMaterializerObservation>,
+    },
+}
+
+struct RecallImmutableSessionBinding {
+    temporal_operation: crate::MemoryRecallTemporalOperation,
+    receipt: StoreReadReceipt,
+    exact_closure: RecallExactClosureEvidence,
+}
+
+struct RecallExactClosureEvidence {
+    manifest_verified: bool,
+    read_set_exact: bool,
+    session_open_count: u64,
+    receipt_count: u64,
+}
+
+struct ValidatedRecallManifestClosure;
+
+impl ValidatedRecallManifestClosure {
+    const fn is_verified(&self) -> bool {
+        true
+    }
+}
+
+impl RecallImmutableSessionBinding {
+    fn new(
+        temporal_operation: crate::MemoryRecallTemporalOperation,
+        receipt: StoreReadReceipt,
+        read_set: RecallReadSetClosureEvidence,
+        session_open_count: u64,
+        receipt_count: u64,
+        manifest_closure: &ValidatedRecallManifestClosure,
+    ) -> Result<Self> {
+        if receipt.state_digest.len() != 64
+            || !receipt
+                .state_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(Error::config(
+                "production_recall_read_session",
+                "immutable store read receipt has an invalid private state digest",
+            ));
+        }
+        let materialized_entry_count = receipt
+            .json_doc_count
+            .checked_add(receipt.blob_count)
+            .ok_or_else(|| {
+                Error::config(
+                    "production_recall_read_session",
+                    "immutable store read receipt count overflow",
+                )
+            })?;
+        if receipt.entry_count < materialized_entry_count {
+            return Err(Error::config(
+                "production_recall_read_session",
+                "immutable store read receipt counts are inconsistent",
+            ));
+        }
+        if !read_set.read_set_exact
+            || session_open_count != 1
+            || receipt_count != 1
+            || !manifest_closure.is_verified()
+        {
+            return Err(Error::config(
+                "production_recall_read_session",
+                "immutable exact-closure evidence is incomplete",
+            ));
+        }
+        Ok(Self {
+            temporal_operation,
+            receipt,
+            exact_closure: RecallExactClosureEvidence {
+                manifest_verified: manifest_closure.is_verified(),
+                read_set_exact: read_set.read_set_exact,
+                session_open_count,
+                receipt_count,
+            },
+        })
+    }
+
+    fn validate_for(&self, temporal_operation: crate::MemoryRecallTemporalOperation) -> Result<()> {
+        if self.temporal_operation != temporal_operation {
+            return Err(Error::config(
+                "production_recall_closure",
+                "immutable store read receipt temporal operation differs from the closure",
+            ));
+        }
+        if self.receipt.state_digest.len() != 64 {
+            return Err(Error::config(
+                "production_recall_closure",
+                "immutable store read receipt is missing from the closure",
+            ));
+        }
+        Ok(())
+    }
+
+    fn exact_closure(&self) -> &RecallExactClosureEvidence {
+        &self.exact_closure
+    }
+}
+
+struct ProductionRecallClosure {
+    report: MemoryRecallReport,
+    long_term: MaterializedLongTermRecallClosure,
+    procedural: Vec<MaterializedRuntimeSkillProjection>,
+    authority: RecallOperationAuthoritySnapshot,
+    immutable_session: RecallImmutableSessionBinding,
+    runtime_skill_materializer_dispatch: Option<RuntimeSkillMaterializerDispatchReceipt>,
+    #[cfg(feature = "nonproduction-replay-harness")]
+    p8_no_execution_authority: crate::P8NoExecutionCounterfactualAuthority,
+}
+
+#[derive(Clone)]
+struct RecallOperationAuthoritySnapshot {
+    safe_view: crate::RecallOperationAuthoritySafeViewV1,
+    lifecycle_token: String,
+    runtime_budget: RuntimeBudgetReport,
+    operation_time: u64,
+    profile_entry: ProfileCapabilityCatalogEntry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeSkillRecallMaterializerResolver {
+    profile_entry: ProfileCapabilityCatalogEntry,
+    backend: StoreBackendKind,
+    exact_manifest_materializer_available: bool,
+    transport: crate::RuntimeSkillRecallTransport,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeSkillMaterializerObservation {
+    transport: crate::RuntimeSkillRecallTransport,
+    backend: StoreBackendKind,
+    manifest_key_count: usize,
+    owner_key_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeSkillMaterializerDispatchReceipt {
+    transport: crate::RuntimeSkillRecallTransport,
+    backend: StoreBackendKind,
+    session_token: String,
+    manifest_key_count: usize,
+    owner_key_count: usize,
+    exact_read_set: bool,
+}
+
+fn runtime_skill_dispatch_required(
+    temporal_operation: crate::MemoryRecallTemporalOperation,
+    transport: crate::RuntimeSkillRecallTransport,
+) -> bool {
+    matches!(
+        temporal_operation,
+        crate::MemoryRecallTemporalOperation::Current
+    ) && transport != crate::RuntimeSkillRecallTransport::Unavailable
+}
+
+impl RuntimeSkillRecallMaterializerResolver {
+    fn resolve(
+        profile_entry: ProfileCapabilityCatalogEntry,
+        backend: StoreBackendKind,
+        exact_manifest_materializer_available: bool,
+    ) -> Self {
+        let transport = if profile_entry.indexed_runtime_skill_recall_allowed
+            && cfg!(feature = "sqlite-store")
+            && backend == StoreBackendKind::Sqlite
+            && exact_manifest_materializer_available
+        {
+            crate::RuntimeSkillRecallTransport::IndexedSqlite
+        } else if profile_entry.compact_runtime_skill_recall_allowed
+            && ((backend == StoreBackendKind::Embedded && cfg!(feature = "embedded-store"))
+                || backend == StoreBackendKind::InMemory)
+            && exact_manifest_materializer_available
+        {
+            crate::RuntimeSkillRecallTransport::CompactTypedDirect
+        } else {
+            crate::RuntimeSkillRecallTransport::Unavailable
+        };
+        Self {
+            profile_entry,
+            backend,
+            exact_manifest_materializer_available,
+            transport,
+        }
+    }
+
+    fn materialize_for_operation(
+        &self,
+        temporal_operation: crate::MemoryRecallTemporalOperation,
+        context: &mut RecallImmutableReadContext<'_>,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        max_owners_per_scope: usize,
+    ) -> Result<Option<RuntimeSkillMaterializerObservation>> {
+        if matches!(
+            temporal_operation,
+            crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
+        ) || self.transport == crate::RuntimeSkillRecallTransport::Unavailable
+        {
+            return Ok(None);
+        }
+        if !self.exact_manifest_materializer_available {
+            return Err(Error::config(
+                "runtime_skill_materializer_dispatch",
+                "selected transport lacks the open-verified exact manifest materializer",
+            ));
+        }
+        let (manifest_key_count, owner_key_count) = context.materialize_runtime_skill_scopes(
+            memory_space_id,
+            mounted_subject_id,
+            max_owners_per_scope,
+        )?;
+        Ok(Some(RuntimeSkillMaterializerObservation {
+            transport: self.transport,
+            backend: self.backend,
+            manifest_key_count,
+            owner_key_count,
+        }))
+    }
+
+    fn finish_dispatch(
+        &self,
+        observation: RuntimeSkillMaterializerObservation,
+        authority: &RecallOperationAuthoritySnapshot,
+        receipt: &StoreReadReceipt,
+        exact_read_set: bool,
+    ) -> Result<RuntimeSkillMaterializerDispatchReceipt> {
+        if observation.transport != self.transport
+            || observation.backend != self.backend
+            || authority.profile_entry != self.profile_entry
+            || authority.safe_view.runtime_skill_transport != self.transport
+            || self.transport == crate::RuntimeSkillRecallTransport::Unavailable
+            || !exact_read_set
+        {
+            return Err(Error::config(
+                "runtime_skill_materializer_dispatch",
+                "materializer selection, authority, or exact read-set drifted",
+            ));
+        }
+        let token_bytes = serde_json::to_vec(&(
+            "runtime_skill_materializer_session_v1",
+            authority.safe_view.authority_ref().as_str(),
+            &authority.lifecycle_token,
+            self.backend.as_str(),
+            &receipt.state_digest,
+            receipt.json_doc_count,
+            receipt.blob_count,
+            receipt.event_count,
+            receipt.entry_count,
+            receipt.json_bytes,
+            receipt.blob_bytes,
+            observation.manifest_key_count,
+            observation.owner_key_count,
+        ))
+        .map_err(|error| Error::config("runtime_skill_materializer_dispatch", error.to_string()))?;
+        Ok(RuntimeSkillMaterializerDispatchReceipt {
+            transport: self.transport,
+            backend: self.backend,
+            session_token: format!(
+                "runtime_skill_materializer_session:sha256:{:x}",
+                Sha256::digest(token_bytes)
+            ),
+            manifest_key_count: observation.manifest_key_count,
+            owner_key_count: observation.owner_key_count,
+            exact_read_set,
+        })
+    }
+
+    fn validate_dispatch_for_operation(
+        &self,
+        temporal_operation: crate::MemoryRecallTemporalOperation,
+        authority: &RecallOperationAuthoritySnapshot,
+        dispatch: Option<&RuntimeSkillMaterializerDispatchReceipt>,
+    ) -> Result<()> {
+        if authority.profile_entry != self.profile_entry
+            || authority.safe_view.runtime_skill_transport != self.transport
+        {
+            return Err(Error::config(
+                "runtime_skill_materializer_dispatch",
+                "operation authority differs from the runtime materializer resolver",
+            ));
+        }
+        let dispatch_required = runtime_skill_dispatch_required(temporal_operation, self.transport);
+        match (dispatch_required, dispatch) {
+            (true, Some(dispatch)) if dispatch.backend == self.backend => {
+                dispatch.validate_for(authority)
+            }
+            (false, None) => Ok(()),
+            _ => Err(Error::config(
+                "runtime_skill_materializer_dispatch",
+                "dispatch receipt presence differs from temporal and transport authority",
+            )),
+        }
+    }
+}
+
+impl RuntimeSkillMaterializerDispatchReceipt {
+    fn validate_for(&self, authority: &RecallOperationAuthoritySnapshot) -> Result<()> {
+        if self.transport != authority.safe_view.runtime_skill_transport
+            || !self.exact_read_set
+            || !self
+                .session_token
+                .strip_prefix("runtime_skill_materializer_session:sha256:")
+                .is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                })
+            || self.transport == crate::RuntimeSkillRecallTransport::Unavailable
+            || self.manifest_key_count != 2
+            || self.backend.as_str().is_empty()
+        {
+            return Err(Error::config(
+                "runtime_skill_materializer_dispatch",
+                "dispatch receipt differs from the operation authority or exact materializer",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod runtime_skill_materializer_resolver_contract_tests {
+    use super::*;
+
+    fn entry(profile: ProfileId) -> ProfileCapabilityCatalogEntry {
+        profile_capability_catalog()
+            .iter()
+            .find(|entry| entry.profile == profile)
+            .copied()
+            .expect("profile entry")
+    }
+
+    #[test]
+    fn resolver_selects_exactly_one_transport_from_profile_backend_feature_and_open_truth() {
+        assert_eq!(
+            RuntimeSkillRecallMaterializerResolver::resolve(
+                entry(ProfileId::EspStandaloneMemory),
+                StoreBackendKind::InMemory,
+                true,
+            )
+            .transport,
+            crate::RuntimeSkillRecallTransport::CompactTypedDirect
+        );
+        assert_eq!(
+            RuntimeSkillRecallMaterializerResolver::resolve(
+                entry(ProfileId::DesktopMacosStandaloneMemory),
+                StoreBackendKind::InMemory,
+                true,
+            )
+            .transport,
+            crate::RuntimeSkillRecallTransport::Unavailable
+        );
+        assert_eq!(
+            RuntimeSkillRecallMaterializerResolver::resolve(
+                entry(ProfileId::DesktopMacosStandaloneMemory),
+                StoreBackendKind::File,
+                true,
+            )
+            .transport,
+            crate::RuntimeSkillRecallTransport::Unavailable
+        );
+        assert_eq!(
+            RuntimeSkillRecallMaterializerResolver::resolve(
+                entry(ProfileId::EspStandaloneMemory),
+                StoreBackendKind::InMemory,
+                false,
+            )
+            .transport,
+            crate::RuntimeSkillRecallTransport::Unavailable
+        );
+        assert_eq!(
+            RuntimeSkillRecallMaterializerResolver::resolve(
+                entry(ProfileId::DesktopMacosStandaloneMemory),
+                StoreBackendKind::Sqlite,
+                true,
+            )
+            .transport,
+            if cfg!(feature = "sqlite-store") {
+                crate::RuntimeSkillRecallTransport::IndexedSqlite
+            } else {
+                crate::RuntimeSkillRecallTransport::Unavailable
+            }
+        );
+        assert_eq!(
+            RuntimeSkillRecallMaterializerResolver::resolve(
+                entry(ProfileId::EspEmbeddedSdk),
+                StoreBackendKind::Embedded,
+                true,
+            )
+            .transport,
+            if cfg!(feature = "embedded-store") {
+                crate::RuntimeSkillRecallTransport::CompactTypedDirect
+            } else {
+                crate::RuntimeSkillRecallTransport::Unavailable
+            }
+        );
+    }
+
+    #[test]
+    fn all_profiles_backends_and_open_truth_have_one_exact_transport_result() {
+        let profiles = [
+            (
+                ProfileId::EspStandaloneMemory,
+                crate::RuntimeSkillRecallTransport::CompactTypedDirect,
+            ),
+            (
+                ProfileId::EspEmbeddedSdk,
+                crate::RuntimeSkillRecallTransport::CompactTypedDirect,
+            ),
+            (
+                ProfileId::LinuxDeviceStandaloneMemory,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::DesktopMacosStandaloneMemory,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::DesktopMacosEmbeddedSdk,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::DesktopMacosDevFull,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::DesktopWindowsEmbeddedSdk,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::DesktopWindowsDevFull,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::ServerLinuxMemoryGateway,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::ServerLinuxDevFull,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+        ];
+        let backends = [
+            StoreBackendKind::InMemory,
+            StoreBackendKind::File,
+            StoreBackendKind::Sqlite,
+            StoreBackendKind::Embedded,
+        ];
+        for (profile, canonical_transport) in profiles {
+            for backend in backends {
+                for open_verified in [false, true] {
+                    let expected = if !open_verified {
+                        crate::RuntimeSkillRecallTransport::Unavailable
+                    } else {
+                        match canonical_transport {
+                            crate::RuntimeSkillRecallTransport::CompactTypedDirect
+                                if backend == StoreBackendKind::InMemory
+                                    || (backend == StoreBackendKind::Embedded
+                                        && cfg!(feature = "embedded-store")) =>
+                            {
+                                crate::RuntimeSkillRecallTransport::CompactTypedDirect
+                            }
+                            crate::RuntimeSkillRecallTransport::IndexedSqlite
+                                if backend == StoreBackendKind::Sqlite
+                                    && cfg!(feature = "sqlite-store") =>
+                            {
+                                crate::RuntimeSkillRecallTransport::IndexedSqlite
+                            }
+                            _ => crate::RuntimeSkillRecallTransport::Unavailable,
+                        }
+                    };
+                    assert_eq!(
+                        RuntimeSkillRecallMaterializerResolver::resolve(
+                            entry(profile),
+                            backend,
+                            open_verified,
+                        )
+                        .transport,
+                        expected,
+                        "{profile:?} {backend:?} open_verified={open_verified}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_presence_is_exact_for_temporal_operation_and_transport() {
+        for transport in [
+            crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            crate::RuntimeSkillRecallTransport::CompactTypedDirect,
+        ] {
+            assert!(runtime_skill_dispatch_required(
+                crate::MemoryRecallTemporalOperation::Current,
+                transport,
+            ));
+            assert!(!runtime_skill_dispatch_required(
+                crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time: 1 },
+                transport,
+            ));
+        }
+        assert!(!runtime_skill_dispatch_required(
+            crate::MemoryRecallTemporalOperation::Current,
+            crate::RuntimeSkillRecallTransport::Unavailable,
+        ));
+        assert!(!runtime_skill_dispatch_required(
+            crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time: 1 },
+            crate::RuntimeSkillRecallTransport::Unavailable,
+        ));
+    }
+
+    #[test]
+    fn runtime_capability_consumes_the_resolver_transport_without_reselection() {
+        let policy = crate::MemoryCapabilityPolicy::strict_profile();
+        let privacy = crate::MemoryPrivacyPolicy::standard_private_boundary();
+        let compact = RuntimeSkillRecallMaterializerResolver::resolve(
+            entry(ProfileId::EspStandaloneMemory),
+            StoreBackendKind::InMemory,
+            true,
+        );
+        let catalog = crate::capability::resolve_memory_capabilities_for_runtime(
+            ProfileId::EspStandaloneMemory,
+            &policy,
+            &privacy,
+            compact.transport,
+        )
+        .expect("runtime capability");
+        assert_eq!(
+            catalog.governed_state.runtime_skill_recall_transport,
+            compact.transport
+        );
+        assert!(catalog.governed_state.dynamic_state_recall.visible);
+        assert!(
+            catalog
+                .governed_state
+                .environment_premise_evaluation
+                .visible
+        );
+        assert!(catalog.governed_state.procedural_recall.visible);
+
+        let unavailable = RuntimeSkillRecallMaterializerResolver::resolve(
+            entry(ProfileId::DesktopMacosStandaloneMemory),
+            StoreBackendKind::InMemory,
+            true,
+        );
+        let catalog = crate::capability::resolve_memory_capabilities_for_runtime(
+            ProfileId::DesktopMacosStandaloneMemory,
+            &policy,
+            &privacy,
+            unavailable.transport,
+        )
+        .expect("runtime capability");
+        assert_eq!(
+            catalog.governed_state.runtime_skill_recall_transport,
+            crate::RuntimeSkillRecallTransport::Unavailable
+        );
+        assert!(!catalog.governed_state.procedural_recall.visible);
+        assert!(catalog.governed_state.dynamic_state_recall.visible);
+
+        let mut policy_off = policy.clone();
+        policy_off.recall_enabled = false;
+        let catalog = crate::capability::resolve_memory_capabilities_for_runtime(
+            ProfileId::EspStandaloneMemory,
+            &policy_off,
+            &privacy,
+            compact.transport,
+        )
+        .expect("policy-off capability");
+        assert!(!catalog.governed_state.dynamic_state_recall.visible);
+        assert!(!catalog.governed_state.procedural_recall.visible);
+        assert!(
+            !catalog
+                .governed_state
+                .environment_premise_evaluation
+                .visible
+        );
+
+        let mut privacy_off = privacy;
+        privacy_off.prompt_projection_allowed = false;
+        let catalog = crate::capability::resolve_memory_capabilities_for_runtime(
+            ProfileId::EspStandaloneMemory,
+            &policy,
+            &privacy_off,
+            compact.transport,
+        )
+        .expect("privacy-off capability");
+        assert!(!catalog.governed_state.dynamic_state_recall.visible);
+        assert!(!catalog.governed_state.procedural_recall.visible);
+        assert!(
+            !catalog
+                .governed_state
+                .environment_premise_evaluation
+                .visible
+        );
+    }
+}
+
+fn checked_safe_count(stage: &'static str, value: usize) -> Result<u64> {
+    u64::try_from(value).map_err(|_| Error::config(stage, "safe report count exceeds u64"))
+}
+
+impl MemoryRuntime {
+    fn build_recall_operation_authority_snapshot(
+        &self,
+        lifecycle: &RuntimeLifecycleReport,
+        temporal_operation: crate::MemoryRecallTemporalOperation,
+        requested_limit: usize,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<RecallOperationAuthoritySnapshot> {
+        let governed = runtime_budget.governed_state_budget;
+        let ceilings = crate::GovernedRecallBudgetSafeCeilingsV1 {
+            max_validity_joins: checked_safe_count(
+                "recall_operation_authority",
+                governed.max_validity_joins,
+            )?,
+            max_lineage_depth: checked_safe_count(
+                "recall_operation_authority",
+                governed.max_lineage_depth,
+            )?,
+            max_as_of_candidates: checked_safe_count(
+                "recall_operation_authority",
+                governed.max_as_of_candidates,
+            )?,
+            max_obsolete_decisions: checked_safe_count(
+                "recall_operation_authority",
+                governed.max_obsolete_decisions,
+            )?,
+            max_procedural_candidates: checked_safe_count(
+                "recall_operation_authority",
+                governed.max_procedural_candidates,
+            )?,
+            max_premises_per_skill: checked_safe_count(
+                "recall_operation_authority",
+                governed.max_premises_per_skill,
+            )?,
+            max_premise_evidence_reads: checked_safe_count(
+                "recall_operation_authority",
+                governed.max_premise_evidence_reads,
+            )?,
+            effective_selected_candidates: checked_safe_count(
+                "recall_operation_authority",
+                requested_limit.max(1).min(
+                    runtime_budget
+                        .recall_delivery_budget
+                        .max_selected_candidates,
+                ),
+            )?,
+        };
+        let capability_catalog_identity =
+            crate::capability_snapshot::platform_capability_snapshot_identity(&self.capabilities);
+        let budget_report_identity = runtime_budget.report_id.clone();
+        let profile_entry = profile_capability_catalog()
+            .iter()
+            .find(|entry| entry.profile == self.config.profile)
+            .copied()
+            .ok_or_else(|| {
+                Error::config(
+                    "recall_operation_authority",
+                    "runtime profile lacks governed-state participation authority",
+                )
+            })?;
+        if matches!(
+            temporal_operation,
+            crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
+        ) && !profile_entry.historical_as_of_recall_allowed
+        {
+            return Err(Error::config(
+                "governed_historical_recall",
+                "runtime profile does not participate in historical as-of recall",
+            ));
+        }
+        let registry_validation = self.config.subject_registry.validate_contract();
+        if !registry_validation.accepted {
+            return Err(Error::config(
+                "recall_operation_authority",
+                "subject registry failed its existing contract",
+            ));
+        }
+        let runtime_validation = self
+            .config
+            .scoped_runtime
+            .validate_against_registry(&self.config.subject_registry);
+        if !runtime_validation.accepted {
+            return Err(Error::config(
+                "recall_operation_authority",
+                "subject-scoped runtime failed its existing contract",
+            ));
+        }
+        let mounted_subject = self
+            .config
+            .subject_registry
+            .subject(&self.config.scoped_runtime.mounted_subject_id)
+            .ok_or_else(|| {
+                Error::config(
+                    "recall_operation_authority",
+                    "mounted subject is absent after registry validation",
+                )
+            })?;
+        if matches!(mounted_subject.kind, SubjectKind::AgentPersona)
+            && mounted_subject.soul_binding.is_none()
+        {
+            return Err(Error::config(
+                "recall_operation_authority",
+                "agent persona is missing its existing Soul binding",
+            ));
+        }
+        let mut soul_surfaces = mounted_subject
+            .soul_binding
+            .as_ref()
+            .map(|binding| {
+                binding
+                    .surfaces
+                    .iter()
+                    .map(|surface| surface.label())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        soul_surfaces.sort_unstable();
+        soul_surfaces.dedup();
+        let resource_snapshot_bytes = serde_json::to_vec(&runtime_budget.resource_snapshot)
+            .map_err(|error| Error::config("recall_operation_authority", error.to_string()))?;
+        let resource_observation_identity = crate::governed_report::domain_separated_sha256(
+            "beetle_memory_resource_observation_identity_v1",
+            &[resource_snapshot_bytes.as_slice()],
+        );
+        let privacy_soul_bytes = serde_json::to_vec(&(
+            (
+                lifecycle.event_id.as_str(),
+                runtime_budget.report_id.as_str(),
+                resource_observation_identity,
+                &lifecycle.admission,
+            ),
+            (
+                self.config.privacy_policy.prompt_projection_allowed,
+                self.config.privacy_policy.private_plane_projection_allowed,
+                self.config.privacy_policy.operator_inspection_allowed,
+                self.config.privacy_policy.export_allowed,
+                self.config.privacy_policy.import_allowed,
+            ),
+            (
+                self.config.memory_space_id.as_str(),
+                self.config.scoped_runtime.mounted_subject_id.as_str(),
+                self.config.scoped_runtime.actor_subject_id.as_str(),
+                &self.config.scoped_runtime.relationship_scope,
+                &mounted_subject.kind,
+                &mounted_subject.lifecycle_state,
+                &mounted_subject.visibility,
+                (
+                    mounted_subject
+                        .soul_binding
+                        .as_ref()
+                        .map(|binding| binding.soul_id.as_str()),
+                    mounted_subject
+                        .soul_binding
+                        .as_ref()
+                        .map(|binding| binding.owner_subject_id.as_str()),
+                    soul_surfaces,
+                ),
+            ),
+        ))
+        .map_err(|error| Error::config("recall_operation_authority", error.to_string()))?;
+        let private_admission_commitment =
+            crate::RecallPrivateAdmissionCommitmentRef::derive(&[privacy_soul_bytes.as_slice()]);
+        let transport = self
+            .capabilities
+            .governed_state
+            .runtime_skill_recall_transport;
+        let safe_view = crate::RecallOperationAuthoritySafeViewV1::new(
+            private_admission_commitment,
+            temporal_operation,
+            self.config.profile,
+            crate::PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA.to_string(),
+            capability_catalog_identity,
+            budget_report_identity,
+            ceilings,
+            transport,
+        );
+        Ok(RecallOperationAuthoritySnapshot {
+            safe_view,
+            lifecycle_token: lifecycle.event_id.clone(),
+            runtime_budget: runtime_budget.clone(),
+            operation_time: lifecycle.started_at_unix_secs,
+            profile_entry,
+        })
+    }
+}
+
+fn public_safe_runtime_skill_delivery_views(
+    items: &[MaterializedRuntimeSkillProjection],
+) -> Result<Vec<ProceduralMemoryDeliveryView>> {
+    let mut views = items
+        .iter()
+        .filter(|item| {
+            !item
+                .report
+                .drop_reasons
+                .contains(&RuntimeSkillDeliveryDropReason::PrivacyBlocked)
+        })
+        .map(|item| {
+            Ok(ProceduralMemoryDeliveryView {
+                candidate_ref: runtime_skill_projection_candidate_ref(&item.plan)?,
+                matched: item.report.matched,
+                selected: item.report.selected,
+                rendered: item.report.rendered,
+                drop_reasons: item.report.drop_reasons.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for view in &mut views {
+        view.drop_reasons.sort();
+        view.drop_reasons.dedup();
+    }
+    views.sort_by(|left, right| left.candidate_ref.cmp(&right.candidate_ref));
+    if views
+        .windows(2)
+        .any(|pair| pair[0].candidate_ref == pair[1].candidate_ref)
+    {
+        return Err(Error::config(
+            "governed_recall_safe_report",
+            "procedural safe candidate refs are not unique",
+        ));
+    }
+    Ok(views)
+}
+
+fn safe_owner_revision_ref(
+    owner_revision_ref: &bm_core::memory::GovernedOwnerRevisionRef,
+) -> Result<crate::GovernedOwnerRevisionSafeRef> {
+    let bytes = serde_json::to_vec(owner_revision_ref)
+        .map_err(|error| Error::config("governed_recall_safe_report", error.to_string()))?;
+    Ok(crate::GovernedOwnerRevisionSafeRef::derive(&[
+        bytes.as_slice()
+    ]))
+}
+
+fn checked_increment(stage: &'static str, value: &mut u64, amount: u64) -> Result<()> {
+    *value = value
+        .checked_add(amount)
+        .ok_or_else(|| Error::config(stage, "safe report count overflow"))?;
+    Ok(())
+}
+
+fn build_governed_safe_reports(
+    authority: &RecallOperationAuthoritySnapshot,
+    immutable_session: &RecallImmutableSessionBinding,
+    long_term: &MaterializedLongTermRecallClosure,
+    procedural: &[MaterializedRuntimeSkillProjection],
+    delivery_report: &MemoryRecallDeliveryReport,
+) -> Result<(
+    crate::GovernedRecallPublicReportV1,
+    crate::GovernedRecallOperatorReportV1,
+)> {
+    immutable_session.validate_for(authority.safe_view.temporal_operation)?;
+    validate_materialized_long_term_recall_closure(
+        long_term,
+        authority.safe_view.temporal_operation(),
+        delivery_report,
+    )?;
+    let mut long_term_render_decisions = BTreeMap::new();
+    let mut long_term_capsules = BTreeMap::new();
+    for owner_ref in long_term.owner_states.keys() {
+        let candidate_id = governed_memory_recall_candidate_id(owner_ref);
+        for decision in delivery_report
+            .render_decisions
+            .iter()
+            .filter(|decision| decision.candidate_id == candidate_id)
+        {
+            if long_term_render_decisions
+                .insert(candidate_id.clone(), decision)
+                .is_some()
+            {
+                return Err(Error::config(
+                    "governed_recall_safe_report",
+                    "long-term render decision is not unique",
+                ));
+            }
+        }
+        for capsule in delivery_report
+            .rendered_capsules
+            .iter()
+            .filter(|capsule| capsule.candidate_id == candidate_id)
+        {
+            if long_term_capsules
+                .insert(candidate_id.clone(), capsule)
+                .is_some()
+            {
+                return Err(Error::config(
+                    "governed_recall_safe_report",
+                    "long-term rendered capsule is not unique",
+                ));
+            }
+        }
+    }
+    let mut eligibility_counts = crate::empty_eligibility_counts();
+    for (eligibility, count) in &long_term.eligibility_report.eligibility_counts {
+        eligibility_counts.insert(*eligibility, *count);
+    }
+    let mut reason_counts = crate::empty_reason_counts();
+    for (reason, count) in &long_term.eligibility_report.reason_counts {
+        reason_counts.insert(*reason, *count);
+    }
+
+    let mut validity_candidate_bindings = Vec::with_capacity(long_term.owner_states.len());
+    let mut dynamic_state = Vec::with_capacity(long_term.owner_states.len());
+    let mut bounded_lineage_items = BTreeSet::new();
+    let mut lineage_item_count = 0u64;
+    let mut lineage_failures = Vec::new();
+    for state in long_term.owner_states.values() {
+        let decision = &state.selected_decision;
+        let candidate_ref = safe_owner_revision_ref(&decision.owner_revision_ref)?;
+        let matched = delivery_report.selection_decisions.iter().any(|delivery| {
+            delivery.owner_ref.as_ref() == Some(&decision.owner_revision_ref.owner_ref)
+        });
+        let selected = delivery_report.selection_decisions.iter().any(|delivery| {
+            delivery.owner_ref.as_ref() == Some(&decision.owner_revision_ref.owner_ref)
+                && delivery.selected
+        });
+        let delivery_candidate_id =
+            governed_memory_recall_candidate_id(&decision.owner_revision_ref.owner_ref);
+        let rendered = long_term_render_decisions
+            .get(&delivery_candidate_id)
+            .is_some_and(|decision| decision.rendered)
+            && long_term_capsules.contains_key(&delivery_candidate_id);
+        let mut suppression_reasons = decision.reasons.clone();
+        suppression_reasons.sort();
+        suppression_reasons.dedup();
+        validity_candidate_bindings.push(crate::GovernedCandidateSafeBindingV1 {
+            candidate_ref: candidate_ref.clone(),
+            eligibility: decision.eligibility,
+            primary_reason: decision.primary_reason,
+            suppression_reasons,
+            matched,
+            selected,
+            rendered,
+        });
+        dynamic_state.push(crate::GovernedDynamicStateSafeDecisionV1 {
+            owner_revision: candidate_ref,
+            current_eligibility: state.dynamic_state_resolution.current_decision.eligibility,
+            as_of_eligibility: state
+                .dynamic_state_resolution
+                .as_of_decision
+                .as_ref()
+                .map(|as_of| as_of.eligibility),
+            conflict_count: state.dynamic_state_resolution.conflict_count,
+            unknown_count: state.dynamic_state_resolution.unknown_count,
+        });
+        if let Some(lineage) = state.lineage_report.as_ref() {
+            checked_increment(
+                "governed_recall_safe_report",
+                &mut lineage_item_count,
+                checked_safe_count("governed_recall_safe_report", lineage.items.len())?,
+            )?;
+            lineage_failures.extend(lineage.failures.iter().copied());
+            for item in &lineage.items {
+                bounded_lineage_items.insert(crate::GovernedLineageSafeItemV1 {
+                    owner_revision: safe_owner_revision_ref(&item.owner_revision_ref)?,
+                    predecessor: item
+                        .predecessor
+                        .as_ref()
+                        .map(safe_owner_revision_ref)
+                        .transpose()?,
+                    successor: item
+                        .successor
+                        .as_ref()
+                        .map(safe_owner_revision_ref)
+                        .transpose()?,
+                });
+            }
+        }
+    }
+    validity_candidate_bindings.sort_by(|left, right| left.candidate_ref.cmp(&right.candidate_ref));
+    dynamic_state.sort_by(|left, right| left.owner_revision.cmp(&right.owner_revision));
+
+    let (
+        cycle_count,
+        gap_count,
+        scope_mismatch_count,
+        privacy_mismatch_count,
+        depth_exceeded_count,
+    ) = crate::lineage_failure_counts(lineage_failures)
+        .ok_or_else(|| Error::config("governed_recall_safe_report", "lineage count overflow"))?;
+    let lineage_failure_total = cycle_count
+        .checked_add(gap_count)
+        .and_then(|total| total.checked_add(scope_mismatch_count))
+        .and_then(|total| total.checked_add(privacy_mismatch_count))
+        .and_then(|total| total.checked_add(depth_exceeded_count))
+        .ok_or_else(|| Error::config("governed_recall_safe_report", "lineage count overflow"))?;
+    let lineage = crate::GovernedLineageSafeSummaryV1 {
+        item_count: lineage_item_count,
+        cycle_count,
+        gap_count,
+        scope_mismatch_count,
+        privacy_mismatch_count,
+        depth_exceeded_count,
+        complete: lineage_failure_total == 0,
+    };
+
+    let mut source_counts = crate::empty_premise_source_counts();
+    let mut decision_counts = crate::empty_premise_decision_counts();
+    let mut required_failure_count = 0u64;
+    for item in procedural {
+        let premise = item.plan.premise_report();
+        checked_increment(
+            "governed_recall_safe_report",
+            &mut required_failure_count,
+            premise.required_failure_count,
+        )?;
+        for premise_item in &premise.items {
+            checked_increment(
+                "governed_recall_safe_report",
+                source_counts
+                    .get_mut(&premise_item.source)
+                    .expect("premise source exact map"),
+                1,
+            )?;
+            checked_increment(
+                "governed_recall_safe_report",
+                decision_counts
+                    .get_mut(&premise_item.decision)
+                    .expect("premise decision exact map"),
+                1,
+            )?;
+        }
+    }
+    let premise = crate::PremiseSafeSummaryV1 {
+        source_counts,
+        decision_counts,
+        required_failure_count,
+    };
+    let procedural_delivery = public_safe_runtime_skill_delivery_views(procedural)?;
+    let privacy_suppression_count = *reason_counts
+        .get(&GovernedRecallEligibilityReason::PrivacyBlocked)
+        .expect("reason exact map");
+    let profile_suppression_count = *reason_counts
+        .get(&GovernedRecallEligibilityReason::ProfileBlocked)
+        .expect("reason exact map");
+    let budget_suppression_count = *reason_counts
+        .get(&GovernedRecallEligibilityReason::BudgetBlocked)
+        .expect("reason exact map");
+    let public_report = crate::GovernedRecallPublicReportV1 {
+        schema: crate::GOVERNED_RECALL_PUBLIC_REPORT_SCHEMA_V1.to_string(),
+        authority: authority.safe_view.clone(),
+        eligibility_counts,
+        reason_counts,
+        dynamic_state,
+        lineage,
+        premise,
+        procedural_delivery,
+        validity_candidate_bindings,
+        privacy_suppression_count,
+        profile_suppression_count,
+        budget_suppression_count,
+        integrity_failures: Vec::new(),
+    };
+    let public_failures = public_report.validate_contract();
+    if !public_failures.is_empty() {
+        return Err(Error::config(
+            "governed_recall_safe_report",
+            format!("public safe report failed contract: {public_failures:?}"),
+        ));
+    }
+
+    let receipt_bytes = serde_json::to_vec(&(
+        authority.safe_view.authority_ref().as_str(),
+        authority.lifecycle_token.as_str(),
+        authority.safe_view.temporal_operation,
+        immutable_session.receipt.state_digest.as_str(),
+        checked_safe_count(
+            "governed_recall_safe_report",
+            immutable_session.receipt.json_doc_count,
+        )?,
+        checked_safe_count(
+            "governed_recall_safe_report",
+            immutable_session.receipt.blob_count,
+        )?,
+        checked_safe_count(
+            "governed_recall_safe_report",
+            immutable_session.receipt.event_count,
+        )?,
+        checked_safe_count(
+            "governed_recall_safe_report",
+            immutable_session.receipt.entry_count,
+        )?,
+        checked_safe_count(
+            "governed_recall_safe_report",
+            immutable_session.receipt.json_bytes,
+        )?,
+        checked_safe_count(
+            "governed_recall_safe_report",
+            immutable_session.receipt.blob_bytes,
+        )?,
+    ))
+    .map_err(|error| Error::config("governed_recall_safe_report", error.to_string()))?;
+    let store_snapshot_receipt =
+        crate::RecallStoreSnapshotReceiptRef::derive(&[receipt_bytes.as_slice()]);
+    let operator_payload = crate::GovernedRecallOperatorReportPayloadV1 {
+        schema: crate::GOVERNED_RECALL_OPERATOR_REPORT_SCHEMA_V1.to_string(),
+        public_report: public_report.clone(),
+        store_snapshot_receipt,
+        bounded_lineage_items: bounded_lineage_items.into_iter().collect(),
+        manifest_verified: immutable_session.exact_closure().manifest_verified,
+        read_set_exact: immutable_session.exact_closure().read_set_exact,
+        session_open_count: immutable_session.exact_closure().session_open_count,
+        receipt_count: immutable_session.exact_closure().receipt_count,
+    };
+    let operator_report = crate::GovernedRecallOperatorReportV1::from_payload(operator_payload);
+    let operator_failures = operator_report.validate_contract();
+    if !operator_failures.is_empty() {
+        return Err(Error::config(
+            "governed_recall_safe_report",
+            format!("operator safe report failed contract: {operator_failures:?}"),
+        ));
+    }
+    Ok((public_report, operator_report))
+}
+
+fn validate_materialized_long_term_recall_closure(
+    closure: &MaterializedLongTermRecallClosure,
+    temporal_operation: crate::MemoryRecallTemporalOperation,
+    delivery_report: &MemoryRecallDeliveryReport,
+) -> Result<()> {
+    if !closure.eligibility_report.validate_contract().accepted
+        || closure.eligibility_report.decisions.len() != closure.owner_states.len()
+    {
+        return Err(Error::config(
+            "production_recall_closure",
+            "canonical long-term eligibility closure is invalid",
+        ));
+    }
+
+    let expected_eligibility = match temporal_operation {
+        crate::MemoryRecallTemporalOperation::Current => GovernedRecallEligibility::EligibleCurrent,
+        crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. } => {
+            GovernedRecallEligibility::EligibleHistoricalAsOf
+        }
+    };
+    let eligibility_decisions = closure
+        .eligibility_report
+        .decisions
+        .iter()
+        .map(|decision| (decision.owner_revision_ref.clone(), decision))
+        .collect::<BTreeMap<_, _>>();
+
+    for (owner_ref, state) in &closure.owner_states {
+        let owner_revision_ref = state.projection.material.owner_revision_ref();
+        if owner_ref != &state.projection.material.owner_ref
+            || !state.projection.material.validate_contract().accepted
+            || !state
+                .projection
+                .validity
+                .validate_for(&owner_revision_ref)
+                .accepted
+            || !state.dynamic_state_resolution.validate_contract().accepted
+            || state.dynamic_state_resolution.validity != state.projection.validity
+            || state.selected_decision.owner_revision_ref != owner_revision_ref
+            || eligibility_decisions.get(&owner_revision_ref).copied()
+                != Some(&state.selected_decision)
+        {
+            return Err(Error::config(
+                "production_recall_closure",
+                "long-term owner, revision, dynamic state, or eligibility binding drifted",
+            ));
+        }
+        match temporal_operation {
+            crate::MemoryRecallTemporalOperation::Current => {
+                if closure.eligibility_report.as_of_time.is_some()
+                    || state.lineage_report.is_some()
+                    || state.dynamic_state_resolution.as_of_decision.is_some()
+                    || state.selected_decision != state.dynamic_state_resolution.current_decision
+                    || !matches!(
+                        state.selected_decision.eligibility,
+                        GovernedRecallEligibility::EligibleCurrent
+                            | GovernedRecallEligibility::Excluded
+                    )
+                {
+                    return Err(Error::config(
+                        "production_recall_closure",
+                        "current long-term closure contains historical authority",
+                    ));
+                }
+            }
+            crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time } => {
+                let Some(lineage_report) = state.lineage_report.as_ref() else {
+                    return Err(Error::config(
+                        "production_recall_closure",
+                        "historical long-term closure omitted lineage authority",
+                    ));
+                };
+                if closure.eligibility_report.as_of_time != Some(as_of_time)
+                    || !lineage_report.validate_contract().accepted
+                    || !lineage_report.complete
+                    || state.dynamic_state_resolution.as_of_decision.as_ref()
+                        != Some(&state.selected_decision)
+                    || state.selected_decision.effective_time != as_of_time
+                    || !matches!(
+                        state.selected_decision.eligibility,
+                        GovernedRecallEligibility::EligibleHistoricalAsOf
+                            | GovernedRecallEligibility::Excluded
+                    )
+                {
+                    return Err(Error::config(
+                        "production_recall_closure",
+                        "historical long-term closure temporal or lineage binding drifted",
+                    ));
+                }
+            }
+        }
+    }
+
+    let declared_selected = delivery_report
+        .selection_decisions
+        .iter()
+        .filter(|decision| decision.selected)
+        .map(|decision| decision.candidate_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let reported_selected = delivery_report
+        .selected_candidate_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if declared_selected != reported_selected
+        || declared_selected.len() != delivery_report.selected_candidate_ids.len()
+    {
+        return Err(Error::config(
+            "production_recall_closure",
+            "final recall selection is not an exact unique set",
+        ));
+    }
+
+    let mut long_term_selection_candidates = BTreeSet::new();
+    let mut long_term_selection_owners = BTreeSet::new();
+
+    for decision in &delivery_report.selection_decisions {
+        let Some(owner_ref) = decision.owner_ref.as_ref() else {
+            continue;
+        };
+        if owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm {
+            continue;
+        }
+        let Some(state) = closure.owner_states.get(owner_ref) else {
+            return Err(Error::config(
+                "production_recall_closure",
+                "final long-term selection references an unknown canonical owner",
+            ));
+        };
+        if decision.candidate_id != governed_memory_recall_candidate_id(owner_ref)
+            || !long_term_selection_candidates.insert(decision.candidate_id.as_str())
+            || !long_term_selection_owners.insert(owner_ref)
+            || decision.selected && state.selected_decision.eligibility != expected_eligibility
+        {
+            return Err(Error::config(
+                "production_recall_closure",
+                "final long-term selection differs from canonical eligibility",
+            ));
+        }
+    }
+
+    let long_term_candidates = closure
+        .owner_states
+        .keys()
+        .map(governed_memory_recall_candidate_id)
+        .collect::<BTreeSet<_>>();
+    let mut long_term_render_decisions = BTreeMap::new();
+    for decision in &delivery_report.render_decisions {
+        if !long_term_candidates.contains(&decision.candidate_id) {
+            continue;
+        }
+        if long_term_render_decisions
+            .insert(decision.candidate_id.as_str(), decision)
+            .is_some()
+            || !declared_selected.contains(decision.candidate_id.as_str())
+            || decision.rendered != decision.drop_reason.is_none()
+        {
+            return Err(Error::config(
+                "production_recall_closure",
+                "long-term render decision is duplicate, unselected, or malformed",
+            ));
+        }
+    }
+    for selected in declared_selected
+        .iter()
+        .filter(|candidate| long_term_candidates.contains::<str>(candidate))
+    {
+        if !long_term_render_decisions.contains_key(selected) {
+            return Err(Error::config(
+                "production_recall_closure",
+                "selected long-term candidate is missing its unique render decision",
+            ));
+        }
+    }
+
+    let rendered_long_term_candidates = delivery_report
+        .rendered_capsules
+        .iter()
+        .filter(|capsule| capsule.owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm)
+        .map(|capsule| capsule.candidate_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let declared_rendered_long_term_candidates = long_term_render_decisions
+        .iter()
+        .filter(|(_, decision)| decision.rendered)
+        .map(|(candidate_id, _)| *candidate_id)
+        .collect::<BTreeSet<_>>();
+    if rendered_long_term_candidates != declared_rendered_long_term_candidates
+        || rendered_long_term_candidates.len()
+            != delivery_report
+                .rendered_capsules
+                .iter()
+                .filter(|capsule| {
+                    capsule.owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm
+                })
+                .count()
+    {
+        return Err(Error::config(
+            "production_recall_closure",
+            "long-term render decisions and capsules are not an exact unique set",
+        ));
+    }
+
+    for capsule in &delivery_report.rendered_capsules {
+        if capsule.owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm {
+            continue;
+        }
+        let Some(state) = closure.owner_states.get(&capsule.owner_ref) else {
+            return Err(Error::config(
+                "production_recall_closure",
+                "rendered long-term capsule references an unknown canonical owner",
+            ));
+        };
+        if capsule.candidate_id != governed_memory_recall_candidate_id(&capsule.owner_ref)
+            || state.selected_decision.eligibility != expected_eligibility
+            || !declared_selected.contains(capsule.candidate_id.as_str())
+        {
+            return Err(Error::config(
+                "production_recall_closure",
+                "rendered long-term capsule differs from final canonical selection",
+            ));
+        }
+    }
+    Ok(())
+}
+
 struct MaterializedGovernedLongTermMemoryReadView<'a> {
     runtime: &'a MemoryRuntime,
     inner: &'a RecallReadView,
+    owner_states: &'a BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermRecallState>,
+    temporal_operation: crate::MemoryRecallTemporalOperation,
+    operation_time: u64,
 }
 
 impl LongTermMemoryReadStore for MaterializedGovernedLongTermMemoryReadView<'_> {
@@ -1253,10 +2749,29 @@ impl LongTermMemoryReadStore for MaterializedGovernedLongTermMemoryReadView<'_> 
         source_chat_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LongTermMemoryEntry>> {
-        let mut visible = self.runtime.filter_materialized_visible_long_term_entries(
-            self.inner.recall(query, source_chat_id, usize::MAX)?,
+        let mut visible = self.runtime.materialized_visible_long_term_entries(
             self.inner,
+            self.owner_states,
+            self.temporal_operation,
         )?;
+        let query = query.trim().to_lowercase();
+        if !query.is_empty() {
+            visible.retain(|entry| {
+                entry.topic.to_lowercase().contains(&query)
+                    || entry.content.to_lowercase().contains(&query)
+                    || entry
+                        .keywords
+                        .iter()
+                        .any(|keyword| keyword.to_lowercase().contains(&query))
+            });
+        }
+        visible.sort_by(|left, right| {
+            let left_scope = usize::from(left.source_chat_id.as_deref() == source_chat_id);
+            let right_scope = usize::from(right.source_chat_id.as_deref() == source_chat_id);
+            right_scope
+                .cmp(&left_scope)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
         visible.truncate(limit.min(MAX_LONG_TERM_MEMORY_ITEMS));
         Ok(visible)
     }
@@ -1264,29 +2779,31 @@ impl LongTermMemoryReadStore for MaterializedGovernedLongTermMemoryReadView<'_> 
     fn get(&self, id: &str) -> Result<Option<LongTermMemoryEntry>> {
         Ok(self
             .runtime
-            .filter_materialized_visible_long_term_entries(
-                LongTermMemoryReadStore::get(self.inner, id)?
-                    .into_iter()
-                    .collect(),
+            .materialized_visible_long_term_entries(
                 self.inner,
+                self.owner_states,
+                self.temporal_operation,
             )?
             .into_iter()
-            .next())
+            .find(|entry| entry.id == id))
     }
 
     fn query(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
-        let visible = self.runtime.filter_materialized_visible_long_term_entries(
-            self.inner.list(usize::MAX)?,
+        let visible = self.runtime.materialized_visible_long_term_entries(
             self.inner,
+            self.owner_states,
+            self.temporal_operation,
         )?;
-        Ok(query.filter_sort_entries(visible, self.runtime.config.clock.now_secs()))
+        Ok(query.filter_sort_entries(visible, self.operation_time))
     }
 
     fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
-        let mut visible = self.runtime.filter_materialized_visible_long_term_entries(
-            self.inner.list(usize::MAX)?,
+        let mut visible = self.runtime.materialized_visible_long_term_entries(
             self.inner,
+            self.owner_states,
+            self.temporal_operation,
         )?;
+        visible.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
         visible.truncate(limit.min(MAX_LONG_TERM_MEMORY_ITEMS));
         Ok(visible)
     }
@@ -1294,12 +2811,56 @@ impl LongTermMemoryReadStore for MaterializedGovernedLongTermMemoryReadView<'_> 
     fn count(&self) -> Result<usize> {
         Ok(self
             .runtime
-            .filter_materialized_visible_long_term_entries(
-                self.inner.list(usize::MAX)?,
+            .materialized_visible_long_term_entries(
                 self.inner,
+                self.owner_states,
+                self.temporal_operation,
             )?
             .len())
     }
+}
+
+#[cfg(test)]
+fn ensure_historical_as_of_profile_participation(profile: ProfileId) -> Result<()> {
+    let historical_allowed = profile_capability_catalog()
+        .iter()
+        .find(|entry| entry.profile == profile)
+        .is_some_and(|entry| entry.historical_as_of_recall_allowed);
+    if !historical_allowed {
+        return Err(Error::config(
+            "governed_historical_recall",
+            "runtime profile does not participate in historical as-of recall",
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_historical_obsolete_decision_budget<'a>(
+    decisions: impl IntoIterator<Item = &'a GovernedRecallEligibilityDecision>,
+    max_obsolete_decisions: usize,
+) -> Result<()> {
+    let obsolete_decision_count = decisions
+        .into_iter()
+        .filter(|decision| {
+            decision
+                .reasons
+                .contains(&GovernedRecallEligibilityReason::Obsolete)
+        })
+        .count();
+    if obsolete_decision_count > max_obsolete_decisions {
+        return Err(Error::config(
+            "governed_historical_recall",
+            "obsolete decision count exceeds the request-pinned budget",
+        ));
+    }
+    Ok(())
+}
+
+const fn runtime_skill_deep_premise_sources_allowed(profile: ProfileId) -> bool {
+    !matches!(
+        profile,
+        ProfileId::EspStandaloneMemory | ProfileId::EspEmbeddedSdk
+    )
 }
 
 impl MemoryRuntime {
@@ -1445,12 +3006,14 @@ impl MemoryRuntime {
                 view: request.view,
             },
         )?;
-        report.revisions.retain(|revision| {
-            revision.memory_space_id.as_deref() == Some(self.config.memory_space_id.as_str())
-        });
-        if report.tombstone.as_ref().is_some_and(|tombstone| {
-            tombstone.memory_space_id.as_deref() != Some(self.config.memory_space_id.as_str())
-        }) {
+        report
+            .revisions
+            .retain(|revision| revision.memory_space_id == self.config.memory_space_id);
+        if report
+            .tombstone
+            .as_ref()
+            .is_some_and(|tombstone| tombstone.memory_space_id != self.config.memory_space_id)
+        {
             report.tombstone = None;
         }
         Ok(report)
@@ -1622,6 +3185,20 @@ impl MemoryRuntime {
         &self,
         request: MemoryLongTermMutationRequest,
     ) -> Result<MemoryLongTermMutationReport> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.mutate_long_term_memory(request)
+            });
+        }
+        self.mutate_long_term_memory_internal(request)
+            .map(|execution| execution.report)
+    }
+
+    fn mutate_long_term_memory_internal(
+        &self,
+        request: MemoryLongTermMutationRequest,
+    ) -> Result<LongTermMutationExecution> {
         let visibility = self.long_term_mutation_visibility(&request.operation);
         self.ensure_visible("long_term_control.mutation", visibility)?;
         let lifecycle = self.start_lifecycle(
@@ -1639,6 +3216,26 @@ impl MemoryRuntime {
             now_secs: self.config.clock.now_secs(),
         };
         let (core_report, mutation_plan) = self.plan_long_term_control_mutation(core_request)?;
+        #[cfg(feature = "nonproduction-replay-harness")]
+        let mut deleted_raw_addresses = mutation_plan
+            .mutations
+            .iter()
+            .filter_map(|mutation| match mutation {
+                StoreMutation::DeleteJson { namespace, key, .. }
+                    if namespace == crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE
+                        || namespace
+                            == crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE =>
+                {
+                    Some((namespace.clone(), key.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        #[cfg(feature = "nonproduction-replay-harness")]
+        {
+            deleted_raw_addresses.sort();
+            deleted_raw_addresses.dedup();
+        }
         let changed = !core_report.dry_run && !core_report.affected_records.is_empty();
         let lifecycle_summary = format!(
             "{} accepted={} affected={}",
@@ -1653,40 +3250,122 @@ impl MemoryRuntime {
                     .as_str()
                     .to_string(),
             ),
-            ("operation", core_report.operation.to_string()),
+            ("control_operation", core_report.operation.to_string()),
             ("accepted", core_report.accepted.to_string()),
             (
                 "affected_records",
                 core_report.affected_records.len().to_string(),
             ),
         ];
-        let lifecycle_report = if mutation_plan.mutations.is_empty() {
-            self.finish_lifecycle_success_with_payload(
-                lifecycle,
-                RuntimeLifecycleEventKind::OperatorAction,
-                RuntimeLifecycleEffect::RecordOperatorAction,
-                changed,
-                lifecycle_summary,
-                &lifecycle_payload,
-            )?
+        let (lifecycle_report, transaction) = if mutation_plan.mutations.is_empty() {
+            (
+                self.finish_lifecycle_success_with_payload(
+                    lifecycle,
+                    RuntimeLifecycleEventKind::OperatorAction,
+                    RuntimeLifecycleEffect::RecordOperatorAction,
+                    changed,
+                    lifecycle_summary,
+                    &lifecycle_payload,
+                )?,
+                None,
+            )
         } else {
-            self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
-                lifecycle,
-                operation: "long_term_control.mutation",
-                lifecycle_kind: RuntimeLifecycleEventKind::OperatorAction,
-                lifecycle_effect: RuntimeLifecycleEffect::RecordOperatorAction,
-                changed,
-                summary: lifecycle_summary,
-                extra_payload: &lifecycle_payload,
-                plan: mutation_plan,
-                changed_count: core_report.affected_records.len(),
-            })?
-            .0
+            let (lifecycle_report, transaction) =
+                self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
+                    lifecycle,
+                    operation: "long_term_control.mutation",
+                    lifecycle_kind: RuntimeLifecycleEventKind::OperatorAction,
+                    lifecycle_effect: RuntimeLifecycleEffect::RecordOperatorAction,
+                    changed,
+                    summary: lifecycle_summary,
+                    extra_payload: &lifecycle_payload,
+                    plan: mutation_plan,
+                    changed_count: core_report.affected_records.len(),
+                })?;
+            (lifecycle_report, Some(transaction))
         };
-        Ok(memory_long_term_mutation_report_from_core(
-            core_report,
-            lifecycle_report,
-        ))
+        #[cfg(not(feature = "nonproduction-replay-harness"))]
+        drop(transaction);
+        Ok(LongTermMutationExecution {
+            report: memory_long_term_mutation_report_from_core(core_report, lifecycle_report),
+            #[cfg(feature = "nonproduction-replay-harness")]
+            transaction,
+            #[cfg(feature = "nonproduction-replay-harness")]
+            deleted_raw_addresses,
+        })
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn p8_prepare_forgetting_pre_operation(
+        &self,
+        selector: crate::MemoryLongTermSelector,
+    ) -> Result<crate::P8ForgettingPreOperationAuthority> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.p8_prepare_forgetting_pre_operation(selector)
+            });
+        }
+        let preview = self.mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: crate::MemoryLongTermMutation::ForgetByQuery {
+                selector: selector.clone(),
+                confirmation_token: None,
+            },
+            reason: "p8_semantic_forgetting_fixture".into(),
+            dry_run: true,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })?;
+        let confirmation_token = preview.policy_decision.confirmation_token.ok_or_else(|| {
+            Error::config(
+                "p8_forgetting_pre_operation",
+                "Forget preview did not produce its exact confirmation token",
+            )
+        })?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "p8_forgetting_pre_operation",
+                "P8 forgetting evidence requires the transactional StorePlatform owner",
+            )
+        })?;
+        let committed = self.mutate_long_term_memory_internal(MemoryLongTermMutationRequest {
+            operation: crate::MemoryLongTermMutation::ForgetByQuery {
+                selector,
+                confirmation_token: Some(confirmation_token),
+            },
+            reason: "p8_semantic_forgetting_fixture".into(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })?;
+        let transaction = committed.transaction.as_ref().ok_or_else(|| {
+            Error::config(
+                "p8_forgetting_pre_operation",
+                "Forget did not return its committed transaction evidence",
+            )
+        })?;
+        if committed.deleted_raw_addresses.is_empty() {
+            return Err(Error::config(
+                "p8_forgetting_pre_operation",
+                "Forget planner produced no canonical raw material addresses",
+            ));
+        }
+        let (post_forget_known_docs, post_forget_receipt) =
+            store_platform.p8_read_json_addresses_with_receipt(&committed.deleted_raw_addresses)?;
+        if !post_forget_known_docs.is_empty()
+            || post_forget_receipt.json_doc_count != 0
+            || post_forget_receipt.blob_count != 0
+            || post_forget_receipt.entry_count != committed.deleted_raw_addresses.len()
+        {
+            return Err(Error::config(
+                "p8_forgetting_pre_operation",
+                "Forget post-image retained one or more canonical raw addresses",
+            ));
+        }
+        crate::P8ForgettingPreOperationBinding::authority_from_forget_mutation(
+            &committed.report,
+            transaction,
+            &committed.deleted_raw_addresses,
+            &post_forget_receipt,
+        )
     }
 
     pub fn mutate_memory_governance_policy(
@@ -1722,7 +3401,7 @@ impl MemoryRuntime {
                     .as_str()
                     .to_string(),
             ),
-            ("operation", core_report.operation.to_string()),
+            ("control_operation", core_report.operation.to_string()),
             ("accepted", core_report.accepted.to_string()),
             (
                 "policy_id",
@@ -1800,22 +3479,50 @@ impl MemoryRuntime {
     }
 
     pub fn runtime_metrics_report(&self) -> Result<RuntimeMetricsReport> {
+        self.runtime_metrics_report_for(RuntimeMetricsQuery::default())
+    }
+
+    pub fn runtime_metrics_report_for(
+        &self,
+        query: RuntimeMetricsQuery,
+    ) -> Result<RuntimeMetricsReport> {
+        self.runtime_metrics_report_with_file_stores(query, &[])
+    }
+
+    pub fn runtime_metrics_report_with_file_stores(
+        &self,
+        query: RuntimeMetricsQuery,
+        external_file_store_roots: &[PathBuf],
+    ) -> Result<RuntimeMetricsReport> {
         let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
                 "runtime_metrics_unavailable",
                 "runtime metrics require a StorePlatform-backed runtime",
             )
         })?;
-        let events = store_platform.read_events()?;
         let runtime_budget = self.runtime_budget();
-        Ok(bm_core::metrics::build_runtime_metrics_report(
-            events.iter().map(|event| RuntimeMetricEvent {
-                kind_name: event.kind_name.clone(),
+        let acquisition = crate::store::acquire_runtime_metric_events(
+            store_platform,
+            external_file_store_roots,
+            &runtime_budget,
+        )?;
+        bm_core::metrics::build_runtime_metrics_report(
+            acquisition.events.iter().map(|event| RuntimeMetricEvent {
+                event_id: event.event_id.clone(),
+                kind: match event.kind {
+                    MemoryStoreEventKind::MemoryWrite => RuntimeMetricEventKind::MemoryWrite,
+                    MemoryStoreEventKind::RuntimeLifecycle => {
+                        RuntimeMetricEventKind::RuntimeLifecycle
+                    }
+                    _ => RuntimeMetricEventKind::NonMetric,
+                },
                 timestamp_unix_secs: event.timestamp_unix_secs,
                 payload: event.payload.clone(),
             }),
+            query,
+            acquisition.evidence,
             runtime_budget.report_id,
-        ))
+        )
     }
 
     pub fn operator_readiness_report(&self) -> OperatorReadinessReport {
@@ -1919,11 +3626,16 @@ impl MemoryRuntime {
             RuntimeLifecycleModeInput::default(),
         );
         let report = match request {
-            MemoryWriteRequest::Procedural { writes, source } => {
+            MemoryWriteRequest::Procedural {
+                writes,
+                owning_scope,
+                source,
+            } => {
                 if runtime_skill_write_source_requires_promotion(source) {
                     let rejected = writes
                         .iter()
-                        .map(|write| {
+                        .map(|input| {
+                            let write = &input.write;
                             if write.name.trim().is_empty() {
                                 sdk_runtime_skill_name(&write.topic)
                             } else {
@@ -1960,28 +3672,74 @@ impl MemoryRuntime {
                         evidence_documents: None,
                     }
                 } else {
-                    let storage = self.config.platform.skill_storage();
-                    let writes = normalize_runtime_skill_write_names(writes);
-                    let plan = plan_governed_runtime_skills(storage.as_ref(), &writes, source)?;
-                    let outcome = plan.outcome;
-                    let procedural_evolution = Some(
-                        build_skill_evolution_report_from_write_outcome(&writes, &outcome),
+                    let normalized_writes = normalize_runtime_skill_write_names(
+                        writes.iter().map(|input| input.write.clone()).collect(),
                     );
+                    let normalized_inputs = writes
+                        .into_iter()
+                        .zip(normalized_writes.iter().cloned())
+                        .map(|(mut input, write)| {
+                            input.write = write;
+                            input
+                        })
+                        .collect::<Vec<_>>();
+                    let mut outcome = govern_runtime_skill_write_shapes(&normalized_writes, source);
+                    let accepted_inputs = normalized_inputs
+                        .iter()
+                        .zip(outcome.reports.iter())
+                        .filter(|(_input, report)| {
+                            matches!(report.action, RuntimeSkillWriteAction::Accepted)
+                        })
+                        .map(|(input, _report)| input)
+                        .collect::<Vec<_>>();
+                    let owner_records = accepted_inputs
+                        .iter()
+                        .map(|input| {
+                            runtime_skill_owner_record_from_governed_write(
+                                &input.write,
+                                &self.config.memory_space_id,
+                                owning_scope.clone(),
+                                input.creation_ref.clone(),
+                                input.privacy_class,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let plan = plan_runtime_skill_owner_upserts(
+                        self.config.store_platform.as_ref().ok_or_else(|| {
+                            Error::config("runtime_skill_owner_plan", "store platform is required")
+                        })?,
+                        &self.config.memory_space_id,
+                        &owning_scope,
+                        owner_records,
+                        self.runtime_budget()
+                            .governed_state_budget
+                            .max_retained_runtime_skill_owners_per_scope,
+                        self.runtime_budget()
+                            .governed_state_budget
+                            .max_runtime_skill_lineage_depth,
+                    )?;
+                    outcome.changed = runtime_skill_owner_mutation_count(&plan);
+                    let procedural_evolution =
+                        Some(build_skill_evolution_report_from_write_outcome(
+                            &normalized_writes,
+                            &outcome,
+                        ));
                     let changed = outcome.changed;
-                    let mutations =
-                        runtime_skill_storage_mutations_to_store_mutations(&plan.mutations);
-                    let (lifecycle_report, transaction) =
-                        self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
-                            lifecycle,
-                            operation: "write.procedural",
-                            lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                            lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
-                            changed: changed > 0,
-                            summary: "write.procedural".to_string(),
-                            extra_payload: &[("changed_count", changed.to_string())],
-                            plan: MemoryStoreMutationPlan::from_mutations(mutations),
-                            changed_count: changed,
-                        })?;
+                    let (lifecycle_report, transaction) = self
+                        .commit_memory_write_transaction_in_runtime_skill_scope(
+                            MemoryWriteTransactionCommit {
+                                lifecycle,
+                                operation: "write.procedural",
+                                lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+                                lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
+                                changed: changed > 0,
+                                summary: "write.procedural".to_string(),
+                                extra_payload: &[("changed_count", changed.to_string())],
+                                plan,
+                                changed_count: changed,
+                            },
+                            &owning_scope,
+                        )?;
                     MemoryWriteReport {
                         accepted: outcome.accepted > 0 || outcome.rejected == 0,
                         changed,
@@ -2001,9 +3759,20 @@ impl MemoryRuntime {
                     }
                 }
             }
-            MemoryWriteRequest::ProceduralPromotions { promotions, source } => {
+            MemoryWriteRequest::ProceduralPromotions {
+                promotions,
+                owning_scope,
+                source,
+            } => {
+                if source != RuntimeSkillWriteSource::TaskLearning {
+                    return Err(Error::config(
+                        "runtime_skill_owner_plan",
+                        "task-learning promotions require the TaskLearning write source",
+                    ));
+                }
                 let promotion_reports = promotions
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(|input| {
                         promote_task_experience_to_procedure(
                             input,
@@ -2011,31 +3780,68 @@ impl MemoryRuntime {
                         )
                     })
                     .collect::<Vec<_>>();
+                let promoted_inputs_and_writes = promotions
+                    .iter()
+                    .zip(promotion_reports.iter())
+                    .filter_map(|(input, report)| {
+                        runtime_skill_write_from_promotion_report(
+                            report,
+                            Some(&self.config.scope.chat_id),
+                            now_secs,
+                        )
+                        .map(|write| (input, write))
+                    })
+                    .collect::<Vec<_>>();
                 let writes = normalize_runtime_skill_write_names(
-                    promotion_reports
+                    promoted_inputs_and_writes
                         .iter()
-                        .filter_map(|report| {
-                            runtime_skill_write_from_promotion_report(
-                                report,
-                                Some(&self.config.scope.chat_id),
-                                now_secs,
-                            )
-                        })
-                        .collect::<Vec<_>>(),
+                        .map(|(_input, write)| write.clone())
+                        .collect(),
                 );
-                let storage = self.config.platform.skill_storage();
                 let transaction_plan = if writes.is_empty() {
                     None
                 } else {
-                    Some(plan_governed_runtime_skills(
-                        storage.as_ref(),
-                        &writes,
-                        source,
-                    )?)
+                    let mut outcome = govern_runtime_skill_write_shapes(&writes, source);
+                    let owner_records = promoted_inputs_and_writes
+                        .iter()
+                        .zip(writes.iter())
+                        .zip(outcome.reports.iter())
+                        .filter(|((_pair, _write), report)| {
+                            matches!(report.action, RuntimeSkillWriteAction::Accepted)
+                        })
+                        .map(|(((input, _raw_write), write), _report)| {
+                            runtime_skill_owner_record_from_governed_write(
+                                write,
+                                &self.config.memory_space_id,
+                                owning_scope.clone(),
+                                RuntimeSkillCreationRef::TaskLearningPromotion {
+                                    learning_id: input.learning_id.clone(),
+                                    learning_digest: input.learning_digest.clone(),
+                                },
+                                input.privacy_class,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let plan = plan_runtime_skill_owner_upserts(
+                        self.config.store_platform.as_ref().ok_or_else(|| {
+                            Error::config("runtime_skill_owner_plan", "store platform is required")
+                        })?,
+                        &self.config.memory_space_id,
+                        &owning_scope,
+                        owner_records,
+                        self.runtime_budget()
+                            .governed_state_budget
+                            .max_retained_runtime_skill_owners_per_scope,
+                        self.runtime_budget()
+                            .governed_state_budget
+                            .max_runtime_skill_lineage_depth,
+                    )?;
+                    outcome.changed = runtime_skill_owner_mutation_count(&plan);
+                    Some((outcome, plan))
                 };
                 let outcome = transaction_plan
                     .as_ref()
-                    .map(|plan| plan.outcome.clone())
+                    .map(|(outcome, _plan)| outcome.clone())
                     .unwrap_or_else(|| crate::RuntimeSkillWriteOutcome {
                         source,
                         submitted: promotion_reports.len(),
@@ -2055,35 +3861,37 @@ impl MemoryRuntime {
                     .flat_map(|report| report.blocked_reasons.iter().cloned())
                     .collect::<Vec<_>>();
                 let changed = outcome.changed;
-                let (lifecycle_report, transaction) = if let Some(plan) = transaction_plan {
-                    let mutations =
-                        runtime_skill_storage_mutations_to_store_mutations(&plan.mutations);
-                    let (lifecycle_report, transaction) =
-                        self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
-                            lifecycle,
-                            operation: "write.procedural_promotions",
-                            lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                            lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
-                            changed: changed > 0,
-                            summary: "write.procedural_promotions".to_string(),
-                            extra_payload: &[("changed_count", changed.to_string())],
-                            plan: MemoryStoreMutationPlan::from_mutations(mutations),
-                            changed_count: changed,
-                        })?;
-                    (lifecycle_report, Some(transaction))
-                } else {
-                    (
-                        self.finish_lifecycle_success_with_payload(
-                            lifecycle,
-                            RuntimeLifecycleEventKind::RuntimeLifecycle,
-                            RuntimeLifecycleEffect::RunMaintenance,
-                            changed > 0,
-                            "write.procedural_promotions",
-                            &[("changed_count", changed.to_string())],
-                        )?,
-                        None,
-                    )
-                };
+                let (lifecycle_report, transaction) =
+                    if let Some((_outcome, plan)) = transaction_plan {
+                        let (lifecycle_report, transaction) = self
+                            .commit_memory_write_transaction_in_runtime_skill_scope(
+                                MemoryWriteTransactionCommit {
+                                    lifecycle,
+                                    operation: "write.procedural_promotions",
+                                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+                                    lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
+                                    changed: changed > 0,
+                                    summary: "write.procedural_promotions".to_string(),
+                                    extra_payload: &[("changed_count", changed.to_string())],
+                                    plan,
+                                    changed_count: changed,
+                                },
+                                &owning_scope,
+                            )?;
+                        (lifecycle_report, Some(transaction))
+                    } else {
+                        (
+                            self.finish_lifecycle_success_with_payload(
+                                lifecycle,
+                                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                                RuntimeLifecycleEffect::RunMaintenance,
+                                changed > 0,
+                                "write.procedural_promotions",
+                                &[("changed_count", changed.to_string())],
+                            )?,
+                            None,
+                        )
+                    };
                 MemoryWriteReport {
                     accepted: !writes.is_empty()
                         && blocked_reasons.is_empty()
@@ -2111,7 +3919,11 @@ impl MemoryRuntime {
                     evidence_documents: None,
                 }
             }
-            MemoryWriteRequest::LongTermExtraction { extraction } => {
+            MemoryWriteRequest::LongTermExtraction {
+                extraction,
+                governed_skill_writes,
+                runtime_skill_owning_scope,
+            } => {
                 let (upserts, suppressed_long_term_policy_ids, suppressed_draft_count) =
                     self.filter_long_term_drafts_by_policy(extraction.upserts.clone(), now_secs)?;
                 let extraction = ParsedLongTermMemoryExtraction {
@@ -2119,26 +3931,38 @@ impl MemoryRuntime {
                     deletes: extraction.deletes,
                     skill_writes: extraction.skill_writes,
                 };
-                let extraction_plan =
-                    self.plan_long_term_extraction_transaction(&extraction, now_secs)?;
+                let extraction_plan = self.plan_long_term_extraction_transaction(
+                    &extraction,
+                    &governed_skill_writes,
+                    runtime_skill_owning_scope.as_ref(),
+                    now_secs,
+                )?;
                 let changed = extraction_plan.changed;
                 let shared_fact_governance = extraction_plan.shared_fact_governance.clone();
                 let procedural_evolution = extraction_plan.procedural_evolution.clone();
+                let commit = MemoryWriteTransactionCommit {
+                    lifecycle,
+                    operation: "write.long_term_extraction",
+                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+                    lifecycle_effect: RuntimeLifecycleEffect::RequestLongTermRefresh,
+                    changed: changed > 0,
+                    summary: "write.long_term_extraction".to_string(),
+                    extra_payload: &[("changed_count", changed.to_string())],
+                    plan: MemoryStoreMutationPlan {
+                        mutations: extraction_plan.mutations,
+                        preconditions: extraction_plan.preconditions,
+                    },
+                    changed_count: changed,
+                };
                 let (lifecycle_report, transaction) =
-                    self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
-                        lifecycle,
-                        operation: "write.long_term_extraction",
-                        lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                        lifecycle_effect: RuntimeLifecycleEffect::RequestLongTermRefresh,
-                        changed: changed > 0,
-                        summary: "write.long_term_extraction".to_string(),
-                        extra_payload: &[("changed_count", changed.to_string())],
-                        plan: MemoryStoreMutationPlan {
-                            mutations: extraction_plan.mutations,
-                            preconditions: extraction_plan.preconditions,
-                        },
-                        changed_count: changed,
-                    })?;
+                    if let Some(owning_scope) = runtime_skill_owning_scope.as_ref() {
+                        self.commit_memory_write_transaction_in_runtime_skill_scope(
+                            commit,
+                            owning_scope,
+                        )?
+                    } else {
+                        self.commit_memory_write_transaction(commit)?
+                    };
                 let policy_reason = if suppressed_draft_count > 0 {
                     format!(
                         "; suppressed_by_long_term_policy={}, policy_ids={}",
@@ -2163,9 +3987,15 @@ impl MemoryRuntime {
                     evidence_documents: None,
                 }
             }
-            MemoryWriteRequest::Candidates { candidates } => {
-                self.write_candidates_transactional(candidates, lifecycle, now_secs)?
-            }
+            MemoryWriteRequest::Candidates {
+                candidates,
+                runtime_skill_owning_scope,
+            } => self.write_candidates_transactional(
+                candidates,
+                runtime_skill_owning_scope,
+                lifecycle,
+                now_secs,
+            )?,
             MemoryWriteRequest::GovernedEvidenceDocuments { mutations } => self
                 .write_governed_evidence_documents_transactional(mutations, lifecycle, now_secs)?,
             MemoryWriteRequest::AgentToolUsageFeedback { feedback } => {
@@ -2865,9 +4695,22 @@ impl MemoryRuntime {
     fn write_candidates_transactional(
         &self,
         candidates: Vec<MemoryWriteCandidate>,
+        runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
         lifecycle: RuntimeLifecycleReport,
         now_secs: u64,
     ) -> Result<MemoryWriteReport> {
+        let has_procedural_candidate = candidates.iter().any(|candidate| {
+            matches!(
+                candidate.governed_target().unwrap_or(&candidate.target),
+                MemoryCandidateTarget::ProceduralMemory { .. }
+            )
+        });
+        if has_procedural_candidate != runtime_skill_owning_scope.is_some() {
+            return Err(Error::config(
+                "runtime_skill_owner_plan",
+                "candidate requests require an explicit owning scope exactly when procedural candidates are present",
+            ));
+        }
         let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
                 "memory_write_transaction_unavailable",
@@ -2955,7 +4798,16 @@ impl MemoryRuntime {
                 context,
             )?;
             planning_store.stage_entries(&plan.accepted_entries)?;
-            let owner_plan = planning_store.into_plan(&self.config.memory_space_id)?;
+            let owner_plan = planning_store.into_plan(
+                &self.config.memory_space_id,
+                &self.config.scoped_runtime.mounted_subject_id,
+                self.config.store_platform.as_ref().ok_or_else(|| {
+                    Error::config("long_term_version_plan", "store platform is required")
+                })?,
+                self.runtime_budget()
+                    .governed_state_budget
+                    .max_retained_long_term_revisions_per_owner,
+            )?;
             let facet_plan =
                 self.plan_long_term_facet_index_upsert_mutations(&plan.accepted_entries)?;
             mutations.extend(owner_plan.mutations);
@@ -2982,69 +4834,77 @@ impl MemoryRuntime {
             })
             .unwrap_or_default();
 
-        let (
-            skill_changed,
-            skill_accepted,
-            skill_rejected,
-            procedural_evolution,
-            governed_skill_pairs,
-        ) = if accepted_skill_writes.is_empty() {
-            (0, 0, 0, None, Vec::new())
-        } else {
-            let storage = self.config.platform.skill_storage();
-            let plan = plan_governed_runtime_skills(
-                storage.as_ref(),
-                &accepted_skill_writes,
-                RuntimeSkillWriteSource::Manual,
-            )?;
-            for mutation in &plan.mutations {
-                match mutation {
-                    RuntimeSkillStorageMutation::Upsert { name, content } => {
-                        mutations.push(StoreMutation::PutBlob {
-                            namespace: "skills".to_string(),
-                            key: name.clone(),
-                            value: content.clone(),
-                            event_kind: MemoryStoreEventKind::MemoryWrite,
-                            plane: "skills".to_string(),
-                            record_key: name.clone(),
-                        });
-                    }
-                    RuntimeSkillStorageMutation::Delete { name } => {
-                        mutations.push(StoreMutation::DeleteBlob {
-                            namespace: "skills".to_string(),
-                            key: name.clone(),
-                            event_kind: MemoryStoreEventKind::MemoryDelete,
-                            plane: "skills".to_string(),
-                            record_key: name.clone(),
-                        });
-                    }
+        let (skill_changed, skill_accepted, skill_rejected, procedural_evolution) =
+            if accepted_skill_writes.is_empty() {
+                (0, 0, 0, None)
+            } else {
+                let mut outcome = govern_runtime_skill_write_shapes(
+                    &accepted_skill_writes,
+                    RuntimeSkillWriteSource::Manual,
+                );
+                let governed_skill_pairs = accepted_normalized_skill_pairs
+                    .iter()
+                    .zip(outcome.reports.iter())
+                    .filter(|&((_candidate, _write), report)| {
+                        matches!(report.action, RuntimeSkillWriteAction::Accepted)
+                    })
+                    .map(|((candidate, write), _report)| (*candidate, write.clone()))
+                    .collect::<Vec<_>>();
+                let owning_scope = runtime_skill_owning_scope.clone().ok_or_else(|| {
+                    Error::config(
+                        "runtime_skill_owner_plan",
+                        "accepted procedural candidates require an explicit owning scope",
+                    )
+                })?;
+                if matches!(owning_scope, RuntimeSkillOwningScope::SharedProgram)
+                    && !accepted_drafts.is_empty()
+                {
+                    return Err(Error::config(
+                    "runtime_skill_owner_plan",
+                    "one candidate transaction cannot mix SharedProgram RuntimeSkill owners with subject long-term owners",
+                ));
                 }
-            }
-            let governed_skill_pairs = accepted_normalized_skill_pairs
-                .iter()
-                .zip(plan.outcome.reports.iter())
-                .filter(|&((_candidate, _write), report)| {
-                    matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                })
-                .map(|((candidate, write), _report)| (*candidate, write.clone()))
-                .collect::<Vec<_>>();
-            let procedural_evolution = build_skill_evolution_report_from_write_outcome(
-                &accepted_skill_writes,
-                &plan.outcome,
-            );
-            (
-                plan.outcome.changed,
-                plan.outcome.accepted,
-                plan.outcome.rejected,
-                Some(procedural_evolution),
-                governed_skill_pairs,
-            )
-        };
+                let owner_records = governed_skill_pairs
+                    .iter()
+                    .map(|(candidate, write)| {
+                        runtime_skill_owner_record_from_candidate(
+                            candidate,
+                            write,
+                            &self.config.memory_space_id,
+                            owning_scope.clone(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let runtime_skill_plan = plan_runtime_skill_owner_upserts(
+                    store_platform,
+                    &self.config.memory_space_id,
+                    &owning_scope,
+                    owner_records,
+                    self.runtime_budget()
+                        .governed_state_budget
+                        .max_retained_runtime_skill_owners_per_scope,
+                    self.runtime_budget()
+                        .governed_state_budget
+                        .max_runtime_skill_lineage_depth,
+                )?;
+                outcome.changed = runtime_skill_owner_mutation_count(&runtime_skill_plan);
+                mutations.extend(runtime_skill_plan.mutations);
+                merge_json_preconditions(&mut preconditions, runtime_skill_plan.preconditions)?;
+                let procedural_evolution = build_skill_evolution_report_from_write_outcome(
+                    &accepted_skill_writes,
+                    &outcome,
+                );
+                (
+                    outcome.changed,
+                    outcome.accepted,
+                    outcome.rejected,
+                    Some(procedural_evolution),
+                )
+            };
 
         mutations.extend(plan_candidate_derived_memory_ref_mutations(
             &self.config.subject_id,
             &governed_draft_pairs,
-            &governed_skill_pairs,
             now_secs,
         )?);
         mutations.extend(plan_soul_handoff_derived_memory_ref_mutations(
@@ -3059,24 +4919,29 @@ impl MemoryRuntime {
             changed > 0,
             "write.candidates",
         );
+        bind_control_audit_transaction_id(&mut mutations, &transaction_id)?;
         self.append_graph_owner_cascade_mutations(&mut mutations, &mut preconditions)?;
         mutations.push(StoreMutation::AppendEvent {
-            event: self.planned_lifecycle_store_event(
+            event: Box::new(self.planned_lifecycle_store_event(
                 &transaction_id,
                 operation,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
                 RuntimeLifecycleEffect::RunMaintenance,
                 &lifecycle_report,
                 &[("changed_count", changed.to_string())],
-            )?,
+            )?),
         });
 
         let runtime_budget = self.runtime_budget();
+        let transaction_scope = match runtime_skill_owning_scope.as_ref() {
+            Some(owning_scope) => self.runtime_skill_transaction_scope(owning_scope)?,
+            None => self.memory_write_transaction_scope(),
+        };
         let store_report = store_platform.commit_governed_memory_transaction_with_runtime_budget(
             StoreMutationBatch {
                 transaction_id: transaction_id.clone(),
                 operation: operation.to_string(),
-                scope: self.memory_write_transaction_scope(),
+                scope: transaction_scope,
                 mutations,
             },
             &preconditions,
@@ -3151,8 +5016,27 @@ impl MemoryRuntime {
             self.config.scope.chat_id.clone(),
         )
         .with_memory_space(self.config.memory_space_id.clone())
-        .with_subject(self.config.subject_id.clone())
+        .with_subject(self.config.scoped_runtime.mounted_subject_id.clone())
         .with_conversation(conversation_id)
+    }
+
+    fn runtime_skill_transaction_scope(
+        &self,
+        owning_scope: &RuntimeSkillOwningScope,
+    ) -> Result<StoreEventScope> {
+        let scope = self.memory_write_transaction_scope();
+        match owning_scope {
+            RuntimeSkillOwningScope::Subject { mounted_subject_id } => {
+                if mounted_subject_id != &self.config.scoped_runtime.mounted_subject_id {
+                    return Err(Error::config(
+                        "runtime_skill_owner_plan",
+                        "subject RuntimeSkill owning scope must equal the runtime mounted subject",
+                    ));
+                }
+                Ok(scope.with_subject(mounted_subject_id.clone()))
+            }
+            RuntimeSkillOwningScope::SharedProgram => Ok(scope.with_shared_program()),
+        }
     }
 
     fn governed_facet_index_subject_ids(&self) -> Vec<String> {
@@ -3215,22 +5099,44 @@ impl MemoryRuntime {
             .collect())
     }
 
-    fn filter_materialized_visible_long_term_entries(
+    fn materialized_visible_long_term_entries(
         &self,
-        entries: Vec<LongTermMemoryEntry>,
         read_view: &RecallReadView,
+        owner_states: &BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermRecallState>,
+        temporal_operation: crate::MemoryRecallTemporalOperation,
     ) -> Result<Vec<LongTermMemoryEntry>> {
         let mut visible = Vec::new();
-        for entry in entries {
-            if !entry.privacy.projection_content_allowed() {
+        for (owner_ref, state) in owner_states {
+            let expected_eligibility = match temporal_operation {
+                crate::MemoryRecallTemporalOperation::Current => {
+                    GovernedRecallEligibility::EligibleCurrent
+                }
+                crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. } => {
+                    GovernedRecallEligibility::EligibleHistoricalAsOf
+                }
+            };
+            if state.selected_decision.eligibility != expected_eligibility
+                || owner_ref != &state.projection.material.owner_ref
+                || !state
+                    .projection
+                    .material
+                    .privacy_class
+                    .projection_content_allowed()
+            {
                 continue;
             }
-            let owner_ref =
-                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id.clone());
+            let entry = state.projection.material.to_current_projection()?;
+            if matches!(
+                temporal_operation,
+                crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
+            ) {
+                visible.push(entry);
+                continue;
+            }
             let key = scoped_memory_facet_owner_storage_key(
                 &self.config.memory_space_id,
                 &self.config.scoped_runtime.mounted_subject_id,
-                &owner_ref,
+                owner_ref,
             )
             .map_err(|error| Error::config("memory_facet_index_read", error.to_string()))?;
             let Some(facet) =
@@ -3243,6 +5149,180 @@ impl MemoryRuntime {
             }
         }
         Ok(visible)
+    }
+
+    fn build_materialized_long_term_recall_states(
+        &self,
+        read_view: &RecallReadView,
+        temporal_operation: crate::MemoryRecallTemporalOperation,
+        runtime_budget: &RuntimeBudgetReport,
+        operation_time: u64,
+    ) -> Result<MaterializedLongTermRecallClosure> {
+        let budget = runtime_budget.governed_state_budget;
+        #[cfg(feature = "nonproduction-replay-harness")]
+        let p8_counterfactual_inputs =
+            crate::P8SemanticLongTermCounterfactualInput::from_retained_materials(
+                read_view.retained_long_term_counterfactual_inputs()?,
+                budget.max_validity_joins,
+            )?;
+        match temporal_operation {
+            crate::MemoryRecallTemporalOperation::Current => {
+                let projections = read_view.current_long_term_projections(
+                    budget.max_retained_long_term_revisions_per_owner,
+                )?;
+                if projections.len() > budget.max_validity_joins {
+                    return Err(Error::config(
+                        "governed_current_recall",
+                        "materialized long-term owners exceed the request-pinned validity join budget",
+                    ));
+                }
+                let query_time = select_long_term_current_recall_query_time(
+                    projections.values(),
+                    operation_time,
+                )?;
+                let temporal_query = GovernedRecallTemporalQuery::Current { query_time };
+                let states = projections
+                    .into_iter()
+                    .map(|(owner_ref, authority)| {
+                        let lifecycle =
+                            project_current_long_term_recall_lifecycle_facts(&authority)?;
+                        let projection = authority.projection().clone();
+                        let disclosure = if projection
+                            .material
+                            .privacy_class
+                            .projection_content_allowed()
+                        {
+                            GovernedRecallDisclosure::Allowed
+                        } else {
+                            GovernedRecallDisclosure::PrivacyBlocked
+                        };
+                        let dynamic_state_resolution =
+                            build_current_dynamic_state_resolution_report(
+                                &lifecycle,
+                                query_time,
+                                GovernedRecallAuthorityGates {
+                                    disclosure,
+                                    required_premise: GovernedRequiredPremiseGate::NotApplicable,
+                                    profile_budget_drop: GovernedProfileBudgetDrop::None,
+                                },
+                            )?;
+                        let selected_decision = dynamic_state_resolution.current_decision.clone();
+                        Ok((
+                            owner_ref,
+                            MaterializedLongTermRecallState {
+                                projection,
+                                dynamic_state_resolution,
+                                lineage_report: None,
+                                selected_decision,
+                            },
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+                let eligibility_report = build_governed_recall_eligibility_report(
+                    states.values().map(|state| state.selected_decision.clone()),
+                    temporal_query,
+                    budget.max_validity_joins,
+                )?;
+                Ok(MaterializedLongTermRecallClosure {
+                    owner_states: states,
+                    eligibility_report,
+                    #[cfg(feature = "nonproduction-replay-harness")]
+                    p8_counterfactual_inputs,
+                })
+            }
+            crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time } => {
+                let authorities = read_view.historical_long_term_authorities(
+                    as_of_time,
+                    budget.max_retained_long_term_revisions_per_owner,
+                    budget.max_lineage_depth,
+                    budget.max_as_of_candidates,
+                )?;
+                if authorities.len() > budget.max_validity_joins {
+                    return Err(Error::config(
+                        "governed_historical_recall",
+                        "historical long-term owners exceed the request-pinned validity join budget",
+                    ));
+                }
+                let query_time = select_long_term_historical_recall_query_time(
+                    authorities.values(),
+                    operation_time,
+                )?;
+                if as_of_time > query_time {
+                    return Err(Error::config(
+                        "governed_historical_recall",
+                        "historical as-of time cannot be later than the pinned logical query time",
+                    ));
+                }
+                let temporal_query = GovernedRecallTemporalQuery::HistoricalAsOf {
+                    query_time,
+                    as_of_time,
+                };
+                let states = authorities
+                    .into_iter()
+                    .map(|(owner_ref, authority)| {
+                        let lifecycle =
+                            project_historical_long_term_recall_lifecycle_facts(&authority)?;
+                        let projection = authority.projection().clone();
+                        let lineage_report = authority.lineage_report().clone();
+                        let disclosure = if projection
+                            .material
+                            .privacy_class
+                            .projection_content_allowed()
+                        {
+                            GovernedRecallDisclosure::Allowed
+                        } else {
+                            GovernedRecallDisclosure::PrivacyBlocked
+                        };
+                        let dynamic_state_resolution =
+                            build_historical_dynamic_state_resolution_report(
+                                &lifecycle,
+                                query_time,
+                                as_of_time,
+                                GovernedRecallAuthorityGates {
+                                    disclosure,
+                                    required_premise: GovernedRequiredPremiseGate::NotApplicable,
+                                    profile_budget_drop: GovernedProfileBudgetDrop::None,
+                                },
+                            )?;
+                        let selected_decision = dynamic_state_resolution
+                            .as_of_decision
+                            .clone()
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "governed_historical_recall",
+                                    "canonical historical report omitted its as-of decision",
+                                )
+                            })?;
+                        Ok((
+                            owner_ref,
+                            MaterializedLongTermRecallState {
+                                projection,
+                                dynamic_state_resolution,
+                                lineage_report: Some(lineage_report),
+                                selected_decision,
+                            },
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+                enforce_historical_obsolete_decision_budget(
+                    states
+                        .values()
+                        .map(|state| &state.dynamic_state_resolution.current_decision),
+                    budget.max_obsolete_decisions,
+                )?;
+                let eligibility_report = build_governed_recall_eligibility_report(
+                    states.values().map(|state| state.selected_decision.clone()),
+                    temporal_query,
+                    budget.max_as_of_candidates,
+                )?;
+                Ok(MaterializedLongTermRecallClosure {
+                    owner_states: states,
+                    eligibility_report,
+                    #[cfg(feature = "nonproduction-replay-harness")]
+                    p8_counterfactual_inputs,
+                })
+            }
+        }
     }
 
     fn long_term_entry_matches_governed_facet(
@@ -3719,11 +5799,51 @@ impl MemoryRuntime {
                         Some(self.long_term_facet_index_doc(&entry)?),
                     );
                 }
+                StoreMutation::PutJson {
+                    namespace, value, ..
+                } if namespace == crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE => {
+                    let material =
+                        serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone())
+                            .map_err(|error| {
+                                Error::config("memory_facet_index_plan", error.to_string())
+                            })?;
+                    let entry = material.to_current_projection()?;
+                    changes.insert(
+                        material.owner_ref,
+                        Some(self.long_term_facet_index_doc(&entry)?),
+                    );
+                }
                 StoreMutation::DeleteJson {
                     namespace,
                     record_key,
                     ..
                 } if namespace == "long_term" => {
+                    if !record_key.trim().is_empty() {
+                        changes.insert(
+                            GovernedMemoryOwnerRef::new(
+                                GovernedMemoryOwnerPlane::LongTerm,
+                                record_key.trim(),
+                            ),
+                            None,
+                        );
+                    }
+                }
+                StoreMutation::PutJson {
+                    namespace, value, ..
+                } if namespace == crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+                    let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
+                        .map_err(|error| {
+                            Error::config("memory_facet_index_plan", error.to_string())
+                        })?;
+                    if head.terminal_transition_ref.is_some() {
+                        changes.insert(head.owner_ref, None);
+                    }
+                }
+                StoreMutation::DeleteJson {
+                    namespace,
+                    record_key,
+                    ..
+                } if namespace == crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
                     if !record_key.trim().is_empty() {
                         changes.insert(
                             GovernedMemoryOwnerRef::new(
@@ -3772,8 +5892,8 @@ impl MemoryRuntime {
         &self,
         context: FacetRecallBuildContext<'_>,
     ) -> RuntimeFacetRecallReport {
-        let runtime_budget = self.runtime_budget();
         let FacetRecallBuildContext {
+            runtime_budget,
             read_view,
             long_term_memory_store,
             query_facets,
@@ -4453,15 +6573,17 @@ impl MemoryRuntime {
         context: RecallDeliveryBuildContext<'_>,
     ) -> MemoryRecallDeliveryReport {
         let RecallDeliveryBuildContext {
+            runtime_budget,
             read_view,
             long_term_memory_store,
+            long_term_owner_states,
             query,
             requested_limit,
             graph_rerank,
             candidate_owner_refs,
+            temporal_operation,
             feature_flags,
         } = context;
-        let runtime_budget = self.runtime_budget();
         let budget = runtime_budget.recall_delivery_budget;
         let selected_limit = requested_limit
             .max(1)
@@ -4498,11 +6620,23 @@ impl MemoryRuntime {
             let owner_ref = candidate_owner_refs
                 .get(candidate_id)
                 .expect("governed candidates have exact typed owner bindings");
-            match self.load_governed_recall_owner_material(
-                read_view,
-                long_term_memory_store,
-                owner_ref,
-            ) {
+            let owner = match owner_ref.owner_plane {
+                GovernedMemoryOwnerPlane::LongTerm => long_term_owner_states
+                    .get(owner_ref)
+                    .map(|state| state.projection.material.to_current_projection())
+                    .transpose()
+                    .map(|owner| owner.map(GovernedRecallOwnerMaterial::LongTerm)),
+                GovernedMemoryOwnerPlane::EvidenceDocument => self
+                    .load_governed_recall_owner_material(
+                        read_view,
+                        long_term_memory_store,
+                        owner_ref,
+                    ),
+                GovernedMemoryOwnerPlane::ConversationTranscript
+                | GovernedMemoryOwnerPlane::MemoryGraph
+                | GovernedMemoryOwnerPlane::RuntimeSkill => Ok(None),
+            };
+            match owner {
                 Ok(Some(material)) => {
                     records.insert(candidate_id.clone(), material);
                 }
@@ -4520,6 +6654,14 @@ impl MemoryRuntime {
             .iter()
             .filter_map(|candidate_id| {
                 let owner_ref = candidate_owner_refs.get(candidate_id)?;
+                if owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm
+                    && matches!(
+                        temporal_operation,
+                        crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
+                    )
+                {
+                    return None;
+                }
                 match scoped_memory_facet_owner_storage_key(
                     &self.config.memory_space_id,
                     &self.config.scoped_runtime.mounted_subject_id,
@@ -4567,6 +6709,13 @@ impl MemoryRuntime {
         for candidate_id in &governed_candidate_ids {
             let owner_ref = candidate_owner_refs.get(candidate_id).cloned();
             let owner = records.get(candidate_id).cloned();
+            let historical_long_term = owner_ref.as_ref().is_some_and(|owner_ref| {
+                owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm
+                    && matches!(
+                        temporal_operation,
+                        crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
+                    )
+            });
             let owner_available = owner.is_some() && !owner_read_failed.contains(candidate_id);
             if owner_ref.is_none() {
                 integrity_failures
@@ -4583,21 +6732,41 @@ impl MemoryRuntime {
             let facet_doc = owner_ref
                 .as_ref()
                 .and_then(|owner_ref| facet_docs.get(owner_ref));
-            if owner_available && facet_doc.is_none() {
+            if owner_available && facet_doc.is_none() && !historical_long_term {
                 integrity_failures.push("recall_delivery_facet_missing".to_string());
             };
-            let facet_matches = owner
-                .as_ref()
-                .zip(facet_doc)
-                .is_some_and(|(owner, facet_doc)| match owner {
-                    GovernedRecallOwnerMaterial::LongTerm(entry) => {
-                        self.long_term_entry_matches_governed_facet(entry, facet_doc)
-                    }
-                    GovernedRecallOwnerMaterial::EvidenceDocument(document) => {
-                        self.evidence_document_matches_governed_facet(document, facet_doc)
-                    }
-                });
-            if owner_available && facet_doc.is_some() && !facet_matches {
+            let facet_matches = if historical_long_term {
+                owner_ref
+                    .as_ref()
+                    .zip(owner.as_ref())
+                    .is_some_and(|(owner_ref, owner)| {
+                        let GovernedRecallOwnerMaterial::LongTerm(entry) = owner else {
+                            return false;
+                        };
+                        long_term_owner_states.get(owner_ref).is_some_and(|state| {
+                            state.selected_decision.eligibility
+                                == GovernedRecallEligibility::EligibleHistoricalAsOf
+                                && state
+                                    .projection
+                                    .material
+                                    .to_current_projection()
+                                    .is_ok_and(|projection| projection == *entry)
+                        })
+                    })
+            } else {
+                owner
+                    .as_ref()
+                    .zip(facet_doc)
+                    .is_some_and(|(owner, facet_doc)| match owner {
+                        GovernedRecallOwnerMaterial::LongTerm(entry) => {
+                            self.long_term_entry_matches_governed_facet(entry, facet_doc)
+                        }
+                        GovernedRecallOwnerMaterial::EvidenceDocument(document) => {
+                            self.evidence_document_matches_governed_facet(document, facet_doc)
+                        }
+                    })
+            };
+            if owner_available && facet_doc.is_some() && !facet_matches && !historical_long_term {
                 integrity_failures.push("recall_delivery_facet_contract_mismatch".to_string());
             }
             let evidence_bindings = owner
@@ -4639,6 +6808,28 @@ impl MemoryRuntime {
             .iter()
             .filter_map(|candidate_id| {
                 governed_materials.get(candidate_id).and_then(|material| {
+                    let owner_ref = material.owner_ref.as_ref()?;
+                    let lexical_eligible = material.owner_available
+                        && material.governed_binding_eligible
+                        && material.privacy_eligible
+                        && match owner_ref.owner_plane {
+                            GovernedMemoryOwnerPlane::LongTerm => {
+                                long_term_owner_states.get(owner_ref).is_some_and(|state| {
+                                    matches!(
+                                        state.selected_decision.eligibility,
+                                        GovernedRecallEligibility::EligibleCurrent
+                                            | GovernedRecallEligibility::EligibleHistoricalAsOf
+                                    )
+                                })
+                            }
+                            GovernedMemoryOwnerPlane::EvidenceDocument => true,
+                            GovernedMemoryOwnerPlane::ConversationTranscript
+                            | GovernedMemoryOwnerPlane::MemoryGraph
+                            | GovernedMemoryOwnerPlane::RuntimeSkill => false,
+                        };
+                    if !lexical_eligible {
+                        return None;
+                    }
                     let owner = material.owner.as_ref()?;
                     (
                         candidate_id.clone(),
@@ -4713,6 +6904,25 @@ impl MemoryRuntime {
                             .saturating_add(score.evidence_quality_score)
                     })
                     .unwrap_or(0);
+                let temporal_eligible = match material.owner_ref.as_ref() {
+                    Some(owner_ref)
+                        if owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm =>
+                    {
+                        long_term_owner_states.get(owner_ref).is_some_and(|state| {
+                            matches!(
+                                state.selected_decision.eligibility,
+                                GovernedRecallEligibility::EligibleCurrent
+                                    | GovernedRecallEligibility::EligibleHistoricalAsOf
+                            )
+                        })
+                    }
+                    Some(owner_ref)
+                        if owner_ref.owner_plane == GovernedMemoryOwnerPlane::EvidenceDocument =>
+                    {
+                        score.is_none_or(|score| score.stale_superseded_penalty == 0)
+                    }
+                    _ => false,
+                };
                 RecallDeliveryCandidate {
                     candidate_id: candidate_id.clone(),
                     evidence_bindings: material.evidence_bindings.clone(),
@@ -4720,8 +6930,7 @@ impl MemoryRuntime {
                     citation_eligible: material.citation_eligible,
                     privacy_eligible: material.privacy_eligible,
                     governed_binding_eligible: material.governed_binding_eligible,
-                    temporal_eligible: score
-                        .is_none_or(|score| score.stale_superseded_penalty == 0),
+                    temporal_eligible,
                     source_rank: source_rank_by_candidate.get(candidate_id.as_str()).copied(),
                     expanded_rank: expanded_rank_by_candidate
                         .get(candidate_id.as_str())
@@ -4922,6 +7131,10 @@ impl MemoryRuntime {
                 })
                 .unwrap_or_else(|| "none".to_string());
             let capsule_chars = content.chars().count();
+            let owner_ref = owner.owner_ref();
+            let owner_validity = long_term_owner_states
+                .get(&owner_ref)
+                .map(|state| &state.projection.validity);
             rendered_chars = rendered_chars.saturating_add(capsule_chars);
             for group in &groups {
                 covered_groups.insert(group.clone());
@@ -4932,7 +7145,7 @@ impl MemoryRuntime {
                     .map(|binding| binding.effective_evidence_family_group().to_string()),
             );
             rendered_capsules.push(MemoryRenderedEvidenceCapsule {
-                owner_ref: owner.owner_ref(),
+                owner_ref,
                 candidate_id: candidate_id.clone(),
                 content,
                 evidence_ref_views,
@@ -4940,8 +7153,8 @@ impl MemoryRuntime {
                 canonical_evidence_groups: groups,
                 source_locator_view,
                 observed_at: owner.observed_at(),
-                valid_from: None,
-                valid_until: None,
+                valid_from: owner_validity.map(|validity| validity.valid_from),
+                valid_until: owner_validity.and_then(|validity| validity.valid_until),
                 facet_summary,
                 redaction_state: owner.privacy().label().to_string(),
                 shared_fact_surface_allowed: owner.shared_fact_surface_allowed(),
@@ -5002,6 +7215,7 @@ impl MemoryRuntime {
         let RecallPrivacyBuildContext {
             read_view,
             long_term_memory_store,
+            long_term_owner_states,
             candidate_owner_refs,
             source_candidate_ids,
             graph_anchor_candidate_ids,
@@ -5040,11 +7254,23 @@ impl MemoryRuntime {
                 failures.push("recall_privacy_candidate_owner_binding_mismatch".to_string());
                 continue;
             }
-            match self.load_governed_recall_owner_material(
-                read_view,
-                long_term_memory_store,
-                owner_ref,
-            ) {
+            let owner = match owner_ref.owner_plane {
+                GovernedMemoryOwnerPlane::LongTerm => long_term_owner_states
+                    .get(owner_ref)
+                    .map(|state| state.projection.material.to_current_projection())
+                    .transpose()
+                    .map(|owner| owner.map(GovernedRecallOwnerMaterial::LongTerm)),
+                GovernedMemoryOwnerPlane::EvidenceDocument => self
+                    .load_governed_recall_owner_material(
+                        read_view,
+                        long_term_memory_store,
+                        owner_ref,
+                    ),
+                GovernedMemoryOwnerPlane::ConversationTranscript
+                | GovernedMemoryOwnerPlane::MemoryGraph
+                | GovernedMemoryOwnerPlane::RuntimeSkill => Ok(None),
+            };
+            match owner {
                 Ok(Some(owner)) => {
                     match owner_ref.owner_plane {
                         GovernedMemoryOwnerPlane::LongTerm => {
@@ -5098,23 +7324,40 @@ impl MemoryRuntime {
         &self,
         commit: MemoryWriteTransactionCommit<'_>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
-        self.commit_memory_write_transaction_with_graph_repair_authority(commit, None)
+        self.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
+            commit, None, None,
+        )
+    }
+
+    fn commit_memory_write_transaction_in_runtime_skill_scope(
+        &self,
+        commit: MemoryWriteTransactionCommit<'_>,
+        owning_scope: &RuntimeSkillOwningScope,
+    ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
+        let scope = self.runtime_skill_transaction_scope(owning_scope)?;
+        self.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
+            commit,
+            None,
+            Some(scope),
+        )
     }
 
     fn commit_graph_integrity_repair_transaction(
         &self,
         commit: MemoryWriteTransactionCommit<'_>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
-        self.commit_memory_write_transaction_with_graph_repair_authority(
+        self.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
             commit,
             Some(GraphRepairAuthority::issue_for_integrity_maintenance()),
+            None,
         )
     }
 
-    fn commit_memory_write_transaction_with_graph_repair_authority(
+    fn commit_memory_write_transaction_with_graph_repair_authority_and_scope(
         &self,
         commit: MemoryWriteTransactionCommit<'_>,
         graph_repair_authority: Option<GraphRepairAuthority>,
+        transaction_scope: Option<StoreEventScope>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
         let MemoryWriteTransactionCommit {
             lifecycle,
@@ -5139,19 +7382,19 @@ impl MemoryRuntime {
             lifecycle.finish_success(self.config.clock.now_secs(), changed, summary);
         self.append_graph_owner_cascade_mutations(&mut plan.mutations, &mut plan.preconditions)?;
         plan.mutations.push(StoreMutation::AppendEvent {
-            event: self.planned_lifecycle_store_event(
+            event: Box::new(self.planned_lifecycle_store_event(
                 &transaction_id,
                 operation,
                 lifecycle_kind,
                 lifecycle_effect,
                 &lifecycle_report,
                 extra_payload,
-            )?,
+            )?),
         });
         let batch = StoreMutationBatch {
             transaction_id,
             operation: operation.to_string(),
-            scope: self.memory_write_transaction_scope(),
+            scope: transaction_scope.unwrap_or_else(|| self.memory_write_transaction_scope()),
             mutations: plan.mutations,
         };
         let runtime_budget = self.runtime_budget();
@@ -5178,7 +7421,20 @@ impl MemoryRuntime {
     fn commit_memory_mutation_batch(
         &self,
         operation: &str,
+        plan: MemoryStoreMutationPlan,
+    ) -> Result<StoreMutationBatchReport> {
+        self.commit_memory_mutation_batch_in_scope(
+            operation,
+            plan,
+            self.memory_write_transaction_scope(),
+        )
+    }
+
+    fn commit_memory_mutation_batch_in_scope(
+        &self,
+        operation: &str,
         mut plan: MemoryStoreMutationPlan,
+        scope: StoreEventScope,
     ) -> Result<StoreMutationBatchReport> {
         let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
@@ -5198,7 +7454,7 @@ impl MemoryRuntime {
             StoreMutationBatch {
                 transaction_id,
                 operation: operation.to_string(),
-                scope: self.memory_write_transaction_scope(),
+                scope,
                 mutations: plan.mutations,
             },
             &plan.preconditions,
@@ -5250,6 +7506,47 @@ impl MemoryRuntime {
                         return Err(Error::config(
                             "memory_graph_owner_cascade_integrity_failed",
                             "long-term delete is missing its logical owner id",
+                        ));
+                    }
+                    affected_owner_refs.insert(GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        record_key.clone(),
+                    ));
+                }
+                StoreMutation::PutJson {
+                    namespace, value, ..
+                } if namespace == crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE => {
+                    let material =
+                        serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone())
+                            .map_err(|error| {
+                                Error::config(
+                                    "memory_graph_owner_cascade_integrity_failed",
+                                    error.to_string(),
+                                )
+                            })?;
+                    affected_owner_refs.insert(material.owner_ref);
+                }
+                StoreMutation::PutJson {
+                    namespace, value, ..
+                } if namespace == crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+                    let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
+                        .map_err(|error| {
+                            Error::config(
+                                "memory_graph_owner_cascade_integrity_failed",
+                                error.to_string(),
+                            )
+                        })?;
+                    affected_owner_refs.insert(head.owner_ref);
+                }
+                StoreMutation::DeleteJson {
+                    namespace,
+                    record_key,
+                    ..
+                } if namespace == crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+                    if record_key.trim().is_empty() {
+                        return Err(Error::config(
+                            "memory_graph_owner_cascade_integrity_failed",
+                            "long-term head delete is missing its logical owner id",
                         ));
                     }
                     affected_owner_refs.insert(GovernedMemoryOwnerRef::new(
@@ -5384,9 +7681,26 @@ impl MemoryRuntime {
                 apply_report,
                 ..
             } => {
+                if !apply_report.planned_skill_mutations.is_empty()
+                    || !apply_report.accepted_skill_writes.is_empty()
+                {
+                    return Err(Error::config(
+                        "runtime_skill_owner_plan",
+                        "post-turn procedural extraction requires an explicit typed creation ref and owning scope",
+                    ));
+                }
                 planning_long_term.stage_delete_ids(&apply_report.deleted_entry_ids)?;
                 planning_long_term.stage_entries(&apply_report.accepted_entries)?;
-                let long_term_plan = planning_long_term.into_plan(&self.config.memory_space_id)?;
+                let long_term_plan = planning_long_term.into_plan(
+                    &self.config.memory_space_id,
+                    &self.config.scoped_runtime.mounted_subject_id,
+                    self.config.store_platform.as_ref().ok_or_else(|| {
+                        Error::config("long_term_version_plan", "store platform is required")
+                    })?,
+                    self.runtime_budget()
+                        .governed_state_budget
+                        .max_retained_long_term_revisions_per_owner,
+                )?;
                 let facet_index_mutations = self
                     .plan_long_term_facet_index_mutations_for_store_mutations(
                         &long_term_plan.mutations,
@@ -5395,13 +7709,10 @@ impl MemoryRuntime {
                 merge_json_preconditions(&mut preconditions, long_term_plan.preconditions)?;
                 mutations.extend(facet_index_mutations.mutations);
                 merge_json_preconditions(&mut preconditions, facet_index_mutations.preconditions)?;
-                mutations.extend(runtime_skill_storage_mutations_to_store_mutations(
-                    &apply_report.planned_skill_mutations,
-                ));
                 mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
                     &self.config.subject_id,
                     &apply_report.accepted_upserts,
-                    &apply_report.accepted_skill_writes,
+                    &[],
                     self.config.clock.now_secs(),
                 )?);
                 if let Some(mutation) = long_term_extraction_state_mutation(
@@ -5428,12 +7739,50 @@ impl MemoryRuntime {
     fn plan_long_term_extraction_transaction(
         &self,
         extraction: &ParsedLongTermMemoryExtraction,
+        governed_skill_writes: &[GovernedRuntimeSkillWriteInput],
+        runtime_skill_owning_scope: Option<&RuntimeSkillOwningScope>,
         now_secs: u64,
     ) -> Result<MemoryLongTermExtractionTransactionPlan> {
         let store = self.config.long_term_memory_read_store.clone();
         let planning_store = PlanningLongTermMemoryStore::new(store.as_ref());
-        let skill_storage = self.config.platform.skill_storage();
         let mut changed = 0usize;
+        if extraction.skill_writes.is_empty() {
+            if !governed_skill_writes.is_empty() || runtime_skill_owning_scope.is_some() {
+                return Err(Error::config(
+                    "runtime_skill_owner_plan",
+                    "long-term extraction without procedural writes must not carry RuntimeSkill authority",
+                ));
+            }
+        } else {
+            let owning_scope = runtime_skill_owning_scope.ok_or_else(|| {
+                Error::config(
+                    "runtime_skill_owner_plan",
+                    "procedural extraction requires an explicit RuntimeSkill owning scope",
+                )
+            })?;
+            if matches!(owning_scope, RuntimeSkillOwningScope::SharedProgram)
+                && (!extraction.upserts.is_empty() || !extraction.deletes.is_empty())
+            {
+                return Err(Error::config(
+                    "runtime_skill_owner_plan",
+                    "one extraction transaction cannot mix SharedProgram RuntimeSkill owners with subject long-term owners",
+                ));
+            }
+            let normalized_extracted =
+                normalize_runtime_skill_write_names(extraction.skill_writes.clone());
+            let normalized_governed = normalize_runtime_skill_write_names(
+                governed_skill_writes
+                    .iter()
+                    .map(|input| input.write.clone())
+                    .collect(),
+            );
+            if normalized_extracted != normalized_governed {
+                return Err(Error::config(
+                    "runtime_skill_owner_plan",
+                    "governed RuntimeSkill writes must exactly bind every extracted procedural write",
+                ));
+            }
+        }
 
         for slot in &extraction.deletes {
             let Some(id) = slot.stable_id() else {
@@ -5471,55 +7820,83 @@ impl MemoryRuntime {
             accepted_upserts = plan.accepted_drafts;
             Some(plan.outcome)
         };
-        let owner_plan = planning_store.into_plan(&self.config.memory_space_id)?;
+        let owner_plan = planning_store.into_plan(
+            &self.config.memory_space_id,
+            &self.config.scoped_runtime.mounted_subject_id,
+            self.config.store_platform.as_ref().ok_or_else(|| {
+                Error::config("long_term_version_plan", "store platform is required")
+            })?,
+            self.runtime_budget()
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner,
+        )?;
         let facet_plan =
             self.plan_long_term_facet_index_mutations_for_store_mutations(&owner_plan.mutations)?;
         let mut mutation_plan = owner_plan;
         mutation_plan.merge(facet_plan)?;
         let MemoryStoreMutationPlan {
             mut mutations,
-            preconditions,
+            mut preconditions,
         } = mutation_plan;
 
-        let mut accepted_skill_writes = Vec::new();
         let procedural_evolution = if extraction.skill_writes.is_empty() {
             None
         } else {
-            let skill_plan = plan_governed_runtime_skills(
-                skill_storage.as_ref(),
-                &extraction.skill_writes,
+            let owning_scope = runtime_skill_owning_scope.expect("validated owning scope");
+            let normalized_writes =
+                normalize_runtime_skill_write_names(extraction.skill_writes.clone());
+            let mut outcome = govern_runtime_skill_write_shapes(
+                &normalized_writes,
                 RuntimeSkillWriteSource::Extraction,
-            )?;
-            for mutation in &skill_plan.mutations {
-                mutations.extend(runtime_skill_storage_mutations_to_store_mutations(
-                    std::slice::from_ref(mutation),
-                ));
-            }
-            changed = changed.saturating_add(skill_plan.outcome.changed);
-            let accepted_topics = skill_plan
-                .outcome
-                .reports
-                .iter()
-                .filter(|report| matches!(report.action, RuntimeSkillWriteAction::Accepted))
-                .map(|report| report.topic.trim().to_string())
-                .collect::<HashSet<_>>();
-            accepted_skill_writes.extend(
-                extraction
-                    .skill_writes
-                    .iter()
-                    .filter(|write| accepted_topics.contains(write.topic.trim()))
-                    .cloned(),
             );
+            let accepted_inputs = governed_skill_writes
+                .iter()
+                .zip(normalized_writes.iter())
+                .zip(outcome.reports.iter())
+                .filter(|((_input, _write), report)| {
+                    matches!(report.action, RuntimeSkillWriteAction::Accepted)
+                })
+                .collect::<Vec<_>>();
+            let owner_records = accepted_inputs
+                .iter()
+                .map(|((input, write), _report)| {
+                    runtime_skill_owner_record_from_governed_write(
+                        write,
+                        &self.config.memory_space_id,
+                        owning_scope.clone(),
+                        input.creation_ref.clone(),
+                        input.privacy_class,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let skill_plan = plan_runtime_skill_owner_upserts(
+                self.config.store_platform.as_ref().ok_or_else(|| {
+                    Error::config("runtime_skill_owner_plan", "store platform is required")
+                })?,
+                &self.config.memory_space_id,
+                owning_scope,
+                owner_records,
+                self.runtime_budget()
+                    .governed_state_budget
+                    .max_retained_runtime_skill_owners_per_scope,
+                self.runtime_budget()
+                    .governed_state_budget
+                    .max_runtime_skill_lineage_depth,
+            )?;
+            outcome.changed = runtime_skill_owner_mutation_count(&skill_plan);
+            mutations.extend(skill_plan.mutations);
+            merge_json_preconditions(&mut preconditions, skill_plan.preconditions)?;
+            changed = changed.saturating_add(outcome.changed);
             Some(build_skill_evolution_report_from_write_outcome(
-                &extraction.skill_writes,
-                &skill_plan.outcome,
+                &normalized_writes,
+                &outcome,
             ))
         };
 
         mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
             &self.config.subject_id,
             &accepted_upserts,
-            &accepted_skill_writes,
+            &[],
             now_secs,
         )?);
 
@@ -5555,10 +7932,23 @@ impl MemoryRuntime {
         let mut mutation_plan = MemoryStoreMutationPlan::default();
         if report.accepted && !report.dry_run {
             let long_term_plan = plan_owner_writes(
-                &governed_store,
-                &self.config.memory_space_id,
+                LongTermOwnerPlanningContext {
+                    base: &governed_store,
+                    control_base: control_store.as_ref(),
+                    memory_space_id: &self.config.memory_space_id,
+                    mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                    store_platform: self.config.store_platform.as_ref().ok_or_else(|| {
+                        Error::config("long_term_version_plan", "store platform is required")
+                    })?,
+                    max_retained_revisions_per_owner: self
+                        .runtime_budget()
+                        .governed_state_budget
+                        .max_retained_long_term_revisions_per_owner,
+                },
                 core_plan.owner_writes,
+                core_plan.control_writes,
             )?;
+            reconcile_bound_long_term_control_report(&mut report, &long_term_plan.mutations)?;
             let facet_index_mutations = self
                 .plan_long_term_facet_index_mutations_for_store_mutations(
                     &long_term_plan.mutations,
@@ -5567,11 +7957,6 @@ impl MemoryRuntime {
                 self.long_term_control_affected_facet_docs(&facet_index_mutations.mutations)?;
             mutation_plan.merge(long_term_plan)?;
             mutation_plan.merge(facet_index_mutations)?;
-            mutation_plan.merge(plan_control_writes(
-                control_store.as_ref(),
-                &self.config.memory_space_id,
-                core_plan.control_writes,
-            )?)?;
         }
         Ok((report, mutation_plan))
     }
@@ -5654,18 +8039,70 @@ impl MemoryRuntime {
         Ok((report, plan))
     }
 
+    fn read_runtime_skill_locator_snapshot(
+        &self,
+        locator: &RuntimeSkillOwnerLocator,
+        stage: &'static str,
+    ) -> Result<RuntimeSkillScopeSnapshot> {
+        if !locator.validate_for(&self.config.memory_space_id) {
+            return Err(Error::invalid_input(
+                stage,
+                "runtime skill owner locator is invalid",
+            ));
+        }
+        self.runtime_skill_transaction_scope(locator.owning_scope())?;
+        read_runtime_skill_scope_snapshot(
+            self.config
+                .store_platform
+                .as_ref()
+                .ok_or_else(|| Error::config(stage, "store platform is required"))?,
+            &self.config.memory_space_id,
+            locator.owning_scope(),
+            self.runtime_budget()
+                .governed_state_budget
+                .max_retained_runtime_skill_owners_per_scope,
+        )
+    }
+
+    fn plan_runtime_skill_owner_records(
+        &self,
+        owning_scope: &RuntimeSkillOwningScope,
+        records: Vec<RuntimeSkillOwnerRecord>,
+    ) -> Result<MemoryStoreMutationPlan> {
+        plan_runtime_skill_owner_upserts(
+            self.config.store_platform.as_ref().ok_or_else(|| {
+                Error::config("runtime_skill_owner_plan", "store platform is required")
+            })?,
+            &self.config.memory_space_id,
+            owning_scope,
+            records,
+            self.runtime_budget()
+                .governed_state_budget
+                .max_retained_runtime_skill_owners_per_scope,
+            self.runtime_budget()
+                .governed_state_budget
+                .max_runtime_skill_lineage_depth,
+        )
+    }
+
     pub fn list_runtime_skills(
         &self,
         request: RuntimeSkillListRequest,
     ) -> Result<RuntimeSkillListReport> {
         self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
-        let platform = self.config.platform.as_ref();
-        let storage = platform.skill_storage();
-        let meta_store = platform.skill_meta_store();
-        let disabled: HashSet<String> = get_disabled_skills(meta_store.as_ref())
-            .into_iter()
-            .collect();
-        let runtime_records = list_runtime_skill_records(storage.as_ref());
+        self.runtime_skill_transaction_scope(&request.owning_scope)?;
+        let runtime_budget = self.runtime_budget();
+        let snapshot = read_runtime_skill_scope_snapshot(
+            self.config
+                .store_platform
+                .as_ref()
+                .ok_or_else(|| Error::config("runtime_skill_list", "store platform is required"))?,
+            &self.config.memory_space_id,
+            &request.owning_scope,
+            runtime_budget
+                .governed_state_budget
+                .max_retained_runtime_skill_owners_per_scope,
+        )?;
         let mut rows = Vec::new();
         let query = request
             .query
@@ -5674,19 +8111,20 @@ impl MemoryRuntime {
             .filter(|value| !value.is_empty())
             .map(str::to_ascii_lowercase);
 
-        for record in runtime_records {
-            let enabled = !disabled.contains(&record.name);
-            let summary = runtime_skill_summary(&record, enabled);
+        for record in snapshot.records {
+            let summary = runtime_skill_summary(&record);
             if !request.include_disabled && !summary.enabled {
                 continue;
             }
-            if !request.include_retired && matches!(record.status, RuntimeSkillStatus::Retired) {
+            if !request.include_retired
+                && matches!(record.lifecycle.state, RuntimeSkillLifecycleState::Retired)
+            {
                 continue;
             }
             if !skill_matches_query(
                 &summary,
-                Some(&record.summary),
-                Some(&record.procedure),
+                Some(&record.procedural_content.summary),
+                Some(&record.procedural_content.procedure),
                 query.as_deref(),
             ) {
                 continue;
@@ -5698,11 +8136,14 @@ impl MemoryRuntime {
             right
                 .updated_at
                 .cmp(&left.updated_at)
-                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.owner_id.cmp(&right.owner_id))
         });
 
         let total = rows.len();
-        let active = rows.iter().filter(|skill| skill.enabled).count();
+        let active = rows
+            .iter()
+            .filter(|skill| skill.enabled && skill.status == "active")
+            .count();
         let disabled_count = rows.iter().filter(|skill| !skill.enabled).count();
         let skills = if request.limit == 0 {
             Vec::new()
@@ -5724,41 +8165,43 @@ impl MemoryRuntime {
         request: RuntimeSkillDetailRequest,
     ) -> Result<RuntimeSkillDetailReport> {
         self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
-        let name = checked_skill_name(&request.name, "skill_detail")?;
-        if !is_runtime_skill_name(name) {
-            self.audit("inspect.skills", false, "runtime_skill_not_found");
-            return Err(Error::config("skill_detail", "runtime_skill_not_found"));
-        }
-        let platform = self.config.platform.as_ref();
-        let storage = platform.skill_storage();
-        let meta_store = platform.skill_meta_store();
-        let disabled: HashSet<String> = get_disabled_skills(meta_store.as_ref())
-            .into_iter()
+        let snapshot =
+            self.read_runtime_skill_locator_snapshot(&request.locator, "skill_detail")?;
+        let record = runtime_skill_record_for_locator(&snapshot, &request.locator, "skill_detail")?;
+        let summary = runtime_skill_summary(record);
+        let raw_content = serde_json::to_string_pretty(record)
+            .map_err(|error| Error::config("skill_detail", error.to_string()))?;
+        let citations = record
+            .intrinsic_contract
+            .evidence_bindings
+            .iter()
+            .map(|binding| binding.safe_ref.clone())
             .collect();
-        if let Some(record) = list_runtime_skill_records(storage.as_ref())
-            .into_iter()
-            .find(|record| record.name == name)
-        {
-            let summary = runtime_skill_summary(&record, !disabled.contains(name));
-            let lineage = render_runtime_skill_lineage(&record);
-            let strategy_diffs = render_runtime_skill_strategy_diffs(&record);
-            let raw_content = render_runtime_skill_detail_content(&record);
-            self.audit("inspect.skills", true, "skill_detail_completed");
-            return Ok(RuntimeSkillDetailReport {
-                summary,
-                summary_text: record.summary,
-                procedure_text: record.procedure,
-                raw_content,
-                citations: record.citations,
-                lineage,
-                strategy_diffs,
-                source_chat_id: record.source_chat_id,
-                last_outcome_note: record.last_outcome_note,
-            });
-        }
-
-        self.audit("inspect.skills", false, "runtime_skill_not_found");
-        Err(Error::config("skill_detail", "runtime_skill_not_found"))
+        let lineage = record
+            .lifecycle
+            .lineage
+            .predecessor
+            .iter()
+            .chain(record.lifecycle.lineage.successor.iter())
+            .map(|binding| {
+                format!(
+                    "{}@{}:{}",
+                    binding.owner_ref.owner_id, binding.owner_revision, binding.content_digest
+                )
+            })
+            .collect();
+        self.audit("inspect.skills", true, "skill_detail_completed");
+        Ok(RuntimeSkillDetailReport {
+            summary,
+            summary_text: record.procedural_content.summary.clone(),
+            procedure_text: record.procedural_content.procedure.clone(),
+            raw_content,
+            citations,
+            lineage,
+            strategy_diffs: Vec::new(),
+            source_chat_id: None,
+            last_outcome_note: runtime_skill_last_outcome_note(record),
+        })
     }
 
     pub fn edit_runtime_skill(
@@ -5766,19 +8209,6 @@ impl MemoryRuntime {
         request: RuntimeSkillEditRequest,
     ) -> Result<RuntimeSkillMutationReport> {
         self.ensure_visible("write.skills", self.capabilities.write)?;
-        let name = checked_skill_name(&request.name, "skill_edit")?;
-        if !is_runtime_skill_name(name) {
-            self.audit("write.skills", false, "runtime_skill_create_forbidden");
-            return Err(Error::config("skill_edit", "runtime_skill_not_found"));
-        }
-        let storage = self.config.platform.skill_storage();
-        let existing = list_runtime_skill_records(storage.as_ref())
-            .into_iter()
-            .find(|record| record.name == name);
-        if existing.is_none() {
-            self.audit("write.skills", false, "runtime_skill_create_forbidden");
-            return Err(Error::config("skill_edit", "runtime_skill_not_found"));
-        }
         let title = checked_non_empty(&request.title, "skill_edit", "title must not be empty")?;
         let topic = checked_non_empty(&request.topic, "skill_edit", "topic must not be empty")?;
         let summary =
@@ -5788,46 +8218,49 @@ impl MemoryRuntime {
             "skill_edit",
             "procedure must not be empty",
         )?;
-        let write = RuntimeSkillWrite {
-            name: name.to_string(),
+        checked_non_empty(
+            &request.edit_reason,
+            "skill_edit",
+            "edit reason must not be empty",
+        )?;
+        let snapshot = self.read_runtime_skill_locator_snapshot(&request.locator, "skill_edit")?;
+        let previous =
+            runtime_skill_record_for_locator(&snapshot, &request.locator, "skill_edit")?.clone();
+        let content = RuntimeSkillProceduralContent {
             title: title.to_string(),
             topic: topic.to_string(),
             summary: summary.to_string(),
-            content: procedure.to_string(),
-            citations: request.citations,
-            source_chat_id: request.source_chat_id,
-            observed_at: request.observed_at,
+            procedure: procedure.to_string(),
         };
-        let normalized = normalize_runtime_skill_write_names(vec![write])
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::config("skill_edit", "skill write missing"))?;
-        let stored_name = normalized.name.clone();
-        let plan = plan_governed_runtime_skills(
-            storage.as_ref(),
-            &[normalized],
-            RuntimeSkillWriteSource::Manual,
-        )?;
-        let outcome = plan.outcome;
-        let mutations = runtime_skill_storage_mutations_to_store_mutations(&plan.mutations);
-        if !mutations.is_empty() {
-            self.commit_memory_mutation_batch(
-                "runtime_skill.edit",
-                MemoryStoreMutationPlan::from_mutations(mutations),
-            )?;
+        if content == previous.procedural_content {
+            let locator = RuntimeSkillOwnerLocator::from_record(&previous);
+            return Ok(RuntimeSkillMutationReport {
+                accepted: true,
+                changed: false,
+                previous_locator: locator.clone(),
+                current_locator: locator,
+                owner_id: previous.owner_ref.owner_id,
+                operation: "runtime_skill.edit",
+                reason: "runtime_skill_content_unchanged".to_string(),
+            });
         }
-        let accepted = outcome.accepted > 0;
-        let reason = format!(
-            "submitted={}, accepted={}, rejected={}",
-            outcome.submitted, outcome.accepted, outcome.rejected
-        );
-        self.audit("write.skills", accepted, &reason);
+        let next = previous.revise_procedural_content(content, request.observed_at)?;
+        let plan = self
+            .plan_runtime_skill_owner_records(request.locator.owning_scope(), vec![next.clone()])?;
+        self.commit_memory_mutation_batch_in_scope(
+            "runtime_skill.edit",
+            plan,
+            self.runtime_skill_transaction_scope(request.locator.owning_scope())?,
+        )?;
+        self.audit("write.skills", true, "runtime_skill_revision_created");
         Ok(RuntimeSkillMutationReport {
-            accepted,
-            changed: outcome.changed > 0,
-            name: stored_name,
+            accepted: true,
+            changed: true,
+            previous_locator: RuntimeSkillOwnerLocator::from_record(&previous),
+            current_locator: RuntimeSkillOwnerLocator::from_record(&next),
+            owner_id: next.owner_ref.owner_id,
             operation: "runtime_skill.edit",
-            reason,
+            reason: "runtime_skill_revision_created".to_string(),
         })
     }
 
@@ -5836,132 +8269,91 @@ impl MemoryRuntime {
         request: RuntimeSkillSetEnabledRequest,
     ) -> Result<RuntimeSkillMutationReport> {
         self.ensure_visible("write.skills", self.capabilities.write)?;
-        let name = checked_skill_name(&request.name, "skill_set_enabled")?;
-        if !is_runtime_skill_name(name) {
-            self.audit("write.skills", false, "runtime_skill_not_found");
-            return Err(Error::config(
-                "skill_set_enabled",
-                "runtime_skill_not_found",
-            ));
-        }
-        let platform = self.config.platform.as_ref();
-        let storage = platform.skill_storage();
-        if !list_runtime_skill_records(storage.as_ref())
-            .iter()
-            .any(|record| record.name == name)
-        {
-            self.audit("write.skills", false, "runtime_skill_not_found");
-            return Err(Error::config(
-                "skill_set_enabled",
-                "runtime_skill_not_found",
-            ));
-        }
-        let meta_store = platform.skill_meta_store();
-        let (_order, mut disabled) = meta_store.read_meta()?;
-        let was_disabled = disabled.iter().any(|value| value == name);
-        if request.enabled {
-            disabled.retain(|value| value != name);
-        } else if !disabled.iter().any(|value| value == name) {
-            disabled.push(name.to_string());
-        }
-        let changed = was_disabled == request.enabled;
-        if changed {
-            self.commit_memory_mutation_batch(
-                "runtime_skill.set_enabled",
-                MemoryStoreMutationPlan::from_mutations(vec![StoreMutation::PutJson {
-                    namespace: "skill_meta".to_string(),
-                    key: "disabled".to_string(),
-                    value: serde_json::to_value(&disabled).map_err(|error| {
-                        Error::config("runtime_skill.set_enabled", error.to_string())
-                    })?,
-                    event_kind: MemoryStoreEventKind::MemoryWrite,
-                    plane: "skill_meta".to_string(),
-                    record_key: "disabled".to_string(),
-                }]),
-            )?;
-        }
+        let snapshot =
+            self.read_runtime_skill_locator_snapshot(&request.locator, "skill_set_enabled")?;
+        let previous =
+            runtime_skill_record_for_locator(&snapshot, &request.locator, "skill_set_enabled")?
+                .clone();
+        let availability = if request.enabled {
+            RuntimeSkillAvailability::Enabled
+        } else {
+            RuntimeSkillAvailability::Disabled
+        };
         let operation = if request.enabled {
             "skill.enable"
         } else {
             "skill.disable"
         };
-        let reason = if changed {
-            "skill_enabled_state_changed"
-        } else {
-            "skill_enabled_state_unchanged"
-        };
-        self.audit("write.skills", true, reason);
-        Ok(RuntimeSkillMutationReport {
-            accepted: true,
-            changed,
-            name: name.to_string(),
-            operation,
-            reason: reason.to_string(),
-        })
-    }
-
-    pub fn delete_runtime_skill(
-        &self,
-        request: RuntimeSkillDeleteRequest,
-    ) -> Result<RuntimeSkillMutationReport> {
-        self.ensure_visible("write.skills", self.capabilities.write)?;
-        let name = checked_skill_name(&request.name, "skill_delete")?;
-        if !is_runtime_skill_name(name) {
-            self.audit("write.skills", false, "runtime_skill_not_found");
-            return Err(Error::config("skill_delete", "runtime_skill_not_found"));
-        }
-        let platform = self.config.platform.as_ref();
-        let storage = platform.skill_storage();
-        if !list_runtime_skill_records(storage.as_ref())
-            .iter()
-            .any(|record| record.name == name)
-        {
-            self.audit("write.skills", false, "runtime_skill_not_found");
-            return Err(Error::config("skill_delete", "runtime_skill_not_found"));
-        }
-        let meta_store = platform.skill_meta_store();
-        let (mut order, mut disabled) = meta_store.read_meta()?;
-        disabled.retain(|value| value != name);
-        let before_len = order.len();
-        order.retain(|value| value != name);
-        let mut mutations = vec![StoreMutation::DeleteBlob {
-            namespace: "skills".to_string(),
-            key: name.to_string(),
-            event_kind: MemoryStoreEventKind::MemoryDelete,
-            plane: "skills".to_string(),
-            record_key: name.to_string(),
-        }];
-        mutations.push(StoreMutation::PutJson {
-            namespace: "skill_meta".to_string(),
-            key: "disabled".to_string(),
-            value: serde_json::to_value(&disabled)
-                .map_err(|error| Error::config("runtime_skill.delete", error.to_string()))?,
-            event_kind: MemoryStoreEventKind::MemoryWrite,
-            plane: "skill_meta".to_string(),
-            record_key: "disabled".to_string(),
-        });
-        if before_len != order.len() {
-            mutations.push(StoreMutation::PutJson {
-                namespace: "skill_meta".to_string(),
-                key: "order".to_string(),
-                value: serde_json::to_value(&order)
-                    .map_err(|error| Error::config("runtime_skill.delete", error.to_string()))?,
-                event_kind: MemoryStoreEventKind::MemoryWrite,
-                plane: "skill_meta".to_string(),
-                record_key: "order".to_string(),
+        if previous.lifecycle.availability == availability {
+            let locator = RuntimeSkillOwnerLocator::from_record(&previous);
+            return Ok(RuntimeSkillMutationReport {
+                accepted: true,
+                changed: false,
+                previous_locator: locator.clone(),
+                current_locator: locator,
+                owner_id: previous.owner_ref.owner_id,
+                operation,
+                reason: "runtime_skill_availability_unchanged".to_string(),
             });
         }
-        self.commit_memory_mutation_batch(
-            "runtime_skill.delete",
-            MemoryStoreMutationPlan::from_mutations(mutations),
+        let next = previous.revise_availability(availability, request.observed_at)?;
+        let plan = self
+            .plan_runtime_skill_owner_records(request.locator.owning_scope(), vec![next.clone()])?;
+        self.commit_memory_mutation_batch_in_scope(
+            "runtime_skill.set_enabled",
+            plan,
+            self.runtime_skill_transaction_scope(request.locator.owning_scope())?,
         )?;
-        self.audit("write.skills", true, "skill_deleted");
+        self.audit("write.skills", true, "runtime_skill_availability_revised");
         Ok(RuntimeSkillMutationReport {
             accepted: true,
             changed: true,
-            name: name.to_string(),
-            operation: "runtime_skill.delete",
-            reason: "runtime_skill_deleted".to_string(),
+            previous_locator: RuntimeSkillOwnerLocator::from_record(&previous),
+            current_locator: RuntimeSkillOwnerLocator::from_record(&next),
+            owner_id: next.owner_ref.owner_id,
+            operation,
+            reason: "runtime_skill_availability_revised".to_string(),
+        })
+    }
+
+    pub fn retire_runtime_skill(
+        &self,
+        request: RuntimeSkillRetireRequest,
+    ) -> Result<RuntimeSkillMutationReport> {
+        self.ensure_visible("write.skills", self.capabilities.write)?;
+        let snapshot =
+            self.read_runtime_skill_locator_snapshot(&request.locator, "skill_retire")?;
+        let previous =
+            runtime_skill_record_for_locator(&snapshot, &request.locator, "skill_retire")?.clone();
+        if previous.lifecycle.state == RuntimeSkillLifecycleState::Retired {
+            let locator = RuntimeSkillOwnerLocator::from_record(&previous);
+            return Ok(RuntimeSkillMutationReport {
+                accepted: true,
+                changed: false,
+                previous_locator: locator.clone(),
+                current_locator: locator,
+                owner_id: previous.owner_ref.owner_id,
+                operation: "runtime_skill.retire",
+                reason: "runtime_skill_already_retired".to_string(),
+            });
+        }
+        let next = previous.retire(request.observed_at)?;
+        let plan = self
+            .plan_runtime_skill_owner_records(request.locator.owning_scope(), vec![next.clone()])?;
+        self.commit_memory_mutation_batch_in_scope(
+            "runtime_skill.retire",
+            plan,
+            self.runtime_skill_transaction_scope(request.locator.owning_scope())?,
+        )?;
+        self.audit("write.skills", true, "runtime_skill_retired");
+        Ok(RuntimeSkillMutationReport {
+            accepted: true,
+            changed: true,
+            previous_locator: RuntimeSkillOwnerLocator::from_record(&previous),
+            current_locator: RuntimeSkillOwnerLocator::from_record(&next),
+            owner_id: next.owner_ref.owner_id,
+            operation: "runtime_skill.retire",
+            reason: "runtime_skill_retired".to_string(),
         })
     }
 
@@ -5978,18 +8370,98 @@ impl MemoryRuntime {
         )
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn p8_semantic_off_run(
+        &self,
+        request: crate::P8SemanticOffRunRequest,
+    ) -> Result<crate::P8SemanticOffRunReport> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self
+                .execute_with_runtime_budget_lease(&lease, || self.p8_semantic_off_run(request));
+        }
+        let (recall, forgetting_pre_operation) = request.into_parts();
+        let closure = self.production_recall_closure(
+            recall,
+            RecallReadPurpose::Query,
+            RuntimeLifecycleTrigger::SdkCall,
+        )?;
+        let long_term_counterfactual_inputs = closure.long_term.p8_counterfactual_inputs;
+        let baseline = closure
+            .report
+            .governed_operator_report
+            .expect("production recall closure finalizes its safe operator report");
+        let report = crate::P8SemanticOffRunReport::from_single_production_closure(
+            baseline,
+            forgetting_pre_operation,
+            long_term_counterfactual_inputs,
+            closure.p8_no_execution_authority,
+        );
+        let failures = report.validate_contract();
+        if !failures.is_empty() {
+            return Err(Error::config(
+                "p8_semantic_off_run",
+                format!("safe off-run report failed exact closure: {failures:?}"),
+            ));
+        }
+        Ok(report)
+    }
+
     fn materialize_production_recall_read_view(
         &self,
         context: &mut RecallImmutableReadContext<'_>,
         query_facets: &[QueryFacet],
         purpose: RecallReadPurpose,
-        max_facet_owner_docs: usize,
-        max_projection_baseline_owner_docs: usize,
-    ) -> Result<RecallReadView> {
+        temporal_operation: crate::MemoryRecallTemporalOperation,
+        authority: &RecallOperationAuthoritySnapshot,
+    ) -> Result<ProductionRecallReadViewMaterialization> {
+        let max_facet_owner_docs = authority
+            .runtime_budget
+            .facet_recall_budget
+            .max_facet_index_docs_read;
+        let max_projection_baseline_owner_docs = authority
+            .runtime_budget
+            .memory_core_budget
+            .long_term_scan_max_items;
         let memory_space_id = self.config.memory_space_id.as_str();
         let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
         let channel_id = self.config.scope.channel.as_str();
         let chat_id = self.config.scope.chat_id.as_str();
+        let governed_state_budget = authority.runtime_budget.governed_state_budget;
+        let runtime_skill_materializer = self
+            .runtime_skill_materializer_resolver
+            .materialize_for_operation(
+                temporal_operation,
+                context,
+                memory_space_id,
+                mounted_subject_id,
+                governed_state_budget.max_retained_runtime_skill_owners_per_scope,
+            )?;
+        if matches!(
+            temporal_operation,
+            crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
+        ) {
+            context.materialize_long_term_historical_scope(
+                memory_space_id,
+                mounted_subject_id,
+                governed_state_budget.max_retained_long_term_revisions_per_owner,
+                governed_state_budget.max_validity_joins,
+                governed_state_budget.max_as_of_candidates,
+            )?;
+            return Ok(ProductionRecallReadViewMaterialization::Ready {
+                read_view: context.take_materialized_view(),
+                runtime_skill_materializer,
+            });
+        }
+        if runtime_skill_deep_premise_sources_allowed(authority.profile_entry.profile)
+            && runtime_skill_materializer.is_some()
+        {
+            context.materialize_runtime_skill_premise_evidence(
+                memory_space_id,
+                mounted_subject_id,
+                governed_state_budget.max_premise_evidence_reads,
+            )?;
+        }
 
         let archive_key = ArchiveRecallManifest::build(
             1,
@@ -6078,12 +8550,17 @@ impl MemoryRuntime {
             mounted_subject_id,
             channel_id,
             &conversation_id,
-            std::iter::empty(),
+            0,
+            0,
         )?
         .physical_key;
-        if let Some(index) =
-            context.materialize_typed_index::<ConversationRecallManifest>(&conversation_root)?
-        {
+        let conversation_manifest = context
+            .read_json_value(ConversationRecallManifest::NAMESPACE, &conversation_root)?
+            .map(|value| {
+                decode_typed_recall_index::<ConversationRecallManifest>(&conversation_root, value)
+            })
+            .transpose()?;
+        if let Some(index) = conversation_manifest {
             if index.memory_space_id != memory_space_id
                 || index.mounted_subject_id != mounted_subject_id
                 || index.channel_id != channel_id
@@ -6094,121 +8571,131 @@ impl MemoryRuntime {
                     "conversation manifest scope differs from the mounted runtime",
                 ));
             }
-            validate_recall_index_entry_namespaces(
-                &index,
-                &[
-                    "conversation_transcript",
-                    "conversation_transcript_attr",
-                    "conversation_transcript_derived_ref",
-                ],
-                &[],
-            )?;
-            for entry in &index.entries {
-                match entry.namespace.as_str() {
-                    "conversation_transcript" => {
-                        let record = context
-                            .cached_json::<TranscriptTurnRecord>(&entry.namespace, &entry.key)?
-                            .ok_or_else(|| {
-                                Error::config(
-                                    "production_recall_materialize",
-                                    "conversation transcript owner is missing",
-                                )
-                            })?;
-                        if record.key != conversation_key
-                            || record.subject != mounted_subject_id
-                            || crate::store_internal::transcript_turn_storage_key(
-                                &record.key,
-                                mounted_subject_id,
-                                &record.turn_id,
-                            ) != entry.key
-                        {
-                            return Err(Error::config(
+            for page_id in 0..index.page_count {
+                let page_id = format!("{page_id:020}");
+                let page_root = ConversationTranscriptPageIndex::build(
+                    1,
+                    memory_space_id,
+                    mounted_subject_id,
+                    channel_id,
+                    &conversation_id,
+                    &page_id,
+                    std::iter::empty(),
+                )?
+                .physical_key;
+                let page = context
+                    .materialize_typed_index::<ConversationTranscriptPageIndex>(&page_root)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "production_recall_materialize",
+                            "conversation head page is missing",
+                        )
+                    })?;
+                validate_recall_index_entry_namespaces(&page, &["conversation_transcript"], &[])?;
+                for entry in &page.entries {
+                    let record = context
+                        .cached_json::<TranscriptTurnRecord>(&entry.namespace, &entry.key)?
+                        .ok_or_else(|| {
+                            Error::config(
                                 "production_recall_materialize",
-                                "conversation transcript owner scope or address drift",
-                            ));
-                        }
-                    }
-                    "conversation_transcript_attr" => {
-                        let attr = context
-                            .cached_json::<TranscriptAttrEnvelope>(&entry.namespace, &entry.key)?
-                            .ok_or_else(|| {
-                                Error::config(
-                                    "production_recall_materialize",
-                                    "conversation transcript attr owner is missing",
-                                )
-                            })?;
-                        let turn_key = crate::store_internal::transcript_turn_storage_key(
-                            &attr.target.key,
+                                "conversation transcript owner is missing",
+                            )
+                        })?;
+                    if record.key != conversation_key
+                        || record.subject != mounted_subject_id
+                        || crate::store_internal::transcript_turn_storage_key(
+                            &record.key,
                             mounted_subject_id,
-                            &attr.target.turn_id,
-                        );
-                        let target_turn = context
-                            .cached_json::<TranscriptTurnRecord>(
-                                "conversation_transcript",
-                                &turn_key,
-                            )?
-                            .ok_or_else(|| {
-                                Error::config(
-                                    "production_recall_materialize",
-                                    "conversation transcript attr target owner is missing",
-                                )
-                            })?;
-                        if attr.target.key != conversation_key
-                            || target_turn.subject != mounted_subject_id
-                            || target_turn.key != conversation_key
-                            || attr.validate_for_record(&target_turn).is_err()
-                        {
-                            return Err(Error::config(
-                                "production_recall_materialize",
-                                "conversation transcript attr scope drift",
-                            ));
+                            &record.turn_id,
+                        ) != entry.key
+                    {
+                        return Err(Error::config(
+                            "production_recall_materialize",
+                            "conversation transcript owner scope or address drift",
+                        ));
+                    }
+                    let aux_root = ConversationTranscriptAuxManifest::build(
+                        1,
+                        memory_space_id,
+                        mounted_subject_id,
+                        channel_id,
+                        &conversation_id,
+                        &record.turn_id,
+                        std::iter::empty(),
+                    )?
+                    .physical_key;
+                    let Some(aux) = context
+                        .materialize_typed_index::<ConversationTranscriptAuxManifest>(&aux_root)?
+                    else {
+                        continue;
+                    };
+                    validate_recall_index_entry_namespaces(
+                        &aux,
+                        &[
+                            "conversation_transcript_attr",
+                            "conversation_transcript_derived_ref",
+                        ],
+                        &[],
+                    )?;
+                    for entry in &aux.entries {
+                        match entry.namespace.as_str() {
+                            "conversation_transcript_attr" => {
+                                let attr = context
+                                    .cached_json::<TranscriptAttrEnvelope>(
+                                        &entry.namespace,
+                                        &entry.key,
+                                    )?
+                                    .ok_or_else(|| {
+                                        Error::config(
+                                            "production_recall_materialize",
+                                            "conversation transcript attr owner is missing",
+                                        )
+                                    })?;
+                                if attr.target.key != conversation_key
+                                    || attr.target.turn_id != record.turn_id
+                                    || attr.validate_for_record(&record).is_err()
+                                {
+                                    return Err(Error::config(
+                                        "production_recall_materialize",
+                                        "conversation transcript attr scope drift",
+                                    ));
+                                }
+                            }
+                            "conversation_transcript_derived_ref" => {
+                                let derived = context
+                                    .cached_json::<DerivedMemoryRef>(&entry.namespace, &entry.key)?
+                                    .ok_or_else(|| {
+                                        Error::config(
+                                            "production_recall_materialize",
+                                            "conversation derived ref owner is missing",
+                                        )
+                                    })?;
+                                let derived_subject = derived
+                                    .subject_id
+                                    .as_deref()
+                                    .or(derived.source.subject_id.as_deref());
+                                if derived.source.memory_space_id != memory_space_id
+                                    || derived.source.channel_id != channel_id
+                                    || derived.source.conversation_id != conversation_id
+                                    || derived.source.turn_id != record.turn_id
+                                    || derived_subject != Some(mounted_subject_id)
+                                    || derived
+                                        .subject_id
+                                        .as_deref()
+                                        .zip(derived.source.subject_id.as_deref())
+                                        .is_some_and(|(owner, source_owner)| owner != source_owner)
+                                {
+                                    return Err(Error::config(
+                                        "production_recall_materialize",
+                                        "conversation derived ref scope drift",
+                                    ));
+                                }
+                            }
+                            _ => unreachable!("namespace admission checked above"),
                         }
                     }
-                    "conversation_transcript_derived_ref" => {
-                        let derived = context
-                            .cached_json::<DerivedMemoryRef>(&entry.namespace, &entry.key)?
-                            .ok_or_else(|| {
-                                Error::config(
-                                    "production_recall_materialize",
-                                    "conversation derived ref owner is missing",
-                                )
-                            })?;
-                        let derived_subject = derived
-                            .subject_id
-                            .as_deref()
-                            .or(derived.source.subject_id.as_deref());
-                        if derived.source.memory_space_id != memory_space_id
-                            || derived.source.channel_id != channel_id
-                            || derived.source.conversation_id != conversation_id
-                            || derived_subject != Some(mounted_subject_id)
-                            || derived
-                                .subject_id
-                                .as_deref()
-                                .zip(derived.source.subject_id.as_deref())
-                                .is_some_and(|(owner, source_owner)| owner != source_owner)
-                        {
-                            return Err(Error::config(
-                                "production_recall_materialize",
-                                "conversation derived ref scope drift",
-                            ));
-                        }
-                    }
-                    _ => unreachable!("namespace admission checked above"),
                 }
             }
-        }
-
-        let skill_root = RuntimeSkillRecallManifest::build(
-            1,
-            memory_space_id,
-            &self.config.identity.agent_id,
-            std::iter::empty(),
-        )?
-        .physical_key;
-        if let Some(index) =
-            context.materialize_typed_index::<RuntimeSkillRecallManifest>(&skill_root)?
-        {
-            validate_recall_index_entry_namespaces(&index, &[], &["skills"])?;
         }
 
         let continuity_root = ContinuityCapsuleScopeIndex::build(
@@ -6281,6 +8768,12 @@ impl MemoryRuntime {
                         "active task run owner scope, state, or address drift",
                     ));
                 }
+                context.bind_runtime_skill_task_run_evidence(
+                    memory_space_id,
+                    channel_id,
+                    chat_id,
+                    &record,
+                )?;
             }
         }
 
@@ -6317,24 +8810,326 @@ impl MemoryRuntime {
                         "task learning owner scope or address drift",
                     ));
                 }
+                context.bind_runtime_skill_task_learning_evidence(
+                    memory_space_id,
+                    channel_id,
+                    chat_id,
+                    &record,
+                )?;
             }
         }
 
-        self.materialize_facet_recall_closure(context, query_facets, max_facet_owner_docs)?;
+        self.materialize_facet_recall_closure(
+            context,
+            query_facets,
+            max_facet_owner_docs,
+            &authority.runtime_budget,
+        )?;
         if purpose == RecallReadPurpose::SubjectProjection {
             self.materialize_projection_subject_owner_closure(
                 context,
                 max_projection_baseline_owner_docs,
+                &authority.runtime_budget,
             )?;
         }
-        self.materialize_graph_recall_closure(context)?;
-        Ok(context.take_materialized_view())
+        self.materialize_graph_recall_closure(context, &authority.runtime_budget)?;
+        self.materialize_cached_long_term_owner_closures(context, &authority.runtime_budget)?;
+        Ok(ProductionRecallReadViewMaterialization::Ready {
+            read_view: context.take_materialized_view(),
+            runtime_skill_materializer,
+        })
+    }
+
+    fn build_runtime_skill_projection_items(
+        &self,
+        read_view: &RecallReadView,
+        query_text: &str,
+        authority_snapshot: &RecallOperationAuthoritySnapshot,
+    ) -> Result<Vec<MaterializedRuntimeSkillProjection>> {
+        if authority_snapshot.safe_view.runtime_skill_transport
+            == crate::RuntimeSkillRecallTransport::Unavailable
+        {
+            return Ok(Vec::new());
+        }
+        let query = match RuntimeSkillRecallQuery::try_from_text(query_text) {
+            Ok(query) => query,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let memory_space_id = self.config.memory_space_id.as_str();
+        let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
+        let scopes = [
+            RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: mounted_subject_id.to_string(),
+            },
+            RuntimeSkillOwningScope::SharedProgram,
+        ];
+        let closures = scopes
+            .iter()
+            .map(|scope| {
+                read_view
+                    .runtime_skill_scope(memory_space_id, scope)
+                    .ok_or_else(|| {
+                        Error::config(
+                            "runtime_skill_delivery",
+                            "request-pinned runtime skill scope was not materialized",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if closures.iter().any(|closure| {
+            closure.memory_space_id() != memory_space_id
+                || closure.owning_scope() != &scopes[0] && closure.owning_scope() != &scopes[1]
+        }) {
+            return Err(Error::config(
+                "runtime_skill_delivery",
+                "materialized RuntimeSkill scope identity drift",
+            ));
+        }
+
+        let profile_entry = authority_snapshot.profile_entry;
+        let deep_premise_sources_allowed =
+            runtime_skill_deep_premise_sources_allowed(profile_entry.profile);
+        let authority = RuntimeSkillRecallAuthority::try_new(
+            profile_entry.procedural_recall_allowed,
+            deep_premise_sources_allowed,
+            deep_premise_sources_allowed,
+            Some(mounted_subject_id.to_string()),
+        )?;
+        let governed_budget = authority_snapshot.runtime_budget.governed_state_budget;
+        let budget = RuntimeSkillRecallBudgetAuthority::try_new(
+            governed_budget.max_retained_runtime_skill_owners_per_scope,
+            governed_budget.max_runtime_skill_lineage_depth,
+            governed_budget.max_procedural_candidates,
+            governed_budget.max_premises_per_skill,
+            governed_budget.max_premise_evidence_reads,
+        )?;
+        let total_owner_count = closures
+            .iter()
+            .map(|closure| closure.records().len())
+            .sum::<usize>();
+        if total_owner_count > budget.max_procedural_candidates() {
+            return Err(Error::config(
+                "runtime_skill_delivery",
+                "request-pinned procedural candidate budget exceeded",
+            ));
+        }
+
+        let subject_manifest = closures[0].manifest();
+        let shared_manifest = closures[1].manifest();
+        let operation_authority_bytes = serde_json::to_vec(&(
+            "runtime_skill_operation_authority_v1",
+            authority_snapshot.safe_view.authority_ref().as_str(),
+            authority_snapshot.operation_time,
+            &query,
+            subject_manifest,
+            shared_manifest,
+        ))
+        .map_err(|error| Error::config("runtime_skill_delivery", error.to_string()))?;
+        let operation_authority_ref = RuntimeSkillOperationAuthorityRef::try_new(format!(
+            "runtime_skill_operation:sha256:{:x}",
+            Sha256::digest(operation_authority_bytes)
+        ))?;
+
+        let mut items = Vec::new();
+        for closure in closures {
+            let Some(manifest) = closure.manifest() else {
+                if !closure.records().is_empty() {
+                    return Err(Error::config(
+                        "runtime_skill_delivery",
+                        "RuntimeSkill records exist without their exact scope manifest",
+                    ));
+                }
+                continue;
+            };
+            for owner in closure.records() {
+                let premise_observations = self.runtime_skill_premise_observations_for_owner(
+                    read_view,
+                    owner,
+                    deep_premise_sources_allowed,
+                )?;
+                let plan = build_runtime_skill_recall_plan(
+                    owner,
+                    manifest,
+                    operation_authority_ref.clone(),
+                    authority_snapshot.operation_time,
+                    query.clone(),
+                    self.config.runtime_skill_applicability_context.clone(),
+                    premise_observations,
+                    authority.clone(),
+                    budget,
+                )?;
+                let report = build_procedural_memory_delivery_report(&plan)?;
+                let material = build_runtime_skill_projection_material(owner, manifest, &plan)?;
+                items.push(MaterializedRuntimeSkillProjection {
+                    plan,
+                    report,
+                    material,
+                    render_receipt: RuntimeSkillProjectionRenderReceipt::not_requested(),
+                });
+            }
+        }
+        items.sort_by(|left, right| {
+            left.report
+                .owner_revision_ref
+                .cmp(&right.report.owner_revision_ref)
+                .then_with(|| left.report.owning_scope.cmp(&right.report.owning_scope))
+        });
+        Ok(items)
+    }
+
+    fn runtime_skill_premise_observations_for_owner(
+        &self,
+        read_view: &RecallReadView,
+        owner: &RuntimeSkillOwnerRecord,
+        governed_environment_evidence_allowed: bool,
+    ) -> Result<Vec<RuntimeSkillPremiseObservation>> {
+        let mut observations = Vec::new();
+        for observation in &self.config.runtime_skill_premise_observations {
+            let relevant = match observation {
+                RuntimeSkillPremiseObservation::RegisteredCapability { capability_id, .. } => {
+                    owner.intrinsic_contract.premises.iter().any(|requirement| {
+                        matches!(
+                            &requirement.premise,
+                            RuntimeSkillPremise::RegisteredCapability {
+                                capability_id: required_id,
+                                ..
+                            } if required_id == capability_id
+                        )
+                    })
+                }
+                RuntimeSkillPremiseObservation::OpaquePresenceAttestation {
+                    handle_ref, ..
+                } => owner.intrinsic_contract.premises.iter().any(|requirement| {
+                    matches!(
+                        &requirement.premise,
+                        RuntimeSkillPremise::OpaquePresenceAttestation {
+                            handle_ref: required_ref
+                        } if required_ref == handle_ref
+                    )
+                }),
+                RuntimeSkillPremiseObservation::GovernedEnvironmentEvidence { .. }
+                | RuntimeSkillPremiseObservation::TaskEvidence { .. } => {
+                    return Err(Error::config(
+                        "runtime_skill_delivery",
+                        "governed environment and task evidence observations are SDK-derived",
+                    ));
+                }
+            };
+            if relevant {
+                observations.push(observation.clone());
+            }
+        }
+
+        let push_unique = |observations: &mut Vec<RuntimeSkillPremiseObservation>,
+                           observation: RuntimeSkillPremiseObservation| {
+            if !observations.contains(&observation) {
+                observations.push(observation);
+            }
+        };
+        for requirement in &owner.intrinsic_contract.premises {
+            let mut governed_refs = requirement.governed_evidence_refs.clone();
+            match &requirement.premise {
+                RuntimeSkillPremise::GovernedEnvironmentEvidence {
+                    evidence_revision_ref,
+                } => governed_refs.push(evidence_revision_ref.clone()),
+                RuntimeSkillPremise::TaskEvidence {
+                    source,
+                    evidence_kind,
+                    safe_ref,
+                } => {
+                    if !governed_environment_evidence_allowed {
+                        continue;
+                    }
+                    let present = match source {
+                        PremiseTypedSource::TaskRun | PremiseTypedSource::TaskLearning => {
+                            Some(read_view.runtime_skill_task_evidence_present(
+                                *source,
+                                safe_ref,
+                                &self.config.memory_space_id,
+                                self.config.scope.channel.as_str(),
+                                self.config.scope.chat_id.as_str(),
+                            )?)
+                        }
+                        PremiseTypedSource::TaskArtifact => None,
+                        _ => {
+                            return Err(Error::config(
+                                "runtime_skill_delivery",
+                                "task evidence premise has a non-task typed source",
+                            ));
+                        }
+                    };
+                    if let Some(present) = present {
+                        push_unique(
+                            &mut observations,
+                            RuntimeSkillPremiseObservation::TaskEvidence {
+                                source: *source,
+                                evidence_kind: *evidence_kind,
+                                safe_ref: safe_ref.clone(),
+                                present,
+                            },
+                        );
+                    }
+                }
+                RuntimeSkillPremise::RegisteredCapability { .. }
+                | RuntimeSkillPremise::OpaquePresenceAttestation { .. } => {}
+            }
+            governed_refs.sort();
+            governed_refs.dedup();
+            if governed_environment_evidence_allowed {
+                for evidence_ref in governed_refs {
+                    let present = read_view
+                        .runtime_skill_premise_evidence(&evidence_ref)
+                        .ok_or_else(|| {
+                            Error::config(
+                                "runtime_skill_delivery",
+                                "governed premise evidence was not materialized in the request session",
+                            )
+                        })?;
+                    push_unique(
+                        &mut observations,
+                        RuntimeSkillPremiseObservation::GovernedEnvironmentEvidence {
+                            evidence_revision_ref: evidence_ref,
+                            present,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(observations)
+    }
+
+    fn materialize_cached_long_term_owner_closures(
+        &self,
+        context: &mut RecallImmutableReadContext<'_>,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<()> {
+        let budget = runtime_budget.governed_state_budget;
+        let heads = context.cached_json_docs::<LongTermMemoryHeadManifest>(
+            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        )?;
+        if heads.len() > budget.max_validity_joins {
+            return Err(Error::config(
+                "governed_current_recall",
+                "cached long-term heads exceed the request-pinned validity join budget",
+            ));
+        }
+        for head in heads {
+            context.materialize_long_term_owner_closure(
+                &self.config.memory_space_id,
+                &self.config.scoped_runtime.mounted_subject_id,
+                &head.owner_ref,
+                budget.max_retained_long_term_revisions_per_owner,
+                budget.max_validity_joins,
+            )?;
+        }
+        Ok(())
     }
 
     fn materialize_projection_subject_owner_closure(
         &self,
         context: &mut RecallImmutableReadContext<'_>,
         max_owner_docs: usize,
+        runtime_budget: &RuntimeBudgetReport,
     ) -> Result<()> {
         let facets = [
             LongTermMemoryKind::Profile,
@@ -6344,7 +9139,7 @@ impl MemoryRuntime {
         .into_iter()
         .flat_map(|kind| QueryFacetParser::parse(QueryFacetInput::Kind(kind)).facets)
         .collect::<Vec<_>>();
-        self.materialize_facet_recall_closure(context, &facets, max_owner_docs)
+        self.materialize_facet_recall_closure(context, &facets, max_owner_docs, runtime_budget)
     }
 
     fn materialize_facet_recall_closure(
@@ -6352,6 +9147,7 @@ impl MemoryRuntime {
         context: &mut RecallImmutableReadContext<'_>,
         query_facets: &[QueryFacet],
         max_owner_docs: usize,
+        runtime_budget: &RuntimeBudgetReport,
     ) -> Result<()> {
         if query_facets.is_empty() {
             return Ok(());
@@ -6431,7 +9227,7 @@ impl MemoryRuntime {
             .collect::<Result<Vec<_>>>()?;
         context.read_json_values(&owner_keys)?;
         for owner_ref in &owner_refs {
-            self.materialize_recall_owner(context, owner_ref)?;
+            self.materialize_recall_owner(context, owner_ref, runtime_budget)?;
         }
         Ok(())
     }
@@ -6439,6 +9235,7 @@ impl MemoryRuntime {
     fn materialize_graph_recall_closure(
         &self,
         context: &mut RecallImmutableReadContext<'_>,
+        runtime_budget: &RuntimeBudgetReport,
     ) -> Result<()> {
         let memory_space_id = self.config.memory_space_id.as_str();
         let subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
@@ -6571,7 +9368,7 @@ impl MemoryRuntime {
         }
         for membership in &node_memberships {
             if proven_owner_refs.contains(&membership.owner_ref) {
-                self.materialize_recall_owner(context, &membership.owner_ref)?;
+                self.materialize_recall_owner(context, &membership.owner_ref, runtime_budget)?;
             }
         }
         Ok(())
@@ -6581,14 +9378,20 @@ impl MemoryRuntime {
         &self,
         context: &mut RecallImmutableReadContext<'_>,
         owner_ref: &GovernedMemoryOwnerRef,
+        runtime_budget: &RuntimeBudgetReport,
     ) -> Result<()> {
         match owner_ref.owner_plane {
             GovernedMemoryOwnerPlane::LongTerm => {
-                let key = scoped_long_term_memory_storage_key(
-                    &self.config.memory_space_id,
-                    &owner_ref.owner_id,
+                let memory_space_id = self.config.memory_space_id.as_str();
+                let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.as_str();
+                let governed_state_budget = runtime_budget.governed_state_budget;
+                context.materialize_long_term_owner_closure(
+                    memory_space_id,
+                    mounted_subject_id,
+                    owner_ref,
+                    governed_state_budget.max_retained_long_term_revisions_per_owner,
+                    governed_state_budget.max_validity_joins,
                 )?;
-                context.read_json_value("long_term", &key)?;
             }
             GovernedMemoryOwnerPlane::EvidenceDocument => {
                 let key = scoped_governed_evidence_document_key(
@@ -6613,40 +9416,83 @@ impl MemoryRuntime {
         Ok(())
     }
 
-    fn recall_with_feature_flags(
+    fn recall_closure_with_feature_flags(
         &self,
         request: MemoryRecallRequest,
         feature_flags: RecallFeatureFlags,
         purpose: RecallReadPurpose,
         trigger: RuntimeLifecycleTrigger,
-    ) -> Result<MemoryRecallReport> {
+        pinned_authority: Option<RecallOperationAuthoritySnapshot>,
+    ) -> Result<ProductionRecallClosure> {
         self.ensure_visible("recall", self.capabilities.recall)?;
-        let runtime_budget = self.runtime_budget();
-        let query_facets = parse_runtime_query_facets(
-            &request.query,
-            &request.structured_query_facets,
-            runtime_budget.facet_recall_budget.max_query_facets,
-        )?;
+        if let crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time } =
+            request.temporal_operation
+        {
+            if as_of_time == 0 {
+                return Err(Error::config(
+                    "governed_historical_recall",
+                    "historical as-of time must be positive",
+                ));
+            }
+        }
+        let temporal_operation = request.temporal_operation;
+        let defer_safe_report_finalization =
+            pinned_authority.is_some() && trigger == RuntimeLifecycleTrigger::ProjectionDependency;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Recall,
             trigger,
             RuntimeLifecycleModeInput::default(),
         );
+        let runtime_budget = pinned_authority
+            .as_ref()
+            .map(|authority| authority.runtime_budget.clone())
+            .unwrap_or_else(|| self.runtime_budget());
+        let authority = if let Some(authority) = pinned_authority {
+            if authority.safe_view.temporal_operation() != temporal_operation
+                || authority.safe_view.profile() != self.config.profile
+            {
+                return Err(Error::config(
+                    "recall_operation_authority",
+                    "pinned operation authority differs from the recall closure",
+                ));
+            }
+            authority
+        } else {
+            self.build_recall_operation_authority_snapshot(
+                &lifecycle,
+                temporal_operation,
+                request.limit,
+                &runtime_budget,
+            )?
+        };
+        let runtime_budget = authority.runtime_budget.clone();
+        let query_facets = parse_runtime_query_facets(
+            &request.query,
+            &request.structured_query_facets,
+            runtime_budget.facet_recall_budget.max_query_facets,
+        )?;
         let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
                 "production_recall_read_session",
                 "production recall requires StorePlatform immutable read authority",
             )
         })?;
-        let (mut report, receipt) =
+        let session_outcome =
             store_platform.with_recall_immutable_read_session(&runtime_budget, |context| {
-                let read_view = Arc::new(self.materialize_production_recall_read_view(
-                    context,
-                    &query_facets,
-                    purpose,
-                    runtime_budget.facet_recall_budget.max_facet_index_docs_read,
-                    runtime_budget.memory_core_budget.long_term_scan_max_items,
-                )?);
+                let (read_view, runtime_skill_materializer) = match self
+                    .materialize_production_recall_read_view(
+                        context,
+                        &query_facets,
+                        purpose,
+                        request.temporal_operation,
+                        &authority,
+                    )? {
+                    ProductionRecallReadViewMaterialization::Ready {
+                        read_view,
+                        runtime_skill_materializer,
+                    } => (read_view, runtime_skill_materializer),
+                };
+                let read_view = Arc::new(read_view);
                 let fallback: Arc<dyn SessionStore> = read_view.clone();
                 let transcript_store: Arc<dyn ConversationTranscriptStore> = read_view.clone();
                 let session_store: Arc<dyn SessionStore> = match self
@@ -6664,9 +9510,19 @@ impl MemoryRuntime {
                         reason: error.to_string(),
                     }),
                 };
+                let long_term_recall_closure = self.build_materialized_long_term_recall_states(
+                    read_view.as_ref(),
+                    request.temporal_operation,
+                    &runtime_budget,
+                    authority.operation_time,
+                )?;
+                let long_term_owner_states = &long_term_recall_closure.owner_states;
                 let governed_long_term_memory_store = MaterializedGovernedLongTermMemoryReadView {
                     runtime: self,
                     inner: read_view.as_ref(),
+                    owner_states: long_term_owner_states,
+                    temporal_operation: request.temporal_operation,
+                    operation_time: authority.operation_time,
                 };
 
                 let (recent, transcript_blocked_reason) = match session_store
@@ -6683,13 +9539,20 @@ impl MemoryRuntime {
                 };
                 let summary =
                     SessionSummaryStore::get(read_view.as_ref(), &self.config.scope.chat_id)?;
-                let procedural_hits = retrieve_runtime_skill_hits(
-                    read_view.as_ref(),
-                    &request.query,
-                    Some(&self.config.scope.chat_id),
-                    self.config.clock.now_secs(),
-                    request.limit.max(1),
-                );
+                let procedural_projection_items = if matches!(
+                    request.temporal_operation,
+                    crate::MemoryRecallTemporalOperation::Current
+                ) {
+                    self.build_runtime_skill_projection_items(
+                        read_view.as_ref(),
+                        &request.query,
+                        &authority,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                let procedural_delivery_reports =
+                    public_safe_runtime_skill_delivery_views(&procedural_projection_items)?;
                 let agent_skill_hits = retrieve_agent_skill_hits(
                     &self.config.agent_skill_registry,
                     &request.query,
@@ -6712,7 +9575,7 @@ impl MemoryRuntime {
                     summary_text: summary.as_deref(),
                     recent: &recent,
                     system_max_len: source_max_chars,
-                    now_secs: self.config.clock.now_secs(),
+                    now_secs: authority.operation_time,
                     profile: self.memory_profile(),
                     current_channel: Some(&self.config.scope.channel),
                     session_store: session_store.as_ref(),
@@ -6721,29 +9584,35 @@ impl MemoryRuntime {
                     active_work_store: Some(read_view.as_ref()),
                     continuity_capsule_store: read_view.as_ref(),
                     turn_ledger_store: read_view.as_ref(),
-                    skill_storage: Some(read_view.as_ref()),
+                    skill_storage: None,
                     task_run_store: Some(read_view.as_ref()),
                     task_learning_store: Some(read_view.as_ref()),
                 });
-                let source_evidence = runtime_recall_graph_source_evidence(
-                    &procedural_hits,
-                    &working,
-                    self.config.clock.now_secs(),
-                );
+                let source_evidence =
+                    runtime_recall_graph_source_evidence(&working, authority.operation_time);
                 let source_candidate_ids = recall_graph_candidate_ids(&source_evidence);
                 let source_candidate_owner_refs = working_recall_candidate_owner_refs(&working);
                 let source_graph_anchor_evidence = runtime_recall_graph_anchor_evidence(
-                    &procedural_hits,
                     &working,
-                    self.config.clock.now_secs(),
+                    authority.operation_time,
                     runtime_budget.graph_expansion_budget.max_seed_candidates,
                 );
                 let source_graph_anchor_candidate_ids =
                     recall_graph_candidate_ids(&source_graph_anchor_evidence);
+                let historical_as_of = matches!(
+                    request.temporal_operation,
+                    crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
+                );
+                let recall_query_facets = if historical_as_of {
+                    &[][..]
+                } else {
+                    query_facets.as_slice()
+                };
                 let facet = self.build_facet_recall_report(FacetRecallBuildContext {
+                    runtime_budget: &runtime_budget,
                     read_view: read_view.as_ref(),
                     long_term_memory_store: &governed_long_term_memory_store,
-                    query_facets: &query_facets,
+                    query_facets: recall_query_facets,
                     source_candidate_ids: &source_candidate_ids,
                     source_graph_anchor_candidate_ids: &source_graph_anchor_candidate_ids,
                     source_candidate_owner_refs: &source_candidate_owner_refs,
@@ -6758,8 +9627,15 @@ impl MemoryRuntime {
                     facet.graph_evidence.clone(),
                     &graph_anchor_candidate_ids,
                 );
-                let persistent_graph = self
-                    .load_persistent_recall_graph(read_view.as_ref(), &graph_anchor_candidate_ids);
+                let persistent_graph = if historical_as_of {
+                    PersistentRecallGraphLoadReport::default()
+                } else {
+                    self.load_persistent_recall_graph(
+                        read_view.as_ref(),
+                        &graph_anchor_candidate_ids,
+                        long_term_owner_states,
+                    )
+                };
                 let mut candidate_owner_refs = source_candidate_owner_refs;
                 candidate_owner_refs.extend(facet.candidate_owner_refs.clone());
                 candidate_owner_refs.extend(persistent_graph.candidate_owner_refs.clone());
@@ -6775,12 +9651,15 @@ impl MemoryRuntime {
                 );
                 let mut delivery_report =
                     self.build_recall_delivery_report(RecallDeliveryBuildContext {
+                        runtime_budget: &runtime_budget,
                         read_view: read_view.as_ref(),
                         long_term_memory_store: &governed_long_term_memory_store,
+                        long_term_owner_states,
                         query: &request.query,
                         requested_limit: request.limit,
                         graph_rerank: &graph.rerank,
                         candidate_owner_refs: &candidate_owner_refs,
+                        temporal_operation: request.temporal_operation,
                         feature_flags,
                     });
                 if let Some(reason) = transcript_blocked_reason {
@@ -6788,9 +9667,15 @@ impl MemoryRuntime {
                     delivery_report.integrity_failures.sort();
                     delivery_report.integrity_failures.dedup();
                 }
+                validate_materialized_long_term_recall_closure(
+                    &long_term_recall_closure,
+                    request.temporal_operation,
+                    &delivery_report,
+                )?;
                 let privacy_report = self.build_recall_privacy_report(RecallPrivacyBuildContext {
                     read_view: read_view.as_ref(),
                     long_term_memory_store: &governed_long_term_memory_store,
+                    long_term_owner_states,
                     candidate_owner_refs: &candidate_owner_refs,
                     source_candidate_ids: &source_candidate_ids,
                     graph_anchor_candidate_ids: &graph_anchor_candidate_ids,
@@ -6799,42 +9684,113 @@ impl MemoryRuntime {
                     delivery_report: &delivery_report,
                 });
                 let graph = public_safe_recall_graph_report(graph);
-                Ok(MemoryRecallReport {
-                    query: request.query,
-                    procedural_hits,
-                    agent_skill_hits,
-                    agent_tool_hints: agent_tool_selection.tool_hints,
-                    tool_experience_status: agent_tool_selection.tool_experience_status,
-                    working,
-                    source_candidate_ids,
-                    graph_anchor_candidate_ids,
-                    graph_index_report: graph.index_report,
-                    facet_index_report: facet.index_report,
-                    rank_fusion_report: facet.rank_fusion_report,
-                    coverage_selection_report: facet.coverage_selection_report,
-                    graph_rerank: graph.rerank,
-                    graph_gate: graph.gate,
-                    graph_candidate_evidence_ref_index: graph.candidate_evidence_ref_index,
-                    compact_graph: graph.compact_graph,
-                    delivery_report,
-                    privacy_report,
-                    store_snapshot_consistent: false,
-                    lifecycle_report: lifecycle.clone(),
+                Ok(MaterializedProductionRecall {
+                    report: MemoryRecallReport {
+                        query: request.query.clone(),
+                        temporal_operation: request.temporal_operation,
+                        procedural_delivery_reports,
+                        agent_skill_hits,
+                        agent_tool_hints: agent_tool_selection.tool_hints,
+                        tool_experience_status: agent_tool_selection.tool_experience_status,
+                        working,
+                        source_candidate_ids,
+                        graph_anchor_candidate_ids,
+                        graph_index_report: graph.index_report,
+                        facet_index_report: facet.index_report,
+                        rank_fusion_report: facet.rank_fusion_report,
+                        coverage_selection_report: facet.coverage_selection_report,
+                        graph_rerank: graph.rerank,
+                        graph_gate: graph.gate,
+                        graph_candidate_evidence_ref_index: graph.candidate_evidence_ref_index,
+                        compact_graph: graph.compact_graph,
+                        delivery_report,
+                        privacy_report,
+                        store_snapshot_consistent: false,
+                        lifecycle_report: lifecycle.clone(),
+                        governed_public_report: None,
+                        governed_operator_report: None,
+                    },
+                    long_term: long_term_recall_closure,
+                    procedural: procedural_projection_items,
+                    runtime_skill_materializer,
+                    manifest_closure: ValidatedRecallManifestClosure,
                 })
             })?;
-        if receipt.state_digest.is_empty() {
-            return Err(Error::config(
-                "production_recall_read_session",
-                "immutable store read receipt is missing its private state digest",
-            ));
+        let materialized_recall = session_outcome.output;
+        let runtime_skill_materializer_dispatch = materialized_recall
+            .runtime_skill_materializer
+            .map(|observation| {
+                self.runtime_skill_materializer_resolver.finish_dispatch(
+                    observation,
+                    &authority,
+                    &session_outcome.receipt,
+                    session_outcome.read_set.read_set_exact,
+                )
+            })
+            .transpose()?;
+        let immutable_session = RecallImmutableSessionBinding::new(
+            temporal_operation,
+            session_outcome.receipt,
+            session_outcome.read_set,
+            session_outcome.session_open_count,
+            session_outcome.receipt_count,
+            &materialized_recall.manifest_closure,
+        )?;
+        let MaterializedProductionRecall {
+            report,
+            long_term,
+            procedural,
+            runtime_skill_materializer: _,
+            manifest_closure: _,
+        } = materialized_recall;
+        #[cfg(feature = "nonproduction-replay-harness")]
+        let p8_no_execution_authority =
+            crate::P8NoExecutionCounterfactualAuthority::issue_for_capability_free_production_recall(
+                authority.safe_view.authority_ref(),
+                &immutable_session.receipt,
+                immutable_session.exact_closure.session_open_count,
+                immutable_session.exact_closure.receipt_count,
+            )?;
+        let mut recall_closure = ProductionRecallClosure {
+            report,
+            long_term,
+            procedural,
+            authority,
+            immutable_session,
+            runtime_skill_materializer_dispatch,
+            #[cfg(feature = "nonproduction-replay-harness")]
+            p8_no_execution_authority,
+        };
+        recall_closure
+            .immutable_session
+            .validate_for(recall_closure.report.temporal_operation)?;
+        self.runtime_skill_materializer_resolver
+            .validate_dispatch_for_operation(
+                recall_closure.report.temporal_operation,
+                &recall_closure.authority,
+                recall_closure.runtime_skill_materializer_dispatch.as_ref(),
+            )?;
+        recall_closure.report.store_snapshot_consistent = true;
+        if !defer_safe_report_finalization {
+            let (governed_public_report, governed_operator_report) = build_governed_safe_reports(
+                &recall_closure.authority,
+                &recall_closure.immutable_session,
+                &recall_closure.long_term,
+                &recall_closure.procedural,
+                &recall_closure.report.delivery_report,
+            )?;
+            recall_closure.report.governed_public_report = Some(governed_public_report);
+            recall_closure.report.governed_operator_report = Some(governed_operator_report);
         }
-        report.store_snapshot_consistent = true;
-        let hit_count = report
-            .procedural_hits
-            .len()
-            .saturating_add(report.agent_skill_hits.len())
-            .saturating_add(report.agent_tool_hints.len())
-            .saturating_add(working_recall_hit_count(&report.working));
+        let hit_count = recall_closure
+            .report
+            .procedural_delivery_reports
+            .iter()
+            .filter(|report| report.selected)
+            .count()
+            .saturating_add(recall_closure.report.agent_skill_hits.len())
+            .saturating_add(recall_closure.report.agent_tool_hints.len())
+            .saturating_add(working_recall_hit_count(&recall_closure.report.working));
         let telemetry_payload = [
             ("memory_hit", (hit_count > 0).to_string()),
             ("hit_count", hit_count.to_string()),
@@ -6842,7 +9798,7 @@ impl MemoryRuntime {
             ("budget_limited_by", runtime_budget.limited_by.join(",")),
         ];
         self.audit("recall", true, "recall_completed");
-        report.lifecycle_report = self.finish_lifecycle_success_with_payload(
+        recall_closure.report.lifecycle_report = self.finish_lifecycle_success_with_payload(
             lifecycle,
             RuntimeLifecycleEventKind::RuntimeLifecycle,
             RuntimeLifecycleEffect::Inspect,
@@ -6850,7 +9806,34 @@ impl MemoryRuntime {
             "recall_completed",
             &telemetry_payload,
         )?;
-        Ok(report)
+        Ok(recall_closure)
+    }
+
+    fn recall_with_feature_flags(
+        &self,
+        request: MemoryRecallRequest,
+        feature_flags: RecallFeatureFlags,
+        purpose: RecallReadPurpose,
+        trigger: RuntimeLifecycleTrigger,
+    ) -> Result<MemoryRecallReport> {
+        self.recall_closure_with_feature_flags(request, feature_flags, purpose, trigger, None)
+            .map(|closure| closure.report)
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    fn production_recall_closure(
+        &self,
+        request: MemoryRecallRequest,
+        purpose: RecallReadPurpose,
+        trigger: RuntimeLifecycleTrigger,
+    ) -> Result<ProductionRecallClosure> {
+        self.recall_closure_with_feature_flags(
+            request,
+            RecallFeatureFlags::default(),
+            purpose,
+            trigger,
+            None,
+        )
     }
 
     pub fn eval_recall(
@@ -6876,6 +9859,7 @@ impl MemoryRuntime {
         let recall_limit = request.k.max(1);
         let recall = self.recall_with_feature_flags(
             MemoryRecallRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::Current,
                 query: request.query.clone(),
                 limit: recall_limit,
                 structured_query_facets: request.structured_query_facets.clone(),
@@ -7346,6 +10330,7 @@ impl MemoryRuntime {
     ) -> Result<EvalRecallAblationOffRun> {
         let recall = self.recall_with_feature_flags(
             MemoryRecallRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::Current,
                 query: request.query.clone(),
                 limit: recall_limit,
                 structured_query_facets: request.structured_query_facets.clone(),
@@ -7387,6 +10372,7 @@ impl MemoryRuntime {
         &self,
         read_view: &RecallReadView,
         source_candidate_ids: &[String],
+        long_term_owner_states: &BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermRecallState>,
     ) -> PersistentRecallGraphLoadReport {
         let memory_space_id = self.config.memory_space_id.as_str();
         let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
@@ -7494,10 +10480,33 @@ impl MemoryRuntime {
             );
         }
 
+        let eligible_candidate_ids = owner_bindings
+            .iter()
+            .filter(|binding| {
+                binding.visible
+                    && match binding.owner_ref.owner_plane {
+                        GovernedMemoryOwnerPlane::LongTerm => long_term_owner_states
+                            .get(&binding.owner_ref)
+                            .is_some_and(|state| {
+                                state.projection.material.owner_revision == binding.owner_revision
+                                    && state.dynamic_state_resolution.current_decision.eligibility
+                                        == GovernedRecallEligibility::EligibleCurrent
+                            }),
+                        GovernedMemoryOwnerPlane::EvidenceDocument => true,
+                        GovernedMemoryOwnerPlane::ConversationTranscript
+                        | GovernedMemoryOwnerPlane::MemoryGraph
+                        | GovernedMemoryOwnerPlane::RuntimeSkill => false,
+                    }
+            })
+            .map(|binding| governed_memory_recall_candidate_id(&binding.owner_ref))
+            .collect::<BTreeSet<_>>();
+        let eligible_candidate_id_order =
+            eligible_candidate_ids.iter().cloned().collect::<Vec<_>>();
         let mut matched_source_anchor_ids = closure
             .indexes
             .iter()
             .map(|index| index.owner_candidate_id.clone())
+            .filter(|candidate_id| eligible_candidate_ids.contains(candidate_id))
             .collect::<Vec<_>>();
         matched_source_anchor_ids.sort();
         matched_source_anchor_ids.dedup();
@@ -7505,19 +10514,22 @@ impl MemoryRuntime {
             .node_memberships
             .iter()
             .map(|membership| governed_memory_recall_candidate_id(&membership.owner_ref))
+            .filter(|candidate_id| eligible_candidate_ids.contains(candidate_id))
             .collect::<Vec<_>>();
         expanded_node_ids.sort();
         expanded_node_ids.dedup();
-        let graph = project_persistent_graph_to_owner_candidates(&closure);
+        let graph = project_persistent_graph_to_owner_candidates(&closure)
+            .map(|graph| filter_temporal_graph_for_index(&graph, &eligible_candidate_id_order, &[]))
+            .filter(|graph| !graph.nodes.is_empty());
         let full_scope_closure_verified = closure.full_scope_closure;
         let candidate_owner_refs = closure
             .node_memberships
             .iter()
-            .map(|membership| {
-                (
-                    governed_memory_recall_candidate_id(&membership.owner_ref),
-                    membership.owner_ref.clone(),
-                )
+            .filter_map(|membership| {
+                let candidate_id = governed_memory_recall_candidate_id(&membership.owner_ref);
+                eligible_candidate_ids
+                    .contains(&candidate_id)
+                    .then(|| (candidate_id, membership.owner_ref.clone()))
             })
             .collect();
         PersistentRecallGraphLoadReport {
@@ -8771,7 +11783,7 @@ impl MemoryRuntime {
         })
     }
 
-    pub fn project(&self, request: MemoryProjectionRequest) -> Result<MemoryProjectionReport> {
+    pub fn project(&self, request: MemoryProjectionRequest) -> Result<MemoryProjectionOutput> {
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
             return self.execute_with_runtime_budget_lease(&lease, || self.project(request));
@@ -8783,23 +11795,80 @@ impl MemoryRuntime {
             self.mode_input_for_request(request.mode_input, request.pressure),
         );
         let runtime_budget = self.runtime_budget();
-        let recall_report = self.recall_with_feature_flags(
+        let project_recall_limit = runtime_budget
+            .recall_delivery_budget
+            .max_selected_candidates;
+        let authority = self.build_recall_operation_authority_snapshot(
+            &lifecycle,
+            request.temporal_operation,
+            project_recall_limit,
+            &runtime_budget,
+        )?;
+        let recall_closure = self.recall_closure_with_feature_flags(
             MemoryRecallRequest {
+                temporal_operation: request.temporal_operation,
                 query: request.user_query.clone(),
-                limit: runtime_budget
-                    .recall_delivery_budget
-                    .max_selected_candidates,
+                limit: project_recall_limit,
                 structured_query_facets: request.structured_query_facets.clone(),
                 tool_registry_refs: request.tool_registry_refs.clone(),
             },
             RecallFeatureFlags::default(),
             RecallReadPurpose::SubjectProjection,
             RuntimeLifecycleTrigger::ProjectionDependency,
+            Some(authority),
         )?;
-        let recall_procedural_hit_count = recall_report.procedural_hits.len();
-        let graph_index_report = recall_report.graph_index_report.clone();
+        let ProductionRecallClosure {
+            report: recall_report,
+            long_term: long_term_recall_closure,
+            procedural: mut procedural_projection_items,
+            authority,
+            immutable_session,
+            runtime_skill_materializer_dispatch,
+            #[cfg(feature = "nonproduction-replay-harness")]
+                p8_no_execution_authority: _,
+        } = recall_closure;
+        self.runtime_skill_materializer_resolver
+            .validate_dispatch_for_operation(
+                request.temporal_operation,
+                &authority,
+                runtime_skill_materializer_dispatch.as_ref(),
+            )?;
+        if recall_report.governed_public_report.is_some()
+            || recall_report.governed_operator_report.is_some()
+        {
+            return Err(Error::config(
+                "memory_projection",
+                "projection dependency finalized governed safe reports before render",
+            ));
+        }
+        if recall_report.temporal_operation != request.temporal_operation {
+            return Err(Error::config(
+                "memory_projection",
+                "projection and recall temporal operations differ",
+            ));
+        }
+        immutable_session.validate_for(request.temporal_operation)?;
+        validate_materialized_long_term_recall_closure(
+            &long_term_recall_closure,
+            request.temporal_operation,
+            &recall_report.delivery_report,
+        )?;
+        let recall_procedural_hit_count = recall_report
+            .procedural_delivery_reports
+            .iter()
+            .filter(|report| report.selected)
+            .count();
+        let graph_used = recall_report.graph_index_report.used;
+        let graph_maintenance_required = recall_report.graph_index_report.maintenance_required;
+        let graph_read_path_mutation_delta =
+            recall_report.graph_index_report.read_path_mutation_delta;
         let mut recall_delivery_report = recall_report.delivery_report;
-        let context = self.load_projection_context(&request, &lifecycle);
+        let context = self.load_projection_context(
+            &request,
+            &lifecycle,
+            &runtime_budget,
+            authority.operation_time,
+        );
         let render_max_chars =
             runtime_budget.projection_render_chars_for_request(request.system_max_len, None);
         let runtime_awareness = render_runtime_awareness_block(
@@ -8813,7 +11882,7 @@ impl MemoryRuntime {
         let inhabited_subject_projection =
             compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
                 context: &context,
-                now_secs: self.config.clock.now_secs(),
+                now_secs: authority.operation_time,
                 platform: runtime_awareness_profile_label(self.config.profile),
                 device_identity: self.config.subject_id.as_str(),
                 channel: self.config.scope.channel.as_str(),
@@ -8853,6 +11922,11 @@ impl MemoryRuntime {
             &mut recall_delivery_report,
             render_max_chars,
         );
+        attach_runtime_skill_projection_materials(
+            &mut runtime_projection,
+            &mut procedural_projection_items,
+            render_max_chars,
+        )?;
         attach_agent_skill_hints_to_runtime_projection(
             &mut runtime_projection,
             agent_skill_hints,
@@ -8863,6 +11937,8 @@ impl MemoryRuntime {
             agent_tool_selection.tool_hints.clone(),
             render_max_chars,
         );
+        let procedural_delivery_reports =
+            public_safe_runtime_skill_delivery_views(&procedural_projection_items)?;
         let system_memory_block = runtime_projection.rendered_block.clone();
         let hit_count = prompt_context_hit_count(&context)
             .saturating_add(recall_delivery_report.rendered_capsules.len())
@@ -8897,9 +11973,18 @@ impl MemoryRuntime {
         let delivery_digest_manifest = build_projection_delivery_digest_manifest(
             &runtime_projection,
             &recall_delivery_report,
+            &procedural_projection_items,
             &system_memory_block,
             render_max_chars,
         );
+        if !delivery_digest_manifest.exact_render_match
+            || !delivery_digest_manifest.integrity_failures.is_empty()
+        {
+            return Err(Error::config(
+                "memory_projection",
+                "provider projection failed its canonical delivery digest contract",
+            ));
+        }
         let projection_surfaces = build_projection_surface_set(&runtime_projection);
         let private_disclosure_integrity = build_private_disclosure_integrity_report(
             &projection_audit,
@@ -8926,37 +12011,117 @@ impl MemoryRuntime {
             ),
         ];
         self.audit("project", true, "projection_completed");
-        Ok(MemoryProjectionReport {
+        let safe_audit = MemoryProjectionSafeAuditReport {
+            projection_id: projection_audit.projection_id.clone(),
+            source_budget_chars: projection_audit.source_budget_chars,
+            render_budget_chars: projection_audit.render_budget_chars,
+            injected: projection_audit.injected,
+            truncated: projection_audit.truncated,
+            runtime_private_context_allowed: projection_audit
+                .private_gate
+                .runtime_private_context_allowed,
+            foreground_disclosure_allowed: projection_audit
+                .private_gate
+                .foreground_disclosure_allowed,
+            private_gate_reason: projection_audit.private_gate.reason.clone(),
+            evidence_ref_count: subject_projection.evidence_refs.len(),
+            budget_decision_count: subject_projection.budget_decisions.len(),
+            privacy_decision_count: subject_projection.privacy_decisions.len(),
+            dropped_candidate_count: subject_projection.dropped_candidates.len(),
+            faithfulness_passed: projection_faithfulness.passed,
+            unsupported_claim_count: projection_faithfulness.unsupported_claims.len(),
+            disclosure_integrity_passed: private_disclosure_integrity.passed,
+            raw_private_violation_count: private_disclosure_integrity.raw_private_violation_count,
+            graph_used,
+            graph_maintenance_required,
+            graph_read_path_mutation_delta,
+            delivery_digest_verified: delivery_digest_manifest.exact_render_match
+                && delivery_digest_manifest.integrity_failures.is_empty(),
+            delivery_digest_candidate_count: delivery_digest_manifest
+                .candidate_receipts
+                .len()
+                .saturating_add(delivery_digest_manifest.procedural_candidate_receipts.len()),
+            agent_skill_selected_count: projection_audit.agent_skills.selected.len(),
+            agent_tool_selected_count: projection_audit.agent_tools.selected.len(),
+            agent_tool_cold_start_selection_used: projection_audit
+                .agent_tools
+                .cold_start_selection_used,
+            agent_tool_rejection_count: projection_audit.agent_tools.rejected.len(),
+        };
+        let gateway_audit = MemoryProjectionGatewayAuditView {
+            projection_id: projection_audit.projection_id.clone(),
+            provider_projection_chars: system_memory_chars,
+            block: projection_surfaces.gateway_raw_audit.clone(),
+            redacted: projection_surfaces.gateway_raw_audit != system_memory_block
+                || !private_disclosure_integrity.redacted_source_ids.is_empty(),
+            redacted_source_count: private_disclosure_integrity.redacted_source_ids.len(),
+        };
+        let recall_delivery = MemoryRecallDeliverySafeView {
+            selected_count: recall_delivery_report.selected_candidate_ids.len(),
+            rendered_count: recall_delivery_report.rendered_capsules.len(),
+            redacted_candidate_count: recall_delivery_report.redacted_candidate_count,
+            rendered_chars: recall_delivery_report.rendered_chars,
+            render_growth: recall_delivery_report.render_growth,
+            integrity_failures: recall_delivery_report.integrity_failures.clone(),
+            delivery_drop_reasons: recall_delivery_report.delivery_drop_reasons.clone(),
+        };
+        let lifecycle_report = self.finish_lifecycle_success_with_payload(
+            lifecycle,
+            RuntimeLifecycleEventKind::RuntimeLifecycle,
+            RuntimeLifecycleEffect::RefreshProjection,
+            false,
+            "projection_completed",
+            &telemetry_payload,
+        )?;
+        let prompt_carry = context.into_runtime_carry();
+        let provider_payload = ProviderProjectionPayload {
             system_memory_block,
-            context,
-            audit: projection_audit,
-            life_projection: runtime_projection.subject_mount.clone(),
-            work_integrity: runtime_projection.work_integrity.clone(),
-            runtime_projection,
-            projection_surfaces,
-            subject_projection,
-            projection_faithfulness,
-            delivery_digest_manifest,
-            private_disclosure_integrity,
-            recall_delivery_report,
-            graph_index_report,
-            lifecycle_report: self.finish_lifecycle_success_with_payload(
-                lifecycle,
-                RuntimeLifecycleEventKind::RuntimeLifecycle,
-                RuntimeLifecycleEffect::RefreshProjection,
-                false,
-                "projection_completed",
-                &telemetry_payload,
-            )?,
+            recent_messages: prompt_carry.recent_messages,
+            agent_tool_hints: runtime_projection.agent_tool_hints.clone(),
+            maintenance_carry: ProviderProjectionMaintenanceCarry {
+                runtime_skill_selected_ids: prompt_carry.runtime_skill_selected_ids,
+                task_learning_selected_ids: prompt_carry.task_recall_selected_ids,
+            },
+        };
+        let (governed_public_report, governed_operator_report) = build_governed_safe_reports(
+            &authority,
+            &immutable_session,
+            &long_term_recall_closure,
+            &procedural_projection_items,
+            &recall_delivery_report,
+        )?;
+        let report = MemoryProjectionReport {
+            temporal_operation: request.temporal_operation,
+            ui_api_chars: projection_surfaces.ui_api.chars().count(),
+            ui_api_projection: projection_surfaces.ui_api,
+            operator_projection: projection_surfaces.operator_raw,
+            shared_fact_projection: projection_surfaces.shared_fact_surface,
+            agent_tool_hints: runtime_projection.agent_tool_hints,
+            audit: safe_audit,
+            gateway_audit,
+            procedural_delivery_reports,
+            recall_delivery,
+            lifecycle_report,
+            governed_public_report,
+            governed_operator_report,
+        };
+        Ok(MemoryProjectionOutput {
+            provider_payload,
+            report,
         })
+    }
+
+    pub fn project_safe(&self, request: MemoryProjectionRequest) -> Result<MemoryProjectionReport> {
+        self.project(request).map(|output| output.into_parts().1)
     }
 
     fn load_projection_context(
         &self,
         request: &MemoryProjectionRequest,
         lifecycle: &RuntimeLifecycleReport,
+        runtime_budget: &RuntimeBudgetReport,
+        operation_time: u64,
     ) -> crate::PromptMemoryContext {
-        let runtime_budget = self.runtime_budget();
         let platform = self.config.platform.as_ref();
         let session_store = self.transcript_backed_session_store(
             platform.session_store(),
@@ -8990,7 +12155,7 @@ impl MemoryRuntime {
         let task_store = platform.task_store();
         let turn_continuity_evidence_store = platform.turn_continuity_evidence_store();
         let turn_ledger_store = platform.turn_ledger_store();
-        let skill_storage = platform.skill_storage();
+        let runtime_skill_storage = P8UnavailableRuntimeSkillStorage;
         let continuity_capsule_store = platform.continuity_capsule_store();
         let memory_system_kind = self.memory_profile().memory_system_kind();
         let include_private_runtime_projection =
@@ -9004,7 +12169,7 @@ impl MemoryRuntime {
             system_max_len: runtime_budget
                 .projection_source_budget
                 .context_assembly_max_chars,
-            now_secs: self.config.clock.now_secs(),
+            now_secs: operation_time,
             participation_plan: self.prompt_participation_plan(),
             recent_messages_limit: request.recent_messages_limit.min(
                 runtime_budget
@@ -9045,7 +12210,7 @@ impl MemoryRuntime {
             task_store: task_store.as_ref(),
             turn_continuity_evidence_store: turn_continuity_evidence_store.as_ref(),
             turn_ledger_store: turn_ledger_store.as_ref(),
-            skill_storage: skill_storage.as_ref(),
+            skill_storage: &runtime_skill_storage,
             continuity_capsule_store: continuity_capsule_store.as_ref(),
         })
     }
@@ -9183,7 +12348,16 @@ impl MemoryRuntime {
                 maintenance_budget.reply_input_max_chars.to_string(),
             ),
         ];
-        let mut mutation_plan = planning_long_term.into_plan(&self.config.memory_space_id)?;
+        let mut mutation_plan = planning_long_term.into_plan(
+            &self.config.memory_space_id,
+            &self.config.scoped_runtime.mounted_subject_id,
+            self.config.store_platform.as_ref().ok_or_else(|| {
+                Error::config("long_term_version_plan", "store platform is required")
+            })?,
+            self.runtime_budget()
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner,
+        )?;
         let changed_count = mutation_plan
             .mutations
             .iter()
@@ -9708,7 +12882,16 @@ impl MemoryRuntime {
         planning_long_term.stage_entries(&hygiene.planned_long_term_entries)?;
         let planned_after_count =
             LongTermMemoryStore::count(&planning_long_term).unwrap_or(before_count);
-        let mut mutation_plan = planning_long_term.into_plan(&self.config.memory_space_id)?;
+        let mut mutation_plan = planning_long_term.into_plan(
+            &self.config.memory_space_id,
+            &self.config.scoped_runtime.mounted_subject_id,
+            self.config.store_platform.as_ref().ok_or_else(|| {
+                Error::config("long_term_version_plan", "store platform is required")
+            })?,
+            self.runtime_budget()
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner,
+        )?;
         let facet_plan = self
             .plan_long_term_facet_index_mutations_for_store_mutations(&mutation_plan.mutations)?;
         mutation_plan.merge(facet_plan)?;
@@ -9818,7 +13001,7 @@ impl MemoryRuntime {
             active_work_store: Some(active_work_store.as_ref()),
             continuity_capsule_store: continuity_capsule_store.as_ref(),
             turn_ledger_store: turn_ledger_store.as_ref(),
-            skill_storage: Some(skill_storage.as_ref()),
+            skill_storage: None,
             task_run_store: Some(task_run_store.as_ref()),
             task_learning_store: Some(task_learning_store.as_ref()),
         });
@@ -10217,7 +13400,7 @@ impl MemoryRuntime {
         request: MemorySpaceExportRequest,
     ) -> Result<MemorySpaceExportReport> {
         self.ensure_visible("export.memory_space", self.capabilities.export)?;
-        self.ensure_runtime_memory_space_scope("export.memory_space", &request.scope)?;
+        self.ensure_runtime_archive_scope("export.memory_space", &request.scope)?;
         let platform = self.store_platform_for_memory_space("export.memory_space")?;
         let runtime_budget = self.runtime_budget();
         let report = crate::export_memory_space_from_platform_with_budget(
@@ -10234,13 +13417,7 @@ impl MemoryRuntime {
         request: MemorySpaceImportRequest,
     ) -> Result<MemorySpaceImportReport> {
         self.ensure_visible("import.memory_space", self.capabilities.import)?;
-        let runtime_scope =
-            self.ensure_runtime_memory_space_scope("import.memory_space", &request.scope)?;
-        crate::ensure_archive_memory_space_identity_and_policy(
-            request.archive.snapshot(),
-            &runtime_scope,
-            request.expected_private_material_policy,
-        )?;
+        self.ensure_runtime_archive_scope("import.memory_space", &request.scope)?;
         let platform = self.store_platform_for_memory_space("import.memory_space")?;
         let runtime_budget = self.runtime_budget();
         let report = crate::import_memory_space_from_platform_with_budget(
@@ -10249,41 +13426,6 @@ impl MemoryRuntime {
             Some(&runtime_budget),
         )?;
         self.audit("import.memory_space", true, "memory_space_import_completed");
-        Ok(report)
-    }
-
-    pub fn preview_memory_space_migration(
-        &self,
-        request: MemorySpaceMigratePreviewRequest,
-    ) -> Result<MemorySpaceMigratePreviewReport> {
-        self.ensure_visible("preview.memory_space", self.capabilities.export)?;
-        let report = crate::preview_memory_space_migration(request)?;
-        self.audit(
-            "preview.memory_space",
-            report.vault_preflight.passed,
-            "memory_space_migration_preview_completed",
-        );
-        Ok(report)
-    }
-
-    pub fn apply_memory_space_migration(
-        &self,
-        request: MemorySpaceMigrateApplyRequest,
-    ) -> Result<MemorySpaceMigrateApplyReport> {
-        self.ensure_visible("apply.memory_space", self.capabilities.import)?;
-        self.ensure_runtime_memory_space_scope("apply.memory_space", &request.plan.target_scope)?;
-        let platform = self.store_platform_for_memory_space("apply.memory_space")?;
-        let runtime_budget = self.runtime_budget();
-        let report = crate::apply_memory_space_migration_from_platform_with_budget(
-            platform,
-            request,
-            Some(&runtime_budget),
-        )?;
-        self.audit(
-            "apply.memory_space",
-            true,
-            "memory_space_migration_apply_completed",
-        );
         Ok(report)
     }
 
@@ -10380,7 +13522,16 @@ impl MemoryRuntime {
         }
         coalesce_continuity_snapshot_import_plans(&mut snapshot_plans);
 
-        let mut mutation_plan = planning_long_term.into_plan(&self.config.memory_space_id)?;
+        let mut mutation_plan = planning_long_term.into_plan(
+            &self.config.memory_space_id,
+            &self.config.scoped_runtime.mounted_subject_id,
+            self.config.store_platform.as_ref().ok_or_else(|| {
+                Error::config("long_term_version_plan", "store platform is required")
+            })?,
+            self.runtime_budget()
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner,
+        )?;
         let facet_plan = self
             .plan_long_term_facet_index_mutations_for_store_mutations(&mutation_plan.mutations)?;
         mutation_plan.merge(facet_plan)?;
@@ -10520,26 +13671,27 @@ impl MemoryRuntime {
         })
     }
 
-    fn ensure_runtime_memory_space_scope(
+    fn ensure_runtime_archive_scope(
         &self,
         operation: &'static str,
-        requested_scope: &MemorySpaceScope,
-    ) -> Result<MemorySpaceScope> {
-        let requested_scope = crate::validate_memory_space_scope(
-            requested_scope.clone(),
-            "memory_runtime_memory_space_scope",
-        )?;
-        let runtime_scope = MemorySpaceScope {
-            memory_space_id: self.config.memory_space_id.clone(),
-            mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
-        };
-        if requested_scope == runtime_scope {
-            return Ok(runtime_scope);
+        requested_scope: &MemoryArchiveScope,
+    ) -> Result<()> {
+        requested_scope.validate()?;
+        let matches_runtime = requested_scope.memory_space_id() == self.config.memory_space_id
+            && requested_scope
+                .mounted_subject_id()
+                .is_none_or(|mounted_subject_id| {
+                    mounted_subject_id == self.config.scoped_runtime.mounted_subject_id
+                });
+        if matches_runtime {
+            return Ok(());
         }
-        self.audit(operation, false, "memory_space_scope_mismatch");
+        self.audit(operation, false, "memory_archive_scope_mismatch");
         Err(Error::config(
-            "memory_runtime_memory_space_scope",
-            format!("{operation} scope must match the runtime mounted memory-space and subject"),
+            "memory_runtime_archive_scope",
+            format!(
+                "{operation} scope must match the runtime memory-space and, for Subject archives, the mounted subject"
+            ),
         ))
     }
 
@@ -10625,44 +13777,13 @@ impl MemoryRuntime {
         extra_payload: &[(&str, String)],
     ) -> Result<MemoryStoreEvent> {
         let event = self.build_lifecycle_event(kind, effect, report, extra_payload);
-        let event_value = serde_json::to_value(&event)
-            .map_err(|error| Error::config("runtime_lifecycle_event", error.to_string()))?;
-        let content_hash = stable_hash_json(&event_value)?;
-        let kind = match event.kind {
-            RuntimeLifecycleEventKind::RuntimeLifecycle => MemoryStoreEventKind::RuntimeLifecycle,
-            RuntimeLifecycleEventKind::OperatorAction => MemoryStoreEventKind::OperatorAction,
-        };
-        let mut store_event = MemoryStoreEvent::new(
-            event.event_id,
-            kind,
-            StoreEventScope::system(event.operation.as_str()),
-            event.timestamp_unix_secs,
+        materialize_runtime_lifecycle_store_event(
+            &event,
+            RuntimeLifecycleStoreBinding::Transaction {
+                operation: transaction_operation,
+                transaction_id,
+            },
         )
-        .with_plane("runtime_lifecycle")
-        .with_record_key(event.operation.as_str())
-        .with_content_hash(content_hash)
-        .with_payload("runtime_operation", event.operation.as_str())
-        .with_payload("operation", transaction_operation)
-        .with_payload("trigger", event.trigger.as_str())
-        .with_payload("disposition", event.disposition.as_str())
-        .with_payload("effect", event.effect.as_str())
-        .with_payload("profile", event.profile.as_str())
-        .with_payload("mode", event.mode.as_str())
-        .with_payload(
-            "pressure",
-            format!("{:?}", event.pressure).to_ascii_lowercase(),
-        )
-        .with_payload("reason", event.reason)
-        .with_payload("result", event.result)
-        .with_payload("error_stage", event.error_stage.unwrap_or_default())
-        .with_payload("transaction_id", transaction_id);
-        for (key, value) in event.payload {
-            if key == "operation" || key == "transaction_id" {
-                continue;
-            }
-            store_event = store_event.with_payload(key, value);
-        }
-        Ok(store_event)
     }
 
     fn build_lifecycle_event(
@@ -10676,8 +13797,6 @@ impl MemoryRuntime {
         let mut event =
             RuntimeLifecycleEvent::from_report(kind, effect, report, self.config.clock.now_secs())
                 .with_payload("changed", report.changed.to_string())
-                .with_payload("success", report.success.to_string())
-                .with_payload("result_summary", report.result_summary.clone())
                 .with_payload(
                     "retry_after_ms",
                     report
@@ -10800,6 +13919,7 @@ impl MemoryRuntime {
             }
             MemoryLongTermMutation::Correct { .. }
             | MemoryLongTermMutation::Supersede { .. }
+            | MemoryLongTermMutation::Invalidate { .. }
             | MemoryLongTermMutation::Delete { .. }
             | MemoryLongTermMutation::MarkStale { .. }
             | MemoryLongTermMutation::ChangeScope { .. }
@@ -11013,6 +14133,108 @@ fn bind_control_audit_transaction_id(
             Error::config("long_term_control_audit_materialization", error.to_string())
         })?;
     }
+    Ok(())
+}
+
+fn reconcile_bound_long_term_control_report(
+    report: &mut bm_core::memory::MemoryLongTermMutationReport,
+    mutations: &[StoreMutation],
+) -> Result<()> {
+    let mut revisions = BTreeMap::new();
+    let mut tombstones = BTreeMap::new();
+    let mut audits = Vec::new();
+    for mutation in mutations {
+        let StoreMutation::PutJson {
+            namespace, value, ..
+        } = mutation
+        else {
+            continue;
+        };
+        match namespace.as_str() {
+            LONG_TERM_CONTROL_REVISION_NAMESPACE => {
+                let revision = serde_json::from_value::<
+                    bm_core::memory::LongTermMemoryControlRevision,
+                >(value.clone())
+                .map_err(|error| {
+                    Error::config("long_term_control_report_binding", error.to_string())
+                })?;
+                let predecessor_id = revision.transition.predecessor.owner_ref.owner_id.clone();
+                if revisions.insert(predecessor_id, revision).is_some() {
+                    return Err(Error::config(
+                        "long_term_control_report_binding",
+                        "multiple durable revisions target one predecessor",
+                    ));
+                }
+            }
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE => {
+                let tombstone = serde_json::from_value::<bm_core::memory::LongTermMemoryTombstone>(
+                    value.clone(),
+                )
+                .map_err(|error| {
+                    Error::config("long_term_control_report_binding", error.to_string())
+                })?;
+                if tombstones
+                    .insert(tombstone.record_id.clone(), tombstone)
+                    .is_some()
+                {
+                    return Err(Error::config(
+                        "long_term_control_report_binding",
+                        "multiple durable tombstones target one owner",
+                    ));
+                }
+            }
+            LONG_TERM_CONTROL_AUDIT_NAMESPACE => {
+                audits.push(
+                    serde_json::from_value::<LongTermMemoryControlAuditEvent>(value.clone())
+                        .map_err(|error| {
+                            Error::config("long_term_control_report_binding", error.to_string())
+                        })?,
+                );
+            }
+            _ => {}
+        }
+    }
+    if !report.affected_records.is_empty() && (revisions.is_empty() || audits.len() != 1) {
+        return Err(Error::config(
+            "long_term_control_report_binding",
+            "accepted owner transition requires durable revision and exactly one canonical audit",
+        ));
+    }
+
+    for affected in &mut report.affected_records {
+        let revision = revisions.get(&affected.record_id).ok_or_else(|| {
+            Error::config(
+                "long_term_control_report_binding",
+                format!(
+                    "affected owner {} has no durable revision",
+                    affected.record_id
+                ),
+            )
+        })?;
+        affected.previous_digest = revision.predecessor_material_digest.clone();
+        affected.new_digest = revision.successor_material_digest.clone();
+        affected.new_owner_revision = revision
+            .transition
+            .successor
+            .as_ref()
+            .filter(|successor| successor.owner_ref == revision.transition.predecessor.owner_ref)
+            .map(|successor| successor.owner_revision);
+    }
+
+    report.tombstones = tombstones
+        .into_values()
+        .map(|tombstone| bm_core::memory::MemoryLongTermTombstoneRef {
+            record_id: tombstone.record_id,
+            tombstone_id: tombstone.tombstone_id,
+            operation: tombstone.operation,
+            last_owner_revision: tombstone.last_owner_revision,
+            last_source_revision: tombstone.last_source_revision,
+        })
+        .collect();
+    report
+        .tombstones
+        .sort_by(|left, right| left.record_id.cmp(&right.record_id));
+    report.audit_event_id = audits.first().map(|audit| audit.event_id.clone());
     Ok(())
 }
 
@@ -11281,11 +14503,15 @@ fn attach_recall_evidence_capsules_to_runtime_projection(
                 break;
             }
             upsert_recall_capsule_projection_block(envelope, &capsule, content.clone());
-            if render_llm_runtime_projection_envelope(envelope)
-                .chars()
-                .count()
-                <= max_len
-            {
+            let bounded = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
+            let rendered_exactly_once = envelope
+                .governed_memory_evidence
+                .iter()
+                .find(|block| block.source_id == capsule.candidate_id)
+                .is_some_and(|block| {
+                    runtime_projection_source_block_prompt_cardinality(&bounded, block) == 1
+                });
+            if rendered_exactly_once {
                 accepted_content = Some(content);
                 low = midpoint.saturating_add(1);
             } else {
@@ -11326,6 +14552,80 @@ fn attach_recall_evidence_capsules_to_runtime_projection(
     delivery.delivery_drop_reasons.sort();
     delivery.delivery_drop_reasons.dedup();
     envelope.rendered_block = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
+}
+
+fn attach_runtime_skill_projection_materials(
+    envelope: &mut LLMRuntimeProjectionEnvelope,
+    items: &mut [MaterializedRuntimeSkillProjection],
+    max_len: usize,
+) -> Result<()> {
+    let mut ordered_items = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            item.material
+                .as_ref()
+                .map(|material| (material.candidate_ref().to_string(), index))
+        })
+        .collect::<Vec<_>>();
+    ordered_items.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, index) in ordered_items {
+        let item = &mut items[index];
+        let Some(material) = item.material.as_ref() else {
+            continue;
+        };
+        let candidate_ref = material.candidate_ref().to_string();
+        let content = render_runtime_skill_provider_content(material.provider_content());
+        let before = envelope.procedural_evidence.clone();
+        envelope
+            .procedural_evidence
+            .push(RuntimeProjectionSourceBlock {
+                owner_ref: None,
+                source_id: candidate_ref.clone(),
+                role: "governed_procedural_memory".to_string(),
+                content,
+                evidence_refs: vec![candidate_ref.clone()],
+                protected: false,
+                shared_fact_surface_allowed: false,
+            });
+        envelope
+            .procedural_evidence
+            .sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        let bounded = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
+        let accepted = envelope
+            .procedural_evidence
+            .iter()
+            .find(|block| block.source_id == candidate_ref)
+            .is_some_and(|block| {
+                runtime_projection_source_block_prompt_cardinality(&bounded, block) == 1
+            });
+        let receipt = if accepted {
+            RuntimeSkillProjectionRenderReceipt::try_rendered(
+                &candidate_ref,
+                material.content_digest(),
+            )?
+        } else {
+            envelope.procedural_evidence = before;
+            RuntimeSkillProjectionRenderReceipt::try_dropped_budget(
+                &candidate_ref,
+                material.content_digest(),
+            )?
+        };
+        item.report =
+            finalize_procedural_memory_delivery_report(&item.plan, Some(material), &receipt)?;
+        item.render_receipt = receipt;
+    }
+    envelope.rendered_block = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
+    Ok(())
+}
+
+fn render_runtime_skill_provider_content(content: &RuntimeSkillProceduralContent) -> String {
+    format!(
+        "{}\n{}\n{}",
+        content.title.trim(),
+        content.summary.trim(),
+        content.procedure.trim()
+    )
 }
 
 fn upsert_recall_capsule_projection_block(
@@ -11737,12 +15037,30 @@ fn render_llm_runtime_projection_envelope(envelope: &LLMRuntimeProjectionEnvelop
 
     let _ = writeln!(out);
     let _ = writeln!(out, "## Governed Memory Evidence");
-    render_runtime_source_blocks(&mut out, &envelope.governed_memory_evidence);
-
-    if !envelope.procedural_evidence.is_empty() {
+    if envelope.procedural_evidence.is_empty() {
+        render_runtime_source_blocks(&mut out, &envelope.governed_memory_evidence);
+    } else {
+        let governed_recall_blocks = envelope
+            .governed_memory_evidence
+            .iter()
+            .filter(|block| block.role == "recall_evidence_capsule")
+            .cloned()
+            .collect::<Vec<_>>();
+        render_runtime_source_blocks(&mut out, &governed_recall_blocks);
         let _ = writeln!(out);
         let _ = writeln!(out, "## Procedural Evidence");
         render_runtime_source_blocks(&mut out, &envelope.procedural_evidence);
+        let runtime_grounding_blocks = envelope
+            .governed_memory_evidence
+            .iter()
+            .filter(|block| block.role != "recall_evidence_capsule")
+            .cloned()
+            .collect::<Vec<_>>();
+        if !runtime_grounding_blocks.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "## Additional Runtime Grounding");
+            render_runtime_source_blocks(&mut out, &runtime_grounding_blocks);
+        }
     }
 
     if !envelope.agent_skill_hints.is_empty() {
@@ -12066,6 +15384,7 @@ fn build_subject_projection_report(
 fn build_projection_delivery_digest_manifest(
     runtime_projection: &LLMRuntimeProjectionEnvelope,
     delivery: &MemoryRecallDeliveryReport,
+    procedural_items: &[MaterializedRuntimeSkillProjection],
     system_memory_block: &str,
     render_max_chars: usize,
 ) -> MemoryProjectionDeliveryDigestManifest {
@@ -12093,8 +15412,11 @@ fn build_projection_delivery_digest_manifest(
         })
         .collect::<Vec<_>>();
     let mut prompt_visible_entries = Vec::new();
+    let mut procedural_block_entries = Vec::new();
+    let mut procedural_prompt_visible_entries = Vec::new();
     let mut integrity_failures = Vec::new();
     let mut candidate_receipts = Vec::new();
+    let mut procedural_candidate_receipts = Vec::new();
     if !exact_render_match {
         integrity_failures.push("projection_deterministic_render_mismatch".to_string());
     } else {
@@ -12123,6 +15445,17 @@ fn build_projection_delivery_digest_manifest(
                 ));
                 continue;
             }
+            if system_memory_block
+                .matches(render_runtime_source_block(block).trim_end())
+                .count()
+                != 1
+            {
+                integrity_failures.push(format!(
+                    "projection_candidate_prompt_cardinality:{}",
+                    capsule.candidate_id
+                ));
+                continue;
+            }
             candidate_receipts.push(MemoryProjectionDeliveryDigestEntry {
                 owner_ref: capsule.owner_ref.clone(),
                 candidate_id: capsule.candidate_id.clone(),
@@ -12135,6 +15468,138 @@ fn build_projection_delivery_digest_manifest(
                 candidate_id: capsule.candidate_id.clone(),
                 content_sha256: projection_delivery_content_sha256(&capsule.content),
             });
+        }
+        for block in runtime_projection
+            .governed_memory_evidence
+            .iter()
+            .filter(|block| block.role == "recall_evidence_capsule")
+        {
+            let matching_capsules = delivery
+                .rendered_capsules
+                .iter()
+                .filter(|capsule| {
+                    capsule.candidate_id == block.source_id
+                        && block.owner_ref.as_ref() == Some(&capsule.owner_ref)
+                        && capsule.content == block.content
+                })
+                .count();
+            if matching_capsules != 1 {
+                integrity_failures.push(format!(
+                    "projection_rendered_capsule_cardinality:{}:{}",
+                    block.source_id, matching_capsules
+                ));
+            }
+        }
+        let mut procedural_candidate_refs = BTreeSet::new();
+        for item in procedural_items {
+            let candidate_ref = match runtime_skill_projection_candidate_ref(&item.plan) {
+                Ok(candidate_ref) => candidate_ref,
+                Err(error) => {
+                    integrity_failures.push(format!(
+                        "projection_procedural_candidate_invalid:{}",
+                        error.stage()
+                    ));
+                    continue;
+                }
+            };
+            if !procedural_candidate_refs.insert(candidate_ref.clone()) {
+                integrity_failures.push(format!(
+                    "projection_procedural_candidate_duplicate:{}",
+                    candidate_ref
+                ));
+                continue;
+            }
+            let matching_blocks = runtime_projection
+                .procedural_evidence
+                .iter()
+                .filter(|block| block.source_id == candidate_ref)
+                .collect::<Vec<_>>();
+            if !item.report.rendered {
+                if !matching_blocks.is_empty() {
+                    integrity_failures.push(format!(
+                        "projection_nonrendered_procedural_block_present:{}:{}",
+                        candidate_ref,
+                        matching_blocks.len()
+                    ));
+                }
+                continue;
+            }
+            let Some(material) = item.material.as_ref() else {
+                integrity_failures.push(format!(
+                    "projection_rendered_procedural_material_missing:{}",
+                    candidate_ref
+                ));
+                continue;
+            };
+            if !item
+                .report
+                .validate_finalized_contract(&item.plan, Some(material), &item.render_receipt)
+                .accepted
+                || item.render_receipt.candidate_ref() != Some(candidate_ref.as_str())
+            {
+                integrity_failures.push(format!(
+                    "projection_procedural_finalization_mismatch:{}",
+                    candidate_ref
+                ));
+                continue;
+            }
+            if matching_blocks.len() != 1 {
+                integrity_failures.push(format!(
+                    "projection_procedural_source_block_cardinality:{}:{}",
+                    candidate_ref,
+                    matching_blocks.len()
+                ));
+                continue;
+            }
+            let block = matching_blocks[0];
+            let expected_content =
+                render_runtime_skill_provider_content(material.provider_content());
+            if !runtime_skill_projection_block_matches(block, &candidate_ref, &expected_content) {
+                integrity_failures.push(format!(
+                    "projection_procedural_source_block_contract_mismatch:{}",
+                    candidate_ref
+                ));
+                continue;
+            }
+            if runtime_projection_source_block_prompt_cardinality(system_memory_block, block) != 1 {
+                integrity_failures.push(format!(
+                    "projection_procedural_prompt_cardinality:{}",
+                    candidate_ref
+                ));
+                continue;
+            }
+            procedural_block_entries.push(MemoryProjectionProceduralDigestContentEntry {
+                candidate_ref: candidate_ref.clone(),
+                content_sha256: projection_delivery_content_sha256(&block.content),
+            });
+            procedural_candidate_receipts.push(MemoryProjectionProceduralDigestReceipt {
+                candidate_ref: candidate_ref.clone(),
+                source_block_sha256: projection_delivery_content_sha256(
+                    &render_runtime_source_block(block),
+                ),
+            });
+            procedural_prompt_visible_entries.push(MemoryProjectionProceduralDigestContentEntry {
+                candidate_ref,
+                content_sha256: projection_delivery_content_sha256(&block.content),
+            });
+        }
+        for block in &runtime_projection.procedural_evidence {
+            let matching_items = procedural_items
+                .iter()
+                .filter(|item| {
+                    item.report.rendered
+                        && item
+                            .material
+                            .as_ref()
+                            .is_some_and(|material| material.candidate_ref() == block.source_id)
+                })
+                .count();
+            if matching_items != 1 {
+                integrity_failures.push(format!(
+                    "projection_procedural_item_cardinality:{}:{}",
+                    block.source_id, matching_items
+                ));
+            }
         }
     }
     let sort_content_entries = |entries: &mut Vec<MemoryProjectionDeliveryDigestContentEntry>| {
@@ -12153,6 +15618,21 @@ fn build_projection_delivery_digest_manifest(
             .cmp(&right.owner_ref)
             .then_with(|| left.candidate_id.cmp(&right.candidate_id))
     });
+    let sort_procedural_content_entries =
+        |entries: &mut Vec<MemoryProjectionProceduralDigestContentEntry>| {
+            entries.sort_by(|left, right| {
+                left.candidate_ref
+                    .cmp(&right.candidate_ref)
+                    .then_with(|| left.content_sha256.cmp(&right.content_sha256))
+            });
+        };
+    sort_procedural_content_entries(&mut procedural_block_entries);
+    sort_procedural_content_entries(&mut procedural_prompt_visible_entries);
+    procedural_candidate_receipts.sort_by(|left, right| {
+        left.candidate_ref
+            .cmp(&right.candidate_ref)
+            .then_with(|| left.source_block_sha256.cmp(&right.source_block_sha256))
+    });
     integrity_failures.sort();
     integrity_failures.dedup();
     MemoryProjectionDeliveryDigestManifest {
@@ -12164,6 +15644,9 @@ fn build_projection_delivery_digest_manifest(
         deterministic_envelope_sha256: projection_delivery_content_sha256(&deterministic_render),
         exact_render_match,
         candidate_receipts,
+        procedural_block_entries,
+        procedural_prompt_visible_entries,
+        procedural_candidate_receipts,
         integrity_failures,
     }
 }
@@ -12171,6 +15654,29 @@ fn build_projection_delivery_digest_manifest(
 fn projection_delivery_content_sha256(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
     format!("{digest:x}")
+}
+
+fn runtime_skill_projection_block_matches(
+    block: &RuntimeProjectionSourceBlock,
+    candidate_ref: &str,
+    expected_content: &str,
+) -> bool {
+    block.owner_ref.is_none()
+        && block.source_id == candidate_ref
+        && block.role == "governed_procedural_memory"
+        && block.content == expected_content
+        && block.evidence_refs == [candidate_ref.to_string()]
+        && !block.protected
+        && !block.shared_fact_surface_allowed
+}
+
+fn runtime_projection_source_block_prompt_cardinality(
+    system_memory_block: &str,
+    block: &RuntimeProjectionSourceBlock,
+) -> usize {
+    system_memory_block
+        .matches(render_runtime_source_block(block).trim_end())
+        .count()
 }
 
 fn build_projection_faithfulness_check(
@@ -12307,6 +15813,7 @@ fn build_projection_surface_set(
 ) -> MemoryProjectionSurfaceSet {
     let mut public_envelope = runtime_projection.clone();
     public_envelope.protected_private_runtime_context.clear();
+    public_envelope.procedural_evidence.clear();
     public_envelope.operator_audit_excluded_source_ids.clear();
     public_envelope
         .boundary_protocol
@@ -12315,9 +15822,9 @@ fn build_projection_surface_set(
         .boundary_protocol
         .foreground_disclosure_allowed = false;
     public_envelope.boundary_protocol.protected_sources.clear();
-    public_envelope
-        .section_names
-        .retain(|name| name != "protected_private_runtime_context");
+    public_envelope.section_names.retain(|name| {
+        name != "protected_private_runtime_context" && name != "procedural_evidence"
+    });
     public_envelope.rendered_block.clear();
     let public_block = render_llm_runtime_projection_envelope(&public_envelope)
         .trim()
@@ -13156,29 +16663,10 @@ fn build_recall_graph_report(
 }
 
 fn runtime_recall_graph_source_evidence(
-    procedural_hits: &[crate::RuntimeSkillHit],
     working: &crate::WorkingRecallInspection,
     now_secs: u64,
 ) -> Vec<MemoryGraphEvidence> {
     let mut evidence = Vec::new();
-    for hit in procedural_hits {
-        let owner_ref = GovernedMemoryOwnerRef::new(
-            GovernedMemoryOwnerPlane::RuntimeSkill,
-            hit.record.name.clone(),
-        );
-        push_recall_graph_evidence(
-            &mut evidence,
-            governed_memory_recall_candidate_id(&owner_ref),
-            MemoryGraphNodeKind::Procedure,
-            hit.record.title.clone(),
-            "procedural_runtime_skill",
-            format!("runtime_skill:{}", hit.record.name),
-            hit.record
-                .updated_at
-                .max(hit.record.observed_at)
-                .max(now_secs),
-        );
-    }
     append_recall_report_graph_evidence(&mut evidence, &working.shared_factual_report, now_secs);
     append_recall_report_graph_evidence(
         &mut evidence,
@@ -13218,7 +16706,9 @@ fn working_recall_candidate_owner_refs(
         };
         if matches!(
             owner_ref.owner_plane,
-            GovernedMemoryOwnerPlane::LongTerm | GovernedMemoryOwnerPlane::EvidenceDocument
+            GovernedMemoryOwnerPlane::LongTerm
+                | GovernedMemoryOwnerPlane::EvidenceDocument
+                | GovernedMemoryOwnerPlane::RuntimeSkill
         ) {
             refs.insert(candidate.candidate_id.clone(), owner_ref.clone());
         }
@@ -13240,12 +16730,11 @@ fn merged_candidate_owner_refs(
 }
 
 fn runtime_recall_graph_anchor_evidence(
-    procedural_hits: &[crate::RuntimeSkillHit],
     working: &crate::WorkingRecallInspection,
     now_secs: u64,
     limit: usize,
 ) -> Vec<MemoryGraphEvidence> {
-    let mut evidence = runtime_recall_graph_source_evidence(procedural_hits, working, now_secs);
+    let mut evidence = runtime_recall_graph_source_evidence(working, now_secs);
     append_recall_report_graph_anchor_evidence(
         &mut evidence,
         &working.shared_factual_report,
@@ -15835,10 +19324,7 @@ fn merge_promotion_and_write_evolution(
 }
 
 fn runtime_skill_write_source_requires_promotion(source: RuntimeSkillWriteSource) -> bool {
-    matches!(
-        source,
-        RuntimeSkillWriteSource::TaskLearning | RuntimeSkillWriteSource::ProgrammableReasoning
-    )
+    matches!(source, RuntimeSkillWriteSource::TaskLearning)
 }
 
 fn projection_id(runtime: &MemoryRuntime, request: &MemoryProjectionRequest) -> String {
@@ -16506,18 +19992,6 @@ fn checked_non_empty<'a>(value: &'a str, stage: &'static str, message: &str) -> 
     Ok(trimmed)
 }
 
-fn checked_skill_name<'a>(value: &'a str, stage: &'static str) -> Result<&'a str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || trimmed.contains("..")
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-    {
-        return Err(Error::config(stage, "skill name empty or contains .. / \\"));
-    }
-    Ok(trimmed)
-}
-
 fn transcript_replay_limit(runtime_budget: &RuntimeBudgetReport, requested_limit: usize) -> usize {
     requested_limit.max(1).min(
         runtime_budget
@@ -17171,7 +20645,6 @@ fn plan_long_term_extraction_derived_memory_ref_mutations(
 fn plan_candidate_derived_memory_ref_mutations(
     subject_id: &str,
     accepted_draft_pairs: &[(&MemoryWriteCandidate, LongTermMemoryDraft)],
-    accepted_skill_pairs: &[(&MemoryWriteCandidate, RuntimeSkillWrite)],
     now_secs: u64,
 ) -> Result<Vec<StoreMutation>> {
     let mut mutations = Vec::new();
@@ -17192,22 +20665,6 @@ fn plan_candidate_derived_memory_ref_mutations(
         for source in candidate_transcript_evidence_refs(candidate, subject_id) {
             mutations.push(candidate_derived_memory_ref_mutation(
                 plane, &store_key, subject_id, source, now_secs,
-            )?);
-        }
-    }
-    for (candidate, write) in accepted_skill_pairs {
-        let name = write.name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let store_key = format!("runtime_skill:{name}");
-        for source in candidate_transcript_evidence_refs(candidate, subject_id) {
-            mutations.push(candidate_derived_memory_ref_mutation(
-                DerivedMemoryPlane::ProceduralSkill,
-                &store_key,
-                subject_id,
-                source,
-                now_secs,
             )?);
         }
     }
@@ -17354,9 +20811,200 @@ struct LongTermMemoryRefreshTransactionContext<'a> {
     draft_admission_policy: Option<&'a dyn LongTermMemoryDraftAdmissionPolicy>,
 }
 
+#[derive(Clone)]
+enum PlanningLongTermVersionIntent {
+    Create {
+        after: LongTermMemoryEntry,
+    },
+    Advance {
+        before: LongTermMemoryEntry,
+        after: Box<LongTermMemoryEntry>,
+        transition: PlanningLongTermTransitionIntent,
+    },
+    Terminal {
+        before: LongTermMemoryEntry,
+        transition: PlanningLongTermTransitionIntent,
+    },
+}
+
+#[derive(Clone)]
+struct PlanningLongTermTransitionIntent {
+    revision_id: String,
+    operation: bm_core::memory::LongTermControlOperation,
+    invalidation_reason_code: Option<bm_core::memory::LongTermInvalidationReasonCode>,
+    reason: String,
+    actor_subject_id: Option<String>,
+    created_at: u64,
+    governed_evidence_refs: Vec<bm_core::memory::GovernedOwnerRevisionRef>,
+}
+
+impl PlanningLongTermTransitionIntent {
+    fn refresh(before: &LongTermMemoryEntry, after: &LongTermMemoryEntry, reason: &str) -> Self {
+        Self {
+            revision_id: format!(
+                "refresh:{}:{}",
+                before.id,
+                after
+                    .owner_revision
+                    .max(before.owner_revision.saturating_add(1))
+            ),
+            operation: bm_core::memory::LongTermControlOperation::Refresh,
+            invalidation_reason_code: None,
+            reason: reason.to_string(),
+            actor_subject_id: None,
+            created_at: after.updated_at.max(after.observed_at).max(1),
+            governed_evidence_refs: Vec::new(),
+        }
+    }
+
+    fn delete(before: &LongTermMemoryEntry, reason: &str) -> Self {
+        Self {
+            revision_id: format!("delete:{}:{}", before.id, before.owner_revision),
+            operation: bm_core::memory::LongTermControlOperation::Delete,
+            invalidation_reason_code: None,
+            reason: reason.to_string(),
+            actor_subject_id: None,
+            created_at: before.updated_at.max(before.observed_at).saturating_add(1),
+            governed_evidence_refs: Vec::new(),
+        }
+    }
+
+    fn bind_scope(
+        &self,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        before: &LongTermMemoryEntry,
+        after: Option<&LongTermMemoryEntry>,
+    ) -> Result<bm_core::memory::LongTermMemoryControlRevisionIntent> {
+        if self.operation == bm_core::memory::LongTermControlOperation::Invalidate {
+            return bm_core::memory::LongTermMemoryControlRevisionIntent::for_invalidation(
+                self.revision_id.clone(),
+                before,
+                self.invalidation_reason_code.ok_or_else(|| {
+                    Error::config(
+                        "long_term_version_plan",
+                        "invalidate requires a typed reason code",
+                    )
+                })?,
+                self.reason.clone(),
+                mounted_subject_id.to_string(),
+                self.actor_subject_id.clone().ok_or_else(|| {
+                    Error::config("long_term_version_plan", "invalidate requires an actor")
+                })?,
+                memory_space_id,
+                self.created_at,
+                self.governed_evidence_refs.clone(),
+            );
+        }
+        bm_core::memory::LongTermMemoryControlRevisionIntent::for_owner_change(
+            self.revision_id.clone(),
+            self.operation,
+            before,
+            after,
+            self.reason.clone(),
+            mounted_subject_id.to_string(),
+            self.actor_subject_id.clone(),
+            memory_space_id,
+            self.created_at,
+            self.governed_evidence_refs.clone(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_version(
+        &self,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        before: &LongTermMemoryEntry,
+        after: Option<&LongTermMemoryEntry>,
+        head: &LongTermMemoryHeadManifest,
+        materials: &[LongTermMemoryVersionMaterial],
+        transitions: &[bm_core::memory::GovernedOwnerTransition],
+        max_retained_revisions_per_owner: usize,
+    ) -> Result<bm_core::memory::BoundVersionMutation> {
+        let control_revision_intent =
+            self.bind_scope(memory_space_id, mounted_subject_id, before, after)?;
+        let snapshot = bm_core::memory::LongTermVersionOwnerSnapshot {
+            head: head.clone(),
+            retained_materials: materials
+                .iter()
+                .filter(|material| material.owner_ref == head.owner_ref)
+                .cloned()
+                .collect(),
+            transitions: transitions
+                .iter()
+                .filter(|transition| transition.predecessor.owner_ref == head.owner_ref)
+                .cloned()
+                .collect(),
+        };
+        bm_core::memory::bind_long_term_version_mutation(
+            bm_core::memory::LongTermMemoryVersionMutationIntent {
+                control_revision_intent,
+                successor_projection: after.cloned(),
+                audit_transaction_id: "pending".to_string(),
+            },
+            &snapshot,
+            bm_core::memory::LongTermVersionRetentionLease::try_new(
+                max_retained_revisions_per_owner,
+            )?,
+        )
+    }
+
+    fn from_core(intent: &bm_core::memory::LongTermMemoryControlRevisionIntent) -> Self {
+        Self {
+            revision_id: intent.revision_id.clone(),
+            operation: intent.operation,
+            invalidation_reason_code: intent.invalidation_reason_code,
+            reason: intent.reason.clone(),
+            actor_subject_id: intent.actor_subject_id.clone(),
+            created_at: intent.created_at,
+            governed_evidence_refs: intent.governed_evidence_refs.clone(),
+        }
+    }
+}
+
+impl PlanningLongTermVersionIntent {
+    fn current_projection(&self) -> Option<&LongTermMemoryEntry> {
+        match self {
+            Self::Create { after } => Some(after),
+            Self::Advance { after, .. } => Some(after.as_ref()),
+            Self::Terminal { .. } => None,
+        }
+    }
+}
+
+fn checked_next_persisted_revision(current: u64, owner: &'static str) -> Result<u64> {
+    current.checked_add(1).ok_or_else(|| {
+        Error::config(
+            "governed_revision_overflow",
+            format!("{owner} revision exhausted"),
+        )
+    })
+}
+
+#[cfg(test)]
+mod persisted_revision_tests {
+    use super::checked_next_persisted_revision;
+
+    #[test]
+    fn persisted_revision_increment_is_checked() {
+        assert_eq!(
+            checked_next_persisted_revision(0, "fixture").expect("zero advances to one"),
+            1
+        );
+        assert_eq!(
+            checked_next_persisted_revision(1, "fixture").expect("one advances to two"),
+            2
+        );
+        let error = checked_next_persisted_revision(u64::MAX, "fixture")
+            .expect_err("maximum revision must fail closed");
+        assert_eq!(error.stage(), "governed_revision_overflow");
+    }
+}
+
 struct PlanningLongTermMemoryStore<'a> {
     base: &'a dyn LongTermMemoryReadStore,
-    changes: Mutex<BTreeMap<String, Option<LongTermMemoryEntry>>>,
+    changes: Mutex<BTreeMap<String, PlanningLongTermVersionIntent>>,
     read_set: Mutex<BTreeMap<String, Option<LongTermMemoryEntry>>>,
     complete_snapshot_read: Mutex<bool>,
 }
@@ -17374,32 +21022,83 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
     fn stage_entries(&self, entries: &[LongTermMemoryEntry]) -> Result<()> {
         for entry in entries {
             let id = entry.id.clone();
-            if !self
-                .read_set
+            let prior = self.planning_prior(&id)?;
+            let next = match self
+                .changes
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .contains_key(&id)
+                .get(&id)
+                .cloned()
             {
-                let prior = if *self
-                    .complete_snapshot_read
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                {
-                    None
-                } else {
-                    self.base.get(&id)?
-                };
-                self.read_set
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .insert(id.clone(), prior);
-            }
+                Some(PlanningLongTermVersionIntent::Create { .. }) => {
+                    PlanningLongTermVersionIntent::Create {
+                        after: entry.clone(),
+                    }
+                }
+                Some(PlanningLongTermVersionIntent::Advance { before, .. }) => {
+                    PlanningLongTermVersionIntent::Advance {
+                        transition: PlanningLongTermTransitionIntent::refresh(
+                            &before,
+                            entry,
+                            "governed long-term refresh",
+                        ),
+                        before,
+                        after: Box::new(entry.clone()),
+                    }
+                }
+                Some(PlanningLongTermVersionIntent::Terminal { .. }) => {
+                    return Err(Error::config(
+                        "long_term_version_plan",
+                        "one transaction cannot recreate a terminal owner",
+                    ));
+                }
+                None => match prior {
+                    Some(before) => PlanningLongTermVersionIntent::Advance {
+                        transition: PlanningLongTermTransitionIntent::refresh(
+                            &before,
+                            entry,
+                            "governed long-term refresh",
+                        ),
+                        before,
+                        after: Box::new(entry.clone()),
+                    },
+                    None => PlanningLongTermVersionIntent::Create {
+                        after: entry.clone(),
+                    },
+                },
+            };
             self.changes
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .insert(id, Some(entry.clone()));
+                .insert(id, next);
         }
         Ok(())
+    }
+
+    fn planning_prior(&self, id: &str) -> Result<Option<LongTermMemoryEntry>> {
+        if let Some(prior) = self
+            .read_set
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .cloned()
+        {
+            return Ok(prior);
+        }
+        let prior = if *self
+            .complete_snapshot_read
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+        {
+            None
+        } else {
+            self.base.get(id)?
+        };
+        self.read_set
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_string(), prior.clone());
+        Ok(prior)
     }
 
     fn stage_delete_ids(&self, entry_ids: &[String]) -> Result<()> {
@@ -17409,11 +21108,20 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
         Ok(())
     }
 
-    fn into_plan(self, memory_space_id: &str) -> Result<MemoryStoreMutationPlan> {
+    fn into_plan(
+        self,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        store_platform: &StorePlatform,
+        max_retained_revisions_per_owner: usize,
+    ) -> Result<MemoryStoreMutationPlan> {
         let changes = self
             .changes
             .into_inner()
             .map_err(|_| Error::config("long_term_control_plan", "planning store poisoned"))?;
+        if changes.is_empty() {
+            return Ok(MemoryStoreMutationPlan::default());
+        }
         let read_set = self
             .read_set
             .into_inner()
@@ -17422,9 +21130,188 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
             .complete_snapshot_read
             .into_inner()
             .map_err(|_| Error::config("long_term_control_plan", "snapshot marker poisoned"))?;
+        let scope_key = long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)?;
+        let scope_docs = store_platform.read_json_docs_by_keys(
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            std::slice::from_ref(&scope_key),
+        )?;
+        let previous_scope_value = scope_docs.first().map(|doc| doc.value.clone());
+        let previous_scope = previous_scope_value
+            .clone()
+            .map(serde_json::from_value::<LongTermMemoryVersionScopeManifest>)
+            .transpose()
+            .map_err(|error| Error::config("long_term_version_plan", error.to_string()))?;
+
+        let head_keys = previous_scope
+            .as_ref()
+            .map(|scope| {
+                scope
+                    .head_bindings
+                    .iter()
+                    .map(|binding| binding.head_physical_key.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let head_docs = store_platform.read_json_docs_by_keys(
+            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+            &head_keys,
+        )?;
+        let head_values = head_docs
+            .iter()
+            .map(|doc| (doc.key.clone(), doc.value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut heads = head_docs
+            .into_iter()
+            .map(|doc| {
+                serde_json::from_value::<LongTermMemoryHeadManifest>(doc.value)
+                    .map_err(|error| Error::config("long_term_version_plan", error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if heads.len() != head_keys.len() {
+            return Err(Error::config(
+                "long_term_version_plan",
+                "scope manifest head closure is incomplete",
+            ));
+        }
+        let material_keys = heads
+            .iter()
+            .flat_map(|head| {
+                head.retained_revision_digests.iter().map(|retained| {
+                    long_term_version_material_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &head.owner_ref,
+                        retained.owner_revision,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let material_docs = store_platform.read_json_docs_by_keys(
+            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+            &material_keys,
+        )?;
+        let material_values = material_docs
+            .iter()
+            .map(|doc| (doc.key.clone(), doc.value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut materials = material_docs
+            .into_iter()
+            .map(|doc| {
+                serde_json::from_value::<LongTermMemoryVersionMaterial>(doc.value)
+                    .map_err(|error| Error::config("long_term_version_plan", error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if materials.len() != material_keys.len() {
+            return Err(Error::config(
+                "long_term_version_plan",
+                "scope manifest material closure is incomplete",
+            ));
+        }
+        let control_revision_keys = previous_scope
+            .as_ref()
+            .map(|scope| {
+                scope
+                    .transition_bindings
+                    .iter()
+                    .map(|binding| binding.control_revision_physical_key.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let control_revision_docs = store_platform
+            .read_json_docs_by_keys(LONG_TERM_CONTROL_REVISION_NAMESPACE, &control_revision_keys)?;
+        if control_revision_docs.len() != control_revision_keys.len() {
+            return Err(Error::config(
+                "long_term_version_plan",
+                "scope manifest transition closure is incomplete",
+            ));
+        }
+        let control_revision_values = control_revision_docs
+            .iter()
+            .map(|doc| (doc.key.clone(), doc.value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut control_revisions = control_revision_docs
+            .into_iter()
+            .map(|doc| {
+                serde_json::from_value::<bm_core::memory::LongTermMemoryControlRevision>(doc.value)
+                    .map_err(|error| Error::config("long_term_version_plan", error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut transitions = control_revisions
+            .iter()
+            .map(|revision| revision.transition.clone())
+            .collect::<Vec<_>>();
+        let mut transition_bindings = previous_scope
+            .as_ref()
+            .map(|scope| scope.transition_bindings.clone())
+            .unwrap_or_default();
+        if let Some(scope) = &previous_scope {
+            let validation = scope.validate_exact(
+                &heads,
+                &materials,
+                &transitions,
+                &transition_bindings,
+                max_retained_revisions_per_owner,
+            );
+            if !validation.accepted
+                || control_revisions
+                    .iter()
+                    .any(|revision| revision.validate_contract().is_err())
+                || transition_bindings.iter().any(|binding| {
+                    control_revisions
+                        .iter()
+                        .find(|revision| revision.transition.predecessor == binding.predecessor)
+                        .is_none_or(|revision| {
+                            revision.content_digest != binding.control_revision_content_digest
+                                || scoped_long_term_control_storage_key(
+                                    memory_space_id,
+                                    LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                                    &revision.revision_id,
+                                )
+                                .ok()
+                                .as_deref()
+                                    != Some(binding.control_revision_physical_key.as_str())
+                        })
+                })
+            {
+                return Err(Error::config(
+                    "long_term_version_plan",
+                    "existing typed long-term root closure is invalid",
+                ));
+            }
+        } else if !heads.is_empty()
+            || !materials.is_empty()
+            || !control_revisions.is_empty()
+            || !transition_bindings.is_empty()
+        {
+            return Err(Error::config(
+                "long_term_version_plan",
+                "typed long-term documents exist without their scope root",
+            ));
+        }
+
         let mut plan = MemoryStoreMutationPlan::default();
+        for (key, value) in &head_values {
+            plan.preconditions.push(json_precondition(
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                key,
+                Some(value.clone()),
+            ));
+        }
+        for (key, value) in &material_values {
+            plan.preconditions.push(json_precondition(
+                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                key,
+                Some(value.clone()),
+            ));
+        }
+        for (key, value) in &control_revision_values {
+            plan.preconditions.push(json_precondition(
+                LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                key,
+                Some(value.clone()),
+            ));
+        }
         for (id, value) in changes {
-            let physical_key = scoped_long_term_memory_storage_key(memory_space_id, &id)?;
             let prior = if let Some(prior) = read_set.get(&id) {
                 prior.clone()
             } else if complete_snapshot_read {
@@ -17435,34 +21322,737 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     format!("owner {id} was mutated without a planning read"),
                 ));
             };
-            plan.preconditions.push(json_precondition(
-                "long_term",
-                &physical_key,
-                prior
-                    .map(serde_json::to_value)
-                    .transpose()
-                    .map_err(|error| Error::config("long_term_control_plan", error.to_string()))?,
-            ));
-            plan.mutations.push(match value {
-                Some(entry) => StoreMutation::PutJson {
-                    namespace: "long_term".to_string(),
-                    key: physical_key,
-                    value: serde_json::to_value(&entry).map_err(|error| {
-                        Error::config("long_term_control_plan", error.to_string())
-                    })?,
-                    event_kind: MemoryStoreEventKind::MemoryWrite,
-                    plane: "long_term".to_string(),
-                    record_key: id,
-                },
-                None => StoreMutation::DeleteJson {
-                    namespace: "long_term".to_string(),
-                    key: physical_key,
-                    event_kind: MemoryStoreEventKind::MemoryDelete,
-                    plane: "long_term".to_string(),
-                    record_key: id,
-                },
-            });
+            match value {
+                PlanningLongTermVersionIntent::Create { after: entry } => {
+                    if prior.is_some() {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "create intent observed an existing owner",
+                        ));
+                    }
+                    let bound_creation = bm_core::memory::bind_long_term_version_creation(
+                        bm_core::memory::LongTermMemoryVersionCreateIntent {
+                            memory_space_id: memory_space_id.to_string(),
+                            mounted_subject_id: mounted_subject_id.to_string(),
+                            requested_at: entry.updated_at,
+                            projection: entry,
+                            governed_evidence_refs: Vec::new(),
+                        },
+                        bm_core::memory::LongTermVersionRetentionLease::try_new(
+                            max_retained_revisions_per_owner,
+                        )?,
+                    )?;
+                    let material = bound_creation.material;
+                    let material_key = long_term_version_material_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &material.owner_ref,
+                        material.owner_revision,
+                    )?;
+                    let head = bound_creation.head;
+                    let head_key = long_term_version_head_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &head.owner_ref,
+                    )?;
+                    if heads
+                        .iter()
+                        .any(|existing| existing.owner_ref == head.owner_ref)
+                    {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "new owner already has a typed head",
+                        ));
+                    }
+                    plan.preconditions.push(json_precondition(
+                        crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                        &material_key,
+                        None,
+                    ));
+                    plan.preconditions.push(json_precondition(
+                        crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                        &head_key,
+                        None,
+                    ));
+                    plan.mutations.push(planned_json_put(
+                        crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                        material_key,
+                        id.clone(),
+                        &material,
+                        MemoryStoreEventKind::MemoryWrite,
+                    )?);
+                    plan.mutations.push(planned_json_put(
+                        crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                        head_key,
+                        id,
+                        &head,
+                        MemoryStoreEventKind::MemoryWrite,
+                    )?);
+                    materials.push(material);
+                    heads.push(head);
+                }
+                PlanningLongTermVersionIntent::Advance {
+                    before,
+                    after,
+                    transition,
+                } => {
+                    if prior.as_ref() != Some(&before) {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "advance intent does not match the exact planning read",
+                        ));
+                    }
+                    if before.id != after.id {
+                        if transition.operation
+                            != bm_core::memory::LongTermControlOperation::Supersede
+                            || after.owner_revision != 1
+                        {
+                            return Err(Error::config(
+                                "long_term_version_plan",
+                                "cross-owner advance must be a new revision-one supersede owner",
+                            ));
+                        }
+                        let predecessor_ref = GovernedMemoryOwnerRef::new(
+                            GovernedMemoryOwnerPlane::LongTerm,
+                            before.id.clone(),
+                        );
+                        let successor_ref = GovernedMemoryOwnerRef::new(
+                            GovernedMemoryOwnerPlane::LongTerm,
+                            after.id.clone(),
+                        );
+                        if heads.iter().any(|head| head.owner_ref == successor_ref) {
+                            return Err(Error::config(
+                                "long_term_version_plan",
+                                "supersede successor already has a typed head",
+                            ));
+                        }
+                        let predecessor_head_index = heads
+                            .iter()
+                            .position(|head| head.owner_ref == predecessor_ref)
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "long_term_version_plan",
+                                    "supersede predecessor is missing its typed head",
+                                )
+                            })?;
+                        let predecessor_head = heads[predecessor_head_index].clone();
+                        if predecessor_head.terminal_transition_ref.is_some() {
+                            return Err(Error::config(
+                                "long_term_version_plan",
+                                "terminal owner cannot be superseded again",
+                            ));
+                        }
+                        let predecessor = materials
+                            .iter()
+                            .find(|material| {
+                                material.owner_ref == predecessor_ref
+                                    && material.owner_revision == predecessor_head.current_revision
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "long_term_version_plan",
+                                    "supersede predecessor material is missing",
+                                )
+                            })?;
+                        if predecessor.to_current_projection()? != before {
+                            return Err(Error::config(
+                                "long_term_version_plan",
+                                "supersede planning read differs from current material",
+                            ));
+                        }
+                        let bound = transition.bind_version(
+                            memory_space_id,
+                            mounted_subject_id,
+                            &before,
+                            Some(&after),
+                            &predecessor_head,
+                            &materials,
+                            &transitions,
+                            max_retained_revisions_per_owner,
+                        )?;
+                        if bound.retention
+                            != bm_core::memory::BoundLongTermVersionRetention::StartSuccessorOwner
+                        {
+                            return Err(Error::config(
+                                "long_term_version_plan",
+                                "supersede binder returned a non-supersede retention disposition",
+                            ));
+                        }
+                        let successor = bound.successor_material.clone().ok_or_else(|| {
+                            Error::config(
+                                "long_term_version_plan",
+                                "supersede binder omitted the successor material",
+                            )
+                        })?;
+                        let revision = bound.control_revision.clone();
+                        let revision_key = scoped_long_term_control_storage_key(
+                            memory_space_id,
+                            LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                            &revision.revision_id,
+                        )?;
+                        let binding = bm_core::memory::LongTermMemoryVersionTransitionBinding::new(
+                            revision.transition.predecessor.clone(),
+                            revision_key.clone(),
+                            revision.content_digest.clone(),
+                        )?;
+                        let successor_material_key = long_term_version_material_key(
+                            memory_space_id,
+                            mounted_subject_id,
+                            &successor_ref,
+                            successor.owner_revision,
+                        )?;
+                        let predecessor_head_key = long_term_version_head_key(
+                            memory_space_id,
+                            mounted_subject_id,
+                            &predecessor_ref,
+                        )?;
+                        let successor_head_key = long_term_version_head_key(
+                            memory_space_id,
+                            mounted_subject_id,
+                            &successor_ref,
+                        )?;
+                        plan.preconditions.push(json_precondition(
+                            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                            &predecessor_head_key,
+                            head_values.get(&predecessor_head_key).cloned(),
+                        ));
+                        plan.preconditions.push(json_precondition(
+                            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                            &successor_head_key,
+                            None,
+                        ));
+                        plan.preconditions.push(json_precondition(
+                            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                            &successor_material_key,
+                            None,
+                        ));
+                        plan.preconditions.push(json_precondition(
+                            LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                            &revision_key,
+                            None,
+                        ));
+                        let mut terminal_head = predecessor_head;
+                        terminal_head.terminal_transition_ref =
+                            Some(predecessor.owner_revision_ref());
+                        terminal_head.manifest_revision = checked_next_persisted_revision(
+                            terminal_head.manifest_revision,
+                            "long_term_head_manifest",
+                        )?;
+                        let successor_head = LongTermMemoryHeadManifest {
+                            schema_version:
+                                bm_core::memory::LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+                            memory_space_id: memory_space_id.to_string(),
+                            mounted_subject_id: mounted_subject_id.to_string(),
+                            owner_ref: successor_ref,
+                            current_revision: successor.owner_revision,
+                            retained_revision_digests: vec![LongTermMemoryRetainedRevisionDigest {
+                                owner_revision: successor.owner_revision,
+                                content_digest: successor.content_digest.clone(),
+                            }],
+                            terminal_transition_ref: None,
+                            manifest_revision: 1,
+                        };
+                        plan.mutations.push(planned_json_put(
+                            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                            successor_material_key,
+                            after.id.clone(),
+                            &successor,
+                            MemoryStoreEventKind::MemoryWrite,
+                        )?);
+                        plan.mutations.push(planned_json_put(
+                            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                            predecessor_head_key,
+                            before.id.clone(),
+                            &terminal_head,
+                            MemoryStoreEventKind::MemoryWrite,
+                        )?);
+                        plan.mutations.push(planned_json_put(
+                            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                            successor_head_key,
+                            after.id.clone(),
+                            &successor_head,
+                            MemoryStoreEventKind::MemoryWrite,
+                        )?);
+                        plan.mutations.push(planned_json_put(
+                            LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                            revision_key,
+                            revision.revision_id.clone(),
+                            &revision,
+                            MemoryStoreEventKind::MemoryControl,
+                        )?);
+                        let supersede_tombstone = bound.tombstone.clone();
+                        if let Some(tombstone) = supersede_tombstone.as_ref() {
+                            let tombstone_key = scoped_long_term_control_storage_key(
+                                memory_space_id,
+                                LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                                &tombstone.record_id,
+                            )?;
+                            plan.preconditions.push(json_precondition(
+                                LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                                &tombstone_key,
+                                None,
+                            ));
+                            plan.mutations.push(planned_json_put(
+                                LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                                tombstone_key,
+                                tombstone.record_id.clone(),
+                                tombstone,
+                                MemoryStoreEventKind::MemoryDelete,
+                            )?);
+                        }
+                        heads[predecessor_head_index] = terminal_head;
+                        heads.push(successor_head);
+                        materials.push(successor);
+                        transitions.push(revision.transition.clone());
+                        transition_bindings.push(binding);
+                        control_revisions.push(revision.clone());
+                        let audit = bound.audit;
+                        let audit_key = scoped_long_term_control_storage_key(
+                            memory_space_id,
+                            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                            &audit.event_id,
+                        )?;
+                        plan.preconditions.push(json_precondition(
+                            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                            &audit_key,
+                            None,
+                        ));
+                        plan.mutations.push(planned_json_put(
+                            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                            audit_key,
+                            audit.event_id.clone(),
+                            &audit,
+                            MemoryStoreEventKind::MemoryControl,
+                        )?);
+                        continue;
+                    }
+                    let owner_ref = GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        before.id.clone(),
+                    );
+                    let head_index = heads
+                        .iter()
+                        .position(|head| head.owner_ref == owner_ref)
+                        .ok_or_else(|| {
+                            Error::config(
+                                "long_term_version_plan",
+                                "advance owner is missing its typed head",
+                            )
+                        })?;
+                    let previous_head = heads[head_index].clone();
+                    if previous_head.terminal_transition_ref.is_some() {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "terminal owner cannot advance",
+                        ));
+                    }
+                    let predecessor_index = materials
+                        .iter()
+                        .position(|material| {
+                            material.owner_ref == owner_ref
+                                && material.owner_revision == previous_head.current_revision
+                        })
+                        .ok_or_else(|| {
+                            Error::config(
+                                "long_term_version_plan",
+                                "advance owner is missing its current material",
+                            )
+                        })?;
+                    let predecessor = materials[predecessor_index].clone();
+                    if predecessor.to_current_projection()? != before {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "planning read differs from the typed current material",
+                        ));
+                    }
+                    let bound = transition.bind_version(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &before,
+                        Some(&after),
+                        &previous_head,
+                        &materials,
+                        &transitions,
+                        max_retained_revisions_per_owner,
+                    )?;
+                    if bound.retention
+                        != bm_core::memory::BoundLongTermVersionRetention::AppendSuccessor
+                    {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "advance binder returned a non-append retention disposition",
+                        ));
+                    }
+                    let successor = bound.successor_material.clone().ok_or_else(|| {
+                        Error::config(
+                            "long_term_version_plan",
+                            "advance binder omitted the successor material",
+                        )
+                    })?;
+                    let revision = bound.control_revision.clone();
+                    let revision_key = scoped_long_term_control_storage_key(
+                        memory_space_id,
+                        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                        &revision.revision_id,
+                    )?;
+                    let binding = bm_core::memory::LongTermMemoryVersionTransitionBinding::new(
+                        revision.transition.predecessor.clone(),
+                        revision_key.clone(),
+                        revision.content_digest.clone(),
+                    )?;
+                    let successor_key = long_term_version_material_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &successor.owner_ref,
+                        successor.owner_revision,
+                    )?;
+                    let head_key = long_term_version_head_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &previous_head.owner_ref,
+                    )?;
+                    plan.preconditions.push(json_precondition(
+                        crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                        &head_key,
+                        head_values.get(&head_key).cloned(),
+                    ));
+                    plan.preconditions.push(json_precondition(
+                        crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                        &successor_key,
+                        None,
+                    ));
+                    plan.preconditions.push(json_precondition(
+                        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                        &revision_key,
+                        None,
+                    ));
+                    plan.mutations.push(planned_json_put(
+                        crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                        successor_key,
+                        after.id.clone(),
+                        &successor,
+                        MemoryStoreEventKind::MemoryWrite,
+                    )?);
+                    plan.mutations.push(planned_json_put(
+                        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                        revision_key.clone(),
+                        revision.revision_id.clone(),
+                        &revision,
+                        MemoryStoreEventKind::MemoryControl,
+                    )?);
+
+                    let mut next_head = previous_head.clone();
+                    next_head.current_revision = successor.owner_revision;
+                    next_head.manifest_revision = checked_next_persisted_revision(
+                        next_head.manifest_revision,
+                        "long_term_head_manifest",
+                    )?;
+                    next_head.retained_revision_digests.push(
+                        LongTermMemoryRetainedRevisionDigest {
+                            owner_revision: successor.owner_revision,
+                            content_digest: successor.content_digest.clone(),
+                        },
+                    );
+                    materials.push(successor);
+                    transitions.push(revision.transition.clone());
+                    transition_bindings.push(binding);
+                    control_revisions.push(revision.clone());
+                    heads[head_index] = next_head.clone();
+                    plan.mutations.push(planned_json_put(
+                        crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                        head_key,
+                        after.id.clone(),
+                        &next_head,
+                        MemoryStoreEventKind::MemoryWrite,
+                    )?);
+                    let audit = bound.audit;
+                    let audit_key = scoped_long_term_control_storage_key(
+                        memory_space_id,
+                        LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                        &audit.event_id,
+                    )?;
+                    plan.preconditions.push(json_precondition(
+                        LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                        &audit_key,
+                        None,
+                    ));
+                    plan.mutations.push(planned_json_put(
+                        LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                        audit_key,
+                        audit.event_id.clone(),
+                        &audit,
+                        MemoryStoreEventKind::MemoryControl,
+                    )?);
+                }
+                PlanningLongTermVersionIntent::Terminal { before, transition } => {
+                    if prior.as_ref() != Some(&before) {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "terminal intent does not match the exact planning read",
+                        ));
+                    }
+                    let owner_ref = GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        before.id.clone(),
+                    );
+                    let head_index = heads
+                        .iter()
+                        .position(|head| head.owner_ref == owner_ref)
+                        .ok_or_else(|| {
+                            Error::config(
+                                "long_term_version_plan",
+                                "terminal owner is missing its typed head",
+                            )
+                        })?;
+                    let previous_head = heads[head_index].clone();
+                    let predecessor = materials
+                        .iter()
+                        .find(|material| {
+                            material.owner_ref == owner_ref
+                                && material.owner_revision == previous_head.current_revision
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::config(
+                                "long_term_version_plan",
+                                "terminal owner is missing its current material",
+                            )
+                        })?;
+                    if predecessor.to_current_projection()? != before {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "terminal planning read differs from current material",
+                        ));
+                    }
+                    let bound = transition.bind_version(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &before,
+                        None,
+                        &previous_head,
+                        &materials,
+                        &transitions,
+                        max_retained_revisions_per_owner,
+                    )?;
+                    let revision = bound.control_revision.clone();
+                    if !matches!(
+                        bound.retention,
+                        bm_core::memory::BoundLongTermVersionRetention::RetainOperatorOnly
+                            | bm_core::memory::BoundLongTermVersionRetention::PurgeOwner
+                    ) {
+                        return Err(Error::config(
+                            "long_term_version_plan",
+                            "terminal binder returned a non-terminal retention disposition",
+                        ));
+                    }
+                    let revision_key = scoped_long_term_control_storage_key(
+                        memory_space_id,
+                        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                        &revision.revision_id,
+                    )?;
+                    plan.preconditions.push(json_precondition(
+                        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                        &revision_key,
+                        None,
+                    ));
+                    plan.mutations.push(planned_json_put(
+                        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                        revision_key.clone(),
+                        revision.revision_id.clone(),
+                        &revision,
+                        MemoryStoreEventKind::MemoryControl,
+                    )?);
+                    let binding = bm_core::memory::LongTermMemoryVersionTransitionBinding::new(
+                        revision.transition.predecessor.clone(),
+                        revision_key.clone(),
+                        revision.content_digest.clone(),
+                    )?;
+
+                    if bound.retention
+                        == bm_core::memory::BoundLongTermVersionRetention::RetainOperatorOnly
+                    {
+                        let head_key = long_term_version_head_key(
+                            memory_space_id,
+                            mounted_subject_id,
+                            &owner_ref,
+                        )?;
+                        plan.preconditions.push(json_precondition(
+                            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                            &head_key,
+                            head_values.get(&head_key).cloned(),
+                        ));
+                        let mut terminal_head = previous_head;
+                        terminal_head.terminal_transition_ref =
+                            Some(predecessor.owner_revision_ref());
+                        terminal_head.manifest_revision = checked_next_persisted_revision(
+                            terminal_head.manifest_revision,
+                            "long_term_head_manifest",
+                        )?;
+                        plan.mutations.push(planned_json_put(
+                            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                            head_key,
+                            before.id.clone(),
+                            &terminal_head,
+                            MemoryStoreEventKind::MemoryWrite,
+                        )?);
+                        heads[head_index] = terminal_head;
+                        transitions.push(revision.transition.clone());
+                        transition_bindings.push(binding);
+                        control_revisions.push(revision);
+                        let audit = bound.audit;
+                        let audit_key = scoped_long_term_control_storage_key(
+                            memory_space_id,
+                            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                            &audit.event_id,
+                        )?;
+                        plan.preconditions.push(json_precondition(
+                            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                            &audit_key,
+                            None,
+                        ));
+                        plan.mutations.push(planned_json_put(
+                            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                            audit_key,
+                            audit.event_id.clone(),
+                            &audit,
+                            MemoryStoreEventKind::MemoryControl,
+                        )?);
+                        continue;
+                    }
+
+                    let owner_materials = materials
+                        .iter()
+                        .filter(|material| material.owner_ref == owner_ref)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for material in &owner_materials {
+                        let material_key = long_term_version_material_key(
+                            memory_space_id,
+                            mounted_subject_id,
+                            &material.owner_ref,
+                            material.owner_revision,
+                        )?;
+                        let material_value =
+                            material_values.get(&material_key).cloned().ok_or_else(|| {
+                                Error::config(
+                                    "long_term_version_plan",
+                                    "terminal material precondition is missing",
+                                )
+                            })?;
+                        plan.preconditions.push(json_precondition(
+                            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                            &material_key,
+                            Some(material_value),
+                        ));
+                        plan.mutations.push(StoreMutation::DeleteJson {
+                            namespace: crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE
+                                .to_string(),
+                            key: material_key,
+                            event_kind: MemoryStoreEventKind::MemoryDelete,
+                            plane: crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE
+                                .to_string(),
+                            record_key: before.id.clone(),
+                        });
+                    }
+                    let head_key = long_term_version_head_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &owner_ref,
+                    )?;
+                    plan.preconditions.push(json_precondition(
+                        crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                        &head_key,
+                        head_values.get(&head_key).cloned(),
+                    ));
+                    plan.mutations.push(StoreMutation::DeleteJson {
+                        namespace: crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE
+                            .to_string(),
+                        key: head_key,
+                        event_kind: MemoryStoreEventKind::MemoryDelete,
+                        plane: crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                        record_key: before.id.clone(),
+                    });
+                    heads.remove(head_index);
+                    materials.retain(|material| material.owner_ref != owner_ref);
+                    transitions.retain(|item| item.predecessor.owner_ref != owner_ref);
+                    transition_bindings.retain(|item| item.predecessor.owner_ref != owner_ref);
+
+                    let tombstone = bound.tombstone.ok_or_else(|| {
+                        Error::config(
+                            "long_term_version_plan",
+                            "purge binder omitted the typed tombstone",
+                        )
+                    })?;
+                    let tombstone_key = scoped_long_term_control_storage_key(
+                        memory_space_id,
+                        LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                        &tombstone.record_id,
+                    )?;
+                    plan.preconditions.push(json_precondition(
+                        LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                        &tombstone_key,
+                        None,
+                    ));
+                    plan.mutations.push(planned_json_put(
+                        LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                        tombstone_key,
+                        tombstone.record_id.clone(),
+                        &tombstone,
+                        MemoryStoreEventKind::MemoryDelete,
+                    )?);
+                    let audit = bound.audit;
+                    let audit_key = scoped_long_term_control_storage_key(
+                        memory_space_id,
+                        LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                        &audit.event_id,
+                    )?;
+                    plan.preconditions.push(json_precondition(
+                        LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                        &audit_key,
+                        None,
+                    ));
+                    plan.mutations.push(planned_json_put(
+                        LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+                        audit_key,
+                        audit.event_id.clone(),
+                        &audit,
+                        MemoryStoreEventKind::MemoryControl,
+                    )?);
+                }
+            }
         }
+        let next_scope = LongTermMemoryVersionScopeManifest::build(
+            memory_space_id,
+            mounted_subject_id,
+            previous_scope
+                .as_ref()
+                .map(|scope| {
+                    checked_next_persisted_revision(
+                        scope.manifest_revision,
+                        "long_term_scope_manifest",
+                    )
+                })
+                .transpose()?
+                .unwrap_or(1),
+            &heads,
+            &materials,
+            &transitions,
+            &transition_bindings,
+            max_retained_revisions_per_owner,
+        )?;
+        plan.preconditions.push(json_precondition(
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            &scope_key,
+            previous_scope_value,
+        ));
+        plan.mutations.push(planned_json_put(
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            scope_key,
+            format!("{memory_space_id}:{mounted_subject_id}"),
+            &next_scope,
+            MemoryStoreEventKind::MemoryWrite,
+        )?);
         let mut normalized_preconditions = Vec::new();
         merge_json_preconditions(&mut normalized_preconditions, plan.preconditions)?;
         plan.preconditions = normalized_preconditions;
@@ -17484,10 +22074,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             match plan_long_term_memory_upsert(prior.as_ref(), draft, now_secs) {
                 LongTermMemoryEntryPlan::Created(entry)
                 | LongTermMemoryEntryPlan::Updated(entry) => {
-                    self.changes
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .insert(id, Some(entry));
+                    self.stage_entries(std::slice::from_ref(&entry))?;
                     changed = changed.saturating_add(1);
                 }
                 LongTermMemoryEntryPlan::Noop => {}
@@ -17512,10 +22099,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             .ok_or_else(|| Error::config("long_term_owner_mutation", "owner record not found"))?;
         let plan = plan_long_term_memory_owner_mutation(&existing, mutation, now_secs);
         if let LongTermMemoryEntryPlan::Updated(entry) = &plan {
-            self.changes
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(id.to_string(), Some(entry.clone()));
+            self.stage_entries(std::slice::from_ref(entry))?;
         }
         Ok(plan)
     }
@@ -17559,7 +22143,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             .get(id)
             .cloned()
         {
-            return Ok(value);
+            return Ok(value.current_projection().cloned());
         }
         let value = self.base.get(id)?;
         self.read_set
@@ -17597,7 +22181,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             .unwrap_or_else(|error| error.into_inner())
             .iter()
         {
-            match value {
+            match value.current_projection() {
                 Some(entry) => {
                     map.insert(id.clone(), entry.clone());
                 }
@@ -17615,15 +22199,51 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
     }
 
     fn delete(&self, id: &str) -> Result<bool> {
-        if LongTermMemoryStore::get(self, id)?.is_some() {
-            self.changes
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(id.to_string(), None);
-            Ok(true)
-        } else {
-            Ok(false)
+        let current = LongTermMemoryStore::get(self, id)?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let existing_change = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .cloned();
+        let mut changes = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match existing_change {
+            Some(PlanningLongTermVersionIntent::Create { .. }) => {
+                changes.remove(id);
+            }
+            Some(PlanningLongTermVersionIntent::Advance { before, .. }) => {
+                changes.insert(
+                    id.to_string(),
+                    PlanningLongTermVersionIntent::Terminal {
+                        transition: PlanningLongTermTransitionIntent::delete(
+                            &before,
+                            "governed long-term deletion",
+                        ),
+                        before,
+                    },
+                );
+            }
+            Some(PlanningLongTermVersionIntent::Terminal { .. }) => {}
+            None => {
+                changes.insert(
+                    id.to_string(),
+                    PlanningLongTermVersionIntent::Terminal {
+                        transition: PlanningLongTermTransitionIntent::delete(
+                            &current,
+                            "governed long-term deletion",
+                        ),
+                        before: current,
+                    },
+                );
+            }
         }
+        Ok(true)
     }
 
     fn delete_slot(&self, slot: &bm_core::memory::LongTermMemorySlot) -> Result<bool> {
@@ -17638,48 +22258,616 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
     }
 }
 
+struct LongTermOwnerPlanningContext<'a> {
+    base: &'a dyn LongTermMemoryReadStore,
+    control_base: &'a dyn LongTermMemoryControlReadStore,
+    memory_space_id: &'a str,
+    mounted_subject_id: &'a str,
+    store_platform: &'a StorePlatform,
+    max_retained_revisions_per_owner: usize,
+}
+
 fn plan_owner_writes(
-    base: &dyn LongTermMemoryReadStore,
-    memory_space_id: &str,
-    writes: Vec<LongTermMemoryOwnerWrite>,
+    context: LongTermOwnerPlanningContext<'_>,
+    owner_writes: Vec<LongTermMemoryOwnerWrite>,
+    control_writes: Vec<LongTermMemoryControlWrite>,
 ) -> Result<MemoryStoreMutationPlan> {
-    let mut plan = MemoryStoreMutationPlan::default();
-    for write in writes {
-        let (record_id, next) = match write {
-            LongTermMemoryOwnerWrite::Put(entry) => (entry.id.clone(), Some(*entry)),
-            LongTermMemoryOwnerWrite::Delete { record_id } => (record_id, None),
-        };
-        let previous = base.get(&record_id)?;
-        let physical_key = scoped_long_term_memory_storage_key(memory_space_id, &record_id)?;
-        plan.preconditions.push(json_precondition(
-            "long_term",
-            &physical_key,
-            previous
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|error| Error::config("long_term_control_plan", error.to_string()))?,
-        ));
-        plan.mutations.push(match next {
-            Some(entry) => planned_json_put(
-                "long_term",
-                physical_key,
-                record_id,
-                &entry,
-                MemoryStoreEventKind::MemoryWrite,
-            )?,
-            None => StoreMutation::DeleteJson {
-                namespace: "long_term".to_string(),
-                key: physical_key,
-                event_kind: MemoryStoreEventKind::MemoryDelete,
-                plane: "long_term".to_string(),
-                record_key: record_id,
-            },
-        });
+    let LongTermOwnerPlanningContext {
+        base,
+        control_base,
+        memory_space_id,
+        mounted_subject_id,
+        store_platform,
+        max_retained_revisions_per_owner,
+    } = context;
+    let mut puts = BTreeMap::new();
+    let mut deletes = BTreeSet::new();
+    for write in owner_writes {
+        match write {
+            LongTermMemoryOwnerWrite::Put(entry) => {
+                if puts.insert(entry.id.clone(), *entry).is_some() {
+                    return Err(Error::config(
+                        "long_term_control_plan",
+                        "control plan contains duplicate owner puts",
+                    ));
+                }
+            }
+            LongTermMemoryOwnerWrite::Delete { record_id } => {
+                deletes.insert(record_id);
+            }
+        }
     }
+    let mut revision_intents = Vec::new();
+    let mut requested_tombstone_records = BTreeSet::new();
+    let mut requested_audit_count = 0usize;
+    let mut other_control_writes = Vec::new();
+    for write in control_writes {
+        match write {
+            LongTermMemoryControlWrite::PutRevisionIntent(intent) => {
+                revision_intents.push(intent);
+            }
+            LongTermMemoryControlWrite::PutTombstone(tombstone) => {
+                requested_tombstone_records.insert(tombstone.record_id);
+            }
+            LongTermMemoryControlWrite::AppendAudit(_) => {
+                requested_audit_count = requested_audit_count.saturating_add(1);
+            }
+            other => other_control_writes.push(other),
+        }
+    }
+    let mut changes = BTreeMap::new();
+    let mut read_set = BTreeMap::new();
+    for intent in revision_intents {
+        let predecessor_id = intent.transition.predecessor.owner_ref.owner_id.clone();
+        let before = base.get(&predecessor_id)?.ok_or_else(|| {
+            Error::config(
+                "long_term_control_plan",
+                "control predecessor is missing from the exact typed read view",
+            )
+        })?;
+        if before.owner_revision != intent.transition.predecessor.owner_revision {
+            return Err(Error::config(
+                "long_term_control_plan",
+                "control predecessor revision differs from the exact typed read view",
+            ));
+        }
+        let transition = PlanningLongTermTransitionIntent::from_core(&intent);
+        let change = match &intent.transition.successor {
+            Some(successor_ref) => {
+                let after = puts
+                    .remove(&successor_ref.owner_ref.owner_id)
+                    .ok_or_else(|| {
+                        Error::config(
+                            "long_term_control_plan",
+                            "control successor owner write is missing",
+                        )
+                    })?;
+                if after.owner_revision != successor_ref.owner_revision {
+                    return Err(Error::config(
+                        "long_term_control_plan",
+                        "control successor revision differs from its typed intent",
+                    ));
+                }
+                deletes.remove(&predecessor_id);
+                PlanningLongTermVersionIntent::Advance {
+                    before: before.clone(),
+                    after: Box::new(after),
+                    transition,
+                }
+            }
+            None => {
+                if intent.operation == bm_core::memory::LongTermControlOperation::Invalidate {
+                    if deletes.contains(&predecessor_id) {
+                        return Err(Error::config(
+                            "long_term_control_plan",
+                            "invalidate must retain the exact owner closure",
+                        ));
+                    }
+                } else if !deletes.remove(&predecessor_id) {
+                    return Err(Error::config(
+                        "long_term_control_plan",
+                        "terminal control intent is missing its owner delete",
+                    ));
+                }
+                PlanningLongTermVersionIntent::Terminal {
+                    before: before.clone(),
+                    transition,
+                }
+            }
+        };
+        if changes.insert(predecessor_id.clone(), change).is_some() {
+            return Err(Error::config(
+                "long_term_control_plan",
+                "one transaction contains multiple transitions for one predecessor",
+            ));
+        }
+        read_set.insert(predecessor_id, Some(before));
+    }
+    if !puts.is_empty()
+        || !deletes.is_empty()
+        || requested_tombstone_records
+            .iter()
+            .any(|record_id| !changes.contains_key(record_id))
+        || (!changes.is_empty() && requested_audit_count == 0)
+    {
+        return Err(Error::config(
+            "long_term_control_plan",
+            "owner, tombstone, or audit request is not bound to an exact typed transition",
+        ));
+    }
+    let planning_store = PlanningLongTermMemoryStore {
+        base,
+        changes: Mutex::new(changes),
+        read_set: Mutex::new(read_set),
+        complete_snapshot_read: Mutex::new(false),
+    };
+    let mut plan = planning_store.into_plan(
+        memory_space_id,
+        mounted_subject_id,
+        store_platform,
+        max_retained_revisions_per_owner,
+    )?;
+
+    let bound_audits = plan
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == LONG_TERM_CONTROL_AUDIT_NAMESPACE => {
+                serde_json::from_value::<LongTermMemoryControlAuditEvent>(value.clone()).ok()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if bound_audits.is_empty() && requested_audit_count > 0 {
+        return Err(Error::config(
+            "long_term_control_plan",
+            "bound control transition did not produce a core-owned audit",
+        ));
+    }
+    plan.mutations.retain(|mutation| {
+        !matches!(
+            mutation,
+            StoreMutation::PutJson { namespace, .. }
+                | StoreMutation::DeleteJson { namespace, .. }
+                if namespace == LONG_TERM_CONTROL_AUDIT_NAMESPACE
+        )
+    });
+    plan.preconditions.retain(|precondition| {
+        !matches!(
+            precondition,
+            StoreJsonPrecondition::Absent { namespace, .. }
+                | StoreJsonPrecondition::Exact { namespace, .. }
+                if namespace == LONG_TERM_CONTROL_AUDIT_NAMESPACE
+        )
+    });
+    for audit in bm_core::memory::bind_long_term_control_audit_batch("pending", &bound_audits)? {
+        let audit_key = scoped_long_term_control_storage_key(
+            memory_space_id,
+            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+            &audit.event_id,
+        )?;
+        plan.preconditions.push(json_precondition(
+            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+            &audit_key,
+            None,
+        ));
+        plan.mutations.push(planned_json_put(
+            LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+            audit_key,
+            audit.event_id.clone(),
+            &audit,
+            MemoryStoreEventKind::MemoryControl,
+        )?);
+    }
+    plan.merge(plan_control_writes(
+        control_base,
+        memory_space_id,
+        other_control_writes,
+    )?)?;
+    Ok(plan)
+}
+
+struct RuntimeSkillScopeSnapshot {
+    manifest_key: String,
+    manifest_value: Option<serde_json::Value>,
+    manifest: Option<RuntimeSkillScopeManifest>,
+    owner_values: BTreeMap<String, serde_json::Value>,
+    records: Vec<RuntimeSkillOwnerRecord>,
+}
+
+struct P8UnavailableRuntimeSkillStorage;
+
+impl SkillStorage for P8UnavailableRuntimeSkillStorage {
+    fn list_names(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    fn read(&self, _name: &str) -> Result<Vec<u8>> {
+        Err(Error::config(
+            "runtime_skill_recall_unavailable",
+            "generic SkillStorage projection cannot deliver governed RuntimeSkill owners; production delivery is owned by the immutable governed recall closure",
+        ))
+    }
+
+    fn write(&self, _name: &str, _content: &[u8]) -> Result<()> {
+        Err(Error::config(
+            "runtime_skill_recall_unavailable",
+            "projection storage is read-only",
+        ))
+    }
+
+    fn remove(&self, _name: &str) -> Result<()> {
+        Err(Error::config(
+            "runtime_skill_recall_unavailable",
+            "projection storage is read-only",
+        ))
+    }
+}
+
+fn read_runtime_skill_scope_snapshot(
+    store_platform: &StorePlatform,
+    memory_space_id: &str,
+    owning_scope: &RuntimeSkillOwningScope,
+    max_owners_per_scope: usize,
+) -> Result<RuntimeSkillScopeSnapshot> {
+    if max_owners_per_scope == 0 {
+        return Err(Error::config(
+            "runtime_skill_scope_read",
+            "pinned owner budget must be positive",
+        ));
+    }
+    let manifest_key = runtime_skill_scope_manifest_key(memory_space_id, owning_scope)?;
+    let manifest_docs = store_platform.read_json_docs_by_keys(
+        crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+        std::slice::from_ref(&manifest_key),
+    )?;
+    if manifest_docs.len() > 1 {
+        return Err(Error::config(
+            "runtime_skill_scope_read",
+            "runtime skill scope manifest address returned duplicate documents",
+        ));
+    }
+    let previous_manifest_value = manifest_docs.first().map(|doc| doc.value.clone());
+    let previous_manifest = previous_manifest_value
+        .clone()
+        .map(serde_json::from_value::<RuntimeSkillScopeManifest>)
+        .transpose()
+        .map_err(|error| Error::config("runtime_skill_scope_read", error.to_string()))?;
+    let owner_keys = previous_manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .owner_bindings
+                .iter()
+                .map(|binding| binding.owner_physical_key.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let owner_docs = store_platform.read_json_docs_by_keys(
+        crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE,
+        &owner_keys,
+    )?;
+    if owner_docs.len() != owner_keys.len() {
+        return Err(Error::config(
+            "runtime_skill_scope_read",
+            "runtime skill scope manifest owner closure is incomplete",
+        ));
+    }
+    let owner_values = owner_docs
+        .iter()
+        .map(|doc| (doc.key.clone(), doc.value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let existing_records = owner_docs
+        .into_iter()
+        .map(|doc| {
+            serde_json::from_value::<RuntimeSkillOwnerRecord>(doc.value)
+                .map_err(|error| Error::config("runtime_skill_scope_read", error.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let existing_bindings = existing_records
+        .iter()
+        .map(RuntimeSkillOwnerBinding::from_record)
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(manifest) = &previous_manifest {
+        manifest.validate_exact(
+            memory_space_id,
+            owning_scope,
+            existing_bindings.clone(),
+            max_owners_per_scope,
+        )?;
+    } else if !existing_records.is_empty() {
+        return Err(Error::config(
+            "runtime_skill_scope_read",
+            "runtime skill owners exist without their typed scope manifest",
+        ));
+    }
+    Ok(RuntimeSkillScopeSnapshot {
+        manifest_key,
+        manifest_value: previous_manifest_value,
+        manifest: previous_manifest,
+        owner_values,
+        records: existing_records,
+    })
+}
+
+fn plan_runtime_skill_owner_upserts(
+    store_platform: &StorePlatform,
+    memory_space_id: &str,
+    owning_scope: &RuntimeSkillOwningScope,
+    records: Vec<RuntimeSkillOwnerRecord>,
+    max_owners_per_scope: usize,
+    max_lineage_depth: usize,
+) -> Result<MemoryStoreMutationPlan> {
+    if records.is_empty() {
+        return Ok(MemoryStoreMutationPlan::default());
+    }
+    if max_lineage_depth == 0 {
+        return Err(Error::config(
+            "runtime_skill_owner_plan",
+            "pinned lineage budget must be positive",
+        ));
+    }
+    let snapshot = read_runtime_skill_scope_snapshot(
+        store_platform,
+        memory_space_id,
+        owning_scope,
+        max_owners_per_scope,
+    )?;
+
+    let mut current = snapshot
+        .records
+        .into_iter()
+        .map(|record| (record.owner_ref.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    let mut plan = MemoryStoreMutationPlan::default();
+    for (key, value) in &snapshot.owner_values {
+        plan.preconditions.push(json_precondition(
+            crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE,
+            key,
+            Some(value.clone()),
+        ));
+    }
+    for incoming in records {
+        let record = match current.get(&incoming.owner_ref) {
+            Some(previous) if incoming.owner_revision == 1 => {
+                if incoming.memory_space_id != previous.memory_space_id
+                    || incoming.owning_scope != previous.owning_scope
+                    || incoming.creation_ref != previous.creation_ref
+                    || incoming.intrinsic_contract != previous.intrinsic_contract
+                    || incoming.privacy_class != previous.privacy_class
+                {
+                    return Err(Error::config(
+                        "runtime_skill_owner_plan",
+                        "runtime skill creation authority cannot revise immutable owner fields",
+                    ));
+                }
+                if incoming.procedural_content == previous.procedural_content {
+                    continue;
+                }
+                previous.revise_procedural_content(
+                    incoming.procedural_content,
+                    incoming.lifecycle.updated_at,
+                )?
+            }
+            _ => incoming,
+        };
+        if record.memory_space_id != memory_space_id
+            || &record.owning_scope != owning_scope
+            || !record.validate_contract().accepted
+        {
+            return Err(Error::config(
+                "runtime_skill_owner_plan",
+                "runtime skill record scope or contract is invalid",
+            ));
+        }
+        match current.get(&record.owner_ref) {
+            Some(previous) => {
+                if previous.owner_revision.checked_add(1) != Some(record.owner_revision)
+                    || record.lifecycle.lineage.predecessor.as_ref()
+                        != Some(&RuntimeSkillOwnerBinding::from_record(previous)?)
+                    || record.owner_revision as usize > max_lineage_depth
+                {
+                    return Err(Error::config(
+                        "runtime_skill_owner_plan",
+                        "runtime skill advance violates exact predecessor or lineage budget",
+                    ));
+                }
+                plan.preconditions.push(json_precondition(
+                    crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE,
+                    &record.physical_key,
+                    snapshot.owner_values.get(&record.physical_key).cloned(),
+                ));
+            }
+            None => {
+                if record.owner_revision != 1 || record.lifecycle.lineage.predecessor.is_some() {
+                    return Err(Error::config(
+                        "runtime_skill_owner_plan",
+                        "runtime skill create must be revision one without a predecessor",
+                    ));
+                }
+                plan.preconditions.push(json_precondition(
+                    crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE,
+                    &record.physical_key,
+                    None,
+                ));
+            }
+        }
+        plan.mutations.push(planned_json_put(
+            crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE,
+            record.physical_key.clone(),
+            record.owner_ref.owner_id.clone(),
+            &record,
+            MemoryStoreEventKind::MemoryWrite,
+        )?);
+        current.insert(record.owner_ref.clone(), record);
+    }
+    if plan.mutations.is_empty() {
+        return Ok(MemoryStoreMutationPlan::default());
+    }
+    let next_bindings = current
+        .values()
+        .map(RuntimeSkillOwnerBinding::from_record)
+        .collect::<Result<Vec<_>>>()?;
+    let next_manifest = RuntimeSkillScopeManifest::build(
+        snapshot
+            .manifest
+            .as_ref()
+            .map(|manifest| {
+                checked_next_persisted_revision(manifest.revision, "runtime_skill_scope_manifest")
+            })
+            .transpose()?
+            .unwrap_or(1),
+        memory_space_id,
+        owning_scope.clone(),
+        next_bindings,
+        max_owners_per_scope,
+    )?;
+    plan.preconditions.push(json_precondition(
+        crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+        &snapshot.manifest_key,
+        snapshot.manifest_value,
+    ));
+    plan.mutations.push(planned_json_put(
+        crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+        snapshot.manifest_key,
+        format!("{memory_space_id}:{owning_scope:?}"),
+        &next_manifest,
+        MemoryStoreEventKind::MemoryWrite,
+    )?);
     let mut normalized = Vec::new();
     merge_json_preconditions(&mut normalized, plan.preconditions)?;
     plan.preconditions = normalized;
     Ok(plan)
+}
+
+fn runtime_skill_owner_mutation_count(plan: &MemoryStoreMutationPlan) -> usize {
+    plan.mutations
+        .iter()
+        .filter(|mutation| {
+            matches!(
+                mutation,
+                StoreMutation::PutJson { namespace, .. }
+                    if namespace == crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE
+            )
+        })
+        .count()
+}
+
+fn runtime_skill_owner_record_from_candidate(
+    candidate: &MemoryWriteCandidate,
+    write: &RuntimeSkillWrite,
+    memory_space_id: &str,
+    owning_scope: RuntimeSkillOwningScope,
+) -> Result<RuntimeSkillOwnerRecord> {
+    let candidate_id = candidate.candidate_id.trim();
+    if candidate_id.is_empty() {
+        return Err(Error::config(
+            "runtime_skill_owner_plan",
+            "governed candidate id is required for runtime skill identity",
+        ));
+    }
+    let candidate_bytes = serde_json::to_vec(candidate)
+        .map_err(|error| Error::config("runtime_skill_owner_plan", error.to_string()))?;
+    let candidate_digest = format!("sha256:{:x}", Sha256::digest(candidate_bytes));
+    runtime_skill_owner_record_from_governed_write(
+        write,
+        memory_space_id,
+        owning_scope,
+        RuntimeSkillCreationRef::GovernedCandidate {
+            candidate_id: candidate_id.to_string(),
+            candidate_digest,
+        },
+        candidate.privacy,
+    )
+}
+
+fn runtime_skill_owner_record_from_governed_write(
+    write: &RuntimeSkillWrite,
+    memory_space_id: &str,
+    owning_scope: RuntimeSkillOwningScope,
+    creation_ref: RuntimeSkillCreationRef,
+    privacy_class: MemoryPrivacyClass,
+) -> Result<RuntimeSkillOwnerRecord> {
+    let (evidence_kind, evidence_safe_ref, evidence_digest) = match &creation_ref {
+        RuntimeSkillCreationRef::GovernedCandidate {
+            candidate_id,
+            candidate_digest,
+        } => (
+            RuntimeSkillEvidenceKind::GovernedEvidence,
+            candidate_id.clone(),
+            candidate_digest.clone(),
+        ),
+        RuntimeSkillCreationRef::TaskLearningPromotion {
+            learning_id,
+            learning_digest,
+        } => (
+            RuntimeSkillEvidenceKind::TaskLearning,
+            learning_id.clone(),
+            learning_digest.clone(),
+        ),
+        RuntimeSkillCreationRef::ReplayPromotion {
+            candidate_ref,
+            verification_receipt_digest,
+        } => (
+            RuntimeSkillEvidenceKind::GovernedEvidence,
+            candidate_ref.clone(),
+            verification_receipt_digest.clone(),
+        ),
+        RuntimeSkillCreationRef::GovernedUsageFeedback {
+            feedback_ref,
+            observation_digest,
+            ..
+        } => (
+            RuntimeSkillEvidenceKind::GovernedEvidence,
+            feedback_ref.clone(),
+            observation_digest.clone(),
+        ),
+    };
+    let observed_at = write.observed_at.max(1);
+    let intrinsic_contract = RuntimeSkillIntrinsicContract {
+        schema_version: RUNTIME_SKILL_GOVERNED_CONTRACT_SCHEMA_VERSION,
+        applicability: RuntimeSkillApplicability::Global,
+        triggers: vec![RuntimeSkillTrigger {
+            kind: RuntimeSkillTriggerKind::QueryIntent,
+            canonical_ref: evidence_safe_ref.clone(),
+        }],
+        constraints: Vec::new(),
+        premises: Vec::new(),
+        failure_modes: vec![
+            RuntimeSkillFailureMode::ExecutionFailed,
+            RuntimeSkillFailureMode::OutputRejected,
+        ],
+        evidence_bindings: vec![RuntimeSkillEvidenceBinding {
+            kind: evidence_kind,
+            safe_ref: evidence_safe_ref,
+            source_digest: evidence_digest,
+        }],
+        projection_policy: RuntimeSkillProjectionPolicy {
+            privacy_class,
+            model_projection_allowed: privacy_class.projection_content_allowed(),
+            require_all_mandatory_premises: true,
+        },
+        capability_affinities: vec![
+            bm_core::skills::RuntimeSkillCapabilityAffinity::ProceduralRecall,
+        ],
+    };
+    RuntimeSkillOwnerRecord::build(
+        memory_space_id,
+        owning_scope,
+        creation_ref,
+        1,
+        intrinsic_contract,
+        RuntimeSkillProceduralContent {
+            title: write.title.trim().to_string(),
+            topic: write.topic.trim().to_string(),
+            summary: write.summary.trim().to_string(),
+            procedure: write.content.trim().to_string(),
+        },
+        RuntimeSkillLifecycle::created(observed_at)?,
+        privacy_class,
+    )
 }
 
 fn plan_control_writes(
@@ -17690,28 +22878,11 @@ fn plan_control_writes(
     let mut plan = MemoryStoreMutationPlan::default();
     for write in writes {
         let (namespace, logical_id, previous, mutation) = match write {
-            LongTermMemoryControlWrite::PutRevision(revision) => {
-                let previous = base
-                    .list_long_term_control_revisions(&revision.record_id, usize::MAX)?
-                    .into_iter()
-                    .find(|item| item.revision_id == revision.revision_id)
-                    .map(serde_json::to_value)
-                    .transpose()
-                    .map_err(|error| Error::config("long_term_control_plan", error.to_string()))?;
-                let id = revision.revision_id.clone();
-                let key = scoped_long_term_control_storage_key(
-                    memory_space_id,
-                    LONG_TERM_CONTROL_REVISION_NAMESPACE,
-                    &id,
-                )?;
-                let mutation = planned_json_put(
-                    LONG_TERM_CONTROL_REVISION_NAMESPACE,
-                    key,
-                    id.clone(),
-                    &revision,
-                    MemoryStoreEventKind::MemoryControl,
-                )?;
-                (LONG_TERM_CONTROL_REVISION_NAMESPACE, id, previous, mutation)
+            LongTermMemoryControlWrite::PutRevisionIntent(_) => {
+                return Err(Error::config(
+                    "long_term_control_plan",
+                    "typed control revision intent must be bound by the version-owner planner",
+                ));
             }
             LongTermMemoryControlWrite::PutTombstone(tombstone) => {
                 let id = tombstone.record_id.clone();
@@ -18082,12 +23253,6 @@ fn runtime_skill_storage_mutations_to_store_mutations(
         .collect()
 }
 
-fn stable_hash_json(value: &serde_json::Value) -> Result<String> {
-    let encoded = serde_json::to_string(value)
-        .map_err(|error| Error::config("stable_hash_json", error.to_string()))?;
-    Ok(stable_hash_hex(&encoded))
-}
-
 fn stable_hash_hex<T: Hash>(value: &T) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
@@ -18128,32 +23293,63 @@ fn transcript_evidence_refs_from_display_citations(
     sources
 }
 
-fn runtime_skill_summary(record: &RuntimeSkillRecord, enabled: bool) -> RuntimeSkillSummary {
+fn runtime_skill_record_for_locator<'a>(
+    snapshot: &'a RuntimeSkillScopeSnapshot,
+    locator: &RuntimeSkillOwnerLocator,
+    stage: &'static str,
+) -> Result<&'a RuntimeSkillOwnerRecord> {
+    if let Some(record) = snapshot.records.iter().find(|record| {
+        record.owner_ref.owner_id == locator.owner_id()
+            && record.owner_revision == locator.owner_revision()
+            && &record.owning_scope == locator.owning_scope()
+    }) {
+        return Ok(record);
+    }
+    if snapshot.records.iter().any(|record| {
+        record.owner_ref.owner_id == locator.owner_id()
+            && &record.owning_scope == locator.owning_scope()
+    }) {
+        return Err(Error::conflict(
+            stage,
+            "runtime skill owner locator is stale",
+        ));
+    }
+    Err(Error::not_found(
+        stage,
+        "runtime skill owner locator does not exist",
+    ))
+}
+
+fn runtime_skill_summary(record: &RuntimeSkillOwnerRecord) -> RuntimeSkillSummary {
     RuntimeSkillSummary {
-        name: record.name.clone(),
-        title: record.title.clone(),
-        topic: record.topic.clone(),
-        status: record.status.label().to_string(),
-        enabled,
-        quality_score: Some(record.quality_score),
-        use_count: record.use_count,
-        validated_success_count: record.validated_success_count,
-        mismatch_count: record.mismatch_count,
-        revision_pending: record.revision_pending,
-        updated_at: record.updated_at,
-        last_used_at: record.last_used_at,
+        locator: RuntimeSkillOwnerLocator::from_record(record),
+        owner_id: record.owner_ref.owner_id.clone(),
+        title: record.procedural_content.title.clone(),
+        topic: record.procedural_content.topic.clone(),
+        status: format!("{:?}", record.lifecycle.state).to_ascii_lowercase(),
+        enabled: record.lifecycle.availability == RuntimeSkillAvailability::Enabled,
+        quality_score: None,
+        use_count: record.lifecycle.usage_outcome.observation_count,
+        validated_success_count: record.lifecycle.usage_outcome.succeeded_count,
+        mismatch_count: record.lifecycle.usage_outcome.mismatch_count,
+        revision_pending: false,
+        updated_at: record.lifecycle.updated_at,
+        last_used_at: record.lifecycle.usage_outcome.last_outcome_at,
     }
 }
 
-fn render_runtime_skill_detail_content(record: &RuntimeSkillRecord) -> String {
-    format!(
-        "<!-- beetle:runtime-skill -->\n# {}\n\nType: procedural_runtime_skill\nOrigin: runtime_learned\nTopic: {}\nStatus: {}\n\n## Summary\n{}\n\n## Procedure\n{}\n",
-        record.title,
-        record.topic,
-        record.status.label(),
-        record.summary,
-        record.procedure
-    )
+fn runtime_skill_last_outcome_note(record: &RuntimeSkillOwnerRecord) -> String {
+    match record.lifecycle.usage_outcome.last_outcome {
+        Some(outcome) => format!(
+            "{outcome:?}@{}",
+            record
+                .lifecycle
+                .usage_outcome
+                .last_outcome_at
+                .unwrap_or_default()
+        ),
+        None => "no_usage_outcome".to_string(),
+    }
 }
 
 fn skill_matches_query(
@@ -18166,7 +23362,7 @@ fn skill_matches_query(
         return true;
     };
     let mut haystack = String::new();
-    haystack.push_str(&summary.name);
+    haystack.push_str(&summary.owner_id);
     haystack.push('\n');
     haystack.push_str(&summary.title);
     haystack.push('\n');
@@ -18180,36 +23376,6 @@ fn skill_matches_query(
         haystack.push_str(value);
     }
     haystack.to_ascii_lowercase().contains(query)
-}
-
-fn render_runtime_skill_lineage(record: &RuntimeSkillRecord) -> Vec<String> {
-    record
-        .genome_lineage
-        .iter()
-        .map(|node| {
-            format!(
-                "{} | {:?} | {} | {}",
-                node.node_id, node.disposition, node.recorded_at, node.summary
-            )
-        })
-        .collect()
-}
-
-fn render_runtime_skill_strategy_diffs(record: &RuntimeSkillRecord) -> Vec<String> {
-    record
-        .strategy_diffs
-        .iter()
-        .map(|diff| {
-            format!(
-                "{} -> {} | {:?} | {} | {}",
-                diff.from_node_id,
-                diff.to_node_id,
-                diff.change_kind,
-                diff.recorded_at,
-                diff.summary
-            )
-        })
-        .collect()
 }
 
 fn normalize_runtime_skill_write_names(
@@ -18269,6 +23435,8 @@ pub struct MemoryRuntimeBuilder {
     store_platform: Option<StorePlatform>,
     agent_skill_dirs: Vec<AgentSkillDirConfig>,
     agent_tool_registries: Vec<AgentToolRegistrySnapshot>,
+    runtime_skill_applicability_context: RuntimeSkillApplicabilityContext,
+    runtime_skill_premise_observations: Vec<RuntimeSkillPremiseObservation>,
 }
 
 impl Default for MemoryRuntimeBuilder {
@@ -18289,6 +23457,11 @@ impl Default for MemoryRuntimeBuilder {
             store_platform: None,
             agent_skill_dirs: Vec::new(),
             agent_tool_registries: Vec::new(),
+            runtime_skill_applicability_context: RuntimeSkillApplicabilityContext::try_new(
+                Vec::new(),
+            )
+            .expect("empty RuntimeSkill applicability context is canonical"),
+            runtime_skill_premise_observations: Vec::new(),
         }
     }
 }
@@ -18373,6 +23546,22 @@ impl MemoryRuntimeBuilder {
 
     pub fn agent_tool_registry(mut self, registry: AgentToolRegistrySnapshot) -> Self {
         self.agent_tool_registries.push(registry);
+        self
+    }
+
+    pub fn runtime_skill_applicability_context(
+        mut self,
+        context: RuntimeSkillApplicabilityContext,
+    ) -> Self {
+        self.runtime_skill_applicability_context = context;
+        self
+    }
+
+    pub fn runtime_skill_premise_observations(
+        mut self,
+        observations: Vec<RuntimeSkillPremiseObservation>,
+    ) -> Self {
+        self.runtime_skill_premise_observations = observations;
         self
     }
 
@@ -18491,8 +23680,27 @@ impl MemoryRuntimeBuilder {
         let audit_sink = self.audit_sink.ok_or_else(|| {
             Error::config("memory_runtime_config", "audit_sink must be configured")
         })?;
-        let capabilities =
-            resolve_memory_capabilities(profile, &self.capability_policy, &self.privacy_policy)?;
+        let profile_entry = profile_capability_catalog()
+            .iter()
+            .find(|entry| entry.profile == profile)
+            .copied()
+            .ok_or_else(|| {
+                Error::config(
+                    "runtime_skill_materializer_resolver",
+                    "runtime profile lacks a capability catalog entry",
+                )
+            })?;
+        let runtime_skill_materializer_resolver = RuntimeSkillRecallMaterializerResolver::resolve(
+            profile_entry,
+            store_platform.config().backend(),
+            store_platform.exact_runtime_skill_manifest_materializer_available(),
+        );
+        let capabilities = crate::capability::resolve_memory_capabilities_for_runtime(
+            profile,
+            &self.capability_policy,
+            &self.privacy_policy,
+            runtime_skill_materializer_resolver.transport,
+        )?;
         store_platform.refresh_runtime_resource_snapshot_if_stale(current_resource_unix_secs())?;
         let runtime_budget_authority = store_platform.runtime_budget_authority();
         if runtime_budget_authority.profile() != profile {
@@ -18519,7 +23727,10 @@ impl MemoryRuntimeBuilder {
                 .map_err(|error| Error::config(error.stage(), error.to_string()))?;
         }
         let long_term_memory_read_store = store_platform
-            .scoped_long_term_memory_read_store(&memory_space_id)
+            .scoped_long_term_memory_read_store(
+                &memory_space_id,
+                &scoped_runtime.mounted_subject_id,
+            )
             .map_err(|error| Error::config(error.stage(), error.to_string()))?;
         let long_term_memory_control_store = store_platform
             .scoped_long_term_memory_control_read_store(&memory_space_id)
@@ -18544,10 +23755,13 @@ impl MemoryRuntimeBuilder {
             audit_sink,
             runtime_budget_authority,
             agent_skill_registry,
+            runtime_skill_applicability_context: self.runtime_skill_applicability_context,
+            runtime_skill_premise_observations: self.runtime_skill_premise_observations,
         };
         let runtime = MemoryRuntime {
             config,
             capabilities,
+            runtime_skill_materializer_resolver,
             lifecycle: RuntimeLifecycleEngine,
             agent_tool_registries: Mutex::new(self.agent_tool_registries),
             last_conversation_id: Mutex::new(None),
@@ -18697,6 +23911,1697 @@ mod eval_recall_candidate_identity_tests {
     }
 }
 
+#[cfg(all(test, feature = "nonproduction-replay-harness"))]
+mod recall_immutable_session_observer_tests {
+    use super::*;
+    use crate::store_internal::{
+        StoreAdmissionAuthority, StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead,
+        StoreBoundedKnownKeyReadResult, StoreImmutableReadSession, StoreReadSessionState,
+        StoreScopedProjection, StoreScopedProjectionReplaceReport,
+        StoreScopedProjectionReplaceRequest, StoreScopedProjectionRequest,
+    };
+    use crate::{
+        MemoryStoreEvent, StoreCapacityBudget, StoreConsistentReadRequest,
+        StoreConsistentReadResult, StoreEngine, StoreEventLog, StoreSnapshotBlob,
+        StoreSnapshotJsonDoc, StoreSnapshotReplaceReport, StoreTransactionAdmission,
+        StoreTransactionReport, StoreTransactionRequest,
+    };
+
+    #[test]
+    fn esp_runtime_skill_premises_reject_deep_typed_evidence_participation() {
+        assert!(!runtime_skill_deep_premise_sources_allowed(
+            ProfileId::EspStandaloneMemory
+        ));
+        assert!(!runtime_skill_deep_premise_sources_allowed(
+            ProfileId::EspEmbeddedSdk
+        ));
+        assert!(runtime_skill_deep_premise_sources_allowed(
+            ProfileId::DesktopMacosDevFull
+        ));
+    }
+
+    #[derive(Clone, Default)]
+    struct RecallReadObservation {
+        open_count: usize,
+        receipt_count: usize,
+        direct_read_count: usize,
+        direct_read_operations: Vec<String>,
+        json_reads: Vec<StoreBoundedKnownJsonRead>,
+        blob_reads: Vec<StoreBoundedKnownBlobRead>,
+        inner_receipt: Option<crate::StoreReadReceipt>,
+        shadow_receipt: Option<crate::StoreReadReceipt>,
+    }
+
+    #[derive(Default)]
+    struct RecallReadObserverState {
+        armed: bool,
+        reject_direct_reads: bool,
+        observation: RecallReadObservation,
+    }
+
+    struct ObservedStoreEngine {
+        inner: Arc<dyn StoreEngine>,
+        state: Arc<Mutex<RecallReadObserverState>>,
+    }
+
+    impl ObservedStoreEngine {
+        fn new(inner: Arc<dyn StoreEngine>) -> Self {
+            Self {
+                inner,
+                state: Arc::new(Mutex::new(RecallReadObserverState::default())),
+            }
+        }
+
+        fn arm(&self) {
+            let mut state = self.state.lock().expect("observer state");
+            state.armed = true;
+            state.reject_direct_reads = true;
+            state.observation = RecallReadObservation::default();
+        }
+
+        fn arm_counting(&self) {
+            let mut state = self.state.lock().expect("observer state");
+            state.armed = true;
+            state.reject_direct_reads = false;
+            state.observation = RecallReadObservation::default();
+        }
+
+        fn observation(&self) -> RecallReadObservation {
+            self.state
+                .lock()
+                .expect("observer state")
+                .observation
+                .clone()
+        }
+
+        fn reject_direct_read_if_armed(&self, operation: &str) -> Result<()> {
+            let mut state = self.state.lock().expect("observer state");
+            if !state.armed {
+                return Ok(());
+            }
+            state.observation.direct_read_count =
+                state.observation.direct_read_count.saturating_add(1);
+            state
+                .observation
+                .direct_read_operations
+                .push(operation.to_string());
+            if state.reject_direct_reads {
+                Err(Error::config(
+                    "recall_observer_direct_read",
+                    format!("production recall used forbidden direct read path: {operation}"),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct ObservedImmutableReadSession<'a> {
+        inner: Box<dyn StoreImmutableReadSession + 'a>,
+        state: Arc<Mutex<RecallReadObserverState>>,
+        shadow: StoreReadSessionState,
+    }
+
+    impl StoreImmutableReadSession for ObservedImmutableReadSession<'_> {
+        fn read_json_known_keys(
+            &mut self,
+            addresses: &[(String, String)],
+        ) -> Result<Vec<StoreBoundedKnownJsonRead>> {
+            let reads = self.inner.read_json_known_keys(addresses)?;
+            for read in &reads {
+                self.shadow
+                    .record_json(&read.namespace, &read.key, read.value.clone())?;
+            }
+            self.state
+                .lock()
+                .expect("observer state")
+                .observation
+                .json_reads
+                .extend(reads.iter().cloned());
+            Ok(reads)
+        }
+
+        fn read_blob_known_keys(
+            &mut self,
+            addresses: &[(String, String)],
+        ) -> Result<Vec<StoreBoundedKnownBlobRead>> {
+            let reads = self.inner.read_blob_known_keys(addresses)?;
+            for read in &reads {
+                self.shadow
+                    .record_blob(&read.namespace, &read.key, read.value.clone())?;
+            }
+            self.state
+                .lock()
+                .expect("observer state")
+                .observation
+                .blob_reads
+                .extend(reads.iter().cloned());
+            Ok(reads)
+        }
+
+        fn receipt(&self) -> Result<crate::StoreReadReceipt> {
+            let inner = self.inner.receipt()?;
+            let shadow = self.shadow.receipt()?;
+            if inner != shadow {
+                return Err(Error::config(
+                    "recall_observer_receipt",
+                    "backend receipt differs from the actual known-key read transcript",
+                ));
+            }
+            let mut state = self.state.lock().expect("observer state");
+            state.observation.receipt_count = state.observation.receipt_count.saturating_add(1);
+            state.observation.inner_receipt = Some(inner.clone());
+            state.observation.shadow_receipt = Some(shadow);
+            Ok(inner)
+        }
+    }
+
+    impl StoreEventLog for ObservedStoreEngine {
+        fn append_event(&self, event: MemoryStoreEvent) -> Result<()> {
+            self.inner.append_event(event)
+        }
+
+        fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
+            self.reject_direct_read_if_armed("read_events")?;
+            self.inner.read_events()
+        }
+    }
+
+    impl StoreEngine for ObservedStoreEngine {
+        fn admission_authority(&self) -> &StoreAdmissionAuthority {
+            self.inner.admission_authority()
+        }
+
+        fn read_metric_events(
+            &self,
+            capacity: StoreCapacityBudget,
+        ) -> Result<crate::store_internal::StoreMetricEventSourceRead> {
+            self.reject_direct_read_if_armed("read_metric_events")?;
+            self.inner.read_metric_events(capacity)
+        }
+
+        fn store_capacity(&self) -> StoreCapacityBudget {
+            self.inner.store_capacity()
+        }
+
+        fn commit_transaction_admitted(
+            &self,
+            request: &StoreTransactionRequest,
+            admission: &StoreTransactionAdmission,
+        ) -> Result<StoreTransactionReport> {
+            self.inner.commit_transaction_admitted(request, admission)
+        }
+
+        fn read_consistent(
+            &self,
+            request: &StoreConsistentReadRequest,
+        ) -> Result<StoreConsistentReadResult> {
+            self.reject_direct_read_if_armed("read_consistent")?;
+            self.inner.read_consistent(request)
+        }
+
+        fn read_consistent_known_keys(
+            &self,
+            json_keys: &[(String, String)],
+            blob_keys: &[(String, String)],
+            include_events: bool,
+            capacity: StoreCapacityBudget,
+        ) -> Result<StoreBoundedKnownKeyReadResult> {
+            self.reject_direct_read_if_armed("read_consistent_known_keys")?;
+            self.inner
+                .read_consistent_known_keys(json_keys, blob_keys, include_events, capacity)
+        }
+
+        fn open_immutable_read_session<'a>(
+            &'a self,
+            capacity: StoreCapacityBudget,
+        ) -> Result<Box<dyn StoreImmutableReadSession + 'a>> {
+            {
+                let mut state = self.state.lock().expect("observer state");
+                if state.armed {
+                    state.observation.open_count = state.observation.open_count.saturating_add(1);
+                    if state.observation.open_count != 1 {
+                        return Err(Error::config(
+                            "recall_observer_second_session",
+                            "production recall opened more than one immutable read session",
+                        ));
+                    }
+                }
+            }
+            let inner = self.inner.open_immutable_read_session(capacity)?;
+            Ok(Box::new(ObservedImmutableReadSession {
+                inner,
+                state: self.state.clone(),
+                shadow: StoreReadSessionState::new(capacity),
+            }))
+        }
+
+        fn read_scoped_projection(
+            &self,
+            request: &StoreScopedProjectionRequest,
+            capacity: StoreCapacityBudget,
+        ) -> Result<StoreScopedProjection> {
+            self.reject_direct_read_if_armed("read_scoped_projection")?;
+            self.inner.read_scoped_projection(request, capacity)
+        }
+
+        fn replace_scoped_projection(
+            &self,
+            request: &StoreScopedProjectionReplaceRequest,
+            admission: &StoreTransactionAdmission,
+        ) -> Result<StoreScopedProjectionReplaceReport> {
+            self.inner.replace_scoped_projection(request, admission)
+        }
+
+        fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<serde_json::Value>> {
+            self.reject_direct_read_if_armed(&format!("get_json_value:{namespace}"))?;
+            self.inner.get_json_value(namespace, key)
+        }
+
+        fn put_json_value(
+            &self,
+            namespace: &str,
+            key: &str,
+            value: serde_json::Value,
+        ) -> Result<()> {
+            self.inner.put_json_value(namespace, key, value)
+        }
+
+        fn delete_json_value(&self, namespace: &str, key: &str) -> Result<bool> {
+            self.inner.delete_json_value(namespace, key)
+        }
+
+        fn list_json_keys(&self, namespace: &str) -> Result<Vec<String>> {
+            self.reject_direct_read_if_armed(&format!("list_json_keys:{namespace}"))?;
+            self.inner.list_json_keys(namespace)
+        }
+
+        fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
+            self.reject_direct_read_if_armed(&format!("get_blob:{namespace}"))?;
+            self.inner.get_blob(namespace, key)
+        }
+
+        fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
+            self.inner.put_blob(namespace, key, value)
+        }
+
+        fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool> {
+            self.inner.delete_blob(namespace, key)
+        }
+
+        fn list_blob_keys(&self, namespace: &str) -> Result<Vec<String>> {
+            self.reject_direct_read_if_armed(&format!("list_blob_keys:{namespace}"))?;
+            self.inner.list_blob_keys(namespace)
+        }
+
+        fn replace_snapshot(
+            &self,
+            json_namespaces: &[&str],
+            blob_namespaces: &[&str],
+            json_docs: &[StoreSnapshotJsonDoc],
+            blobs: &[StoreSnapshotBlob],
+            events: &[MemoryStoreEvent],
+        ) -> Result<StoreSnapshotReplaceReport> {
+            self.inner
+                .replace_snapshot(json_namespaces, blob_namespaces, json_docs, blobs, events)
+        }
+    }
+
+    struct FixedClock;
+
+    impl MemoryClock for FixedClock {
+        fn now_secs(&self) -> u64 {
+            1_900_000_000
+        }
+    }
+
+    fn runtime_for_owner(platform: StorePlatform, owner_id: &str) -> MemoryRuntime {
+        MemoryRuntime::builder()
+            .identity(MemoryIdentity::new("agent-main", owner_id).expect("identity"))
+            .scope(MemoryScope::new("local", "chat-a").expect("scope"))
+            .store(MemoryStoreHandle::from_platform(platform))
+            .clock(Arc::new(FixedClock))
+            .capability_policy(MemoryCapabilityPolicy::strict_profile())
+            .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+            .audit_sink(Arc::new(NoopMemoryAuditSink))
+            .build()
+            .expect("runtime")
+    }
+
+    fn runtime(platform: StorePlatform) -> MemoryRuntime {
+        runtime_for_owner(platform, "owner-default")
+    }
+
+    #[test]
+    fn long_term_render_closure_rejects_duplicate_missing_extra_and_drift() {
+        let profile = test_host_profile();
+        let platform = open_test_store_platform(
+            crate::store_internal::StoreBackendConfig::in_memory(profile).expect("store config"),
+        )
+        .expect("store");
+        let runtime = runtime(platform);
+        runtime
+            .write(MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
+                extraction: ParsedLongTermMemoryExtraction {
+                    upserts: vec![LongTermMemoryDraft {
+                        kind: LongTermMemoryKind::Project,
+                        topic: "render closure exact sentinel".to_string(),
+                        content: "The render closure must bind one decision to one capsule."
+                            .to_string(),
+                        keywords: vec!["render".to_string(), "closure".to_string()],
+                        privacy: MemoryPrivacyClass::SharedWithSubject,
+                        source_chat_id: Some("chat-a".to_string()),
+                        source_type: None,
+                        source_scope: None,
+                        confidence: None,
+                        freshness: None,
+                        stale_hint: None,
+                        supporting_citations: vec!["evidence:render-closure".to_string()],
+                        canonical_entities: Vec::new(),
+                        evidence_count: Some(1),
+                        observed_at: Some(1_900_000_000),
+                        last_confirmed_at: Some(1_900_000_000),
+                        source_revision: Some(1),
+                    }],
+                    deletes: Vec::new(),
+                    skill_writes: Vec::new(),
+                },
+            })
+            .expect("seed long-term render closure");
+        let lease = runtime
+            .acquire_runtime_budget_lease()
+            .expect("budget lease");
+        let closure = runtime
+            .execute_with_runtime_budget_lease(&lease, || {
+                runtime.recall_closure_with_feature_flags(
+                    MemoryRecallRequest {
+                        temporal_operation: crate::MemoryRecallTemporalOperation::Current,
+                        query: "render closure exact sentinel".to_string(),
+                        limit: 4,
+                        structured_query_facets: Vec::new(),
+                        tool_registry_refs: Vec::new(),
+                    },
+                    RecallFeatureFlags::default(),
+                    RecallReadPurpose::Query,
+                    RuntimeLifecycleTrigger::SdkCall,
+                    None,
+                )
+            })
+            .expect("materialized closure");
+        let canonical = closure.report.delivery_report.clone();
+        assert_eq!(canonical.rendered_capsules.len(), 1);
+        assert_eq!(canonical.render_decisions.len(), 1);
+        validate_materialized_long_term_recall_closure(
+            &closure.long_term,
+            closure.report.temporal_operation,
+            &canonical,
+        )
+        .expect("canonical render closure");
+
+        let assert_rejected = |delivery: &MemoryRecallDeliveryReport| {
+            assert!(validate_materialized_long_term_recall_closure(
+                &closure.long_term,
+                closure.report.temporal_operation,
+                delivery,
+            )
+            .is_err());
+        };
+
+        let mut duplicate_decision = canonical.clone();
+        duplicate_decision
+            .render_decisions
+            .push(duplicate_decision.render_decisions[0].clone());
+        assert_rejected(&duplicate_decision);
+
+        let mut missing_decision = canonical.clone();
+        missing_decision.render_decisions.clear();
+        assert_rejected(&missing_decision);
+
+        let mut duplicate_capsule = canonical.clone();
+        duplicate_capsule
+            .rendered_capsules
+            .push(duplicate_capsule.rendered_capsules[0].clone());
+        assert_rejected(&duplicate_capsule);
+
+        let mut missing_capsule = canonical.clone();
+        missing_capsule.rendered_capsules.clear();
+        assert_rejected(&missing_capsule);
+
+        let mut wrong_candidate = canonical.clone();
+        wrong_candidate.rendered_capsules[0].candidate_id = "owner:drift".to_string();
+        assert_rejected(&wrong_candidate);
+
+        let mut extra_owner = canonical.clone();
+        let mut capsule = extra_owner.rendered_capsules[0].clone();
+        capsule.owner_ref =
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "unknown-owner");
+        capsule.candidate_id = governed_memory_recall_candidate_id(&capsule.owner_ref);
+        extra_owner.rendered_capsules.push(capsule);
+        assert_rejected(&extra_owner);
+    }
+
+    fn fixture_json<T: serde::de::DeserializeOwned>(
+        docs: &BTreeMap<(String, String), serde_json::Value>,
+        namespace: &str,
+        key: &str,
+    ) -> T {
+        serde_json::from_value(
+            docs.get(&(namespace.to_string(), key.to_string()))
+                .unwrap_or_else(|| panic!("fixture JSON missing at {namespace}/{key}"))
+                .clone(),
+        )
+        .unwrap_or_else(|error| panic!("fixture JSON invalid at {namespace}/{key}: {error}"))
+    }
+
+    fn add_typed_index_fixture_addresses<T: TypedRecallIndex>(
+        docs: &BTreeMap<(String, String), serde_json::Value>,
+        root_key: String,
+        json_addresses: &mut BTreeSet<(String, String)>,
+        blob_addresses: &mut BTreeSet<(String, String)>,
+    ) {
+        let root_address = (T::NAMESPACE.to_string(), root_key.clone());
+        json_addresses.insert(root_address.clone());
+        let Some(value) = docs.get(&root_address) else {
+            return;
+        };
+        let index = crate::store_internal::recall_index::decode_typed_recall_index::<T>(
+            &root_key,
+            value.clone(),
+        )
+        .expect("typed fixture index");
+        for entry in index.entries() {
+            let address = (entry.namespace.clone(), entry.key.clone());
+            match entry.kind {
+                RecallIndexAddressKind::Json => {
+                    json_addresses.insert(address);
+                }
+                RecallIndexAddressKind::Blob => {
+                    blob_addresses.insert(address);
+                }
+            }
+        }
+    }
+
+    struct FixtureRecallScope<'a> {
+        memory_space_id: &'a str,
+        mounted_subject_id: &'a str,
+        channel_id: &'a str,
+        chat_id: &'a str,
+        conversation_id: &'a str,
+        query_facets: &'a [QueryFacet],
+        max_facet_owner_docs: usize,
+    }
+
+    struct FixtureRecallAddresses {
+        json: BTreeSet<(String, String)>,
+        blobs: BTreeSet<(String, String)>,
+    }
+
+    fn expected_fixture_recall_addresses(
+        json_docs: &[StoreSnapshotJsonDoc],
+        scope: FixtureRecallScope<'_>,
+    ) -> FixtureRecallAddresses {
+        let FixtureRecallScope {
+            memory_space_id,
+            mounted_subject_id,
+            channel_id,
+            chat_id,
+            conversation_id,
+            query_facets,
+            max_facet_owner_docs,
+        } = scope;
+        let docs = json_docs
+            .iter()
+            .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut json_addresses = BTreeSet::new();
+        let mut blob_addresses = BTreeSet::new();
+
+        add_typed_index_fixture_addresses::<ArchiveRecallManifest>(
+            &docs,
+            ArchiveRecallManifest::build(
+                1,
+                memory_space_id,
+                mounted_subject_id,
+                std::iter::empty(),
+            )
+            .expect("archive fixture root")
+            .physical_key,
+            &mut json_addresses,
+            &mut blob_addresses,
+        );
+        add_typed_index_fixture_addresses::<ConversationRecallManifest>(
+            &docs,
+            ConversationRecallManifest::build(
+                1,
+                memory_space_id,
+                mounted_subject_id,
+                channel_id,
+                conversation_id,
+                0,
+                0,
+            )
+            .expect("conversation fixture root")
+            .physical_key,
+            &mut json_addresses,
+            &mut blob_addresses,
+        );
+        add_typed_index_fixture_addresses::<ContinuityCapsuleScopeIndex>(
+            &docs,
+            ContinuityCapsuleScopeIndex::build(
+                1,
+                memory_space_id,
+                "chat",
+                chat_id,
+                std::iter::empty(),
+            )
+            .expect("continuity fixture root")
+            .physical_key,
+            &mut json_addresses,
+            &mut blob_addresses,
+        );
+        add_typed_index_fixture_addresses::<ActiveTaskRunByChatIndex>(
+            &docs,
+            ActiveTaskRunByChatIndex::build(
+                1,
+                memory_space_id,
+                channel_id,
+                chat_id,
+                std::iter::empty(),
+            )
+            .expect("task-run fixture root")
+            .physical_key,
+            &mut json_addresses,
+            &mut blob_addresses,
+        );
+        add_typed_index_fixture_addresses::<TaskLearningByChatIndex>(
+            &docs,
+            TaskLearningByChatIndex::build(
+                1,
+                memory_space_id,
+                channel_id,
+                chat_id,
+                std::iter::empty(),
+            )
+            .expect("task-learning fixture root")
+            .physical_key,
+            &mut json_addresses,
+            &mut blob_addresses,
+        );
+
+        let facet_manifest_key =
+            memory_facet_manifest_key(memory_space_id, mounted_subject_id).expect("facet root key");
+        let mut owner_refs_to_materialize = BTreeSet::new();
+        if !query_facets.is_empty() {
+            json_addresses.insert((
+                MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                facet_manifest_key.clone(),
+            ));
+            let facet_manifest = fixture_json::<MemoryFacetIndexManifest>(
+                &docs,
+                MEMORY_FACET_POSTING_NAMESPACE,
+                &facet_manifest_key,
+            );
+            validate_memory_facet_manifest(memory_space_id, mounted_subject_id, &facet_manifest)
+                .expect("fixture facet manifest");
+            let manifest_posting_keys = facet_manifest
+                .posting_revisions
+                .iter()
+                .map(|posting| posting.posting_key.as_str())
+                .collect::<BTreeSet<_>>();
+            let mut posting_chain_valid = true;
+            for query_facet in query_facets {
+                let posting_key =
+                    memory_facet_posting_key(memory_space_id, mounted_subject_id, query_facet)
+                        .expect("fixture facet posting key");
+                json_addresses.insert((
+                    MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                    posting_key.clone(),
+                ));
+                let Some(value) = docs.get(&(
+                    MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                    posting_key.clone(),
+                )) else {
+                    continue;
+                };
+                let Ok(posting) = serde_json::from_value::<MemoryFacetPostingDoc>(value.clone())
+                else {
+                    posting_chain_valid = false;
+                    continue;
+                };
+                if !manifest_posting_keys.contains(posting_key.as_str())
+                    || posting.posting_key != posting_key
+                    || validate_memory_facet_posting(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &facet_manifest,
+                        &posting,
+                    )
+                    .is_err()
+                {
+                    posting_chain_valid = false;
+                    continue;
+                }
+                owner_refs_to_materialize.extend(
+                    posting
+                        .owner_versions
+                        .into_iter()
+                        .map(|version| version.owner_ref),
+                );
+            }
+            assert!(
+                posting_chain_valid
+                    && owner_refs_to_materialize.len() <= max_facet_owner_docs.max(1),
+                "fixture facet posting chain must pass the production admission path"
+            );
+            for owner_ref in &owner_refs_to_materialize {
+                let owner_key = scoped_memory_facet_owner_storage_key(
+                    memory_space_id,
+                    mounted_subject_id,
+                    owner_ref,
+                )
+                .expect("fixture facet owner key");
+                json_addresses.insert((MEMORY_FACET_INDEX_NAMESPACE.to_string(), owner_key));
+            }
+        }
+
+        let graph_manifest_key =
+            memory_graph_scope_manifest_key(memory_space_id, mounted_subject_id);
+        let graph_manifest_address = (
+            MEMORY_GRAPH_MANIFEST_NAMESPACE.to_string(),
+            graph_manifest_key.clone(),
+        );
+        json_addresses.insert(graph_manifest_address.clone());
+        if let Some(value) = docs.get(&graph_manifest_address) {
+            let graph_manifest = serde_json::from_value::<MemoryGraphScopeManifest>(value.clone())
+                .expect("fixture graph manifest");
+            assert!(
+                validate_memory_graph_scope_manifest(&graph_manifest).verified,
+                "fixture graph manifest must be canonical"
+            );
+            for dependency in &graph_manifest.recall_indexes {
+                json_addresses.insert((
+                    MEMORY_GRAPH_INDEX_NAMESPACE.to_string(),
+                    dependency.storage_key.clone(),
+                ));
+            }
+            for dependency in &graph_manifest.node_memberships {
+                json_addresses.insert((
+                    MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE.to_string(),
+                    dependency.storage_key.clone(),
+                ));
+            }
+            for dependency in &graph_manifest.edge_memberships {
+                json_addresses.insert((
+                    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE.to_string(),
+                    dependency.storage_key.clone(),
+                ));
+            }
+            for dependency in &graph_manifest.backlink_memberships {
+                json_addresses.insert((
+                    MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE.to_string(),
+                    dependency.storage_key.clone(),
+                ));
+            }
+            json_addresses.insert((
+                MEMORY_GRAPH_REVISION_NAMESPACE.to_string(),
+                graph_manifest.revision.storage_key.clone(),
+            ));
+
+            let node_memberships = graph_manifest
+                .node_memberships
+                .iter()
+                .map(|dependency| {
+                    fixture_json::<MemoryGraphNodeMembership>(
+                        &docs,
+                        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+                        &dependency.storage_key,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for membership in &node_memberships {
+                json_addresses.insert((
+                    MEMORY_GRAPH_NODE_NAMESPACE.to_string(),
+                    membership.document_key.clone(),
+                ));
+            }
+            for dependency in &graph_manifest.edge_memberships {
+                let membership = fixture_json::<MemoryGraphEdgeMembership>(
+                    &docs,
+                    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+                    &dependency.storage_key,
+                );
+                json_addresses.insert((
+                    MEMORY_GRAPH_EDGE_NAMESPACE.to_string(),
+                    membership.document_key,
+                ));
+            }
+            for dependency in &graph_manifest.backlink_memberships {
+                let membership = fixture_json::<MemoryGraphBacklinkMembership>(
+                    &docs,
+                    MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+                    &dependency.storage_key,
+                );
+                json_addresses.insert((
+                    MEMORY_GRAPH_BACKLINK_NAMESPACE.to_string(),
+                    membership.document_key,
+                ));
+            }
+
+            json_addresses.insert((
+                MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                facet_manifest_key.clone(),
+            ));
+            let facet_manifest = fixture_json::<MemoryFacetIndexManifest>(
+                &docs,
+                MEMORY_FACET_POSTING_NAMESPACE,
+                &facet_manifest_key,
+            );
+            validate_memory_facet_manifest(memory_space_id, mounted_subject_id, &facet_manifest)
+                .expect("fixture facet manifest");
+            for membership in &node_memberships {
+                let owner_key = scoped_memory_facet_owner_storage_key(
+                    memory_space_id,
+                    mounted_subject_id,
+                    &membership.owner_ref,
+                )
+                .expect("fixture graph facet owner key");
+                json_addresses
+                    .insert((MEMORY_FACET_INDEX_NAMESPACE.to_string(), owner_key.clone()));
+                let owner = fixture_json::<MemoryFacetIndexDoc>(
+                    &docs,
+                    MEMORY_FACET_INDEX_NAMESPACE,
+                    &owner_key,
+                );
+                let version = facet_manifest
+                    .owner_versions
+                    .iter()
+                    .find(|version| version.owner_ref == owner.owner_ref)
+                    .expect("fixture graph facet owner version");
+                if owner.memory_space_id == memory_space_id
+                    && owner
+                        .subject_ids
+                        .iter()
+                        .any(|subject_id| subject_id == mounted_subject_id)
+                    && owner.status == MemoryFacetStatus::Active
+                    && owner.owner_revision == version.owner_revision
+                    && owner.facet_index_revision == version.facet_index_revision
+                {
+                    owner_refs_to_materialize.insert(owner.owner_ref);
+                }
+            }
+        }
+
+        let long_term_scope_key =
+            long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)
+                .expect("long-term fixture root key");
+        for owner_ref in owner_refs_to_materialize {
+            assert_eq!(
+                owner_ref.owner_plane,
+                GovernedMemoryOwnerPlane::LongTerm,
+                "fixture graph owner must use the typed LongTerm plane"
+            );
+            json_addresses.insert((
+                crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                long_term_scope_key.clone(),
+            ));
+            let root = fixture_json::<LongTermMemoryVersionScopeManifest>(
+                &docs,
+                crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+                &long_term_scope_key,
+            );
+            let head_binding = root
+                .head_bindings
+                .iter()
+                .find(|binding| binding.owner_ref == owner_ref)
+                .expect("fixture head binding");
+            json_addresses.insert((
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                head_binding.head_physical_key.clone(),
+            ));
+            let head = fixture_json::<LongTermMemoryHeadManifest>(
+                &docs,
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                &head_binding.head_physical_key,
+            );
+            for retained in &head.retained_revision_digests {
+                json_addresses.insert((
+                    crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                    long_term_version_material_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &owner_ref,
+                        retained.owner_revision,
+                    )
+                    .expect("fixture material key"),
+                ));
+            }
+            assert!(
+                root.transition_bindings.is_empty(),
+                "the revision-one fixture must not silently expand into control dependencies"
+            );
+        }
+
+        FixtureRecallAddresses {
+            json: json_addresses,
+            blobs: blob_addresses,
+        }
+    }
+
+    fn expected_historical_long_term_addresses(
+        json_docs: &[StoreSnapshotJsonDoc],
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+    ) -> BTreeSet<(String, String)> {
+        let docs = json_docs
+            .iter()
+            .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let root_key = long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)
+            .expect("historical long-term root key");
+        let root_address = (
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+            root_key.clone(),
+        );
+        let mut addresses = BTreeSet::from([root_address]);
+        let root = fixture_json::<LongTermMemoryVersionScopeManifest>(
+            &docs,
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            &root_key,
+        );
+        for binding in &root.head_bindings {
+            addresses.insert((
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                binding.head_physical_key.clone(),
+            ));
+            let head = fixture_json::<LongTermMemoryHeadManifest>(
+                &docs,
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                &binding.head_physical_key,
+            );
+            for retained in &head.retained_revision_digests {
+                addresses.insert((
+                    crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                    long_term_version_material_key(
+                        memory_space_id,
+                        mounted_subject_id,
+                        &binding.owner_ref,
+                        retained.owner_revision,
+                    )
+                    .expect("historical material key"),
+                ));
+            }
+        }
+        addresses.extend(root.transition_bindings.iter().map(|binding| {
+            (
+                LONG_TERM_CONTROL_REVISION_NAMESPACE.to_string(),
+                binding.control_revision_physical_key.clone(),
+            )
+        }));
+        addresses
+    }
+
+    #[test]
+    fn production_recall_uses_one_session_and_receipt_from_exact_known_key_reads() {
+        let profile = ProfileId::EspStandaloneMemory;
+        let platform = open_test_store_platform(
+            crate::store_internal::StoreBackendConfig::in_memory(profile).expect("store config"),
+        )
+        .expect("store");
+        let seed_runtime = runtime(platform.clone());
+        seed_runtime
+            .write(MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
+                extraction: ParsedLongTermMemoryExtraction {
+                    upserts: vec![LongTermMemoryDraft {
+                        kind: LongTermMemoryKind::Project,
+                        topic: "immutable receipt owner".to_string(),
+                        content: "Recall must consume one exact immutable read transcript."
+                            .to_string(),
+                        keywords: vec!["immutable".to_string(), "receipt".to_string()],
+                        privacy: MemoryPrivacyClass::SharedWithSubject,
+                        source_chat_id: Some("chat-a".to_string()),
+                        source_type: None,
+                        source_scope: None,
+                        confidence: None,
+                        freshness: None,
+                        stale_hint: None,
+                        supporting_citations: vec!["evidence:immutable-receipt".to_string()],
+                        canonical_entities: Vec::new(),
+                        evidence_count: Some(1),
+                        observed_at: Some(1_900_000_000),
+                        last_confirmed_at: Some(1_900_000_000),
+                        source_revision: Some(1),
+                    }],
+                    deletes: Vec::new(),
+                    skill_writes: Vec::new(),
+                },
+            })
+            .expect("seed governed owner");
+        let procedural_write = seed_runtime
+            .write(MemoryWriteRequest::Procedural {
+                writes: vec![GovernedRuntimeSkillWriteInput {
+                    write: RuntimeSkillWrite {
+                        name: "immutable_receipt_guard".to_string(),
+                        topic: "immutable receipt owner".to_string(),
+                        title: "Verify immutable recall receipt".to_string(),
+                        summary: "Verify the exact owner closure before delivery.".to_string(),
+                        content: "1. open one immutable session\n2. read exact owner keys\n3. verify the receipt"
+                            .to_string(),
+                        citations: vec!["observer fixture".to_string()],
+                        source_chat_id: Some("chat-a".to_string()),
+                        observed_at: 1_900_000_000,
+                    },
+                    creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                        candidate_ref: "test:immutable-receipt-guard".to_string(),
+                        verification_receipt_digest: format!("sha256:{}", "a".repeat(64)),
+                    },
+                    privacy_class: MemoryPrivacyClass::SharedWithSubject,
+                }],
+                owning_scope: RuntimeSkillOwningScope::Subject {
+                    mounted_subject_id: "agent:agent-main".to_string(),
+                },
+                source: RuntimeSkillWriteSource::Manual,
+            })
+            .expect("seed typed RuntimeSkill owner");
+        assert!(procedural_write.accepted);
+        assert_eq!(procedural_write.changed, 1);
+        let cross_space_runtime = runtime_for_owner(platform.clone(), "other-owner");
+        let cross_space_write = cross_space_runtime
+            .write(MemoryWriteRequest::Procedural {
+                writes: vec![GovernedRuntimeSkillWriteInput {
+                    write: RuntimeSkillWrite {
+                        name: "cross_space_only_guard".to_string(),
+                        topic: "cross space only sentinel".to_string(),
+                        title: "Never cross memory spaces".to_string(),
+                        summary: "This procedure belongs to a different memory space.".to_string(),
+                        content: "1. bind the owner memory space\n2. reject every foreign scope\n3. verify exact-zero delivery"
+                            .to_string(),
+                        citations: vec!["observer cross-space fixture".to_string()],
+                        source_chat_id: Some("chat-a".to_string()),
+                        observed_at: 1_900_000_000,
+                    },
+                    creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                        candidate_ref: "test:cross-space-only-guard".to_string(),
+                        verification_receipt_digest: format!("sha256:{}", "b".repeat(64)),
+                    },
+                    privacy_class: MemoryPrivacyClass::SharedWithSubject,
+                }],
+                owning_scope: RuntimeSkillOwningScope::Subject {
+                    mounted_subject_id: "agent:agent-main".to_string(),
+                },
+                source: RuntimeSkillWriteSource::Manual,
+            })
+            .expect("seed cross-space RuntimeSkill owner");
+        assert!(cross_space_write.accepted);
+        assert_eq!(cross_space_write.changed, 1);
+        let owner = platform
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .expect("long-term store")
+            .list(8)
+            .expect("owners")
+            .into_iter()
+            .next()
+            .expect("seeded owner");
+        let fixture_snapshot = platform.export_store_snapshot().expect("fixture snapshot");
+        let fixture_budget = seed_runtime.runtime_budget();
+        let fixture_query_facets = parse_runtime_query_facets(
+            "immutable receipt owner",
+            &[],
+            fixture_budget.facet_recall_budget.max_query_facets,
+        )
+        .expect("fixture query facets");
+        let mut expected_addresses = expected_fixture_recall_addresses(
+            &fixture_snapshot.json_docs,
+            FixtureRecallScope {
+                memory_space_id: "space:owner-default",
+                mounted_subject_id: "agent:agent-main",
+                channel_id: "local",
+                chat_id: "chat-a",
+                conversation_id: "chat-a",
+                query_facets: &fixture_query_facets,
+                max_facet_owner_docs: fixture_budget.facet_recall_budget.max_facet_index_docs_read,
+            },
+        );
+        let mut expected_runtime_skill_addresses = BTreeSet::new();
+        for owning_scope in [
+            RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: "agent:agent-main".to_string(),
+            },
+            RuntimeSkillOwningScope::SharedProgram,
+        ] {
+            let manifest_key =
+                runtime_skill_scope_manifest_key("space:owner-default", &owning_scope)
+                    .expect("runtime skill scope manifest key");
+            expected_addresses.json.insert((
+                crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                manifest_key.clone(),
+            ));
+            expected_runtime_skill_addresses.insert((
+                crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                manifest_key.clone(),
+            ));
+            if let Some(manifest_doc) = fixture_snapshot.json_docs.iter().find(|doc| {
+                doc.namespace == crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE
+                    && doc.key == manifest_key
+            }) {
+                let manifest =
+                    serde_json::from_value::<RuntimeSkillScopeManifest>(manifest_doc.value.clone())
+                        .expect("runtime skill scope manifest fixture");
+                for binding in manifest.owner_bindings {
+                    let address = (
+                        crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+                        binding.owner_physical_key,
+                    );
+                    expected_addresses.json.insert(address.clone());
+                    expected_runtime_skill_addresses.insert(address);
+                }
+            }
+        }
+        let mut forbidden_cross_space_runtime_skill_addresses = BTreeSet::new();
+        for owning_scope in [
+            RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: "agent:agent-main".to_string(),
+            },
+            RuntimeSkillOwningScope::SharedProgram,
+        ] {
+            let manifest_required =
+                matches!(&owning_scope, RuntimeSkillOwningScope::Subject { .. });
+            let manifest_key = runtime_skill_scope_manifest_key("space:other-owner", &owning_scope)
+                .expect("cross-space RuntimeSkill scope manifest key");
+            forbidden_cross_space_runtime_skill_addresses.insert((
+                crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                manifest_key.clone(),
+            ));
+            let manifest_doc = fixture_snapshot.json_docs.iter().find(|doc| {
+                doc.namespace == crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE
+                    && doc.key == manifest_key
+            });
+            if manifest_required {
+                assert!(
+                    manifest_doc.is_some(),
+                    "cross-space Subject manifest must exist after the accepted write"
+                );
+            }
+            if let Some(manifest_doc) = manifest_doc {
+                let manifest =
+                    serde_json::from_value::<RuntimeSkillScopeManifest>(manifest_doc.value.clone())
+                        .expect("cross-space RuntimeSkill scope manifest fixture");
+                if manifest_required {
+                    assert_eq!(manifest.owner_count, 1);
+                    assert_eq!(manifest.owner_bindings.len(), 1);
+                }
+                for binding in manifest.owner_bindings {
+                    let owner_doc = fixture_snapshot
+                        .json_docs
+                        .iter()
+                        .find(|doc| {
+                            doc.namespace == crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE
+                                && doc.key == binding.owner_physical_key
+                        })
+                        .expect("cross-space RuntimeSkill owner fixture");
+                    let owner =
+                        serde_json::from_value::<RuntimeSkillOwnerRecord>(owner_doc.value.clone())
+                            .expect("cross-space typed RuntimeSkill owner");
+                    assert_eq!(owner.memory_space_id, "space:other-owner");
+                    assert_eq!(owner.owning_scope, owning_scope);
+                    assert_eq!(owner.procedural_content.topic, "cross space only sentinel");
+                    forbidden_cross_space_runtime_skill_addresses.insert((
+                        crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+                        binding.owner_physical_key,
+                    ));
+                }
+            }
+        }
+        assert!(
+            expected_addresses.blobs.is_empty(),
+            "this fixture must remain JSON-only"
+        );
+
+        let observer = Arc::new(ObservedStoreEngine::new(platform.engine_for_test()));
+        let observed_platform = platform.with_engine_for_test(observer.clone());
+        let observed_runtime = runtime(observed_platform);
+        observer.arm();
+
+        let recall = observed_runtime
+            .recall(MemoryRecallRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::Current,
+                query: "immutable receipt owner".to_string(),
+                limit: 4,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect("production recall");
+        assert!(recall.store_snapshot_consistent);
+        assert!(recall
+            .procedural_delivery_reports
+            .iter()
+            .any(|report| report.selected));
+
+        let observation = observer.observation();
+        assert_eq!(observation.open_count, 1);
+        assert_eq!(observation.receipt_count, 1);
+        assert_eq!(observation.direct_read_count, 0);
+        assert_eq!(observation.inner_receipt, observation.shadow_receipt);
+        let receipt = observation.inner_receipt.expect("private receipt");
+        assert!(!receipt.state_digest.is_empty());
+        assert_eq!(
+            receipt.entry_count,
+            observation
+                .json_reads
+                .len()
+                .saturating_add(observation.blob_reads.len())
+        );
+        assert_eq!(
+            receipt.json_doc_count,
+            observation
+                .json_reads
+                .iter()
+                .filter(|read| read.value.is_some())
+                .count()
+        );
+        assert_eq!(
+            receipt.blob_count,
+            observation
+                .blob_reads
+                .iter()
+                .filter(|read| read.value.is_some())
+                .count()
+        );
+        assert_eq!(
+            receipt.json_bytes,
+            observation
+                .json_reads
+                .iter()
+                .filter_map(|read| read.value.as_ref())
+                .map(|value| serde_json::to_vec(value).expect("canonical JSON").len())
+                .sum::<usize>()
+        );
+        assert_eq!(
+            receipt.blob_bytes,
+            observation
+                .blob_reads
+                .iter()
+                .filter_map(|read| read.value.as_ref())
+                .map(Vec::len)
+                .sum::<usize>()
+        );
+        let actual_json_addresses = observation
+            .json_reads
+            .iter()
+            .map(|read| (read.namespace.clone(), read.key.clone()))
+            .collect::<BTreeSet<_>>();
+        let actual_blob_addresses = observation
+            .blob_reads
+            .iter()
+            .map(|read| (read.namespace.clone(), read.key.clone()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual_json_addresses.len(),
+            observation.json_reads.len(),
+            "the immutable session must never reread a JSON address"
+        );
+        assert_eq!(
+            actual_blob_addresses.len(),
+            observation.blob_reads.len(),
+            "the immutable session must never reread a blob address"
+        );
+        assert_eq!(actual_json_addresses, expected_addresses.json);
+        assert_eq!(actual_blob_addresses, expected_addresses.blobs);
+        let owner_ref =
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone());
+        for required in [
+            (
+                crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                long_term_version_scope_manifest_key("space:owner-default", "agent:agent-main")
+                    .expect("scope manifest key"),
+            ),
+            (
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                long_term_version_head_key("space:owner-default", "agent:agent-main", &owner_ref)
+                    .expect("head key"),
+            ),
+            (
+                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                long_term_version_material_key(
+                    "space:owner-default",
+                    "agent:agent-main",
+                    &owner_ref,
+                    owner.owner_revision,
+                )
+                .expect("material key"),
+            ),
+            (
+                MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                memory_facet_manifest_key("space:owner-default", "agent:agent-main")
+                    .expect("facet manifest key"),
+            ),
+            (
+                MEMORY_FACET_INDEX_NAMESPACE.to_string(),
+                scoped_memory_facet_owner_storage_key(
+                    "space:owner-default",
+                    "agent:agent-main",
+                    &owner_ref,
+                )
+                .expect("facet owner key"),
+            ),
+        ] {
+            assert!(
+                actual_json_addresses.contains(&required),
+                "required known-key read missing: {required:?}"
+            );
+        }
+
+        observer.arm();
+        let projection = observed_runtime
+            .project(MemoryProjectionRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::Current,
+                user_query: "immutable receipt owner".to_string(),
+                system_max_len: 4096,
+                recent_messages_limit: 8,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect("production projection");
+        assert!(projection
+            .report()
+            .procedural_delivery_reports()
+            .iter()
+            .any(|report| report.selected));
+        assert!(projection.report().audit().delivery_digest_verified);
+        let projected = observer.observation();
+        assert_eq!(projected.open_count, 1);
+        assert_eq!(projected.receipt_count, 1);
+        assert_eq!(projected.inner_receipt, projected.shadow_receipt);
+        for governed_namespace in [
+            crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+            crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE,
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+            LONG_TERM_CONTROL_REVISION_NAMESPACE,
+            MEMORY_FACET_INDEX_NAMESPACE,
+            MEMORY_FACET_POSTING_NAMESPACE,
+        ] {
+            assert!(
+                projected
+                    .direct_read_operations
+                    .iter()
+                    .all(|operation| !operation.ends_with(governed_namespace)),
+                "projection reread a governed owner namespace outside the immutable session: {:?}",
+                projected.direct_read_operations
+            );
+        }
+
+        observer.arm();
+        let cross_space_recall = observed_runtime
+            .recall(MemoryRecallRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::Current,
+                query: "cross space only sentinel".to_string(),
+                limit: 4,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect("cross-space exclusion recall");
+        assert!(
+            cross_space_recall
+                .procedural_delivery_reports
+                .iter()
+                .all(|report| !report.selected),
+            "a RuntimeSkill from another memory space must produce exact-zero delivery"
+        );
+        let excluded = observer.observation();
+        assert_eq!(excluded.open_count, 1);
+        assert_eq!(excluded.receipt_count, 1);
+        assert_eq!(excluded.direct_read_count, 0);
+        assert_eq!(excluded.inner_receipt, excluded.shadow_receipt);
+        let excluded_json_addresses = excluded
+            .json_reads
+            .iter()
+            .map(|read| (read.namespace.clone(), read.key.clone()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            excluded_json_addresses.len(),
+            excluded.json_reads.len(),
+            "cross-space exclusion must not reread a JSON address"
+        );
+        let excluded_runtime_skill_addresses = excluded_json_addresses
+            .iter()
+            .filter(|(namespace, _)| {
+                namespace == crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE
+                    || namespace == crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            excluded_runtime_skill_addresses, expected_runtime_skill_addresses,
+            "cross-space recall may read only the current memory-space RuntimeSkill closure"
+        );
+        assert!(
+            forbidden_cross_space_runtime_skill_addresses
+                .is_disjoint(&excluded_runtime_skill_addresses),
+            "cross-space RuntimeSkill manifests and owners must remain unread"
+        );
+
+        let subject_manifest_key = runtime_skill_scope_manifest_key(
+            "space:owner-default",
+            &RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: "agent:agent-main".to_string(),
+            },
+        )
+        .expect("subject RuntimeSkill manifest key");
+        let mut malformed_manifest = platform
+            .engine_for_test()
+            .get_json_value(
+                crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+                &subject_manifest_key,
+            )
+            .expect("read subject RuntimeSkill manifest")
+            .expect("subject RuntimeSkill manifest exists");
+        malformed_manifest["owner_count"] = serde_json::json!(2);
+        platform
+            .engine_for_test()
+            .put_json_value(
+                crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+                &subject_manifest_key,
+                malformed_manifest,
+            )
+            .expect("corrupt RuntimeSkill manifest fixture");
+
+        observer.arm();
+        let malformed_error = observed_runtime
+            .recall(MemoryRecallRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::Current,
+                query: "immutable receipt owner".to_string(),
+                limit: 4,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect_err("malformed RuntimeSkill manifest must fail without a receipt");
+        assert_eq!(malformed_error.stage(), "recall_runtime_skill_scope");
+        let malformed = observer.observation();
+        assert_eq!(malformed.open_count, 1);
+        assert_eq!(malformed.receipt_count, 0);
+        assert_eq!(malformed.direct_read_count, 0);
+
+        assert_eq!(
+            observer
+                .get_json_value("forbidden-live", "sentinel")
+                .expect_err("observer direct-read sentinel")
+                .stage(),
+            "recall_observer_direct_read"
+        );
+        let second_session_error = match observer.open_immutable_read_session(platform.capacity()) {
+            Ok(_) => panic!("observer second-session sentinel"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            second_session_error.stage(),
+            "recall_observer_second_session"
+        );
+    }
+
+    #[test]
+    fn procedural_projection_adds_zero_soul_owner_reads() {
+        let profile = ProfileId::EspStandaloneMemory;
+        let platform = open_test_store_platform(
+            crate::store_internal::StoreBackendConfig::in_memory(profile).expect("store config"),
+        )
+        .expect("store");
+        let observer = Arc::new(ObservedStoreEngine::new(platform.engine_for_test()));
+        let observed_platform = platform.with_engine_for_test(observer.clone());
+        let runtime = runtime(observed_platform);
+        let request = || MemoryProjectionRequest {
+            temporal_operation: crate::MemoryRecallTemporalOperation::Current,
+            structured_query_facets: Vec::new(),
+            user_query: "soul read delta procedural guard".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
+        };
+
+        observer.arm_counting();
+        let baseline = runtime.project(request()).expect("baseline projection");
+        assert!(baseline.report().procedural_delivery_reports().is_empty());
+        let baseline_operations = observer.observation().direct_read_operations;
+
+        let write = runtime
+            .write(MemoryWriteRequest::Procedural {
+                writes: vec![GovernedRuntimeSkillWriteInput {
+                    write: RuntimeSkillWrite {
+                        name: "soul_read_delta_guard".to_string(),
+                        topic: "soul read delta procedural guard".to_string(),
+                        title: "Soul read delta guard".to_string(),
+                        summary: "Projection must not add Soul owner reads.".to_string(),
+                        content: "1. bind the governed procedure\n2. preserve zero Soul read delta"
+                            .to_string(),
+                        citations: vec!["observer fixture".to_string()],
+                        source_chat_id: Some("chat-a".to_string()),
+                        observed_at: 1_900_000_000,
+                    },
+                    creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                        candidate_ref: "test:soul-read-delta-guard".to_string(),
+                        verification_receipt_digest: format!("sha256:{}", "c".repeat(64)),
+                    },
+                    privacy_class: MemoryPrivacyClass::SharedWithSubject,
+                }],
+                owning_scope: RuntimeSkillOwningScope::Subject {
+                    mounted_subject_id: "agent:agent-main".to_string(),
+                },
+                source: RuntimeSkillWriteSource::Manual,
+            })
+            .expect("seed Soul read delta procedure");
+        assert!(write.accepted, "{write:#?}");
+
+        observer.arm_counting();
+        let procedural = runtime.project(request()).expect("procedural projection");
+        assert_eq!(
+            procedural
+                .report()
+                .procedural_delivery_reports()
+                .iter()
+                .filter(|report| report.rendered)
+                .count(),
+            1
+        );
+        let procedural_operations = observer.observation().direct_read_operations;
+        let is_soul_read = |operation: &&String| {
+            [
+                "inner_life",
+                "private_docs",
+                "private_garden",
+                "self_model",
+                "self_continuity",
+                "self_authored_core",
+                "boundary_persona",
+                "outer_voice",
+                "relationship",
+            ]
+            .iter()
+            .any(|namespace| operation.contains(namespace))
+        };
+        let baseline_soul_reads = baseline_operations
+            .iter()
+            .filter(is_soul_read)
+            .cloned()
+            .collect::<Vec<_>>();
+        let procedural_soul_reads = procedural_operations
+            .iter()
+            .filter(is_soul_read)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            !baseline_soul_reads.is_empty(),
+            "Soul read delta evidence must be non-vacuous: {baseline_operations:#?}"
+        );
+        assert_eq!(procedural_soul_reads, baseline_soul_reads);
+        assert_eq!(procedural_operations, baseline_operations);
+    }
+
+    #[test]
+    fn historical_recall_walks_only_the_exact_scope_root_in_one_session() {
+        let profile = test_host_profile();
+        let platform = open_test_store_platform(
+            crate::store_internal::StoreBackendConfig::in_memory(profile).expect("store config"),
+        )
+        .expect("store");
+        let seed_runtime = runtime(platform.clone());
+        seed_runtime
+            .write(MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
+                extraction: ParsedLongTermMemoryExtraction {
+                    upserts: vec![LongTermMemoryDraft {
+                        kind: LongTermMemoryKind::Project,
+                        topic: "historical immutable receipt".to_string(),
+                        content: "Use the predecessor release receipt.".to_string(),
+                        keywords: vec!["predecessor".to_string(), "receipt".to_string()],
+                        privacy: MemoryPrivacyClass::SharedWithSubject,
+                        source_chat_id: Some("chat-a".to_string()),
+                        source_type: None,
+                        source_scope: None,
+                        confidence: None,
+                        freshness: None,
+                        stale_hint: None,
+                        supporting_citations: vec!["evidence:historical-predecessor".to_string()],
+                        canonical_entities: Vec::new(),
+                        evidence_count: Some(1),
+                        observed_at: Some(1_900_000_000),
+                        last_confirmed_at: Some(1_900_000_000),
+                        source_revision: Some(1),
+                    }],
+                    deletes: Vec::new(),
+                    skill_writes: Vec::new(),
+                },
+            })
+            .expect("seed predecessor");
+        let predecessor = platform
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .expect("long-term store")
+            .list(8)
+            .expect("owners")
+            .into_iter()
+            .next()
+            .expect("predecessor");
+        seed_runtime
+            .mutate_long_term_memory(MemoryLongTermMutationRequest {
+                operation: MemoryLongTermMutation::Supersede {
+                    target: crate::MemoryLongTermTarget::RecordId(predecessor.id.clone()),
+                    replacement: LongTermMemoryDraft {
+                        kind: predecessor.kind.clone(),
+                        topic: "historical successor receipt".to_string(),
+                        content: "Use the successor release receipt.".to_string(),
+                        keywords: vec!["successor".to_string(), "receipt".to_string()],
+                        privacy: predecessor.privacy,
+                        source_chat_id: predecessor.source_chat_id.clone(),
+                        source_type: Some(predecessor.source_type),
+                        source_scope: Some(predecessor.source_scope),
+                        confidence: Some(predecessor.confidence),
+                        freshness: Some(predecessor.freshness),
+                        stale_hint: None,
+                        supporting_citations: vec!["evidence:historical-successor".to_string()],
+                        canonical_entities: predecessor.canonical_entities.clone(),
+                        evidence_count: Some(predecessor.evidence_count),
+                        observed_at: Some(predecessor.observed_at.saturating_add(1)),
+                        last_confirmed_at: Some(predecessor.last_confirmed_at.saturating_add(1)),
+                        source_revision: Some(
+                            predecessor
+                                .source_revision
+                                .unwrap_or_default()
+                                .saturating_add(1),
+                        ),
+                    },
+                },
+                reason: "bind the historical session fixture".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
+            })
+            .expect("supersede predecessor");
+        let control = platform
+            .read_json_namespace(LONG_TERM_CONTROL_REVISION_NAMESPACE)
+            .expect("control revisions")
+            .into_iter()
+            .map(|doc| {
+                serde_json::from_value::<bm_core::memory::LongTermMemoryControlRevision>(doc.value)
+                    .expect("typed control revision")
+            })
+            .find(|revision| {
+                revision.transition.predecessor.owner_ref.owner_id == predecessor.id
+                    && revision.operation == bm_core::memory::LongTermControlOperation::Supersede
+            })
+            .expect("supersede control");
+        let as_of_time = control
+            .transition
+            .terminated_at
+            .checked_sub(1)
+            .expect("historical interval");
+        let mut historical_docs = Vec::new();
+        for namespace in [
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+            LONG_TERM_CONTROL_REVISION_NAMESPACE,
+        ] {
+            historical_docs.extend(
+                platform
+                    .read_json_namespace(namespace)
+                    .expect("historical fixture namespace"),
+            );
+        }
+        let expected_json_addresses = expected_historical_long_term_addresses(
+            &historical_docs,
+            "space:owner-default",
+            "agent:agent-main",
+        );
+
+        let observer = Arc::new(ObservedStoreEngine::new(platform.engine_for_test()));
+        let observed_platform = platform.with_engine_for_test(observer.clone());
+        let observed_runtime = runtime(observed_platform);
+        observer.arm();
+
+        let recall = observed_runtime
+            .recall(MemoryRecallRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::HistoricalAsOf {
+                    as_of_time,
+                },
+                query: predecessor.content.clone(),
+                limit: 4,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect("historical production recall");
+        let predecessor_ref =
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, predecessor.id.clone());
+        let predecessor_candidate = governed_memory_recall_candidate_id(&predecessor_ref);
+        assert!(recall.store_snapshot_consistent);
+        assert!(recall.source_candidate_ids.contains(&predecessor_candidate));
+        assert!(recall
+            .delivery_report
+            .rendered_capsules
+            .iter()
+            .any(|capsule| capsule.owner_ref == predecessor_ref));
+
+        let observation = observer.observation();
+        assert_eq!(observation.open_count, 1);
+        assert_eq!(observation.receipt_count, 1);
+        assert_eq!(observation.direct_read_count, 0);
+        assert_eq!(observation.inner_receipt, observation.shadow_receipt);
+        assert!(observation.blob_reads.is_empty());
+        let actual_json_addresses = observation
+            .json_reads
+            .iter()
+            .map(|read| (read.namespace.clone(), read.key.clone()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_json_addresses.len(), observation.json_reads.len());
+        assert_eq!(actual_json_addresses, expected_json_addresses);
+
+        observer.arm();
+        let error = observed_runtime
+            .recall(MemoryRecallRequest {
+                temporal_operation: crate::MemoryRecallTemporalOperation::HistoricalAsOf {
+                    as_of_time: u64::MAX,
+                },
+                query: predecessor.content,
+                limit: 4,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect_err("future as-of must fail without a success receipt");
+        assert_eq!(error.stage(), "governed_historical_recall");
+        let failed = observer.observation();
+        assert_eq!(failed.open_count, 1);
+        assert_eq!(failed.receipt_count, 0);
+        assert_eq!(failed.direct_read_count, 0);
+    }
+}
+
 #[cfg(test)]
 mod projection_budget_truncation_tests {
     use super::*;
@@ -18734,6 +25639,8 @@ mod projection_budget_truncation_tests {
         let visible_topic = "governed_scan_visible_after_96";
         runtime
             .write(MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Project,
@@ -18787,6 +25694,8 @@ mod projection_budget_truncation_tests {
             .collect::<Vec<_>>();
         runtime
             .write(MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: hidden,
                     deletes: Vec::new(),
@@ -18831,6 +25740,7 @@ mod projection_budget_truncation_tests {
         let manifest = build_projection_delivery_digest_manifest(
             &envelope,
             &MemoryRecallDeliveryReport::default(),
+            &[],
             &format!("{deterministic}\ntampered-render"),
             4096,
         );
@@ -18840,6 +25750,197 @@ mod projection_budget_truncation_tests {
         assert!(manifest
             .integrity_failures
             .contains(&"projection_deterministic_render_mismatch".to_string()));
+    }
+
+    #[test]
+    fn procedural_projection_digest_block_requires_exact_opaque_binding() {
+        let candidate_ref = "runtime_skill_projection_candidate:sha256:\
+            0000000000000000000000000000000000000000000000000000000000000000"
+            .replace(char::is_whitespace, "");
+        let content = "Procedure title\nProcedure summary\n1. exact step";
+        let valid = RuntimeProjectionSourceBlock {
+            owner_ref: None,
+            source_id: candidate_ref.clone(),
+            role: "governed_procedural_memory".to_string(),
+            content: content.to_string(),
+            evidence_refs: vec![candidate_ref.clone()],
+            protected: false,
+            shared_fact_surface_allowed: false,
+        };
+        assert!(runtime_skill_projection_block_matches(
+            &valid,
+            &candidate_ref,
+            content
+        ));
+        let rendered = render_runtime_source_block(&valid);
+        assert_eq!(
+            runtime_projection_source_block_prompt_cardinality(&rendered, &valid),
+            1
+        );
+        assert_eq!(
+            runtime_projection_source_block_prompt_cardinality("", &valid),
+            0
+        );
+        assert_eq!(
+            runtime_projection_source_block_prompt_cardinality(
+                &format!("{rendered}{rendered}"),
+                &valid
+            ),
+            2
+        );
+
+        let mut forged = valid.clone();
+        forged.source_id.push_str("-forged");
+        assert!(!runtime_skill_projection_block_matches(
+            &forged,
+            &candidate_ref,
+            content
+        ));
+        forged = valid.clone();
+        forged.owner_ref = Some(GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::RuntimeSkill,
+            "raw-owner-must-not-enter-envelope",
+        ));
+        assert!(!runtime_skill_projection_block_matches(
+            &forged,
+            &candidate_ref,
+            content
+        ));
+        for mutate in [
+            |block: &mut RuntimeProjectionSourceBlock| block.role.push_str("-forged"),
+            |block: &mut RuntimeProjectionSourceBlock| block.content.push_str("-forged"),
+            |block: &mut RuntimeProjectionSourceBlock| block.evidence_refs.clear(),
+            |block: &mut RuntimeProjectionSourceBlock| block.protected = true,
+            |block: &mut RuntimeProjectionSourceBlock| block.shared_fact_surface_allowed = true,
+        ] {
+            let mut forged = valid.clone();
+            mutate(&mut forged);
+            assert!(!runtime_skill_projection_block_matches(
+                &forged,
+                &candidate_ref,
+                content
+            ));
+        }
+    }
+
+    #[test]
+    fn projection_delivery_digest_rejects_source_blocks_without_exact_delivery_items() {
+        let procedural_candidate_ref = "runtime_skill_projection_candidate:sha256:\
+            1111111111111111111111111111111111111111111111111111111111111111"
+            .replace(char::is_whitespace, "");
+        let mut envelope = LLMRuntimeProjectionEnvelope {
+            projection_id: "projection-reverse-binding-test".to_string(),
+            governed_memory_evidence: vec![RuntimeProjectionSourceBlock {
+                owner_ref: Some(GovernedMemoryOwnerRef::new(
+                    GovernedMemoryOwnerPlane::LongTerm,
+                    "missing-long-term-delivery-owner",
+                )),
+                source_id: "missing-long-term-delivery-candidate".to_string(),
+                role: "recall_evidence_capsule".to_string(),
+                content: "missing long-term delivery capsule".to_string(),
+                evidence_refs: vec!["evidence:missing-long-term-delivery".to_string()],
+                protected: false,
+                shared_fact_surface_allowed: false,
+            }],
+            procedural_evidence: vec![RuntimeProjectionSourceBlock {
+                owner_ref: None,
+                source_id: procedural_candidate_ref.clone(),
+                role: "governed_procedural_memory".to_string(),
+                content: "missing procedural delivery item".to_string(),
+                evidence_refs: vec![procedural_candidate_ref.clone()],
+                protected: false,
+                shared_fact_surface_allowed: false,
+            }],
+            ..LLMRuntimeProjectionEnvelope::default()
+        };
+        let deterministic = render_bounded_llm_runtime_projection_envelope(&envelope, 4096);
+        envelope.rendered_block = deterministic.clone();
+        let manifest = build_projection_delivery_digest_manifest(
+            &envelope,
+            &MemoryRecallDeliveryReport::default(),
+            &[],
+            &deterministic,
+            4096,
+        );
+
+        assert!(manifest.exact_render_match);
+        assert!(manifest.integrity_failures.contains(
+            &"projection_rendered_capsule_cardinality:missing-long-term-delivery-candidate:0"
+                .to_string()
+        ));
+        assert!(manifest.integrity_failures.contains(&format!(
+            "projection_procedural_item_cardinality:{procedural_candidate_ref}:0"
+        )));
+        assert!(manifest.candidate_receipts.is_empty());
+        assert!(manifest.procedural_candidate_receipts.is_empty());
+    }
+
+    #[test]
+    fn production_recall_closure_requires_a_private_temporal_session_binding() {
+        let current = crate::MemoryRecallTemporalOperation::Current;
+        let manifest = ValidatedRecallManifestClosure;
+        let exact_read_set = || RecallReadSetClosureEvidence {
+            read_set_exact: true,
+        };
+        assert!(RecallImmutableSessionBinding::new(
+            current,
+            StoreReadReceipt::default(),
+            exact_read_set(),
+            1,
+            1,
+            &manifest,
+        )
+        .is_err());
+        assert!(RecallImmutableSessionBinding::new(
+            current,
+            StoreReadReceipt {
+                state_digest: "a".repeat(64),
+                json_doc_count: 2,
+                blob_count: 1,
+                entry_count: 2,
+                ..StoreReadReceipt::default()
+            },
+            exact_read_set(),
+            1,
+            1,
+            &manifest,
+        )
+        .is_err());
+
+        let binding = RecallImmutableSessionBinding::new(
+            current,
+            StoreReadReceipt {
+                state_digest: "b".repeat(64),
+                json_doc_count: 2,
+                blob_count: 1,
+                entry_count: 3,
+                ..StoreReadReceipt::default()
+            },
+            exact_read_set(),
+            1,
+            1,
+            &manifest,
+        )
+        .expect("valid private immutable-session binding");
+        binding.validate_for(current).expect("current binding");
+        assert!(binding
+            .validate_for(crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time: 1 })
+            .is_err());
+        assert!(RecallImmutableSessionBinding::new(
+            current,
+            StoreReadReceipt {
+                state_digest: "c".repeat(64),
+                entry_count: 0,
+                ..StoreReadReceipt::default()
+            },
+            RecallReadSetClosureEvidence {
+                read_set_exact: false,
+            },
+            1,
+            1,
+            &manifest,
+        )
+        .is_err());
     }
 
     #[test]
@@ -18861,6 +25962,8 @@ mod projection_budget_truncation_tests {
             .expect("runtime");
         runtime
             .write(MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Project,
@@ -19000,6 +26103,8 @@ mod concurrent_memory_plan_tests {
         let second = runtime(platform.clone());
         first
             .write(MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![draft("initial owner")],
                     deletes: Vec::new(),
@@ -19078,7 +26183,12 @@ mod concurrent_memory_plan_tests {
         };
         let plan = |runtime: &MemoryRuntime, topic: &str, content: &str| {
             let plan = runtime
-                .plan_long_term_extraction_transaction(&extraction(topic, content), 1_900_000_000)
+                .plan_long_term_extraction_transaction(
+                    &extraction(topic, content),
+                    &[],
+                    None,
+                    1_900_000_000,
+                )
                 .expect("extraction plan");
             MemoryStoreMutationPlan {
                 mutations: plan.mutations,

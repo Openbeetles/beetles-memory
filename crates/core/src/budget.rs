@@ -131,6 +131,22 @@ pub struct RecallDeliveryRuntimeBudget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GovernedStateRuntimeBudget {
+    pub max_validity_joins: usize,
+    pub max_lineage_depth: usize,
+    pub max_retained_long_term_revisions_per_owner: usize,
+    pub max_retained_runtime_skill_owners_per_scope: usize,
+    pub max_runtime_skill_lineage_depth: usize,
+    pub max_as_of_candidates: usize,
+    pub max_obsolete_decisions: usize,
+    pub max_procedural_candidates: usize,
+    pub max_premises_per_skill: usize,
+    pub max_premise_evidence_reads: usize,
+    pub max_state_transitions_per_write: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EvidenceDocumentRuntimeBudget {
     pub max_document_bytes: usize,
     pub max_document_body_bytes: usize,
@@ -144,6 +160,7 @@ pub struct EvidenceDocumentRuntimeBudget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreRuntimeBudget {
+    pub metric_source_max_items: usize,
     pub event_log_max_items: usize,
     pub kv_max_entries: usize,
     pub blob_max_bytes: usize,
@@ -240,6 +257,7 @@ pub struct RuntimeBudgetReport {
     pub graph_expansion_budget: GraphExpansionRuntimeBudget,
     pub facet_recall_budget: FacetRecallRuntimeBudget,
     pub recall_delivery_budget: RecallDeliveryRuntimeBudget,
+    pub governed_state_budget: GovernedStateRuntimeBudget,
     pub evidence_document_budget: EvidenceDocumentRuntimeBudget,
     pub store_budget: StoreRuntimeBudget,
     pub adapter_budget: AdapterRuntimeBudget,
@@ -925,7 +943,77 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         )
         .max(1),
     };
+    let governed_state_budget = GovernedStateRuntimeBudget {
+        max_validity_joins: scale_usize(
+            ceiling.governed_state_budget.max_validity_joins,
+            source_scale,
+        )
+        .max(1),
+        max_lineage_depth: scale_usize(
+            ceiling.governed_state_budget.max_lineage_depth,
+            source_scale,
+        )
+        .max(1),
+        max_retained_long_term_revisions_per_owner: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner,
+            source_scale,
+        )
+        .max(1),
+        max_retained_runtime_skill_owners_per_scope: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_retained_runtime_skill_owners_per_scope,
+            source_scale,
+        )
+        .max(1),
+        max_runtime_skill_lineage_depth: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_runtime_skill_lineage_depth,
+            source_scale,
+        )
+        .max(1),
+        max_as_of_candidates: scale_usize(
+            ceiling.governed_state_budget.max_as_of_candidates,
+            source_scale,
+        )
+        .max(1),
+        max_obsolete_decisions: scale_usize(
+            ceiling.governed_state_budget.max_obsolete_decisions,
+            source_scale,
+        )
+        .max(1),
+        max_procedural_candidates: scale_usize(
+            ceiling.governed_state_budget.max_procedural_candidates,
+            source_scale,
+        )
+        .max(1),
+        max_premises_per_skill: scale_usize(
+            ceiling.governed_state_budget.max_premises_per_skill,
+            source_scale,
+        )
+        .max(1),
+        max_premise_evidence_reads: scale_usize(
+            ceiling.governed_state_budget.max_premise_evidence_reads,
+            source_scale,
+        )
+        .max(1),
+        max_state_transitions_per_write: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_state_transitions_per_write,
+            source_scale,
+        )
+        .max(1),
+    };
     let store_budget = StoreRuntimeBudget {
+        metric_source_max_items: scale_usize(
+            ceiling.store_budget.metric_source_max_items,
+            store_scale,
+        )
+        .max(1),
         event_log_max_items: scale_usize(ceiling.store_budget.event_log_max_items, store_scale)
             .max(ceiling.p0_min_events),
         kv_max_entries: scale_usize(ceiling.store_budget.kv_max_entries, store_scale)
@@ -1118,6 +1206,7 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
         graph_expansion_budget,
         facet_recall_budget,
         recall_delivery_budget,
+        governed_state_budget,
         evidence_document_budget,
         store_budget,
         adapter_budget,
@@ -1469,6 +1558,9 @@ fn recompile_store_derived_budgets(report: &mut RuntimeBudgetReport) {
 
 fn min_store_budget(left: StoreRuntimeBudget, right: StoreRuntimeBudget) -> StoreRuntimeBudget {
     StoreRuntimeBudget {
+        metric_source_max_items: left
+            .metric_source_max_items
+            .min(right.metric_source_max_items),
         event_log_max_items: left.event_log_max_items.min(right.event_log_max_items),
         kv_max_entries: left.kv_max_entries.min(right.kv_max_entries),
         blob_max_bytes: left.blob_max_bytes.min(right.blob_max_bytes),
@@ -1740,7 +1832,8 @@ fn validate_transcript_governance_budget(budget: TranscriptGovernanceBudget) -> 
 
 #[cfg(feature = "nonproduction-replay-harness")]
 fn validate_store_budget(budget: StoreRuntimeBudget, stage: &'static str) -> Result<()> {
-    if budget.event_log_max_items == 0
+    if budget.metric_source_max_items == 0
+        || budget.event_log_max_items == 0
         || budget.kv_max_entries == 0
         || budget.blob_max_bytes == 0
         || budget.snapshot_max_bytes < 2
@@ -1779,7 +1872,8 @@ fn nonproduction_limits_error(reason: &'static str) -> Error {
 
 #[cfg(feature = "nonproduction-replay-harness")]
 fn store_budget_is_at_least(candidate: StoreRuntimeBudget, floor: StoreRuntimeBudget) -> bool {
-    candidate.event_log_max_items >= floor.event_log_max_items
+    candidate.metric_source_max_items >= floor.metric_source_max_items
+        && candidate.event_log_max_items >= floor.event_log_max_items
         && candidate.kv_max_entries >= floor.kv_max_entries
         && candidate.blob_max_bytes >= floor.blob_max_bytes
         && candidate.snapshot_max_bytes >= floor.snapshot_max_bytes
@@ -1881,6 +1975,7 @@ struct ProfileBudgetCeiling {
     graph_expansion_budget: GraphExpansionRuntimeBudget,
     facet_recall_budget: FacetRecallRuntimeBudget,
     recall_delivery_budget: RecallDeliveryRuntimeBudget,
+    governed_state_budget: GovernedStateRuntimeBudget,
     store_budget: StoreRuntimeBudget,
     adapter_budget: AdapterRuntimeBudget,
     projection_source_budget: ProjectionSourceBudget,
@@ -1908,7 +2003,11 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             memory_floor_bytes: 128 * MB,
             storage_floor_bytes: 8 * MB,
             records: 512,
+            retained_long_term_revisions_per_owner: 4,
+            retained_runtime_skill_owners_per_scope: 16,
+            runtime_skill_lineage_depth: 4,
             events: 256,
+            metric_source_max_items: 1,
             blob_max_bytes: 1024 * 1024,
             snapshot_max_bytes: 256 * 1024,
             http_body_max_bytes: 8 * 1024,
@@ -1926,7 +2025,11 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             memory_floor_bytes: 256 * MB,
             storage_floor_bytes: 16 * MB,
             records: 4096,
+            retained_long_term_revisions_per_owner: 4,
+            retained_runtime_skill_owners_per_scope: 64,
+            runtime_skill_lineage_depth: 4,
             events: 2048,
+            metric_source_max_items: 1,
             blob_max_bytes: 4 * 1024 * 1024,
             snapshot_max_bytes: 1024 * 1024,
             http_body_max_bytes: 16 * 1024,
@@ -1944,7 +2047,11 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             memory_floor_bytes: 512 * MB,
             storage_floor_bytes: 256 * MB,
             records: 12_000,
+            retained_long_term_revisions_per_owner: 8,
+            retained_runtime_skill_owners_per_scope: 256,
+            runtime_skill_lineage_depth: 8,
             events: 4096,
+            metric_source_max_items: 2,
             blob_max_bytes: 16 * 1024 * 1024,
             snapshot_max_bytes: 4 * 1024 * 1024,
             http_body_max_bytes: 64 * 1024,
@@ -1963,7 +2070,11 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
                 memory_floor_bytes: 512 * MB,
                 storage_floor_bytes: 256 * MB,
                 records: 4096,
+                retained_long_term_revisions_per_owner: 8,
+                retained_runtime_skill_owners_per_scope: 128,
+                runtime_skill_lineage_depth: 8,
                 events: 2048,
+                metric_source_max_items: 2,
                 blob_max_bytes: 8 * 1024 * 1024,
                 snapshot_max_bytes: 2 * 1024 * 1024,
                 http_body_max_bytes: 32 * 1024,
@@ -1982,7 +2093,11 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             memory_floor_bytes: 1024 * MB,
             storage_floor_bytes: 512 * MB,
             records: 20_000,
+            retained_long_term_revisions_per_owner: 16,
+            retained_runtime_skill_owners_per_scope: 512,
+            runtime_skill_lineage_depth: 16,
             events: 8192,
+            metric_source_max_items: 2,
             blob_max_bytes: 32 * 1024 * 1024,
             snapshot_max_bytes: 8 * 1024 * 1024,
             http_body_max_bytes: 96 * 1024,
@@ -2000,7 +2115,11 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             memory_floor_bytes: 1024 * MB,
             storage_floor_bytes: 1024 * MB,
             records: 40_000,
+            retained_long_term_revisions_per_owner: 32,
+            retained_runtime_skill_owners_per_scope: 1024,
+            runtime_skill_lineage_depth: 32,
             events: 16_384,
+            metric_source_max_items: 2,
             blob_max_bytes: 64 * 1024 * 1024,
             snapshot_max_bytes: 16 * 1024 * 1024,
             http_body_max_bytes: 128 * 1024,
@@ -2020,7 +2139,11 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             memory_floor_bytes: 2048 * MB,
             storage_floor_bytes: 2048 * MB,
             records: 80_000,
+            retained_long_term_revisions_per_owner: 32,
+            retained_runtime_skill_owners_per_scope: 2048,
+            runtime_skill_lineage_depth: 32,
             events: 32_768,
+            metric_source_max_items: 2,
             blob_max_bytes: 128 * 1024 * 1024,
             snapshot_max_bytes: 32 * 1024 * 1024,
             http_body_max_bytes: 256 * 1024,
@@ -2043,7 +2166,11 @@ struct ProfileBudgetSpec {
     memory_floor_bytes: u64,
     storage_floor_bytes: u64,
     records: usize,
+    retained_long_term_revisions_per_owner: usize,
+    retained_runtime_skill_owners_per_scope: usize,
+    runtime_skill_lineage_depth: usize,
     events: usize,
+    metric_source_max_items: usize,
     blob_max_bytes: usize,
     snapshot_max_bytes: usize,
     http_body_max_bytes: usize,
@@ -2092,7 +2219,22 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             max_capsule_chars: max_usize(spec.render_chars / 3, 256),
             max_loss_ledger_entries: max_usize(spec.source_chars / 256, 4),
         },
+        governed_state_budget: GovernedStateRuntimeBudget {
+            max_validity_joins: max_usize(spec.records / 256, 2),
+            max_lineage_depth: if spec.records >= 4096 { 16 } else { 4 },
+            max_retained_long_term_revisions_per_owner: spec.retained_long_term_revisions_per_owner,
+            max_retained_runtime_skill_owners_per_scope: spec
+                .retained_runtime_skill_owners_per_scope,
+            max_runtime_skill_lineage_depth: spec.runtime_skill_lineage_depth,
+            max_as_of_candidates: max_usize(spec.records / 512, 2),
+            max_obsolete_decisions: max_usize(spec.records / 256, 2),
+            max_procedural_candidates: max_usize(spec.source_chars / 256, 2),
+            max_premises_per_skill: max_usize(spec.source_chars / 1024, 2),
+            max_premise_evidence_reads: max_usize(spec.source_chars / 512, 2),
+            max_state_transitions_per_write: if spec.records >= 4096 { 8 } else { 2 },
+        },
         store_budget: StoreRuntimeBudget {
+            metric_source_max_items: spec.metric_source_max_items,
             event_log_max_items: spec.events,
             kv_max_entries: spec.records,
             blob_max_bytes: spec.blob_max_bytes,
@@ -2176,7 +2318,7 @@ const fn max_usize(left: usize, right: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resource::RuntimeResourceUnavailableReason;
+    use crate::resource::{RuntimeResourceObservation, RuntimeResourceUnavailableReason};
 
     fn compiler_fixture(profile: ProfileId) -> RuntimeBudgetInput {
         let store_medium = if profile.target() == TargetFeature::Esp {
@@ -2192,6 +2334,43 @@ mod tests {
                 RuntimeResourceUnavailableReason::ProbeNotConfigured,
             ),
             static_platform_manifest: StaticPlatformManifest::for_profile(profile, store_medium),
+            provider_model_context_limit: None,
+        }
+    }
+
+    fn full_resource_compiler_fixture(profile: ProfileId) -> RuntimeBudgetInput {
+        let store_medium = if profile.target() == TargetFeature::Esp {
+            RuntimeStoreMedium::EmbeddedFlash
+        } else {
+            RuntimeStoreMedium::VolatileMemory
+        };
+        let manifest = StaticPlatformManifest::for_profile(profile, store_medium);
+        let observation = RuntimeResourceObservation {
+            observed_at_unix_secs: 10,
+            ttl_ms: 30_000,
+            stale: false,
+            pressure: PressureLevel::Normal,
+            available_parallelism: Some(16),
+            memory_total_bytes: Some(manifest.memory_floor_bytes.saturating_mul(4)),
+            memory_available_bytes: Some(manifest.memory_floor_bytes.saturating_mul(3)),
+            internal_heap_free_bytes: None,
+            internal_heap_minimum_free_bytes: None,
+            internal_heap_largest_block_bytes: None,
+            psram_total_bytes: None,
+            psram_free_bytes: None,
+            psram_largest_block_bytes: None,
+            storage_total_bytes: Some(manifest.storage_floor_bytes.saturating_mul(4)),
+            storage_available_bytes: Some(manifest.storage_floor_bytes.saturating_mul(3)),
+            unavailable_reason: None,
+            unavailable_detail: None,
+        };
+        RuntimeBudgetInput {
+            profile,
+            resource_snapshot: RuntimeResourceSnapshot::from_observation(
+                RuntimeResourceProbeSource::StaticManifest,
+                observation,
+            ),
+            static_platform_manifest: manifest,
             provider_model_context_limit: None,
         }
     }
@@ -2315,6 +2494,159 @@ mod tests {
         render_budgets.sort_unstable();
         render_budgets.dedup();
         assert!(render_budgets.len() >= 6);
+    }
+
+    #[test]
+    fn metric_source_count_is_explicitly_owned_by_each_profile_budget() {
+        for (profile, expected) in [
+            (ProfileId::EspEmbeddedSdk, 1),
+            (ProfileId::EspStandaloneMemory, 1),
+            (ProfileId::LinuxDeviceStandaloneMemory, 2),
+            (ProfileId::DesktopMacosEmbeddedSdk, 2),
+            (ProfileId::DesktopWindowsEmbeddedSdk, 2),
+            (ProfileId::DesktopMacosStandaloneMemory, 2),
+            (ProfileId::ServerLinuxMemoryGateway, 2),
+            (ProfileId::DesktopMacosDevFull, 2),
+            (ProfileId::DesktopWindowsDevFull, 2),
+            (ProfileId::ServerLinuxDevFull, 2),
+        ] {
+            assert_eq!(
+                compile_runtime_budget(full_resource_compiler_fixture(profile))
+                    .store_budget
+                    .metric_source_max_items,
+                expected,
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_long_term_revision_cap_is_explicitly_profile_owned() {
+        for (profile, expected) in [
+            (ProfileId::EspStandaloneMemory, 4),
+            (ProfileId::EspEmbeddedSdk, 4),
+            (ProfileId::LinuxDeviceStandaloneMemory, 8),
+            (ProfileId::DesktopMacosStandaloneMemory, 16),
+            (ProfileId::DesktopMacosEmbeddedSdk, 8),
+            (ProfileId::DesktopMacosDevFull, 32),
+            (ProfileId::DesktopWindowsEmbeddedSdk, 8),
+            (ProfileId::DesktopWindowsDevFull, 32),
+            (ProfileId::ServerLinuxMemoryGateway, 32),
+            (ProfileId::ServerLinuxDevFull, 32),
+        ] {
+            let ceiling = profile_budget_ceiling(profile)
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner;
+            assert_eq!(ceiling, expected, "{profile:?} retention ceiling drifted");
+            let compiled = compile_runtime_budget(compiler_fixture(profile))
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner;
+            assert!(compiled > 0);
+            assert!(
+                compiled <= expected,
+                "{profile:?} compiled retention cap exceeded its profile ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_skill_scope_and_lineage_caps_are_explicitly_profile_owned() {
+        for (profile, expected_owners, expected_lineage) in [
+            (ProfileId::EspStandaloneMemory, 64, 4),
+            (ProfileId::EspEmbeddedSdk, 16, 4),
+            (ProfileId::LinuxDeviceStandaloneMemory, 256, 8),
+            (ProfileId::DesktopMacosStandaloneMemory, 512, 16),
+            (ProfileId::DesktopMacosEmbeddedSdk, 128, 8),
+            (ProfileId::DesktopMacosDevFull, 2048, 32),
+            (ProfileId::DesktopWindowsEmbeddedSdk, 128, 8),
+            (ProfileId::DesktopWindowsDevFull, 2048, 32),
+            (ProfileId::ServerLinuxMemoryGateway, 1024, 32),
+            (ProfileId::ServerLinuxDevFull, 2048, 32),
+        ] {
+            let ceiling = profile_budget_ceiling(profile).governed_state_budget;
+            assert_eq!(
+                ceiling.max_retained_runtime_skill_owners_per_scope, expected_owners,
+                "{profile:?} runtime skill owner ceiling drifted"
+            );
+            assert_eq!(
+                ceiling.max_runtime_skill_lineage_depth, expected_lineage,
+                "{profile:?} runtime skill lineage ceiling drifted"
+            );
+            let compiled = compile_runtime_budget(compiler_fixture(profile)).governed_state_budget;
+            assert!(compiled.max_retained_runtime_skill_owners_per_scope > 0);
+            assert!(
+                compiled.max_retained_runtime_skill_owners_per_scope <= expected_owners,
+                "{profile:?} compiled runtime skill owner cap exceeded its profile ceiling"
+            );
+            assert!(compiled.max_runtime_skill_lineage_depth > 0);
+            assert!(
+                compiled.max_runtime_skill_lineage_depth <= expected_lineage,
+                "{profile:?} compiled runtime skill lineage cap exceeded its profile ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn governed_state_full_resource_budget_matrix_is_exact_for_all_profiles() {
+        for (profile, expected) in [
+            (
+                ProfileId::EspStandaloneMemory,
+                (16, 16, 4, 64, 4, 8, 16, 8, 2, 4, 8),
+            ),
+            (
+                ProfileId::EspEmbeddedSdk,
+                (2, 4, 4, 16, 4, 2, 2, 4, 2, 2, 2),
+            ),
+            (
+                ProfileId::LinuxDeviceStandaloneMemory,
+                (46, 16, 8, 256, 8, 23, 46, 16, 4, 8, 8),
+            ),
+            (
+                ProfileId::DesktopMacosStandaloneMemory,
+                (78, 16, 16, 512, 16, 39, 78, 32, 8, 16, 8),
+            ),
+            (
+                ProfileId::DesktopMacosEmbeddedSdk,
+                (16, 16, 8, 128, 8, 8, 16, 8, 2, 4, 8),
+            ),
+            (
+                ProfileId::DesktopMacosDevFull,
+                (312, 16, 32, 2048, 32, 156, 312, 64, 16, 32, 8),
+            ),
+            (
+                ProfileId::DesktopWindowsEmbeddedSdk,
+                (16, 16, 8, 128, 8, 8, 16, 8, 2, 4, 8),
+            ),
+            (
+                ProfileId::DesktopWindowsDevFull,
+                (312, 16, 32, 2048, 32, 156, 312, 64, 16, 32, 8),
+            ),
+            (
+                ProfileId::ServerLinuxMemoryGateway,
+                (156, 16, 32, 1024, 32, 78, 156, 32, 8, 16, 8),
+            ),
+            (
+                ProfileId::ServerLinuxDevFull,
+                (312, 16, 32, 2048, 32, 156, 312, 64, 16, 32, 8),
+            ),
+        ] {
+            let budget = compile_runtime_budget(full_resource_compiler_fixture(profile))
+                .governed_state_budget;
+            let actual = (
+                budget.max_validity_joins,
+                budget.max_lineage_depth,
+                budget.max_retained_long_term_revisions_per_owner,
+                budget.max_retained_runtime_skill_owners_per_scope,
+                budget.max_runtime_skill_lineage_depth,
+                budget.max_as_of_candidates,
+                budget.max_obsolete_decisions,
+                budget.max_procedural_candidates,
+                budget.max_premises_per_skill,
+                budget.max_premise_evidence_reads,
+                budget.max_state_transitions_per_write,
+            );
+            assert_eq!(actual, expected, "{profile:?} governed budget drifted");
+        }
     }
 
     #[test]

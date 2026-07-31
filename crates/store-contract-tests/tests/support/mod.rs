@@ -1,39 +1,28 @@
 #![allow(dead_code)]
 
 use bm_core::feature_gate::ProfileId;
-use bm_core::memory::{
-    build_long_term_memory_facet_index_doc as try_build_long_term_memory_facet_index_doc,
-    memory_facet_manifest_key, plan_long_term_memory_upsert, scoped_long_term_memory_storage_key,
-    scoped_memory_facet_owner_storage_key, LongTermMemoryDraft, LongTermMemoryEntry,
-    LongTermMemoryEntryPlan, MemoryFacetIndexDoc, MemoryFacetIndexManifest,
-    MemoryFacetOwnerVersion, MemoryFacetPostingDoc, MemoryFacetPostingRevision,
-    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
+use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryEntry};
+use bm_core::skills::{
+    canonical_runtime_skill_owner_id, canonical_runtime_skill_owner_key,
+    runtime_skill_scope_manifest_key, RuntimeSkillOwnerBinding, RuntimeSkillOwnerRecord,
+    RuntimeSkillScopeManifest,
 };
-use bm_core::platform::Platform;
-use bm_core::skills::{upsert_runtime_skill, RuntimeSkillWrite};
-
-fn build_long_term_memory_facet_index_doc(
-    entry: &LongTermMemoryEntry,
-    memory_space_id: impl Into<String>,
-    subject_ids: Vec<String>,
-    facet_index_revision: u64,
-) -> MemoryFacetIndexDoc {
-    try_build_long_term_memory_facet_index_doc(
-        entry,
-        memory_space_id,
-        subject_ids,
-        facet_index_revision,
-    )
-    .expect("store fixture owner must produce a valid governed facet document")
-}
 #[cfg(feature = "sqlite-store")]
 use bm_sdk::nonproduction_replay_harness::SqliteStoreEngine;
 use bm_sdk::nonproduction_replay_harness::{
-    FileStoreEngine, MemoryStoreEventKind, StoreCapacityBudget, StoreEventScope,
-    StoreJsonPrecondition, StoreMutation, StoreMutationBatch, StorePlatform, StoreRepairReport,
-    StoreSchemaManifest,
+    FileStoreEngine, StoreCapacityBudget, StorePlatform, StoreRepairReport, StoreSchemaManifest,
+    RUNTIME_SKILL_RECORD_NAMESPACE, RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
 };
-use bm_sdk::{Result, StoreBackendConfig};
+use bm_sdk::{
+    GovernedRuntimeSkillWriteInput, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity,
+    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermTarget,
+    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    MemoryWriteRequest, NoopMemoryAuditSink, ParsedLongTermMemoryExtraction, Result,
+    RuntimeLifecycleModeInput, RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendConfig,
+};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 pub fn open_store(config: StoreBackendConfig) -> Result<StorePlatform> {
     StorePlatform::open(config)
@@ -68,7 +57,45 @@ pub fn open_store_in_memory(config: StoreBackendConfig) -> Result<StorePlatform>
     open_store(config)
 }
 
-pub fn seed_runtime_skill(platform: &StorePlatform, name: &str) -> Vec<u8> {
+struct FixedMemoryClock {
+    now_secs: u64,
+}
+
+impl MemoryClock for FixedMemoryClock {
+    fn now_secs(&self) -> u64 {
+        self.now_secs
+    }
+}
+
+fn runtime_for_scope(
+    platform: &StorePlatform,
+    memory_space_id: &str,
+    now_secs: u64,
+) -> MemoryRuntime {
+    let owner_id = memory_space_id
+        .strip_prefix("space:")
+        .filter(|owner_id| !owner_id.is_empty())
+        .expect("store fixture memory space must be canonical space:<owner>");
+    let mounted_subject_id = platform.config().event_scope().subject_id.clone();
+    let runtime = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("store-contract", owner_id).expect("fixture identity"))
+        .subject_id(&mounted_subject_id)
+        .scope(MemoryScope::new("test", "chat-a").expect("fixture scope"))
+        .store(MemoryStoreHandle::from_nonproduction_store_platform(
+            platform.clone(),
+        ))
+        .clock(Arc::new(FixedMemoryClock { now_secs }))
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(NoopMemoryAuditSink))
+        .build()
+        .expect("fixture runtime");
+    assert_eq!(runtime.memory_space_id(), memory_space_id);
+    assert_eq!(runtime.subject_id(), mounted_subject_id);
+    runtime
+}
+
+pub fn seed_runtime_skill(platform: &StorePlatform, name: &str) -> RuntimeSkillOwnerRecord {
     let write = RuntimeSkillWrite {
         name: name.to_string(),
         topic: "store persistence".to_string(),
@@ -80,14 +107,75 @@ pub fn seed_runtime_skill(platform: &StorePlatform, name: &str) -> Vec<u8> {
         source_chat_id: Some("chat-a".to_string()),
         observed_at: 100,
     };
-    assert!(
-        upsert_runtime_skill(platform.skill_storage().as_ref(), &write)
-            .expect("seed typed runtime skill")
+    let runtime = runtime_for_scope(platform, "space:test", 100);
+    let owning_scope = RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: runtime.subject_id().to_string(),
+    };
+    let candidate_ref = format!("store-contract:runtime-skill:{name}");
+    let verification_receipt_digest = format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("{candidate_ref}\n{}\n{}", write.title, write.content).as_bytes())
     );
-    platform
-        .skill_storage()
-        .read(name)
-        .expect("read seeded runtime skill")
+    let creation_ref = RuntimeSkillCreationRef::ReplayPromotion {
+        candidate_ref,
+        verification_receipt_digest,
+    };
+    let report = runtime
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![GovernedRuntimeSkillWriteInput {
+                write,
+                creation_ref: creation_ref.clone(),
+                privacy_class: MemoryPrivacyClass::SharedWithSubject,
+            }],
+            owning_scope: owning_scope.clone(),
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("seed typed runtime skill");
+    assert!(report.accepted);
+    assert_eq!(report.changed, 1);
+    let owner_id =
+        canonical_runtime_skill_owner_id(runtime.memory_space_id(), &owning_scope, &creation_ref)
+            .expect("canonical runtime skill owner id");
+    let owner_key =
+        canonical_runtime_skill_owner_key(runtime.memory_space_id(), &owning_scope, &owner_id)
+            .expect("canonical runtime skill owner key");
+    let docs = platform
+        .read_json_docs_by_keys(RUNTIME_SKILL_RECORD_NAMESPACE, &[owner_key])
+        .expect("read exact typed runtime skill owner");
+    assert_eq!(docs.len(), 1);
+    let owner: RuntimeSkillOwnerRecord =
+        serde_json::from_value(docs[0].value.clone()).expect("decode typed runtime skill owner");
+    assert!(owner.validate_contract().accepted);
+
+    let manifest_key = runtime_skill_scope_manifest_key(runtime.memory_space_id(), &owning_scope)
+        .expect("canonical runtime skill scope manifest key");
+    let manifest_docs = platform
+        .read_json_docs_by_keys(RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE, &[manifest_key])
+        .expect("read exact runtime skill scope manifest");
+    assert_eq!(manifest_docs.len(), 1);
+    let manifest: RuntimeSkillScopeManifest =
+        serde_json::from_value(manifest_docs[0].value.clone())
+            .expect("decode runtime skill scope manifest");
+    manifest
+        .validate_exact(
+            runtime.memory_space_id(),
+            &owning_scope,
+            [RuntimeSkillOwnerBinding::from_record(&owner).expect("runtime skill owner binding")],
+            platform.capacity().kv_max_entries,
+        )
+        .expect("validate exact runtime skill owner closure");
+    owner
+}
+
+pub fn read_runtime_skill_owner(
+    platform: &StorePlatform,
+    physical_key: &str,
+) -> RuntimeSkillOwnerRecord {
+    let docs = platform
+        .read_json_docs_by_keys(RUNTIME_SKILL_RECORD_NAMESPACE, &[physical_key.to_string()])
+        .expect("read typed runtime skill owner by key");
+    assert_eq!(docs.len(), 1);
+    serde_json::from_value(docs[0].value.clone()).expect("decode typed runtime skill owner")
 }
 
 fn runtime_capacity_for_profile(profile: ProfileId) -> Result<StoreCapacityBudget> {
@@ -113,130 +201,38 @@ pub fn seed_scoped_long_term(
     draft: &LongTermMemoryDraft,
     now_secs: u64,
 ) -> LongTermMemoryEntry {
-    let entry = match plan_long_term_memory_upsert(None, draft, now_secs) {
-        LongTermMemoryEntryPlan::Created(entry) => entry,
-        other => panic!("new test owner must be created, got {other:?}"),
-    };
-    let key =
-        scoped_long_term_memory_storage_key(memory_space_id, &entry.id).expect("scoped owner key");
-    let subject_id = "subject:test";
-    let facet = build_long_term_memory_facet_index_doc(
-        &entry,
-        memory_space_id,
-        vec![subject_id.to_string()],
-        1,
-    );
-    let facet_key =
-        scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, &facet.owner_ref)
-            .expect("scoped facet owner key");
-    let owner_version = MemoryFacetOwnerVersion {
-        owner_ref: facet.owner_ref.clone(),
-        owner_revision: entry.owner_revision,
-        facet_index_revision: facet.facet_index_revision,
-    };
-    let posting_keys = facet
-        .posting_keys_for_subject(subject_id)
-        .expect("facet posting keys");
-    let mut mutations = vec![
-        StoreMutation::PutJson {
-            namespace: "long_term".to_string(),
-            key: key.clone(),
-            value: serde_json::to_value(&entry).expect("serialize owner"),
-            event_kind: MemoryStoreEventKind::MemoryWrite,
-            plane: "long_term".to_string(),
-            record_key: entry.id.clone(),
-        },
-        StoreMutation::PutJson {
-            namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-            key: facet_key.clone(),
-            value: serde_json::to_value(&facet).expect("serialize facet owner"),
-            event_kind: MemoryStoreEventKind::MemoryWrite,
-            plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-            record_key: format!(
-                "facet-owner:{}:{}",
-                facet.owner_ref.owner_plane.as_str(),
-                facet.owner_ref.owner_id
-            ),
-        },
-    ];
-    let mut preconditions = vec![
-        StoreJsonPrecondition::Absent {
-            namespace: "long_term".to_string(),
-            key: key.clone(),
-        },
-        StoreJsonPrecondition::Absent {
-            namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-            key: facet_key.clone(),
-        },
-    ];
-    let manifest_key =
-        memory_facet_manifest_key(memory_space_id, subject_id).expect("facet manifest key");
-    if !posting_keys.is_empty() {
-        for posting_key in &posting_keys {
-            let posting = MemoryFacetPostingDoc {
-                schema_version: MEMORY_FACET_SCHEMA_VERSION,
-                memory_space_id: memory_space_id.to_string(),
-                subject_id: subject_id.to_string(),
-                posting_key: posting_key.clone(),
-                revision: 1,
-                owner_versions: vec![owner_version.clone()],
-            };
-            mutations.push(StoreMutation::PutJson {
-                namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                key: posting_key.clone(),
-                value: serde_json::to_value(posting).expect("serialize posting"),
-                event_kind: MemoryStoreEventKind::MemoryWrite,
-                plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                record_key: posting_key.clone(),
-            });
-            preconditions.push(StoreJsonPrecondition::Absent {
-                namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                key: posting_key.clone(),
-            });
-        }
-        let manifest = MemoryFacetIndexManifest {
-            schema_version: MEMORY_FACET_SCHEMA_VERSION,
-            memory_space_id: memory_space_id.to_string(),
-            subject_id: subject_id.to_string(),
-            owner_doc_count: 1,
-            posting_doc_count: posting_keys.len(),
-            revision: 1,
-            owner_versions: vec![owner_version],
-            posting_revisions: posting_keys
-                .iter()
-                .map(|posting_key| MemoryFacetPostingRevision {
-                    posting_key: posting_key.clone(),
-                    revision: 1,
-                })
-                .collect(),
-        };
-        mutations.push(StoreMutation::PutJson {
-            namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-            key: manifest_key.clone(),
-            value: serde_json::to_value(manifest).expect("serialize facet manifest"),
-            event_kind: MemoryStoreEventKind::MemoryWrite,
-            plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-            record_key: manifest_key.clone(),
-        });
-        preconditions.push(StoreJsonPrecondition::Absent {
-            namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-            key: manifest_key,
-        });
-    }
-    platform
-        .commit_governed_memory_transaction_with_preconditions(
-            StoreMutationBatch {
-                transaction_id: format!("test-seed-{}", entry.id),
-                operation: "test.seed_scoped_long_term".to_string(),
-                scope: StoreEventScope::system("test.seed_scoped_long_term")
-                    .with_memory_space(memory_space_id)
-                    .with_subject(subject_id),
-                mutations,
+    let runtime = runtime_for_scope(platform, memory_space_id, now_secs);
+    let report = runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![draft.clone()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
             },
-            &preconditions,
+        })
+        .expect("seed scoped long-term owner");
+    assert!(report.accepted);
+    assert_eq!(report.changed, 1);
+    let entries = platform
+        .scoped_long_term_memory_read_store(
+            memory_space_id,
+            &platform.config().event_scope().subject_id,
         )
-        .expect("seed scoped owner transaction");
-    entry
+        .expect("scoped long-term read store")
+        .list(usize::MAX)
+        .expect("list seeded long-term owners");
+    entries
+        .iter()
+        .find(|entry| entry.content == draft.content)
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "seeded long-term owner missing from {memory_space_id}; expected topic={:?} content={:?}; actual={entries:#?}",
+                draft.topic, draft.content
+            )
+        })
 }
 
 pub fn delete_scoped_long_term(
@@ -244,125 +240,20 @@ pub fn delete_scoped_long_term(
     memory_space_id: &str,
     entry: &LongTermMemoryEntry,
 ) {
-    let key =
-        scoped_long_term_memory_storage_key(memory_space_id, &entry.id).expect("scoped owner key");
-    let value = serde_json::to_value(entry).expect("serialize owner");
-    let subject_id = "subject:test";
-    let facet = build_long_term_memory_facet_index_doc(
-        entry,
+    let runtime = runtime_for_scope(
+        platform,
         memory_space_id,
-        vec![subject_id.to_string()],
-        1,
+        entry.updated_at.saturating_add(1),
     );
-    let facet_key =
-        scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, &facet.owner_ref)
-            .expect("scoped facet owner key");
-    let facet_value = serde_json::to_value(&facet).expect("serialize facet owner");
-    let owner_version = MemoryFacetOwnerVersion {
-        owner_ref: facet.owner_ref.clone(),
-        owner_revision: entry.owner_revision,
-        facet_index_revision: facet.facet_index_revision,
-    };
-    let posting_keys = facet
-        .posting_keys_for_subject(subject_id)
-        .expect("facet posting keys");
-    let mut mutations = vec![
-        StoreMutation::DeleteJson {
-            namespace: "long_term".to_string(),
-            key: key.clone(),
-            event_kind: MemoryStoreEventKind::MemoryDelete,
-            plane: "long_term".to_string(),
-            record_key: entry.id.clone(),
-        },
-        StoreMutation::DeleteJson {
-            namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-            key: facet_key.clone(),
-            event_kind: MemoryStoreEventKind::MemoryDelete,
-            plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-            record_key: format!(
-                "facet-owner:{}:{}",
-                facet.owner_ref.owner_plane.as_str(),
-                facet.owner_ref.owner_id
-            ),
-        },
-    ];
-    let mut preconditions = vec![
-        StoreJsonPrecondition::Exact {
-            namespace: "long_term".to_string(),
-            key: key.clone(),
-            value,
-        },
-        StoreJsonPrecondition::Exact {
-            namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-            key: facet_key.clone(),
-            value: facet_value,
-        },
-    ];
-    let manifest_key =
-        memory_facet_manifest_key(memory_space_id, subject_id).expect("facet manifest key");
-    if !posting_keys.is_empty() {
-        for posting_key in &posting_keys {
-            let posting = MemoryFacetPostingDoc {
-                schema_version: MEMORY_FACET_SCHEMA_VERSION,
-                memory_space_id: memory_space_id.to_string(),
-                subject_id: subject_id.to_string(),
-                posting_key: posting_key.clone(),
-                revision: 1,
-                owner_versions: vec![owner_version.clone()],
-            };
-            mutations.push(StoreMutation::DeleteJson {
-                namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                key: posting_key.clone(),
-                event_kind: MemoryStoreEventKind::MemoryDelete,
-                plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                record_key: posting_key.clone(),
-            });
-            preconditions.push(StoreJsonPrecondition::Exact {
-                namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                key: posting_key.clone(),
-                value: serde_json::to_value(posting).expect("serialize posting"),
-            });
-        }
-        let manifest = MemoryFacetIndexManifest {
-            schema_version: MEMORY_FACET_SCHEMA_VERSION,
-            memory_space_id: memory_space_id.to_string(),
-            subject_id: subject_id.to_string(),
-            owner_doc_count: 1,
-            posting_doc_count: posting_keys.len(),
-            revision: 1,
-            owner_versions: vec![owner_version],
-            posting_revisions: posting_keys
-                .iter()
-                .map(|posting_key| MemoryFacetPostingRevision {
-                    posting_key: posting_key.clone(),
-                    revision: 1,
-                })
-                .collect(),
-        };
-        mutations.push(StoreMutation::DeleteJson {
-            namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-            key: manifest_key.clone(),
-            event_kind: MemoryStoreEventKind::MemoryDelete,
-            plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-            record_key: manifest_key.clone(),
-        });
-        preconditions.push(StoreJsonPrecondition::Exact {
-            namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-            key: manifest_key,
-            value: serde_json::to_value(manifest).expect("serialize facet manifest"),
-        });
-    }
-    platform
-        .commit_governed_memory_transaction_with_preconditions(
-            StoreMutationBatch {
-                transaction_id: format!("test-delete-{}", entry.id),
-                operation: "test.delete_scoped_long_term".to_string(),
-                scope: StoreEventScope::system("test.delete_scoped_long_term")
-                    .with_memory_space(memory_space_id)
-                    .with_subject(subject_id),
-                mutations,
+    let report = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Delete {
+                target: MemoryLongTermTarget::RecordId(entry.id.clone()),
             },
-            &preconditions,
-        )
-        .expect("delete scoped owner transaction");
+            reason: "store contract scoped deletion".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("delete scoped long-term owner");
+    assert!(report.accepted);
 }

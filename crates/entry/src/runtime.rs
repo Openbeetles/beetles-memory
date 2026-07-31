@@ -10,20 +10,20 @@ use bm_adapter::{
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_replay::{load_memory_benchmark_fixture_dir, run_memory_benchmark_wall};
 use bm_sdk::{
-    resolve_memory_capabilities, AgentSkillDirConfig, Error, MemoryCapabilityPolicy,
-    MemoryCloseRequest, MemoryFacetRecallIndexReport, MemoryIdentity, MemoryInspectionRequest,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemorySpaceExportRequest, MemorySpaceMigratePreviewRequest, MemorySpacePrivateMaterialPolicy,
-    MemorySpaceScope, MemoryStoreHandle, NoopMemoryAuditSink, PressureLevel, ProfileId, Result,
-    RuntimeBudgetLease, RuntimeBudgetReport, RuntimeLifecycleModeInput, RuntimeSkillDeleteRequest,
-    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListRequest,
-    RuntimeSkillSetEnabledRequest, StoreBackendConfig, StoreOpenReport, WorkbenchApiMap,
-    WorkbenchSurface,
+    default_agent_subject_id, resolve_memory_capabilities, AgentSkillDirConfig, Error,
+    MemoryArchiveScope, MemoryCapabilityPolicy, MemoryCloseRequest, MemoryFacetRecallIndexReport,
+    MemoryIdentity, MemoryInspectionRequest, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemorySpaceExportRequest,
+    MemorySpacePrivateMaterialPolicy, MemoryStoreHandle, NoopMemoryAuditSink, PressureLevel,
+    ProfileId, Result, RuntimeBudgetLease, RuntimeBudgetReport, RuntimeLifecycleModeInput,
+    RuntimeMetricsQuery, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
+    RuntimeSkillListRequest, RuntimeSkillOwnerLocator, RuntimeSkillOwningScope,
+    RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest, StoreBackendConfig, StoreOpenReport,
+    WorkbenchApiMap, WorkbenchSurface,
 };
 use sha2::{Digest, Sha256};
 
 use crate::config::{enabled_capability_policy, privacy_policy};
-use crate::console::EntryConsoleTelemetrySnapshot;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::EntryConsoleMemoryBenchmarkReport;
 use crate::{
@@ -32,12 +32,12 @@ use crate::{
     EntryConsoleRuntimeSkillEdit, EntryConsoleSession, EntryConsoleSkillDetail,
     EntryConsoleSkillList, EntryConsoleSkillMutation, EntryConsoleSkillSetEnabled,
     EntryConsoleState, EntryConsoleTransport, EntryConsoleTransportUpdate,
-    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchFacetInspector,
-    EntryConsoleWorkbenchProceduralEvolution, EntryConsoleWorkbenchProjectionInspector,
-    EntryConsoleWorkbenchRecallInspector, EntryConsoleWorkbenchReport,
-    EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth, EntryConsoleWorkbenchStatus,
-    EntryConsoleWorkbenchVaultMigration, EntryIdempotencyCache, EntryIdempotencyConfig,
-    EntryIdentity, EntryResponse, EntryScope, EntryTransportConfig, EntryTransportContext,
+    EntryConsoleWorkbenchArchiveRestore, EntryConsoleWorkbenchBenchmarkWall,
+    EntryConsoleWorkbenchFacetInspector, EntryConsoleWorkbenchProceduralEvolution,
+    EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
+    EntryConsoleWorkbenchReport, EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth,
+    EntryConsoleWorkbenchStatus, EntryIdempotencyCache, EntryIdempotencyConfig, EntryIdentity,
+    EntryResponse, EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 
 const FACET_AUDIT_MARKDOWN_FORMAT: &str = "obsidian-style-facet-audit-markdown";
@@ -317,6 +317,12 @@ impl EntryRuntimeBudgetLease {
 }
 
 impl EntryRuntime {
+    fn runtime_skill_subject_scope(&self) -> RuntimeSkillOwningScope {
+        RuntimeSkillOwningScope::Subject {
+            mounted_subject_id: default_agent_subject_id(&self.config.identity.agent_id),
+        }
+    }
+
     pub fn open(config: EntryRuntimeConfig) -> Result<Self> {
         let factory = EntryRuntimeFactory::open(config.base_config())?;
         factory.runtime_for_scope(config.runtime_scope())
@@ -444,25 +450,29 @@ impl EntryRuntime {
         self.store.open_report()
     }
 
-    pub fn console_overview(&self) -> EntryConsoleOverview {
+    pub fn console_overview(&self) -> Result<EntryConsoleOverview> {
         self.console_overview_with_event_store_paths(&[])
     }
 
     pub fn console_overview_with_event_store_paths(
         &self,
         event_store_paths: &[PathBuf],
-    ) -> EntryConsoleOverview {
-        let telemetry = self.console_telemetry_snapshot(event_store_paths);
-        let deferred_governance = self
-            .runtime
-            .deferred_governance_report()
-            .unwrap_or_default();
+    ) -> Result<EntryConsoleOverview> {
+        const SECS_PER_DAY: u64 = 24 * 60 * 60;
+        let today_start = (self.accepted_at() / SECS_PER_DAY) * SECS_PER_DAY;
+        let metrics = self.runtime.runtime_metrics_report_with_file_stores(
+            RuntimeMetricsQuery {
+                write_since_unix_secs: Some(today_start),
+            },
+            event_store_paths,
+        )?;
+        let deferred_governance = self.runtime.deferred_governance_report()?;
         let runtime_budget = self.runtime_budget();
-        self.console.overview_with_telemetry_and_budget(
-            telemetry,
+        Ok(self.console.overview_with_runtime_metrics_and_budget(
+            &metrics,
             &runtime_budget,
             deferred_governance,
-        )
+        ))
     }
 
     pub fn console_workbench_api_map(&self) -> WorkbenchApiMap {
@@ -504,8 +514,8 @@ impl EntryRuntime {
                     private_raw_allowed: false,
                 },
                 WorkbenchSurface {
-                    surface_id: "vault_migration".to_string(),
-                    report_api: "sdk.vault.redaction_preflight".to_string(),
+                    surface_id: "archive_restore".to_string(),
+                    report_api: "sdk.archive.typed_scope_root".to_string(),
                     private_raw_allowed: false,
                 },
             ],
@@ -530,7 +540,7 @@ impl EntryRuntime {
             facet_inspector: self.console_workbench_facet_inspector(),
             projection_inspector: self.console_workbench_projection_inspector(),
             procedural_evolution: self.console_workbench_procedural_evolution(),
-            vault_migration: self.console_workbench_vault_migration(),
+            archive_restore: self.console_workbench_archive_restore(),
             soul_health: self.console_workbench_soul_health(),
         }
     }
@@ -577,6 +587,7 @@ impl EntryRuntime {
     fn console_workbench_recall_inspector(&self) -> EntryConsoleWorkbenchRecallInspector {
         let query = "workbench memory inspection".to_string();
         match self.runtime.recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: query.clone(),
             limit: 6,
@@ -593,7 +604,11 @@ impl EntryRuntime {
                 EntryConsoleWorkbenchRecallInspector {
                     status: EntryConsoleWorkbenchStatus::ready("sdk_recall_report_available"),
                     query,
-                    procedural_hits: report.procedural_hits.len(),
+                    procedural_delivery_reports: report
+                        .procedural_delivery_reports
+                        .iter()
+                        .filter(|delivery| delivery.selected)
+                        .count(),
                     runtime_skill_selected: report.working.runtime_skill_report.selected_count,
                     working_selected_surfaces,
                     graph_nodes: report.graph_gate.nodes,
@@ -613,7 +628,7 @@ impl EntryRuntime {
             Err(error) => EntryConsoleWorkbenchRecallInspector {
                 status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
                 query,
-                procedural_hits: 0,
+                procedural_delivery_reports: 0,
                 runtime_skill_selected: 0,
                 working_selected_surfaces: 0,
                 graph_nodes: 0,
@@ -633,6 +648,7 @@ impl EntryRuntime {
     fn console_workbench_facet_inspector(&self) -> EntryConsoleWorkbenchFacetInspector {
         let query = "workbench facet index inspection".to_string();
         match self.runtime.recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query,
             limit: 6,
@@ -690,6 +706,7 @@ impl EntryRuntime {
         match project_adapter_report(
             &self.runtime,
             MemoryProjectionRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: query.clone(),
                 system_max_len: runtime_budget
@@ -750,6 +767,7 @@ impl EntryRuntime {
 
     fn console_workbench_procedural_evolution(&self) -> EntryConsoleWorkbenchProceduralEvolution {
         match self.runtime.list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: self.runtime_skill_subject_scope(),
             query: None,
             include_disabled: true,
             include_retired: true,
@@ -766,7 +784,8 @@ impl EntryRuntime {
                     .into_iter()
                     .take(5)
                     .map(|skill| EntryConsoleWorkbenchSkillRef {
-                        name: skill.name,
+                        locator: skill.locator,
+                        owner_id: skill.owner_id,
                         title: skill.title,
                         topic: skill.topic,
                         status: skill.status,
@@ -785,97 +804,26 @@ impl EntryRuntime {
         }
     }
 
-    fn console_workbench_vault_migration(&self) -> EntryConsoleWorkbenchVaultMigration {
-        let source_memory_space_id = self.runtime.memory_space_id().to_string();
-        let target_memory_space_id = format!("{source_memory_space_id}-vault-preview");
-        let source_scope = MemorySpaceScope {
-            memory_space_id: source_memory_space_id.clone(),
-            mounted_subject_id: self.runtime.subject_id().to_string(),
-        };
-        let target_scope = MemorySpaceScope {
-            memory_space_id: target_memory_space_id.clone(),
-            mounted_subject_id: self.runtime.subject_id().to_string(),
-        };
+    fn console_workbench_archive_restore(&self) -> EntryConsoleWorkbenchArchiveRestore {
+        let scope =
+            MemoryArchiveScope::subject(self.runtime.memory_space_id(), self.runtime.subject_id())
+                .expect("validated runtime identity must form a Subject archive scope");
+        let private_material_policy = MemorySpacePrivateMaterialPolicy::ExcludePrivate;
         match self.runtime.export_memory_space(MemorySpaceExportRequest {
-            scope: source_scope.clone(),
-            include_private: false,
+            scope: scope.clone(),
+            private_material_policy,
         }) {
-            Ok(export) => {
-                let preview =
-                    self.runtime
-                        .preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-                            source_scope,
-                            target_scope,
-                            expected_private_material_policy:
-                                MemorySpacePrivateMaterialPolicy::ExcludePrivate,
-                            source_profile: self.runtime_budget().profile,
-                            target_profile: self.runtime_budget().profile,
-                            archive: export.archive,
-                        });
-                match preview {
-                    Ok(report) => {
-                        let status = if report.vault_preflight.passed {
-                            EntryConsoleWorkbenchStatus::ready("vault_migration_preflight_passed")
-                        } else {
-                            EntryConsoleWorkbenchStatus::limited(
-                                "vault_migration_preflight_blocked",
-                            )
-                        };
-                        let mut preflight_failures = vault_preflight_failures(
-                            report.vault_preflight.schema_allowed,
-                            report.vault_preflight.capability_allowed,
-                            report.vault_preflight.privacy_allowed,
-                            report.vault_preflight.lineage_allowed,
-                        );
-                        if report.manifest.identity_remap.required
-                            && !report.manifest.identity_remap.applied
-                        {
-                            preflight_failures.push(report.manifest.identity_remap.reason.clone());
-                        }
-                        EntryConsoleWorkbenchVaultMigration {
-                            status,
-                            source_memory_space_id,
-                            target_memory_space_id,
-                            json_docs: report.json_docs,
-                            blobs: report.blobs,
-                            events: report.events,
-                            privacy_redactions: report.privacy_redactions,
-                            loss_risk: report.loss_risk,
-                            preflight_passed: report.vault_preflight.passed,
-                            preflight_failures,
-                            snapshot_fingerprint: report.state_fingerprint,
-                            event_fingerprint: report.event_fingerprint,
-                        }
-                    }
-                    Err(error) => EntryConsoleWorkbenchVaultMigration {
-                        status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
-                        source_memory_space_id,
-                        target_memory_space_id,
-                        json_docs: 0,
-                        blobs: 0,
-                        events: 0,
-                        privacy_redactions: 0,
-                        loss_risk: false,
-                        preflight_passed: false,
-                        preflight_failures: Vec::new(),
-                        snapshot_fingerprint: String::new(),
-                        event_fingerprint: String::new(),
-                    },
-                }
-            }
-            Err(error) => EntryConsoleWorkbenchVaultMigration {
+            Ok(export) => EntryConsoleWorkbenchArchiveRestore {
+                status: EntryConsoleWorkbenchStatus::ready("typed_archive_export_ready"),
+                scope,
+                private_material_policy,
+                archive_root: Some(export.archive.root().clone()),
+            },
+            Err(error) => EntryConsoleWorkbenchArchiveRestore {
                 status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
-                source_memory_space_id,
-                target_memory_space_id,
-                json_docs: 0,
-                blobs: 0,
-                events: 0,
-                privacy_redactions: 0,
-                loss_risk: false,
-                preflight_passed: false,
-                preflight_failures: Vec::new(),
-                snapshot_fingerprint: String::new(),
-                event_fingerprint: String::new(),
+                scope,
+                private_material_policy,
+                archive_root: None,
             },
         }
     }
@@ -975,8 +923,17 @@ impl EntryRuntime {
     }
 
     pub fn console_skills(&self, query: Option<String>) -> Result<EntryConsoleSkillList> {
+        self.console_skills_in_scope(self.runtime_skill_subject_scope(), query)
+    }
+
+    pub fn console_skills_in_scope(
+        &self,
+        owning_scope: RuntimeSkillOwningScope,
+        query: Option<String>,
+    ) -> Result<EntryConsoleSkillList> {
         self.runtime
             .list_runtime_skills(RuntimeSkillListRequest {
+                owning_scope,
                 query,
                 include_disabled: true,
                 include_retired: true,
@@ -985,31 +942,25 @@ impl EntryRuntime {
             .map(Into::into)
     }
 
-    pub fn console_skill_detail(&self, name: &str) -> Result<Option<EntryConsoleSkillDetail>> {
-        match self.runtime.get_runtime_skill(RuntimeSkillDetailRequest {
-            name: name.to_string(),
-        }) {
-            Ok(report) => Ok(Some(report.into())),
-            Err(error) if error.stage() == "skill_detail" => Ok(None),
-            Err(error) => Err(error),
-        }
+    pub fn console_skill_detail(
+        &self,
+        locator: RuntimeSkillOwnerLocator,
+    ) -> Result<EntryConsoleSkillDetail> {
+        self.runtime
+            .get_runtime_skill(RuntimeSkillDetailRequest { locator })
+            .map(Into::into)
     }
 
     pub fn console_edit_runtime_skill(
         &self,
-        name: &str,
         payload: EntryConsoleRuntimeSkillEdit,
     ) -> Result<EntryConsoleSkillMutation> {
         let report = self.runtime.edit_runtime_skill(RuntimeSkillEditRequest {
-            name: name.to_string(),
+            locator: payload.locator,
             title: payload.title,
             topic: payload.topic,
             summary: payload.summary,
             procedure: payload.procedure,
-            citations: payload.citations,
-            source_chat_id: payload
-                .source_chat_id
-                .or_else(|| Some(self.config.scope.chat_id.clone())),
             edit_reason: payload
                 .edit_reason
                 .unwrap_or_else(|| "operator_runtime_skill_edit".to_string()),
@@ -1018,58 +969,52 @@ impl EntryRuntime {
         let mutation: EntryConsoleSkillMutation = report.into();
         if mutation.accepted {
             self.console
-                .record_skill_mutation(&mutation.name, "updated");
+                .record_skill_mutation(&mutation.owner_id, "updated");
         }
         Ok(mutation)
     }
 
     pub fn console_set_skill_enabled(
         &self,
-        name: &str,
         payload: EntryConsoleSkillSetEnabled,
-    ) -> Result<Option<EntryConsoleSkillMutation>> {
-        match self
+    ) -> Result<EntryConsoleSkillMutation> {
+        let report = self
             .runtime
             .set_runtime_skill_enabled(RuntimeSkillSetEnabledRequest {
-                name: name.to_string(),
+                locator: payload.locator,
                 enabled: payload.enabled,
-            }) {
-            Ok(report) => {
-                let mutation: EntryConsoleSkillMutation = report.into();
-                if mutation.accepted {
-                    self.console.record_skill_mutation(
-                        &mutation.name,
-                        if payload.enabled {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        },
-                    );
-                }
-                Ok(Some(mutation))
-            }
-            Err(error) if error.stage() == "skill_set_enabled" => Ok(None),
-            Err(error) => Err(error),
+                observed_at: self.accepted_at(),
+            })?;
+        let mutation: EntryConsoleSkillMutation = report.into();
+        if mutation.accepted {
+            self.console.record_skill_mutation(
+                &mutation.owner_id,
+                if payload.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+            );
         }
+        Ok(mutation)
     }
 
-    pub fn console_delete_skill(&self, name: &str) -> Result<Option<EntryConsoleSkillMutation>> {
-        match self
+    pub fn console_retire_skill(
+        &self,
+        locator: RuntimeSkillOwnerLocator,
+    ) -> Result<EntryConsoleSkillMutation> {
+        let report = self
             .runtime
-            .delete_runtime_skill(RuntimeSkillDeleteRequest {
-                name: name.to_string(),
-            }) {
-            Ok(report) => {
-                let mutation: EntryConsoleSkillMutation = report.into();
-                if mutation.accepted {
-                    self.console
-                        .record_skill_mutation(&mutation.name, "deleted");
-                }
-                Ok(Some(mutation))
-            }
-            Err(error) if error.stage() == "skill_delete" => Ok(None),
-            Err(error) => Err(error),
+            .retire_runtime_skill(RuntimeSkillRetireRequest {
+                locator,
+                observed_at: self.accepted_at(),
+            })?;
+        let mutation: EntryConsoleSkillMutation = report.into();
+        if mutation.accepted {
+            self.console
+                .record_skill_mutation(&mutation.owner_id, "retired");
         }
+        Ok(mutation)
     }
 
     pub fn handle(
@@ -1257,19 +1202,6 @@ impl EntryRuntime {
             .record_adapter_response(operation, &response.adapter);
         Ok(response)
     }
-
-    fn console_telemetry_snapshot(
-        &self,
-        event_store_paths: &[PathBuf],
-    ) -> EntryConsoleTelemetrySnapshot {
-        const SECS_PER_DAY: u64 = 24 * 60 * 60;
-        let today_start = (self.accepted_at() / SECS_PER_DAY) * SECS_PER_DAY;
-        let report = self
-            .store
-            .telemetry_report_with_file_stores(event_store_paths, today_start)
-            .unwrap_or_default();
-        EntryConsoleTelemetrySnapshot::from_store_telemetry(report)
-    }
 }
 
 fn agent_skill_dirs_from_env() -> Vec<AgentSkillDirConfig> {
@@ -1283,28 +1215,6 @@ fn agent_skill_dirs_from_env() -> Vec<AgentSkillDirConfig> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn vault_preflight_failures(
-    schema_allowed: bool,
-    capability_allowed: bool,
-    privacy_allowed: bool,
-    lineage_allowed: bool,
-) -> Vec<String> {
-    let mut failures = Vec::new();
-    if !schema_allowed {
-        failures.push("schema_not_allowed".to_string());
-    }
-    if !capability_allowed {
-        failures.push("capability_not_allowed".to_string());
-    }
-    if !privacy_allowed {
-        failures.push("privacy_not_allowed".to_string());
-    }
-    if !lineage_allowed {
-        failures.push("lineage_not_allowed".to_string());
-    }
-    failures
 }
 
 fn facet_audit_markdown_preview(

@@ -1120,6 +1120,8 @@ fn same_owner_id_does_not_collide_across_long_term_and_evidence_document_planes(
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -1147,7 +1149,7 @@ fn same_owner_id_does_not_collide_across_long_term_and_evidence_document_planes(
         .expect("create long-term owner");
     let shared_owner_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store(MEMORY_SPACE_ID)
+        .scoped_long_term_memory_read_store(MEMORY_SPACE_ID, "agent:agent-main")
         .expect("long-term store")
         .list(8)
         .expect("long-term owners")
@@ -1214,6 +1216,7 @@ fn recall_decision_and_capsule_preserve_evidence_owner_and_block_shared_fact_sur
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "zephyr quartz governed owner".to_string(),
             limit: 8,
             structured_query_facets: Vec::new(),
@@ -1250,6 +1253,8 @@ fn recall_snapshot_keeps_long_term_and_evidence_typed_owner_bindings_consistent(
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -1294,6 +1299,7 @@ fn recall_snapshot_keeps_long_term_and_evidence_typed_owner_bindings_consistent(
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "aurelia basalt owner binding".to_string(),
             limit: 8,
             structured_query_facets: Vec::new(),
@@ -1363,6 +1369,8 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
         .expect("seed evidence owner");
     reader
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -1403,6 +1411,8 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
         for index in 0..16_u64 {
             runtime
                 .write(MemoryWriteRequest::LongTermExtraction {
+                    governed_skill_writes: Vec::new(),
+                    runtime_skill_owning_scope: None,
                     extraction: ParsedLongTermMemoryExtraction {
                         upserts: vec![LongTermMemoryDraft {
                             kind: LongTermMemoryKind::Project,
@@ -1449,6 +1459,7 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
     for _ in 0..64 {
         let recall = reader
             .recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 query: "vermilion mica immutable snapshot".to_string(),
                 limit: 8,
                 structured_query_facets: Vec::new(),
@@ -1464,7 +1475,7 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
 }
 
 #[test]
-fn projection_and_digest_bind_evidence_capsule_to_the_same_typed_owner() {
+fn projection_exposes_only_safe_delivery_counts_for_typed_evidence_owner() {
     let platform = empty_store_platform(support::host_test_profile());
     let runtime = test_runtime_with_scope(
         platform,
@@ -1487,6 +1498,7 @@ fn projection_and_digest_bind_evidence_capsule_to_the_same_typed_owner() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "orchid tungsten typed evidence owner".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 4,
@@ -1496,47 +1508,21 @@ fn projection_and_digest_bind_evidence_capsule_to_the_same_typed_owner() {
             tool_registry_refs: Vec::new(),
         })
         .expect("project evidence owner");
-    let expected = owner_ref(document_id);
-    let capsule = projection
-        .recall_delivery_report
-        .rendered_capsules
-        .iter()
-        .find(|capsule| capsule.owner_ref == expected)
-        .expect("evidence capsule");
-    let block = projection
-        .runtime_projection
-        .governed_memory_evidence
-        .iter()
-        .find(|block| block.source_id == capsule.candidate_id)
-        .expect("governed evidence block");
-    assert_eq!(block.owner_ref.as_ref(), Some(&expected));
-    for entry in projection
-        .delivery_digest_manifest
-        .capsule_entries
-        .iter()
-        .chain(
-            projection
-                .delivery_digest_manifest
-                .governed_block_entries
-                .iter(),
-        )
-        .chain(
-            projection
-                .delivery_digest_manifest
-                .prompt_visible_entries
-                .iter(),
-        )
-        .filter(|entry| entry.candidate_id == capsule.candidate_id)
-    {
-        assert_eq!(entry.owner_ref, expected);
-    }
-    let receipt = projection
-        .delivery_digest_manifest
-        .candidate_receipts
-        .iter()
-        .find(|receipt| receipt.candidate_id == capsule.candidate_id)
-        .expect("candidate receipt");
-    assert_eq!(receipt.owner_ref, expected);
+    assert!(projection
+        .provider_payload()
+        .system_memory_block()
+        .contains("Orchid tungsten projection receipts bind typed evidence owners."));
+    assert_eq!(projection.report().recall_delivery().selected_count, 1);
+    assert_eq!(projection.report().recall_delivery().rendered_count, 1);
+    assert!(projection
+        .report()
+        .recall_delivery()
+        .integrity_failures
+        .is_empty());
+    assert!(!projection
+        .report()
+        .ui_api_projection()
+        .contains(document_id));
 }
 
 #[test]

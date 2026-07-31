@@ -11,7 +11,9 @@ use bm_core::memory::{
     TranscriptRepairIssueKind, TranscriptReplayView, TranscriptTurnRecord,
 };
 use bm_core::platform::Platform;
-use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StoreEventScope};
+use bm_sdk::nonproduction_replay_harness::{
+    StoreBackendConfig, StoreCapacityBudget, StoreEventScope,
+};
 use serde_json::json;
 
 fn temp_root(name: &str) -> std::path::PathBuf {
@@ -93,6 +95,28 @@ fn model_usage_attr(
         }],
         created_at: 1_800_000_010,
         updated_at: 1_800_000_010,
+    }
+}
+
+fn derived_ref_for_turn(
+    key: &ConversationKey,
+    turn_id: &str,
+    message_id: &str,
+) -> DerivedMemoryRef {
+    DerivedMemoryRef {
+        plane: DerivedMemoryPlane::LongTerm,
+        store_key: format!("long_term:{turn_id}"),
+        subject_id: Some("subject-store".to_string()),
+        source: TranscriptEvidenceRef {
+            memory_space_id: key.memory_space_id.clone(),
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            turn_id: turn_id.to_string(),
+            message_id: Some(message_id.to_string()),
+            subject_id: Some("subject-store".to_string()),
+            authority: Some(MemoryEvidenceAuthority::UserAsserted),
+        },
+        created_at: 1_800_000_010,
     }
 }
 
@@ -209,6 +233,261 @@ fn conversation_manifest_isolates_identical_conversation_and_turn_ids_by_subject
 }
 
 #[test]
+fn transcript_append_materializes_bounded_head_and_pages() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+
+    for sequence in 1..=65 {
+        let mut record = transcript_record(
+            &key,
+            &format!("turn-{sequence:04}"),
+            &format!("message {sequence}"),
+        );
+        record.sequence = sequence;
+        store.append_turn(&record).unwrap();
+    }
+
+    let snapshot = platform.export_store_snapshot().unwrap();
+    let head = snapshot
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "conversation_recall_manifests")
+        .expect("typed conversation transcript head");
+    assert_eq!(head.value["turn_count"], json!(65));
+    assert_eq!(head.value["last_sequence"], json!(65));
+    assert_eq!(head.value["page_count"], json!(2));
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "conversation_transcript_pages")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn transcript_append_and_tail_read_scale_past_legacy_manifest_ceiling() {
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .unwrap()
+    .try_with_nonproduction_store_budget_limit(StoreCapacityBudget::full().into_runtime_budget())
+    .unwrap();
+    let platform = support::open_store_in_memory(config).unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-scale", "llm.gateway", "conversation-store").unwrap();
+
+    for sequence in 1..=1_000 {
+        let mut record = transcript_record(
+            &key,
+            &format!("turn-{sequence:04}"),
+            &format!("message {sequence}"),
+        );
+        record.sequence = sequence;
+        let report = store.append_turn(&record).unwrap();
+        assert_eq!(report.sequence, sequence);
+        assert_eq!(report.after_count, sequence as usize);
+    }
+
+    let tail = store.list_turns(&key, "subject-store", 10).unwrap();
+    assert_eq!(tail.len(), 10);
+    assert_eq!(tail.first().unwrap().sequence, 991);
+    assert_eq!(tail.last().unwrap().sequence, 1_000);
+}
+
+#[test]
+fn transcript_tail_and_forward_page_do_not_read_unrelated_history_pages() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    for sequence in 1..=130 {
+        let mut record = transcript_record(
+            &key,
+            &format!("turn-{sequence:04}"),
+            &format!("message {sequence}"),
+        );
+        record.sequence = sequence;
+        store.append_turn(&record).unwrap();
+    }
+    let first_doc = platform
+        .export_store_snapshot()
+        .unwrap()
+        .json_docs
+        .into_iter()
+        .find(|doc| {
+            doc.namespace == "conversation_transcript" && doc.value["turn_id"] == json!("turn-0001")
+        })
+        .expect("first transcript owner");
+    let first_key = first_doc.key;
+    let mut corrupt = first_doc.value;
+    corrupt["subject"] = json!("wrong-subject");
+    platform
+        .tamper_json_document_for_nonproduction_harness(
+            "conversation_transcript",
+            &first_key,
+            corrupt,
+        )
+        .unwrap();
+
+    let tail = store.list_turns(&key, "subject-store", 10).unwrap();
+    assert_eq!(tail.first().unwrap().sequence, 121);
+    assert_eq!(tail.last().unwrap().sequence, 130);
+    assert!(store
+        .list_turns_page(&key, "subject-store", None, 10)
+        .is_err());
+}
+
+#[test]
+fn transcript_cursor_is_typed_tamper_evident_and_scope_bound() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    for sequence in 1..=2 {
+        let mut record = transcript_record_for_subject(
+            &key,
+            "subject-store",
+            &format!("turn-{sequence}"),
+            "cursor",
+        );
+        record.sequence = sequence;
+        store.append_turn(&record).unwrap();
+    }
+    let first = store
+        .list_turns_page(&key, "subject-store", None, 1)
+        .unwrap();
+    let cursor = first.next_cursor.expect("bounded first page cursor");
+    let mut tampered = cursor.clone().into_bytes();
+    let last = tampered.last_mut().expect("cursor byte");
+    *last = if *last == b'0' { b'1' } else { b'0' };
+    let tampered = String::from_utf8(tampered).unwrap();
+    assert!(store
+        .list_turns_page(&key, "subject-store", Some(&tampered), 1)
+        .is_err());
+    assert!(store
+        .list_turns_page(&key, "another-subject", Some(&cursor), 1)
+        .is_err());
+}
+
+#[test]
+fn transcript_per_turn_aux_scales_with_one_thousand_turns() {
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .unwrap()
+    .try_with_nonproduction_store_budget_limit(StoreCapacityBudget::full().into_runtime_budget())
+    .unwrap();
+    let platform = support::open_store_in_memory(config).unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-aux", "llm.gateway", "conversation-store").unwrap();
+
+    for sequence in 1..=1_000 {
+        let turn_id = format!("turn-{sequence:04}");
+        let mut record = transcript_record(&key, &turn_id, "bounded aux");
+        record.sequence = sequence;
+        let message_id = record
+            .assistant_message
+            .as_ref()
+            .expect("assistant message")
+            .message_id
+            .clone();
+        store.append_turn(&record).unwrap();
+        store
+            .upsert_transcript_attrs(
+                &key,
+                "subject-store",
+                &[model_usage_attr(&key, &turn_id, &message_id)],
+            )
+            .unwrap();
+        store
+            .append_derived_memory_ref(&key, &derived_ref_for_turn(&key, &turn_id, &message_id))
+            .unwrap();
+    }
+
+    let snapshot = platform.export_store_snapshot().unwrap();
+    let head = snapshot
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "conversation_recall_manifests")
+        .expect("bounded conversation head");
+    assert_eq!(head.value["turn_count"], json!(1_000));
+    assert_eq!(head.value["page_count"], json!(16));
+    assert!(head.value.get("entries").is_none());
+    assert!(
+        serde_json::to_vec(&head.value).unwrap().len() < 1_024,
+        "conversation head must stay constant-size"
+    );
+    let pages = snapshot
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "conversation_transcript_pages")
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 16);
+    assert!(pages.iter().all(|page| {
+        page.value["entries"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty() && entries.len() <= 64)
+    }));
+    let aux = snapshot
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "conversation_transcript_aux_manifests")
+        .collect::<Vec<_>>();
+    assert_eq!(aux.len(), 1_000);
+    assert!(aux.iter().all(|manifest| {
+        manifest.value["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.len() == 2)
+    }));
+
+    let replay = store
+        .redacted_replay(&key, "subject-store", 10, TranscriptReplayView::HostUi)
+        .unwrap();
+    assert_eq!(replay.turns.len(), 10);
+    assert_eq!(
+        replay
+            .turns
+            .iter()
+            .map(|turn| turn.attrs.len())
+            .sum::<usize>(),
+        0
+    );
+    assert_eq!(
+        replay
+            .turns
+            .iter()
+            .filter_map(|turn| turn.assistant_message.as_ref())
+            .map(|message| message.attrs.len())
+            .sum::<usize>(),
+        10
+    );
+    let repair = store.repair_report(&key, "subject-store").unwrap();
+    assert!(!repair.fail_closed);
+    assert_eq!(repair.checked_turns, 1_000);
+    assert_eq!(repair.checked_attrs, 1_000);
+    assert_eq!(repair.checked_derived_refs, 1_000);
+}
+
+#[test]
 fn conversation_manifest_identity_tampering_fails_closed() {
     let platform = support::open_store_in_memory(
         StoreBackendConfig::in_memory(
@@ -246,7 +525,7 @@ fn conversation_manifest_identity_tampering_fails_closed() {
     let error = target
         .import_store_snapshot(&snapshot)
         .expect_err("tampered manifest identity must fail closed at admission");
-    assert_eq!(error.stage(), "typed_recall_index");
+    assert_eq!(error.stage(), "store_snapshot_import");
 }
 
 #[test]
@@ -939,4 +1218,126 @@ fn file_snapshot_export_import_preserves_long_transcript_keys_and_attrs() {
         replay.turns[0].assistant_message.as_ref().unwrap().attrs,
         vec![attr]
     );
+}
+
+#[test]
+fn independent_persistent_platforms_conflict_then_explicitly_replan_transcript_append() {
+    let root = temp_root("independent-platform-transcript-cas");
+    let profile = support::native_persistent_profile();
+    let configs = vec![(
+        "file",
+        StoreBackendConfig::file(root.join("file"), profile).expect("file config"),
+    )];
+    #[cfg(feature = "sqlite-store")]
+    let configs = configs
+        .into_iter()
+        .chain(std::iter::once((
+            "sqlite",
+            StoreBackendConfig::sqlite(root.join("sqlite.db"), profile).expect("sqlite config"),
+        )))
+        .collect::<Vec<_>>();
+
+    for (backend, config) in configs {
+        let first_platform = support::open_store(config.clone())
+            .unwrap_or_else(|error| panic!("open first {backend} platform: {error}"));
+        let second_platform = support::open_store(config)
+            .unwrap_or_else(|error| panic!("open second {backend} platform: {error}"));
+        let key = ConversationKey::new(
+            format!("space-{backend}-concurrent"),
+            "llm.gateway",
+            "conversation-store",
+        )
+        .unwrap();
+        let mut first_record = transcript_record(&key, "turn-first", "first concurrent append");
+        first_record.sequence = 0;
+        let mut second_record = transcript_record(&key, "turn-second", "second concurrent append");
+        second_record.sequence = 0;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let first_store = first_platform.conversation_transcript_store();
+        let first_barrier = std::sync::Arc::clone(&barrier);
+        let first_candidate = first_record.clone();
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first_store
+                .append_turn(&first_candidate)
+                .map(|report| ("turn-first", report))
+                .map_err(|error| ("turn-first", error))
+        });
+        let second_store = second_platform.conversation_transcript_store();
+        let second_barrier = std::sync::Arc::clone(&barrier);
+        let second_candidate = second_record.clone();
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            second_store
+                .append_turn(&second_candidate)
+                .map(|report| ("turn-second", report))
+                .map_err(|error| ("turn-second", error))
+        });
+        let outcomes = [
+            first.join().expect("first append thread"),
+            second.join().expect("second append thread"),
+        ];
+        let committed = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.as_ref().ok())
+            .collect::<Vec<_>>();
+        let conflicted = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.as_ref().err())
+            .collect::<Vec<_>>();
+        assert_eq!(committed.len(), 1, "backend={backend}");
+        assert_eq!(committed[0].1.sequence, 1, "backend={backend}");
+        assert_eq!(conflicted.len(), 1, "backend={backend}");
+        assert_eq!(
+            conflicted[0].1.stage(),
+            "memory_write_transaction_precondition_failed",
+            "backend={backend}: {}",
+            conflicted[0].1
+        );
+
+        let before_retry = first_platform
+            .conversation_transcript_store()
+            .list_turns(&key, "subject-store", 10)
+            .unwrap_or_else(|error| panic!("read {backend} before retry: {error}"));
+        assert_eq!(before_retry.len(), 1, "backend={backend}");
+        let conflicted_record = match conflicted[0].0 {
+            "turn-first" => &first_record,
+            "turn-second" => &second_record,
+            other => panic!("unexpected conflicted turn {other}"),
+        };
+        let retry = first_platform
+            .conversation_transcript_store()
+            .append_turn(conflicted_record)
+            .unwrap_or_else(|error| panic!("explicitly replan {backend} append: {error}"));
+        assert_eq!(retry.sequence, 2, "backend={backend}");
+
+        let turns = second_platform
+            .conversation_transcript_store()
+            .list_turns(&key, "subject-store", 10)
+            .unwrap_or_else(|error| panic!("read {backend} after retry: {error}"));
+        assert_eq!(
+            turns.iter().map(|turn| turn.sequence).collect::<Vec<_>>(),
+            vec![1, 2],
+            "backend={backend}"
+        );
+        let turn_ids = turns
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            turn_ids,
+            std::collections::BTreeSet::from(["turn-first", "turn-second"]),
+            "backend={backend}"
+        );
+        let transcript_events = first_platform
+            .read_events()
+            .expect("read transcript events")
+            .into_iter()
+            .filter(|event| {
+                event.kind_name == "memory.write" && event.plane == "conversation_transcript"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(transcript_events.len(), 2, "backend={backend}");
+    }
 }

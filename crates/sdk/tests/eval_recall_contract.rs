@@ -8,8 +8,8 @@ use bm_core::memory::{
     canonical_evidence_ref_from_source, canonical_recall_evidence_group,
     governed_memory_recall_candidate_id, memory_facet_manifest_key, CanonicalEntityKey,
     CanonicalEntityKind, CanonicalEntityRef, CanonicalEvidenceRef,
-    CanonicalRecallEvidenceFamilyGroup, QueryFacetInput, RecallDeliverySelectionDropReason,
-    TemporalAnchor, TemporalAnchorKind, TemporalAnchorPrecision, MEMORY_FACET_POSTING_NAMESPACE,
+    CanonicalRecallEvidenceFamilyGroup, QueryFacetInput, TemporalAnchor, TemporalAnchorKind,
+    TemporalAnchorPrecision, MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_sdk::{
     default_agent_subject_id, EvidenceBacklink, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
@@ -112,8 +112,10 @@ fn evidence_with_family(source: &str, family: &str) -> CanonicalEvidenceRef {
 }
 
 fn seed_governed_long_term(runtime: &bm_sdk::MemoryRuntime, drafts: Vec<LongTermMemoryDraft>) {
-    runtime
+    let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: drafts,
                 deletes: Vec::new(),
@@ -121,6 +123,11 @@ fn seed_governed_long_term(runtime: &bm_sdk::MemoryRuntime, drafts: Vec<LongTerm
             },
         })
         .expect("seed governed long-term memory");
+    assert!(report.accepted, "seed report must be accepted: {report:?}");
+    assert!(
+        report.changed > 0,
+        "seed report must persist owners: {report:?}"
+    );
 }
 
 #[test]
@@ -141,7 +148,7 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
     seed_governed_long_term(&runtime, vec![private, public]);
     let raw_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(10)
         .expect("list long-term owner records");
@@ -206,6 +213,7 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
 
     let report = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "public delivery anchor".to_string(),
             limit: 4,
@@ -267,6 +275,7 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
         }));
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "public delivery anchor".to_string(),
             system_max_len: 4096,
@@ -276,15 +285,14 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
             tool_registry_refs: Vec::new(),
         })
         .expect("private projection");
-    assert!(projection.context.long_term_memory_text.is_none());
     assert!(!projection
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("SOUL_PRIVATE_RAW_SENTINEL"));
-    assert!(projection
-        .runtime_projection
-        .governed_memory_evidence
-        .iter()
-        .all(|block| !block.content.contains("SOUL_PRIVATE_RAW_SENTINEL")));
+    assert!(!projection
+        .report()
+        .ui_api_projection()
+        .contains("SOUL_PRIVATE_RAW_SENTINEL"));
 
     assert!(!platform
         .replay_harness()
@@ -309,7 +317,7 @@ fn persistent_graph_recall_drops_ownerless_private_like_nodes_and_dependents() {
     );
     let visible_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list visible owner")
@@ -370,6 +378,7 @@ fn persistent_graph_recall_drops_ownerless_private_like_nodes_and_dependents() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "ownerless graph anchor".to_string(),
             limit: 4,
@@ -443,12 +452,13 @@ fn governed_read_filters_private_records_before_source_recall_limit() {
     let mut drafts = vec![public];
     drafts.extend(private);
     seed_governed_long_term(&runtime, drafts);
-    let public_id = platform
+    let observed_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(96)
-        .expect("list records")
+        .expect("list records");
+    let public_id = observed_records
         .into_iter()
         .find(|entry| {
             entry
@@ -460,6 +470,7 @@ fn governed_read_filters_private_records_before_source_recall_limit() {
         .id;
     let report = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "visibility displacement sentinel".to_string(),
             limit: 8,
@@ -490,6 +501,7 @@ fn production_capsule_exposes_non_public_locator_only_as_stable_opaque_ref() {
 
     let first = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "opaque locator evidence".to_string(),
             limit: 1,
@@ -498,6 +510,7 @@ fn production_capsule_exposes_non_public_locator_only_as_stable_opaque_ref() {
         .expect("first production recall");
     let second = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "opaque locator evidence".to_string(),
             limit: 1,
@@ -602,7 +615,7 @@ fn evidence_locator_fragments_never_count_as_typed_exact_facet_matches() {
     );
     let owner_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(10)
         .expect("list long-term records")
@@ -620,6 +633,7 @@ fn evidence_locator_fragments_never_count_as_typed_exact_facet_matches() {
     for weak_locator_fragment in ["external", "eval", "d1", "12", "session_1"] {
         let report = runtime
             .recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: weak_locator_fragment.to_string(),
                 limit: 4,
@@ -667,27 +681,24 @@ fn facet_recall_fails_closed_when_manifest_counts_are_corrupt() {
     manifest_doc.value["owner_doc_count"] = serde_json::json!(0);
 
     let platform = empty_store_platform(profile);
-    platform
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("empty destination snapshot")
+        .state_fingerprint();
+    let error = platform
         .replay_harness()
         .import_store_snapshot(&snapshot)
-        .expect("restore schema-valid snapshot with corrupt facet manifest");
-    let runtime = test_runtime(platform, profile);
-
-    let report = runtime
-        .recall(MemoryRecallRequest {
-            structured_query_facets: Vec::new(),
-            query: "manifest integrity sentinel".to_string(),
-            limit: 4,
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("recall remains available without trusting corrupt facet index");
-
-    assert!(!report.facet_index_report.manifest_integrity_verified);
-    assert!(report.facet_index_report.report_only);
-    assert!(report
-        .facet_index_report
-        .failures
-        .contains(&"memory_facet_manifest_contract_mismatch".to_string()));
+        .expect_err("corrupt facet manifest must be rejected before restore");
+    assert_eq!(error.stage(), "store_snapshot_import");
+    assert_eq!(
+        platform
+            .replay_harness()
+            .export_store_snapshot()
+            .expect("destination snapshot after rejection")
+            .state_fingerprint(),
+        before
+    );
 }
 
 #[test]
@@ -725,30 +736,28 @@ fn facet_recall_fails_closed_for_independent_owner_and_facet_version_drift() {
         manifest.value["owner_versions"][0][field] = serde_json::json!(version + 1);
 
         let platform = empty_store_platform(profile);
-        platform
+        let before = platform
+            .replay_harness()
+            .export_store_snapshot()
+            .expect("empty destination snapshot")
+            .state_fingerprint();
+        let error = platform
             .replay_harness()
             .import_store_snapshot(&snapshot)
-            .expect("restore schema-valid drifted snapshot");
-        let runtime = test_runtime(platform, profile);
-        let report = runtime
-            .recall(MemoryRecallRequest {
-                structured_query_facets: Vec::new(),
-                query: "dual version integrity sentinel".to_string(),
-                limit: 4,
-                tool_registry_refs: Vec::new(),
-            })
-            .expect("recall fails closed without failing request");
-
-        assert!(!report.facet_index_report.manifest_integrity_verified);
-        assert!(report.facet_index_report.report_only);
+            .expect_err("facet version drift must be rejected before restore");
         assert!(
-            report
-                .facet_index_report
-                .failures
-                .iter()
-                .any(|failure| failure.contains("version_mismatch")),
-            "unexpected failures for {field}: {:?}",
-            report.facet_index_report.failures
+            error
+                .to_string()
+                .contains("memory_facet_manifest_exact_closure_drift"),
+            "unexpected import rejection for {field}: {error}"
+        );
+        assert_eq!(
+            platform
+                .replay_harness()
+                .export_store_snapshot()
+                .expect("destination snapshot after rejection")
+                .state_fingerprint(),
+            before
         );
     }
 }
@@ -769,6 +778,7 @@ fn facet_recall_reports_verified_zero_hit_when_query_posting_is_absent_from_mani
 
     let report = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "unrelated query".to_string(),
             limit: 4,
             structured_query_facets: vec![QueryFacetInput::Keyword(
@@ -819,31 +829,26 @@ fn facet_recall_fails_closed_when_manifest_posting_document_is_missing() {
         .retain(|doc| doc.namespace != MEMORY_FACET_POSTING_NAMESPACE || doc.key == manifest_key);
 
     let platform = empty_store_platform(profile);
-    platform
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("empty destination snapshot")
+        .state_fingerprint();
+    let error = platform
         .replay_harness()
         .import_store_snapshot(&snapshot)
-        .expect("restore snapshot with missing posting document");
-    let runtime = test_runtime(platform, profile);
-    let report = runtime
-        .recall(MemoryRecallRequest {
-            query: "irrelevant".to_string(),
-            limit: 4,
-            structured_query_facets: vec![QueryFacetInput::Keyword(
-                "missing-posting-sentinel".to_string(),
-            )],
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("corrupt facet index must not break baseline recall");
-
-    assert!(!report.facet_index_report.used);
-    assert!(report.facet_index_report.report_only);
-    assert!(!report.facet_index_report.manifest_integrity_verified);
-    assert_eq!(report.facet_index_report.owner_key_lookup_count, 0);
-    assert_eq!(report.facet_index_report.owner_doc_read_count, 0);
-    assert!(report
-        .facet_index_report
-        .failures
-        .contains(&"memory_facet_posting_manifest_read_contract_mismatch".to_string()));
+        .expect_err("missing manifest-listed posting must be rejected before restore");
+    assert!(error
+        .to_string()
+        .contains("memory_facet_posting_exact_closure_drift"));
+    assert_eq!(
+        platform
+            .replay_harness()
+            .export_store_snapshot()
+            .expect("destination snapshot after rejection")
+            .state_fingerprint(),
+        before
+    );
 }
 
 #[test]
@@ -877,7 +882,7 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
     seed_governed_long_term(&runtime, vec![temporal_owner, text_owner]);
     let records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", runtime.subject_id())
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("typed temporal owners");
@@ -912,6 +917,7 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "plain text decoy".to_string(),
             limit: 8,
             structured_query_facets: vec![typed_facet.clone()],
@@ -929,6 +935,7 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "plain text decoy".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 4,
@@ -938,11 +945,7 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
             tool_registry_refs: Vec::new(),
         })
         .expect("typed temporal projection");
-    assert!(projection
-        .recall_delivery_report
-        .rendered_capsules
-        .iter()
-        .any(|capsule| capsule.candidate_id == temporal_candidate_id));
+    assert!(projection.report().recall_delivery().rendered_count > 0);
 
     let eval = runtime
         .eval_recall(MemoryEvalRecallRequest {
@@ -989,7 +992,7 @@ fn production_typed_entity_facet_hits_a_governed_owner() {
     seed_governed_long_term(&runtime, vec![draft]);
     let owner_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("typed entity owner")
@@ -1003,6 +1006,7 @@ fn production_typed_entity_facet_hits_a_governed_owner() {
     ));
     let report = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "text query without entity owner terms".to_string(),
             limit: 8,
             structured_query_facets: vec![QueryFacetInput::Entity(key)],
@@ -1035,6 +1039,7 @@ fn invalid_or_unresolved_typed_entity_and_temporal_facets_reject_all_production_
     for (facet, reason) in requests {
         let recall_error = runtime
             .recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 query: "typed rejection".to_string(),
                 limit: 4,
                 structured_query_facets: vec![facet.clone()],
@@ -1045,6 +1050,7 @@ fn invalid_or_unresolved_typed_entity_and_temporal_facets_reject_all_production_
         assert!(recall_error.to_string().contains(reason));
 
         let projection_error = match runtime.project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "typed rejection".to_string(),
             system_max_len: 1024,
             recent_messages_limit: 2,
@@ -1108,6 +1114,7 @@ fn facet_recall_fails_closed_before_owner_reads_when_posting_exceeds_governed_bu
 
     let report = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "unrelated text".to_string(),
             limit: 8,
             structured_query_facets: vec![QueryFacetInput::Keyword(
@@ -1159,6 +1166,7 @@ fn facet_recall_fails_closed_before_owner_reads_when_posting_exceeds_governed_bu
 
     let exact_report = exact_runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "unrelated exact text".to_string(),
             limit: 8,
             structured_query_facets: vec![QueryFacetInput::Keyword("exact-posting".to_string())],
@@ -1195,7 +1203,7 @@ fn eval_recall_reports_production_selection_render_loss_ledger() {
     );
     let entries = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(10)
         .expect("list multi-gold long-term memory");
@@ -1265,6 +1273,7 @@ fn eval_recall_reports_production_selection_render_loss_ledger() {
 
     let production = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release evidence".to_string(),
             limit: 1,
@@ -1406,6 +1415,7 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release capsule evidence".to_string(),
             system_max_len: 4096,
@@ -1416,46 +1426,37 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
         })
         .expect("projection");
 
-    assert!(!projection
-        .recall_delivery_report
-        .rendered_capsules
-        .is_empty());
+    assert!(projection.report().recall_delivery().rendered_count > 0);
+    assert!(projection.report().audit().delivery_digest_verified);
+    assert_eq!(
+        projection.report().audit().delivery_digest_candidate_count,
+        projection.report().recall_delivery().rendered_count
+    );
     assert!(
         projection
-            .runtime_projection
-            .governed_memory_evidence
-            .iter()
-            .any(|block| block.role == "recall_evidence_capsule"
-                && block
-                    .evidence_refs
-                    .iter()
-                    .any(|reference| reference.starts_with("opaque:evidence:"))),
-        "governed evidence: {:?}; delivery: {:?}",
-        projection.runtime_projection.governed_memory_evidence,
-        projection.recall_delivery_report.rendered_capsules
+            .provider_payload()
+            .system_memory_block()
+            .chars()
+            .count()
+            <= 4096
     );
-    assert!(projection.system_memory_block.chars().count() <= 4096);
     assert!(!projection
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("external_eval:capsule"));
     assert!(projection
-        .recall_delivery_report
-        .rendered_capsules
-        .iter()
-        .any(|capsule| capsule
-            .canonical_evidence_groups
-            .iter()
-            .any(|group| group == &canonical_recall_evidence_group("external_eval:capsule"))));
-    assert!(projection
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("## Boundary And Disclosure Protocol"));
     assert!(projection
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("## Work Integrity Covenant"));
-    assert_eq!(projection.recall_delivery_report.render_growth, 0);
+    assert_eq!(projection.report().recall_delivery().render_growth, 0);
 
     let constrained = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release capsule evidence".to_string(),
             system_max_len: 512,
@@ -1465,19 +1466,19 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
             tool_registry_refs: Vec::new(),
         })
         .expect("constrained projection");
-    assert!(constrained
-        .recall_delivery_report
-        .rendered_capsules
-        .is_empty());
-    assert!(constrained
-        .runtime_projection
-        .governed_memory_evidence
-        .iter()
-        .all(|block| block.role != "recall_evidence_capsule"));
+    assert_eq!(constrained.report().recall_delivery().rendered_count, 0);
     assert!(!constrained
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("external_eval:capsule"));
-    assert!(constrained.system_memory_block.chars().count() <= 512);
+    assert!(
+        constrained
+            .provider_payload()
+            .system_memory_block()
+            .chars()
+            .count()
+            <= 512
+    );
 }
 
 #[test]
@@ -1498,6 +1499,7 @@ fn projection_keeps_unicode_capsules_consistent_with_the_character_budget() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "unicode delivery evidence".to_string(),
             system_max_len: 4096,
@@ -1508,43 +1510,21 @@ fn projection_keeps_unicode_capsules_consistent_with_the_character_budget() {
         })
         .expect("unicode projection");
 
-    assert!(projection.recall_delivery_report.rendered_capsules.len() > 1);
-    assert!(projection.system_memory_block.chars().count() <= 4096);
-    assert!(projection.system_memory_block.len() > 4096);
-    assert_eq!(projection.delivery_digest_manifest.schema_version, 3);
-    assert!(projection.delivery_digest_manifest.exact_render_match);
-    assert!(projection
-        .delivery_digest_manifest
-        .integrity_failures
-        .is_empty());
-    assert_eq!(
-        projection.delivery_digest_manifest.candidate_receipts.len(),
-        projection.recall_delivery_report.rendered_capsules.len()
-    );
-    assert_eq!(
+    assert!(projection.report().recall_delivery().rendered_count > 1);
+    assert!(
         projection
-            .delivery_digest_manifest
-            .system_memory_block_sha256
-            .len(),
-        64
+            .provider_payload()
+            .system_memory_block()
+            .chars()
+            .count()
+            <= 4096
     );
-    for capsule in &projection.recall_delivery_report.rendered_capsules {
-        let block = projection
-            .runtime_projection
-            .governed_memory_evidence
-            .iter()
-            .find(|block| block.source_id == capsule.candidate_id)
-            .expect("rendered capsule must own a governed projection block");
-        assert_eq!(block.role, "recall_evidence_capsule");
-        assert_eq!(block.content, capsule.content);
-        let receipt = projection
-            .delivery_digest_manifest
-            .candidate_receipts
-            .iter()
-            .find(|receipt| receipt.candidate_id == capsule.candidate_id)
-            .expect("renderer-owned candidate receipt");
-        assert_eq!(receipt.source_block_sha256.len(), 64);
-    }
+    assert!(projection.provider_payload().system_memory_block().len() > 4096);
+    assert!(projection.report().audit().delivery_digest_verified);
+    assert_eq!(
+        projection.report().audit().delivery_digest_candidate_count,
+        projection.report().recall_delivery().rendered_count
+    );
 }
 
 #[test]
@@ -1571,6 +1551,7 @@ fn projection_digest_proves_duplicate_content_by_candidate_source_id() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "duplicate receipt".to_string(),
             system_max_len: 4096,
@@ -1580,39 +1561,23 @@ fn projection_digest_proves_duplicate_content_by_candidate_source_id() {
             tool_registry_refs: Vec::new(),
         })
         .expect("duplicate-content projection");
-    let receipts = &projection.delivery_digest_manifest.candidate_receipts;
-    let capsule_entries = &projection.delivery_digest_manifest.capsule_entries;
-    let governed_entries = &projection.delivery_digest_manifest.governed_block_entries;
-    let prompt_entries = &projection.delivery_digest_manifest.prompt_visible_entries;
-
-    assert!(projection.delivery_digest_manifest.exact_render_match);
-    assert_eq!(capsule_entries, governed_entries);
-    assert_eq!(capsule_entries, prompt_entries);
-    assert_eq!(capsule_entries.len(), 2);
-    assert_ne!(
-        capsule_entries[0].candidate_id,
-        capsule_entries[1].candidate_id
-    );
+    assert!(projection.report().audit().delivery_digest_verified);
+    assert_eq!(projection.report().recall_delivery().selected_count, 2);
+    assert_eq!(projection.report().recall_delivery().rendered_count, 2);
     assert_eq!(
-        capsule_entries[0].content_sha256,
-        capsule_entries[1].content_sha256
-    );
-    assert_eq!(receipts.len(), 2);
-    assert_ne!(receipts[0].candidate_id, receipts[1].candidate_id);
-    assert_ne!(
-        receipts[0].source_block_sha256,
-        receipts[1].source_block_sha256
+        projection.report().audit().delivery_digest_candidate_count,
+        2
     );
 }
 
 #[test]
-fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
+fn p8_persistence_does_not_deliver_runtime_skill_before_p8_3() {
     let platform = empty_store_platform(support::host_test_profile());
     let runtime = test_runtime(platform, support::host_test_profile());
 
     runtime
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "release_guard".to_string(),
                 topic: "release".to_string(),
                 title: "Release artifact guard".to_string(),
@@ -1621,13 +1586,15 @@ fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
                 citations: vec!["operator accepted".to_string()],
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
-            }],
+            })],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("seed procedural memory");
 
     let baseline = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release artifact".to_string(),
             limit: 4,
@@ -1663,50 +1630,28 @@ fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
         .expect("eval recall");
     let release_guard_candidate_id = runtime_skill_candidate_id("runtime_skill__release_guard");
 
-    assert!(report
+    assert!(!report
         .source_candidates
         .iter()
         .any(|candidate| candidate.candidate_id == release_guard_candidate_id));
-    assert!(report
+    assert!(!report
         .expanded_candidates
         .iter()
         .any(|candidate| candidate.candidate_id == release_guard_candidate_id));
-    assert!(report
+    assert!(!report
         .reranked_candidates
         .iter()
-        .any(
-            |candidate| candidate.candidate_id == release_guard_candidate_id
-                && candidate.score_breakdown.evidence_quality_score > 0
-                && candidate.score_breakdown.source_authority_score > 0
-        ));
+        .any(|candidate| candidate.candidate_id == release_guard_candidate_id));
     assert!(!report
         .selected_candidates
         .iter()
         .any(|candidate| candidate.candidate_id == release_guard_candidate_id));
     assert!(report.rendered_candidates.is_empty());
-    let unavailable_decision = report
+    assert!(!report
         .delivery_report
         .selection_decisions
         .iter()
-        .find(|decision| decision.candidate_id == release_guard_candidate_id)
-        .expect("every reranked candidate has a typed delivery decision");
-    assert_eq!(unavailable_decision.owner_ref, None);
-    assert!(!unavailable_decision.selected);
-    assert_eq!(
-        unavailable_decision.drop_reason,
-        Some(RecallDeliverySelectionDropReason::OwnerRecordUnavailable)
-    );
-    assert!(report
-        .delivery_report
-        .delivery_drop_reasons
-        .iter()
-        .any(|reason| reason == "owner_record_unavailable"));
-    assert_eq!(
-        report.missing_evidence_refs,
-        vec![canonical_recall_evidence_group(
-            "external_eval:missing-source"
-        )]
-    );
+        .any(|decision| decision.candidate_id == release_guard_candidate_id));
     assert_eq!(
         report
             .metrics
@@ -1716,9 +1661,9 @@ fn eval_recall_report_separates_source_expanded_selected_and_rendered_layers() {
             .collect::<Vec<_>>(),
         vec![5, 10, 20, 50]
     );
-    assert!(report.metrics.any_evidence_hit);
+    assert!(!report.metrics.any_evidence_hit);
     assert!(!report.metrics.all_evidence_hit);
-    assert!(report.metrics.mrr_bps > 0);
+    assert_eq!(report.metrics.mrr_bps, 0);
     assert!(
         report.privacy_report.passed,
         "privacy failures: {:?}",
@@ -1749,7 +1694,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
     seed_governed_long_term(&runtime, vec![anchor, manifest]);
     let records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list graph owners");
@@ -1770,6 +1715,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
 
     let preview = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release artifact".to_string(),
             limit: 4,
@@ -1828,7 +1774,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
     assert!(graph_write.gate_failures.is_empty());
     assert!(platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store after graph write")
         .get(&manifest_id)
         .expect("read manifest owner after graph write")
@@ -1836,6 +1782,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release artifact".to_string(),
             limit: 4,
@@ -2061,13 +2008,19 @@ fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
     );
     let owner_a_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-a")
+        .scoped_long_term_memory_read_store("space:owner-a", runtime_a.subject_id())
         .expect("scoped long-term read store")
         .list(10)
         .expect("owner-a graph owner records");
+    let owner_b_records = platform
+        .replay_harness()
+        .scoped_long_term_memory_read_store("space:owner-a", runtime_b.subject_id())
+        .expect("subject-b scoped long-term read store")
+        .list(10)
+        .expect("owner-b graph owner records");
     let owner_c_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-c")
+        .scoped_long_term_memory_read_store("space:owner-c", runtime_c.subject_id())
         .expect("scoped long-term read store")
         .list(10)
         .expect("owner-c graph owner records");
@@ -2077,7 +2030,7 @@ fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
         .expect("alpha owner")
         .id
         .clone();
-    let beta_id = owner_a_records
+    let beta_id = owner_b_records
         .iter()
         .find(|entry| entry.content.contains("Beta runtime owns"))
         .expect("beta owner")
@@ -2095,7 +2048,7 @@ fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
         .expect("alpha neighbor owner")
         .id
         .clone();
-    let beta_neighbor_id = owner_a_records
+    let beta_neighbor_id = owner_b_records
         .iter()
         .find(|entry| entry.content.contains("BETA_GRAPH_NEIGHBOR_SENTINEL"))
         .expect("beta neighbor owner")
@@ -2192,6 +2145,7 @@ fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
 
     let alpha_recall = runtime_a
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "space alpha anchor".to_string(),
             limit: 8,
@@ -2238,7 +2192,7 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
     seed_governed_long_term(&runtime, vec![anchor, manifest]);
     let records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list graph owners");
@@ -2609,7 +2563,7 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
     let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let store = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store");
 
     let topics = [
@@ -2660,6 +2614,7 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
     seed_governed_long_term(&runtime, drafts);
     let initial_source_ids = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release".to_string(),
             limit: 5,
@@ -2922,6 +2877,8 @@ fn facet_recall_expands_graph_anchor_pool_without_render_growth() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3061,6 +3018,8 @@ fn facet_recall_respects_privacy_scope_and_profile_budget() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3172,6 +3131,8 @@ fn facet_rank_fusion_preserves_pool_provenance() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3282,6 +3243,8 @@ fn facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3292,7 +3255,7 @@ fn facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups() {
                     long_term_draft(
                         "facet/coverage/shared-two",
                         "Coverage shared two has the same canonical evidence group.",
-                        "external_eval:coverage-shared|turn=2",
+                        "external_eval:coverage-shared|turn=1",
                     ),
                     long_term_draft(
                         "facet/coverage/distinct",
@@ -3486,6 +3449,7 @@ fn production_delivery_enforces_profile_capsule_character_ceiling() {
 
     let report = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "capsule budget governed evidence".to_string(),
             limit: 2,
@@ -3519,6 +3483,7 @@ fn production_delivery_enforces_profile_capsule_character_ceiling() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "capsule budget governed evidence".to_string(),
             system_max_len: 512,
@@ -3528,22 +3493,10 @@ fn production_delivery_enforces_profile_capsule_character_ceiling() {
             tool_registry_refs: Vec::new(),
         })
         .expect("projection with tighter final render ceiling");
-    let selected_ids = projection
-        .recall_delivery_report
-        .selection_decisions
-        .iter()
-        .filter(|decision| decision.selected)
-        .map(|decision| decision.candidate_id.clone())
-        .collect::<Vec<_>>();
-    let shared_factual_audit = projection
-        .audit
-        .sources
-        .iter()
-        .find(|source| source.plane == "shared_factual")
-        .expect("shared factual projection audit");
-    assert_eq!(shared_factual_audit.selected_ids, selected_ids);
-    assert_eq!(shared_factual_audit.selected_count, selected_ids.len());
-    assert!(selected_ids.len() >= projection.recall_delivery_report.rendered_capsules.len());
+    assert!(
+        projection.report().recall_delivery().selected_count
+            >= projection.report().recall_delivery().rendered_count
+    );
 }
 
 #[test]
@@ -3772,6 +3725,7 @@ fn delivery_reports_selected_owner_families_separately_from_rendered_families() 
 
     let report = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "selected family independently useful".to_string(),
             limit: 2,
@@ -3794,6 +3748,16 @@ fn delivery_reports_selected_owner_families_separately_from_rendered_families() 
 
     assert_eq!(report.delivery_report.selected_candidate_ids.len(), 2);
     assert_eq!(report.delivery_report.rendered_capsules.len(), 1);
+    assert!(
+        report.delivery_report.rendered_capsules[0]
+            .valid_from
+            .is_some(),
+        "rendered long-term capsule must carry the exact owner validity"
+    );
+    assert_eq!(
+        report.delivery_report.rendered_capsules[0].valid_until,
+        None
+    );
     assert_eq!(selected_owner_families.len(), 2);
     assert_eq!(rendered_families.len(), 1);
     assert!(rendered_families.is_subset(&selected_owner_families));
@@ -3864,6 +3828,8 @@ fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
 
     alpha_runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![long_term_draft(
                     "facet/hidden/alpha-only",
@@ -3977,6 +3943,7 @@ fn delegated_actor_is_not_added_to_shared_memory_owner_subjects() {
 
     let mounted = mounted_runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "delegated owner evidence".to_string(),
             limit: 4,
@@ -3985,6 +3952,7 @@ fn delegated_actor_is_not_added_to_shared_memory_owner_subjects() {
         .expect("mounted subject recall");
     let actor = actor_runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "delegated owner evidence".to_string(),
             limit: 4,
@@ -4018,6 +3986,7 @@ fn subject_local_capsule_never_enters_cross_subject_shared_fact_surface() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "subject local surface evidence".to_string(),
             system_max_len: 4096,
@@ -4028,10 +3997,13 @@ fn subject_local_capsule_never_enters_cross_subject_shared_fact_surface() {
         })
         .expect("project subject-local evidence");
 
-    assert!(projection.system_memory_block.contains(content));
+    assert!(projection
+        .provider_payload()
+        .system_memory_block()
+        .contains(content));
     assert!(!projection
-        .projection_surfaces
-        .shared_fact_surface
+        .report()
+        .shared_fact_projection()
         .contains(content));
 }
 
@@ -4063,6 +4035,8 @@ fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![anchor_draft, alpha_draft, beta_draft],
                 deletes: Vec::new(),
@@ -4289,6 +4263,7 @@ fn persistent_graph_recall_uses_sdk_owned_production_index_report() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release artifact".to_string(),
             limit: 4,
@@ -4480,6 +4455,7 @@ fn large_persistent_graph_index_report_explains_anchor_and_expansion_coverage() 
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release artifact".to_string(),
             limit: 8,
@@ -4611,6 +4587,7 @@ fn persistent_graph_recall_fails_closed_when_loaded_graph_exceeds_profile_budget
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release budget anchor".to_string(),
             limit: 4,

@@ -1,5 +1,7 @@
 use bm_sdk::nonproduction_replay_harness::StoreSnapshot;
-use bm_sdk::{IngressKind, PressureLevel, ProfileId, RuntimeSkillWrite};
+use bm_sdk::{
+    GovernedRuntimeSkillWriteInput, IngressKind, PressureLevel, ProfileId, RuntimeSkillOwningScope,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -15,7 +17,8 @@ pub struct ReplayFixture {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReplayOperation {
     WriteProcedural {
-        writes: Vec<RuntimeSkillWrite>,
+        writes: Vec<GovernedRuntimeSkillWriteInput>,
+        owning_scope: RuntimeSkillOwningScope,
     },
     Recall {
         query: String,

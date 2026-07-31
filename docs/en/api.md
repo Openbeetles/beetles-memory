@@ -27,7 +27,7 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Maintain | `MemoryRuntime::maintain` | Run explicit post-reply memory maintenance when an LLM client is configured. |
 | Inspect | `MemoryRuntime::inspect` | Return recall/operator/lifecycle inspection data. |
 | Runtime Skill List / Detail | `MemoryRuntime::list_runtime_skills` / `MemoryRuntime::get_runtime_skill` | List and inspect runtime-learned procedural memory records without executing them. |
-| Runtime Skill Mutation | `MemoryRuntime::edit_runtime_skill` / `MemoryRuntime::set_runtime_skill_enabled` / `MemoryRuntime::delete_runtime_skill` | Edit, enable, disable, or delete existing runtime skills only; it does not create, import, or manage standard Agent Skills. |
+| Runtime Skill Mutation | `MemoryRuntime::edit_runtime_skill` / `MemoryRuntime::set_runtime_skill_enabled` / `MemoryRuntime::retire_runtime_skill` | Edit, enable, disable, or retire existing runtime skills only; it does not create, import, or manage standard Agent Skills. |
 | Long-Term Memory List / Detail | `MemoryRuntime::list_long_term_memory` / `MemoryRuntime::get_long_term_memory` | List, search, and inspect accepted long-term memory with redacted views, evidence summaries, revisions, and tombstone metadata. |
 | Long-Term Memory Mutation | `MemoryRuntime::mutate_long_term_memory` | Correct, supersede, delete, forget_by_query, mark_stale, or change_scope accepted long-term memory, and return affected records, tombstones, projection impact, and lifecycle reports. |
 | Long-Term Governance Policy | `MemoryRuntime::mutate_memory_governance_policy` | Pause, resume, or suppress future long-term memory updates. Policies affect future write governance and do not silently delete accepted memory. |
@@ -35,12 +35,12 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Agent Tool Registry | `MemoryRuntimeBuilder::agent_tool_registry` / `MemoryRuntime::upsert_agent_tool_registry` | Hosts register tool indexes and fingerprints. The SDK returns `agent_tool_hints` only from governed tool experience; no experience means empty hints, not tool routing. |
 | Replay | `MemoryRuntime::replay` | Inspect turn ledger history for a chat. |
 | Transcript Attr Write | `MemoryRuntime::record_transcript_attrs` | Attach governed turn/message metadata to transcript evidence for replay, export, redaction, repair, and profile budgeting. |
-| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Transfer a typed `(memory_space_id, mounted_subject_id)` archive under an explicit private-material policy. |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Export an opaque archive and atomically replace the same exact `MemoryArchiveScope` under an explicit private-material policy. |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
 
 ## Memory Evidence System
 
-The Conversation Transcript Substrate release surface is the current base evidence contract for hosts that need governed transcript commit, redacted replay, lifecycle review, and migration-ready evidence handling. It is not a host task system and it does not replace Soul Governance, Subject Projection, Program Memory, procedural memory, or accepted long-term memory planes.
+The Conversation Transcript Substrate release surface is the current base evidence contract for hosts that need governed transcript commit, redacted replay, lifecycle review, and archive-ready evidence handling. It is not a host task system and it does not replace Soul Governance, Subject Projection, Program Memory, procedural memory, or accepted long-term memory planes.
 
 The owner remains `MemoryRuntime`: hosts and adapters provide delivered turn deltas, actor attribution, and opaque host references; Beetle Memory commits evidence, applies governance, and returns reports. External code must not write a parallel transcript store or infer memory facts from raw conversation history.
 
@@ -55,7 +55,7 @@ SDK-facing transcript operations:
 | Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport` via `MemoryRuntime::request_transcript_lifecycle` | Archive, mask, delete raw content, or run lifecycle review with audit output. |
 | Transcript Repair | `MemoryTranscriptRepairRequest` / `MemoryTranscriptRepairReport` via `MemoryRuntime::repair_transcript` | Inspect broken Memory-owned evidence links without scanning host business databases. |
 | Transcript Attr Write | `MemoryTranscriptAttrWriteRequest` / `MemoryTranscriptAttrWriteReport` via `MemoryRuntime::record_transcript_attrs` | Write turn/message `TranscriptAttrEnvelope` records after the transcript target exists. This is for lightweight metadata such as per-message model usage, runtime latency/status, attachment summaries, and provenance tags. |
-| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport` via `MemoryRuntime::export_transcript`; `MemorySpaceExportRequest { include_private: false }` redacts raw transcript, `conversation_transcript_alias`, `conversation_transcript_attr`, and `conversation_transcript_derived_ref` manifests by default | Export a redacted transcript slice, and keep raw transcript plus transcript owner/attr/derived metadata out of public memory-space exports unless the caller explicitly requests private material. |
+| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport` via `MemoryRuntime::export_transcript`; `MemorySpaceExportRequest { private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate, .. }` excludes private transcript material and its dependent export-visible indexes as one governed closure | Export a redacted transcript slice, and keep private transcript material out of public memory-space archives unless the caller explicitly selects `IncludePrivate`. |
 
 `MemoryTranscriptReplayRequest` and `MemoryTranscriptExportRequest` take `limit` plus optional `cursor`; their reports return `next_cursor` and `has_more`. SDK callers should page through transcript replay/export through `MemoryRuntime` instead of reaching into the core/store trait. Runtime profile budgets may clamp page size, visible host refs per turn, visible attrs per turn/message, redaction items, lifecycle derived refs, and repair issues, but they do not relax redaction, lifecycle, or privacy policy. Lifecycle and repair reports set `profile_budget_applied=true` when those report lists are clipped.
 
@@ -71,7 +71,7 @@ Core release-surface concepts:
 
 | Concept | Contract |
 | --- | --- |
-| `ConversationKey` | `memory_space_id`, `channel_id`, and `conversation_id`; `chat_id` is only a legacy alias or migration source. |
+| `ConversationKey` | `memory_space_id`, `channel_id`, and `conversation_id`; `chat_id` remains the turn-ledger inspection key for `MemoryReplayRequest`. |
 | `ActorAttribution` | Preserves speaker, subject, actor subject, mounted subject, agent id, and trigger source without collapsing them into one identity. |
 | `HostOpaqueRef` | Carries host object references such as task, project, ticket, document, or order ids without letting Memory parse host business state machines; `HostRefVisibility` is enforced per replay/export view, and `label` is field-redacted outside owner-approved views with `HostRefLabel` in the redaction report. |
 | `TranscriptAttrEnvelope` | Carries governed turn/message metadata. `TranscriptAttrScope` is `turn` or `message`; keys must be namespaced under `host.*` or `memory.*`; values are typed by `TranscriptAttrValueKind`; visibility, export policy, redaction policy, source, links, and value-size budgets are enforced by Memory. |
@@ -98,7 +98,7 @@ The most common SDK request types are:
 
 | Request type | Required fields | Notes |
 | --- | --- | --- |
-| `MemoryWriteRequest::Procedural` | `writes`, `source` | Each `RuntimeSkillWrite` includes `name`, `topic`, `title`, `summary`, `content`, `citations`, `source_chat_id`, and `observed_at`. |
+| `MemoryWriteRequest::Procedural` | `writes`, `owning_scope`, `source` | Every item carries a `RuntimeSkillWrite`, typed creation ref, and privacy class. `name` is display input and is not owner identity. |
 | `MemoryWriteRequest::AgentToolUsageFeedback` | `feedback` | Host reports tool execution observations with `registry_ref`; the SDK may turn repeated governed evidence into tool experience. |
 | `MemoryWriteRequest::LongTermExtraction` | `extraction` | Use when an extraction pipeline has produced a validated long-term memory extraction. |
 | `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | Atomically creates, revises, or deletes governed evidence owners together with source claims and derived indexes. `Upsert` carries a bounded `GovernedEvidenceDocumentDraft`; `Delete` requires an expected owner revision. |
@@ -106,19 +106,19 @@ The most common SDK request types are:
 | `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | Returns `system_memory_block` bounded by `system_max_len`; structured facets use the same governed query contract as recall, standard Agent Skills enter only as read-only hint summaries, and Agent Tools enter only as experience hints without full schemas. |
 | `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | Reads an exact bounded set of governed evidence documents through `MemoryRuntime::read_governed_evidence_documents(request)`. The runtime rejects a memory-space mismatch, empty/duplicate document ids, and requests above the current profile read budget; each result is privacy-filtered and carries typed owner identity, revision, canonical evidence binding, safe source metadata, and bounded body/chunks. |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, operator inspection data, the Agent Skill directory report, and the Agent Tool registry report. |
-| `RuntimeSkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | Returns `RuntimeSkillListReport` with total, active, disabled, runtime_skills, and runtime skill summaries. |
-| `RuntimeSkillDetailRequest` | `name` | Returns `RuntimeSkillDetailReport` with summary/procedure/citations/lineage/strategy diffs/raw content. |
-| `RuntimeSkillEditRequest` | `name`, `title`, `topic`, `summary`, `procedure`, `edit_reason` | Edits only an existing runtime skill whose name starts with `runtime_skill__`. |
-| `RuntimeSkillSetEnabledRequest` | `name`, `enabled` | Changes only the runtime skill enabled state; it does not rewrite skill content. |
-| `RuntimeSkillDeleteRequest` | `name` | Deletes the runtime procedural memory from skill storage without adding a console tombstone. |
+| `RuntimeSkillListRequest` | `owning_scope`, `query`, `include_disabled`, `include_retired`, `limit` | Lists only exact typed owners bound by the explicit Subject or SharedProgram scope manifest. |
+| `RuntimeSkillDetailRequest` | `locator` | The locator binds owning scope, owner ref, and expected revision. A display name is never translated into identity. |
+| `RuntimeSkillEditRequest` | `locator`, `title`, `topic`, `summary`, `procedure`, `edit_reason`, `observed_at` | Uses the locator revision as the concurrency precondition, appends an immutable owner revision, and returns `current_locator`. |
+| `RuntimeSkillSetEnabledRequest` | `locator`, `enabled`, `observed_at` | Appends a lifecycle revision and never writes `skill_meta`. |
+| `RuntimeSkillRetireRequest` | `locator`, `observed_at` | Appends a disabled and retired revision while retaining lineage; it does not physically delete the owner. |
 | `MemoryLongTermListRequest` | `query`, `limit`, `view` | Lists accepted long-term memory through `MemoryRuntime::list_long_term_memory`; supports `cursor` paging and redacts source metadata from embedded records for `HostUi` by default. |
 | `MemoryLongTermDetailRequest` | `target`, `view` | Inspects one long-term memory record by record id, slot, or transcript derived ref, including revisions, tombstone data, and evidence refs. |
 | `MemoryLongTermMutationRequest` | `operation`, `reason`, `dry_run`, `mode_input` | Runs correct, supersede, delete, forget_by_query, mark_stale, or change_scope. Bulk forget requires a dry-run preview plus confirmation token. |
 | `MemoryLongTermPolicyRequest` | `operation`, `reason`, `dry_run`, `mode_input` | Runs pause, resume, suppress, or remove_suppression. Writes blocked by the policy appear in SDK governance reports. |
 | `MemoryTranscriptAttrWriteRequest` | `memory_space_id`, `channel_id`, `conversation_id`, `attrs`, `dry_run` | Writes governed `TranscriptAttrEnvelope` metadata to existing transcript turns/messages. `idempotency_key` is accepted for host/adapter correlation; dry-run validates target existence and attr envelope rules without persisting and returns rejected attrs plus `redactions_preview`. |
 | `MemoryReplayRequest` | `chat_id`, `limit` | Inspection-only replay surface. |
-| `MemorySpaceExportRequest` | `scope`, `include_private` | Exports only the runtime's exact typed memory-space and mounted-subject projection. |
-| `MemorySpaceImportRequest` | `scope`, `expected_private_material_policy`, `archive` | Imports only when runtime, request, archive scope, and private-material policy match before store access. |
+| `MemorySpaceExportRequest` | `scope`, `private_material_policy` | Uses `MemoryArchiveScope::subject(...)` or `MemoryArchiveScope::shared_program(...)` and returns an opaque archive with a canonical governed root. |
+| `MemorySpaceImportRequest` | `scope`, `expected_private_material_policy`, `archive` | Recomputes the archive root and atomically replaces only when runtime, request, and archive have the same exact scope and private-material policy before store mutation. |
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | Runs recoverable lifecycle recovery. |
 | `MemoryCloseRequest` | `reason` | Emits a close lifecycle report. |
 
@@ -136,7 +136,7 @@ The control plane is separate from the automatic write path:
 - `MemoryLongTermMutationRequest` handles user or operator correction, supersede, delete, forget, and scope-change actions for already accepted long-term memory.
 - `MemoryLongTermPolicyRequest` handles "do not remember this kind of thing again" and "pause memory updates for this scope".
 - Transcript lifecycle `DeleteRaw` / `Mask` affects conversation evidence only. It reports `DerivedMemoryRef` impact, but it does not automatically delete accepted long-term memory. Revoking derived long-term memory must go through the long-term control surface.
-- Runtime Skill management is limited to procedural runtime skill memory and is not the edit/delete surface for ordinary long-term memory.
+- Runtime Skill management is limited to procedural runtime skill memory and is not the edit/retire surface for ordinary long-term memory.
 
 Every mutation report must be audit-ready: affected records, tombstones, transcript refs, projection impact, deferred governance impact, policy decision, and lifecycle report are returned by the SDK. If a profile denies an operation, the SDK returns a structured rejection; the host must not fall back to direct local store edits.
 
@@ -203,10 +203,10 @@ The Console API is only for standalone deployments that serve the Beetle Memory 
 | --- | --- | --- |
 | `/console/overview` | `GET` | System info, runtime shape, observable metrics, kernel summary, session overview, and current memory context. |
 | `/console/skills` | `GET` | Runtime Skill list and summary counts. |
-| `/console/skills/{name}` | `GET` | Single runtime Skill detail. |
-| `/console/skills/{name}` | `PATCH` | Edit an existing runtime Skill. |
-| `/console/skills/{name}/enabled` | `PATCH` | Enable or disable a runtime Skill. |
-| `/console/skills/{name}` | `DELETE` | Delete a runtime Skill Memory record. |
+| `/console/skills/detail` | `POST` | Read one runtime Skill by typed owner locator. |
+| `/console/skills` | `PATCH` | Append an immutable revision by typed owner locator. |
+| `/console/skills/enabled` | `PATCH` | Enable or disable a runtime Skill by typed owner locator. |
+| `/console/skills/retire` | `POST` | Append a retired revision by typed owner locator. |
 | `/console/llm-gateway` | `GET` | Return the LLM Gateway operator surface: OpenAI/Ollama/MCP endpoints, rule export commands, and smoke checks. |
 | `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | Run a backend-whitelisted LLM Gateway smoke check and return exit code, duration, and bounded stdout/stderr. |
 | `/console/transports` | `GET` | List configurable communication entries. |

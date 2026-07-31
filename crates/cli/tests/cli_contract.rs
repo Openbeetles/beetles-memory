@@ -1,6 +1,16 @@
 use bm_cli::{command_specs, render_capabilities, run_cli};
 use bm_sdk::{resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId};
 
+fn assert_exact_governed_result(value: &serde_json::Value) {
+    let result = value["result"].clone();
+    let dto: bm_adapter::AdapterGovernedSafeReportV1 =
+        serde_json::from_value(result.clone()).expect("strict adapter governed safe DTO");
+    assert_eq!(
+        serde_json::to_value(dto).expect("serialize adapter governed safe DTO"),
+        result
+    );
+}
+
 fn host_profile_name() -> &'static str {
     #[cfg(target_os = "macos")]
     {
@@ -42,7 +52,7 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
             "skill-edit",
             "skill-enable",
             "skill-disable",
-            "skill-delete",
+            "skill-retire",
             "close",
         ]
     );
@@ -67,6 +77,36 @@ fn legacy_continuity_transfer_commands_are_rejected_before_runtime_open() {
         let error = run_cli(["memory", command].into_iter().map(str::to_string))
             .expect_err("legacy continuity transfer command must not remain public");
         assert_eq!(error, format!("unsupported memory command: {command}"));
+    }
+}
+
+#[test]
+fn runtime_skill_management_rejects_legacy_name_before_runtime_open() {
+    for command in [
+        "skill-list",
+        "skill-show",
+        "skill-edit",
+        "skill-enable",
+        "skill-disable",
+        "skill-retire",
+    ] {
+        let error = run_cli(
+            [
+                "memory",
+                command,
+                "--profile",
+                host_profile_name(),
+                "--name",
+                "runtime_skill__legacy_identity",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect_err("management name compatibility must be rejected");
+        assert!(
+            error.contains("--name is not accepted"),
+            "{command}: {error}"
+        );
     }
 }
 
@@ -166,6 +206,8 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "local",
             "--chat",
             "chat-1",
+            "--name",
+            "runtime_skill__release",
             "--title",
             "Release guard",
             "--topic",
@@ -174,6 +216,14 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "Check release artifacts before publishing.",
             "--content",
             "1. run gates\n2. inspect artifacts\n3. dry run publish",
+            "--runtime-skill-subject",
+            "agent:cli-skill-agent",
+            "--replay-candidate-ref",
+            "cli-test:release",
+            "--verification-receipt-digest",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "--runtime-skill-privacy",
+            "shared-with-subject",
         ]
         .into_iter()
         .map(str::to_string),
@@ -182,6 +232,38 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
     let created_json: serde_json::Value = serde_json::from_str(&created).expect("write json");
     assert_eq!(created_json["status"], "accepted");
     assert_eq!(created_json["accepted"], true);
+
+    let initial_list = run_cli(
+        [
+            "memory",
+            "skill-list",
+            "--profile",
+            host_profile_name(),
+            "--store-file",
+            &store,
+            "--agent",
+            "cli-skill-agent",
+            "--owner",
+            "owner-default",
+            "--channel",
+            "local",
+            "--chat",
+            "chat-1",
+            "--runtime-skill-subject",
+            "agent:cli-skill-agent",
+            "--query",
+            "release",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect("initial skill list");
+    let initial_list_json: serde_json::Value =
+        serde_json::from_str(&initial_list).expect("initial list json");
+    let owner_id = initial_list_json["skills"]["skills"][0]["ownerId"]
+        .as_str()
+        .expect("owner id")
+        .to_string();
 
     let edited = run_cli(
         [
@@ -199,8 +281,12 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "local",
             "--chat",
             "chat-1",
-            "--name",
-            "runtime_skill__release",
+            "--runtime-skill-subject",
+            "agent:cli-skill-agent",
+            "--runtime-skill-owner-id",
+            &owner_id,
+            "--runtime-skill-owner-revision",
+            "1",
             "--title",
             "Release guard",
             "--topic",
@@ -233,6 +319,8 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "local",
             "--chat",
             "chat-1",
+            "--runtime-skill-subject",
+            "agent:cli-skill-agent",
             "--query",
             "release",
         ]
@@ -243,6 +331,10 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
     let list_json: serde_json::Value = serde_json::from_str(&list).expect("list json");
     assert_eq!(list_json["skills"]["total"], 1);
     assert_eq!(list_json["skills"]["runtimeLearned"], 1);
+    let revision_after_edit = list_json["skills"]["skills"][0]["locator"]["owner_revision"]
+        .as_u64()
+        .expect("revision after edit")
+        .to_string();
 
     let disabled = run_cli(
         [
@@ -260,8 +352,12 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "local",
             "--chat",
             "chat-1",
-            "--name",
-            "runtime_skill__release",
+            "--runtime-skill-subject",
+            "agent:cli-skill-agent",
+            "--runtime-skill-owner-id",
+            &owner_id,
+            "--runtime-skill-owner-revision",
+            &revision_after_edit,
         ]
         .into_iter()
         .map(str::to_string),
@@ -269,11 +365,15 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
     .expect("skill disable");
     let disabled_json: serde_json::Value = serde_json::from_str(&disabled).expect("disable json");
     assert_eq!(disabled_json["mutation"]["accepted"], true);
+    let revision_after_disable = disabled_json["mutation"]["currentLocator"]["owner_revision"]
+        .as_u64()
+        .expect("revision after disable")
+        .to_string();
 
-    let deleted = run_cli(
+    let retired = run_cli(
         [
             "memory",
-            "skill-delete",
+            "skill-retire",
             "--profile",
             host_profile_name(),
             "--store-file",
@@ -286,15 +386,19 @@ fn memory_cli_skill_management_uses_entry_runtime_facade() {
             "local",
             "--chat",
             "chat-1",
-            "--name",
-            "runtime_skill__release",
+            "--runtime-skill-subject",
+            "agent:cli-skill-agent",
+            "--runtime-skill-owner-id",
+            &owner_id,
+            "--runtime-skill-owner-revision",
+            &revision_after_disable,
         ]
         .into_iter()
         .map(str::to_string),
     )
-    .expect("skill delete");
-    let deleted_json: serde_json::Value = serde_json::from_str(&deleted).expect("delete json");
-    assert_eq!(deleted_json["mutation"]["accepted"], true);
+    .expect("skill retire");
+    let retired_json: serde_json::Value = serde_json::from_str(&retired).expect("retire json");
+    assert_eq!(retired_json["mutation"]["accepted"], true);
 }
 
 #[test]
@@ -351,6 +455,14 @@ fn memory_cli_write_then_recall_uses_entry_runtime_store() {
         "CLI writes procedural memory through bm-entry.",
         "--content",
         "1. Open EntryRuntime with an explicit profile and store.\n2. Normalize source, auth, and idempotency metadata.\n3. Dispatch the AdapterCommand through the SDK runtime.\n4. Return only the adapter report envelope.",
+        "--runtime-skill-subject",
+        "agent:cli-agent",
+        "--replay-candidate-ref",
+        "cli-test:entry-runtime",
+        "--verification-receipt-digest",
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "--runtime-skill-privacy",
+        "shared-with-subject",
     ]
     .into_iter()
     .map(str::to_string))
@@ -387,9 +499,16 @@ fn memory_cli_write_then_recall_uses_entry_runtime_store() {
     .expect("recall");
     let recall_json: serde_json::Value = serde_json::from_str(&recall).expect("recall json");
     assert_eq!(recall_json["status"], "accepted");
-    assert!(recall_json["procedural_hits"]
-        .as_array()
-        .is_some_and(|hits| !hits.is_empty()));
+    assert_eq!(recall_json["result"]["operation"], "recall");
+    assert_exact_governed_result(&recall_json);
+    assert_eq!(
+        recall_json["result"]["report"]["governed_recall"]["authority"]["runtime_skill_transport"],
+        "unavailable"
+    );
+    assert_eq!(
+        recall_json["result"]["report"]["governed_recall"]["procedural_delivery"],
+        serde_json::json!([])
+    );
 
     let long_term = run_cli(
         [
@@ -459,6 +578,14 @@ fn memory_cli_binary_can_reopen_file_store_across_processes() {
             "CLI binary writes procedural memory through bm-entry.",
             "--content",
             "1. Open EntryRuntime from the CLI binary.\n2. Persist through the configured file store.\n3. Reopen the same store from a second process.\n4. Recall the procedural memory through SDK dispatch.",
+            "--runtime-skill-subject",
+            "agent:cli-agent",
+            "--replay-candidate-ref",
+            "cli-test:binary-entry-runtime",
+            "--verification-receipt-digest",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "--runtime-skill-privacy",
+            "shared-with-subject",
         ])
         .output()
         .expect("write command");
@@ -498,7 +625,13 @@ fn memory_cli_binary_can_reopen_file_store_across_processes() {
     );
 
     let value: serde_json::Value = serde_json::from_slice(&recall.stdout).expect("recall json");
-    assert!(value["procedural_hits"]
-        .as_array()
-        .is_some_and(|hits| !hits.is_empty()));
+    assert_eq!(value["result"]["operation"], "recall");
+    assert_eq!(
+        value["result"]["report"]["governed_recall"]["authority"]["runtime_skill_transport"],
+        "unavailable"
+    );
+    assert_eq!(
+        value["result"]["report"]["governed_recall"]["procedural_delivery"],
+        serde_json::json!([])
+    );
 }

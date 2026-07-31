@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
@@ -1055,6 +1056,71 @@ pub struct TranscriptTurnPage {
     pub has_more: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptTurnCursor {
+    pub schema_version: u32,
+    pub scope_digest: String,
+    pub sequence: u64,
+    pub turn_id: String,
+}
+
+impl TranscriptTurnCursor {
+    const SCHEMA_VERSION: u32 = 1;
+
+    pub fn for_record(record: &TranscriptTurnRecord) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            scope_digest: transcript_cursor_scope_digest(&record.key, &record.subject),
+            sequence: record.sequence,
+            turn_id: record.turn_id.clone(),
+        }
+    }
+
+    pub fn encode(&self) -> Result<String> {
+        self.validate_shape()?;
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| Error::config("conversation_transcript_page", error.to_string()))?;
+        Ok(format!("btc1:{}", encode_hex(&bytes)))
+    }
+
+    pub fn decode_for_scope(
+        encoded: &str,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+    ) -> Result<Self> {
+        let payload = encoded.trim().strip_prefix("btc1:").ok_or_else(|| {
+            Error::config("conversation_transcript_page", "cursor_schema_invalid")
+        })?;
+        let bytes = decode_hex(payload)?;
+        let cursor = serde_json::from_slice::<Self>(&bytes)
+            .map_err(|_| Error::config("conversation_transcript_page", "cursor_payload_invalid"))?;
+        cursor.validate_shape()?;
+        if cursor.scope_digest != transcript_cursor_scope_digest(key, mounted_subject_id) {
+            return Err(Error::config(
+                "conversation_transcript_page",
+                "cursor_scope_mismatch",
+            ));
+        }
+        Ok(cursor)
+    }
+
+    fn validate_shape(&self) -> Result<()> {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || self.sequence == 0
+            || self.turn_id.trim().is_empty()
+            || !self.scope_digest.starts_with("sha256:")
+            || self.scope_digest.len() != 71
+        {
+            return Err(Error::config(
+                "conversation_transcript_page",
+                "cursor_shape_invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl TranscriptTurnPage {
     pub fn from_records(
         key: ConversationKey,
@@ -1065,7 +1131,9 @@ impl TranscriptTurnPage {
         let start = match cursor.map(str::trim).filter(|value| !value.is_empty()) {
             Some(cursor) => records
                 .iter()
-                .position(|record| transcript_turn_cursor(record) == cursor)
+                .position(|record| {
+                    transcript_turn_cursor(record).is_ok_and(|candidate| candidate == cursor)
+                })
                 .map(|index| index.saturating_add(1))
                 .ok_or_else(|| Error::config("conversation_transcript_page", "cursor_not_found"))?,
             None => 0,
@@ -1075,7 +1143,7 @@ impl TranscriptTurnPage {
         let turns = records[start..end].to_vec();
         let has_more = end < records.len();
         let next_cursor = if has_more {
-            turns.last().map(transcript_turn_cursor)
+            turns.last().map(transcript_turn_cursor).transpose()?
         } else {
             None
         };
@@ -1263,6 +1331,9 @@ pub trait ConversationTranscriptStore: Send + Sync {
         mounted_subject_id: &str,
         limit: usize,
     ) -> Result<Vec<TranscriptTurnRecord>>;
+    fn turn_count(&self, key: &ConversationKey, mounted_subject_id: &str) -> Result<usize> {
+        Ok(self.list_turns(key, mounted_subject_id, usize::MAX)?.len())
+    }
     fn list_turns_page(
         &self,
         key: &ConversationKey,
@@ -1336,7 +1407,14 @@ pub trait ConversationTranscriptStore: Send + Sync {
         view: TranscriptReplayView,
     ) -> Result<RedactedTranscriptSlice> {
         let records = self.list_turns(key, mounted_subject_id, limit)?;
-        let attrs = self.list_transcript_attrs(key, mounted_subject_id, None)?;
+        let mut attrs = Vec::new();
+        for record in &records {
+            attrs.extend(self.list_transcript_attrs(
+                key,
+                mounted_subject_id,
+                Some(&record.turn_id),
+            )?);
+        }
         Ok(RedactedTranscriptSlice::from_records_with_attrs(
             key.clone(),
             view,
@@ -1354,7 +1432,14 @@ pub trait ConversationTranscriptStore: Send + Sync {
         view: TranscriptReplayView,
     ) -> Result<(RedactedTranscriptSlice, Option<String>, bool)> {
         let page = self.list_turns_page(key, mounted_subject_id, cursor, limit)?;
-        let attrs = self.list_transcript_attrs(key, mounted_subject_id, None)?;
+        let mut attrs = Vec::new();
+        for record in &page.turns {
+            attrs.extend(self.list_transcript_attrs(
+                key,
+                mounted_subject_id,
+                Some(&record.turn_id),
+            )?);
+        }
         Ok((
             RedactedTranscriptSlice::from_records_with_attrs(
                 key.clone(),
@@ -1625,8 +1710,51 @@ fn transcript_attr_validation_issue_kind(reason: &str) -> TranscriptRepairIssueK
     }
 }
 
-fn transcript_turn_cursor(record: &TranscriptTurnRecord) -> String {
-    format!("{}:{}", record.sequence, record.turn_id)
+fn transcript_turn_cursor(record: &TranscriptTurnRecord) -> Result<String> {
+    TranscriptTurnCursor::for_record(record).encode()
+}
+
+fn transcript_cursor_scope_digest(key: &ConversationKey, mounted_subject_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    for field in [
+        "beetle_conversation_transcript_cursor_scope_v1",
+        key.memory_space_id.as_str(),
+        mounted_subject_id,
+        key.channel_id.as_str(),
+        key.conversation_id.as_str(),
+    ] {
+        hasher.update(field.len().to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn decode_hex(encoded: &str) -> Result<Vec<u8>> {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(2) {
+        return Err(Error::config(
+            "conversation_transcript_page",
+            "cursor_encoding_invalid",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).map_err(|_| {
+            Error::config("conversation_transcript_page", "cursor_encoding_invalid")
+        })?;
+        bytes.push(u8::from_str_radix(pair, 16).map_err(|_| {
+            Error::config("conversation_transcript_page", "cursor_encoding_invalid")
+        })?);
+    }
+    Ok(bytes)
 }
 
 fn redact_message_for_view(

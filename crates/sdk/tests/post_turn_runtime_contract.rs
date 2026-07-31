@@ -347,6 +347,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
@@ -357,40 +358,21 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
         })
         .expect("projection");
 
-    assert!(projection.context.long_term_memory_text.is_none());
-    assert!(projection.graph_index_report.source_candidate_count > 0);
-    assert!(!projection
-        .recall_delivery_report
-        .selection_decisions
-        .is_empty());
-    assert_eq!(
-        projection.recall_delivery_report.governed_candidate_count,
-        projection.recall_delivery_report.selection_decisions.len()
-    );
-    assert!(projection
-        .recall_delivery_report
-        .selection_decisions
-        .iter()
-        .all(|decision| decision.owner_ref.is_some()));
-    assert!(projection
-        .recall_delivery_report
-        .selection_decisions
-        .iter()
-        .any(|decision| decision.selected));
+    assert!(projection.report().recall_delivery().selected_count > 0);
     assert!(
         projection
-            .recall_delivery_report
+            .report()
+            .recall_delivery()
             .integrity_failures
             .is_empty(),
         "{:#?}",
-        projection.recall_delivery_report
+        projection.report().recall_delivery()
     );
+    assert!(projection.report().recall_delivery().rendered_count > 0);
     assert!(projection
-        .recall_delivery_report
-        .rendered_capsules
-        .iter()
-        .any(|capsule| capsule.content.contains("Qingchuan")));
-    assert!(projection.system_memory_block.contains("Qingchuan"));
+        .provider_payload()
+        .system_memory_block()
+        .contains("Qingchuan"));
 }
 
 #[test]
@@ -438,6 +420,7 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "你是谁？".to_string(),
             system_max_len: 4096,
@@ -448,8 +431,10 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
         })
         .expect("projection");
 
-    assert!(projection.context.long_term_memory_text.is_none());
-    assert!(!projection.system_memory_block.contains("memory helper"));
+    assert!(!projection
+        .provider_payload()
+        .system_memory_block()
+        .contains("memory helper"));
 }
 
 #[test]
@@ -500,6 +485,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "回答风格偏好是什么？".to_string(),
             system_max_len: 4096,
@@ -510,13 +496,11 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
         })
         .expect("projection");
 
-    assert!(projection.context.long_term_memory_text.is_none());
+    assert!(projection.report().recall_delivery().rendered_count > 0);
     assert!(projection
-        .recall_delivery_report
-        .rendered_capsules
-        .iter()
-        .any(|capsule| capsule.content.contains("concise Chinese")));
-    assert!(projection.system_memory_block.contains("concise Chinese"));
+        .provider_payload()
+        .system_memory_block()
+        .contains("concise Chinese"));
 }
 
 #[test]
@@ -564,6 +548,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "external_claim".to_string(),
             system_max_len: 4096,
@@ -575,10 +560,8 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
         .expect("projection");
 
     assert!(!projection
-        .context
-        .long_term_memory_text
-        .as_deref()
-        .unwrap_or_default()
+        .provider_payload()
+        .system_memory_block()
         .contains("External tool output"));
 }
 
@@ -625,6 +608,7 @@ fn finalize_turn_uses_canonical_delta_external_content_boundary() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "external_delta_claim".to_string(),
             system_max_len: 4096,
@@ -636,9 +620,7 @@ fn finalize_turn_uses_canonical_delta_external_content_boundary() {
         .expect("projection");
 
     assert!(!projection
-        .context
-        .long_term_memory_text
-        .as_deref()
-        .unwrap_or_default()
+        .provider_payload()
+        .system_memory_block()
         .contains("External delta content"));
 }

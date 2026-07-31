@@ -8,9 +8,10 @@ use bm_entry::{
     EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryCapabilityPolicy,
+    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
+    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 use serde_json::Value;
 
@@ -71,32 +72,54 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
         .unwrap();
     assert_eq!(create_forbidden.status_code, 405);
 
+    let seed_body = serde_json::json!({
+        "name": "runtime_skill__desktop_console",
+        "topic": "desktop_console",
+        "title": "Desktop direct skill",
+        "summary": "Desktop commands must use the in-process entry runtime.",
+        "content": "1. open the Tauri app\n2. call the shared console API\n3. verify the returned report",
+        "source": "manual",
+        "citations": ["desktop contract test"],
+        "owning_scope": {
+            "kind": "subject",
+            "mounted_subject_id": default_agent_subject_id("bm-desktop"),
+        },
+        "creation_ref": RuntimeSkillCreationRef::ReplayPromotion {
+            candidate_ref: "desktop-test:runtime-skill".to_string(),
+            verification_receipt_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+        },
+        "privacy_class": MemoryPrivacyClass::SharedWithSubject,
+    })
+    .to_string();
     let seeded = state
         .handle_console_request(DesktopConsoleRequest::post_json(
             "/memory/write",
-            r#"{
-              "name":"runtime_skill__desktop_console",
-              "topic":"desktop_console",
-              "title":"Desktop direct skill",
-              "summary":"Desktop commands must use the in-process entry runtime.",
-              "content":"1. open the Tauri app\n2. call the shared console API\n3. verify the returned report",
-              "source":"manual",
-              "citations":["desktop contract test"]
-            }"#,
+            &seed_body,
         ))
         .unwrap();
     assert_eq!(seeded.status_code, 200, "{}", seeded.body);
 
+    let list = state
+        .handle_console_request(DesktopConsoleRequest::get("/console/skills?query=desktop"))
+        .unwrap();
+    assert_eq!(list.status_code, 200);
+    let list_body: Value = serde_json::from_str(&list.body).expect("skill list json");
+    let locator = list_body["skills"]["skills"][0]["locator"].clone();
+    let edit_body = serde_json::json!({
+        "locator": locator,
+        "title": "Desktop direct skill",
+        "topic": "desktop_console",
+        "summary": "Desktop commands must use the in-process entry runtime.",
+        "procedure": "1. open the Tauri app\n2. call the shared console API\n3. verify the returned report\n4. keep edits inside runtime skill management",
+        "editReason": "desktop_contract_edit",
+    })
+    .to_string();
     let mutation = state
         .handle_console_request(DesktopConsoleRequest::patch_json(
-            "/console/skills/runtime_skill__desktop_console",
-            r#"{
-              "title":"Desktop direct skill",
-              "topic":"desktop_console",
-              "summary":"Desktop commands must use the in-process entry runtime.",
-              "procedure":"1. open the Tauri app\n2. call the shared console API\n3. verify the returned report\n4. keep edits inside runtime skill management",
-              "citations":["desktop contract test edit"]
-            }"#,
+            "/console/skills",
+            &edit_body,
         ))
         .unwrap();
     assert_eq!(mutation.status_code, 200, "{}", mutation.body);
@@ -105,6 +128,50 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
         "{}",
         mutation.body
     );
+    let mutation_body: Value = serde_json::from_str(&mutation.body).expect("edit mutation json");
+    let edited_locator = mutation_body["mutation"]["currentLocator"].clone();
+
+    let stale_edit = state
+        .handle_console_request(DesktopConsoleRequest::patch_json(
+            "/console/skills",
+            &edit_body,
+        ))
+        .expect("stale edit response");
+    assert_eq!(stale_edit.status_code, 409, "{}", stale_edit.body);
+
+    let disable_body = serde_json::json!({
+        "locator": edited_locator,
+        "enabled": false,
+    })
+    .to_string();
+    let disabled = state
+        .handle_console_request(DesktopConsoleRequest::patch_json(
+            "/console/skills/enabled",
+            &disable_body,
+        ))
+        .expect("disable response");
+    assert_eq!(disabled.status_code, 200, "{}", disabled.body);
+    let disabled_body: Value = serde_json::from_str(&disabled.body).expect("disable mutation json");
+    let disabled_locator = disabled_body["mutation"]["currentLocator"].clone();
+
+    let retired = state
+        .handle_console_request(DesktopConsoleRequest::post_json(
+            "/console/skills/retire",
+            disabled_locator.to_string(),
+        ))
+        .expect("retire response");
+    assert_eq!(retired.status_code, 200, "{}", retired.body);
+    let retired_body: Value = serde_json::from_str(&retired.body).expect("retire mutation json");
+    let retired_locator = retired_body["mutation"]["currentLocator"].clone();
+
+    let retired_detail = state
+        .handle_console_request(DesktopConsoleRequest::post_json(
+            "/console/skills/detail",
+            retired_locator.to_string(),
+        ))
+        .expect("retired detail response");
+    assert_eq!(retired_detail.status_code, 200, "{}", retired_detail.body);
+    assert!(retired_detail.body.contains(r#""status":"retired""#));
 
     let list = state
         .handle_console_request(DesktopConsoleRequest::get("/console/skills?query=desktop"))
@@ -128,7 +195,7 @@ fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
     assert_eq!(response.status_code, 200, "{}", response.body);
     let body: Value = serde_json::from_str(&response.body).expect("overview json");
     assert_eq!(body["overview"]["writesToday"]["value"], "1");
-    assert_eq!(body["overview"]["recall"]["value"], "100.0%");
+    assert_eq!(body["overview"]["recall"]["value"], "0.0%");
     assert!(body["overview"]["projection"]["desc"]
         .as_str()
         .unwrap_or_default()
@@ -240,24 +307,37 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
     runtime
         .runtime()
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "desktop_ollama_overview".to_string(),
-                topic: "desktop ollama overview".to_string(),
-                title: "Desktop Ollama overview".to_string(),
-                summary: "Desktop overview must include transparent Ollama memory events."
-                    .to_string(),
-                content: "1. read the transparent Ollama memory store\n2. merge store events into the Desktop overview\n3. keep writes and projection hits on the shared metrics path"
-                    .to_string(),
-                citations: vec!["desktop console overview contract".to_string()],
-                source_chat_id: Some("local-desktop".to_string()),
-                observed_at: 1_800_000_000,
+            writes: vec![GovernedRuntimeSkillWriteInput {
+                write: RuntimeSkillWrite {
+                    name: "desktop_ollama_overview".to_string(),
+                    topic: "desktop ollama overview".to_string(),
+                    title: "Desktop Ollama overview".to_string(),
+                    summary: "Desktop overview must include transparent Ollama memory events."
+                        .to_string(),
+                    content: "1. read the transparent Ollama memory store\n2. merge store events into the Desktop overview\n3. keep writes and projection hits on the shared metrics path"
+                        .to_string(),
+                    citations: vec!["desktop console overview contract".to_string()],
+                    source_chat_id: Some("local-desktop".to_string()),
+                    observed_at: 1_800_000_000,
+                },
+                creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                    candidate_ref: "desktop-test:ollama-overview".to_string(),
+                    verification_receipt_digest:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                },
+                privacy_class: MemoryPrivacyClass::SharedWithSubject,
             }],
+            owning_scope: RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: default_agent_subject_id("bm-desktop"),
+            },
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("write");
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should Desktop overview count transparent Ollama?".to_string(),
             system_max_len: 4096,

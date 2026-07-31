@@ -18,12 +18,13 @@ fn scoped_long_term_store_isolates_identical_logical_owners_by_memory_space() {
         .unwrap(),
     )
     .unwrap();
+    let mounted_subject_id = platform.config().event_scope().subject_id.as_str();
     let space_a = platform
-        .scoped_long_term_memory_read_store("space-a")
-        .expect("space-a store");
+        .scoped_long_term_memory_read_store("space:a", mounted_subject_id)
+        .expect("space:a store");
     let space_b = platform
-        .scoped_long_term_memory_read_store("space-b")
-        .expect("space-b store");
+        .scoped_long_term_memory_read_store("space:b", mounted_subject_id)
+        .expect("space:b store");
     let draft = |content: &str| LongTermMemoryDraft {
         kind: LongTermMemoryKind::Project,
         topic: "same-logical-owner".to_string(),
@@ -44,14 +45,14 @@ fn scoped_long_term_store_isolates_identical_logical_owners_by_memory_space() {
         source_revision: None,
     };
 
-    let entry_a = seed_scoped_long_term(&platform, "space-a", &draft("space a"), 1);
-    seed_scoped_long_term(&platform, "space-b", &draft("space b"), 1);
+    let entry_a = seed_scoped_long_term(&platform, "space:a", &draft("space a"), 1);
+    seed_scoped_long_term(&platform, "space:b", &draft("space b"), 1);
     assert_eq!(space_a.count().unwrap(), 1);
     assert_eq!(space_b.count().unwrap(), 1);
     assert_eq!(space_a.list(8).unwrap()[0].content, "space a");
     assert_eq!(space_b.list(8).unwrap()[0].content, "space b");
 
-    delete_scoped_long_term(&platform, "space-a", &entry_a);
+    delete_scoped_long_term(&platform, "space:a", &entry_a);
     assert_eq!(space_a.count().unwrap(), 0);
     assert_eq!(space_b.count().unwrap(), 1);
 }
@@ -80,12 +81,11 @@ fn in_memory_store_platform_covers_core_runtime_paths() {
     state_fs.remove("runtime/state.json").unwrap();
     assert_eq!(state_fs.read("runtime/state.json").unwrap(), None);
 
-    let skill_storage = platform.skill_storage();
-    let skill_body = support::seed_runtime_skill(&platform, "runtime-alpha");
-    assert_eq!(skill_storage.read("runtime-alpha").unwrap(), skill_body);
-    assert_eq!(skill_storage.list_names().unwrap(), vec!["runtime-alpha"]);
-    skill_storage.remove("runtime-alpha").unwrap();
-    assert!(skill_storage.list_names().unwrap().is_empty());
+    let skill_owner = support::seed_runtime_skill(&platform, "runtime-alpha");
+    assert_eq!(
+        support::read_runtime_skill_owner(&platform, &skill_owner.physical_key),
+        skill_owner
+    );
 
     let skill_meta = platform.skill_meta_store();
     skill_meta
@@ -155,7 +155,10 @@ fn in_memory_store_platform_covers_core_runtime_paths() {
     };
     seed_scoped_long_term(&platform, "space:test", &long_term_draft, 100);
     let long_term = platform
-        .scoped_long_term_memory_read_store("space:test")
+        .scoped_long_term_memory_read_store(
+            "space:test",
+            &platform.config().event_scope().subject_id,
+        )
         .expect("scoped long-term read store");
     assert_eq!(long_term.count().unwrap(), 1);
     assert_eq!(

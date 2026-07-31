@@ -48,7 +48,7 @@ cargo test -p bm-core --test memory_graph_v2_contract
 cargo test -p bm-core --test post_image_closure_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test governed_evidence_document_runtime_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test memory_graph_v2_contract
-cargo test -p bm-sdk --features nonproduction-replay-harness --test memory_space_migration_contract
+cargo test -p bm-sdk --features nonproduction-replay-harness --test archive_restore_contract
 
 candidate_body="$(
   awk '
@@ -70,8 +70,13 @@ if ! grep -q "plan_governed_shared_memory_in_space" <<<"${candidate_body}"; then
   exit 1
 fi
 
-if ! grep -q "plan_governed_runtime_skills" <<<"${candidate_body}"; then
-  echo "check_memory_write_transaction_contract: Candidates path must use runtime-skill plan builder" >&2
+if ! grep -q "plan_runtime_skill_owner_upserts" <<<"${candidate_body}"; then
+  echo "check_memory_write_transaction_contract: Candidates path must use the typed runtime-skill owner plan builder" >&2
+  exit 1
+fi
+
+if grep -q "plan_governed_runtime_skills" <<<"${candidate_body}"; then
+  echo "check_memory_write_transaction_contract: Candidates path must not regress to the legacy runtime-skill plan builder" >&2
   exit 1
 fi
 
@@ -138,7 +143,7 @@ for required in \
     crates/sdk/src/store_internal/platform.rs \
     crates/sdk/tests/governed_evidence_document_runtime_contract.rs \
     crates/sdk/tests/memory_graph_v2_contract.rs \
-    crates/sdk/tests/memory_space_migration_contract.rs \
+    crates/sdk/tests/archive_restore_contract.rs \
     crates/core/tests/post_image_closure_contract.rs \
     crates/store-contract-tests/tests/manifest_admission_contract.rs \
     crates/store-contract-tests/tests/mutation_batch_contract.rs >/dev/null; then
@@ -170,9 +175,9 @@ for required in \
   "long_term_control_change_scope_updates_facet_and_reports_visibility_not_indexed" \
   "report_only_subject_visibility_not_indexed" \
   "transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted" \
-  "memory_space_migration_imports_a_valid_same_scope_facet_closure" \
-  "same_scope_import_replaces_only_that_scope_and_preserves_other_spaces"; do
-  if ! rg -n "${required}" crates/sdk/src/runtime.rs crates/sdk/src/lib.rs crates/sdk/tests/memory_write_transaction_contract.rs crates/sdk/tests/memory_space_migration_contract.rs >/dev/null; then
+  "same_scope_restore_preserves_v6_long_term_facet_and_control_closure" \
+  "same_scope_restore_replaces_only_that_scope"; do
+  if ! rg -n "${required}" crates/sdk/src/runtime.rs crates/sdk/src/lib.rs crates/sdk/tests/memory_write_transaction_contract.rs crates/sdk/tests/archive_restore_contract.rs >/dev/null; then
     echo "check_memory_write_transaction_contract: missing P2 facet transaction marker ${required}" >&2
     exit 1
   fi
@@ -204,7 +209,7 @@ for operation in \
   "post_turn.private_garden" \
   "runtime_skill.edit" \
   "runtime_skill.set_enabled" \
-  "runtime_skill.delete"; do
+  "runtime_skill.retire"; do
   if ! grep -q "${operation}" <<<"${runtime_source}"; then
     echo "check_memory_write_transaction_contract: missing transactional operation ${operation}" >&2
     exit 1

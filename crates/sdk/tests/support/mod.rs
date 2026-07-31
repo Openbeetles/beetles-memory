@@ -11,11 +11,12 @@ use bm_core::platform::ResponseBody;
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::NonproductionRuntimeBudgetLimits;
 use bm_sdk::{
-    default_agent_subject_id, default_memory_space_id, LongTermMemoryDraft, MemoryCapabilityPolicy,
-    MemoryClock, MemoryIdentity, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime,
-    MemoryScope, MemoryStoreHandle, MemoryWriteRequest, NoopMemoryAuditSink,
-    ParsedLongTermMemoryExtraction, ProfileId, Result, StoreBackendConfig, SubjectDescriptor,
-    SubjectRegistry, SubjectScopedRuntime,
+    default_agent_subject_id, default_memory_space_id, GovernedRuntimeSkillWriteInput,
+    LongTermMemoryDraft, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyClass,
+    MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryWriteRequest,
+    NoopMemoryAuditSink, ParsedLongTermMemoryExtraction, ProfileId, Result,
+    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite, StoreBackendConfig,
+    SubjectDescriptor, SubjectRegistry, SubjectScopedRuntime,
 };
 
 struct FixedMemoryClock {
@@ -44,6 +45,25 @@ pub fn host_test_profile() -> ProfileId {
         not(any(target_os = "macos", target_os = "windows", target_os = "linux"))
     ))]
     compile_error!("SDK host contract tests require macOS, Windows, or Linux");
+}
+
+pub fn runtime_skill_subject_scope() -> RuntimeSkillOwningScope {
+    RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: default_agent_subject_id("agent-main"),
+    }
+}
+
+pub fn governed_runtime_skill_write(write: RuntimeSkillWrite) -> GovernedRuntimeSkillWriteInput {
+    GovernedRuntimeSkillWriteInput {
+        write,
+        creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+            candidate_ref: "test:governed-runtime-skill".to_string(),
+            verification_receipt_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+        },
+        privacy_class: MemoryPrivacyClass::SharedWithSubject,
+    }
 }
 
 impl FixedMemoryClock {
@@ -86,6 +106,8 @@ pub fn seeded_store_platform(profile: ProfileId) -> MemoryStoreHandle {
     let runtime = test_runtime(platform.clone(), profile);
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,

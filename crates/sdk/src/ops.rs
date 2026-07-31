@@ -1,6 +1,4 @@
-use crate::store_internal::{
-    StoreMutationBudgetReport, StoreSnapshotExportReport, StoreSnapshotImportReport,
-};
+use crate::store_internal::{StoreMutationBudgetReport, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION};
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
     CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, DerivedMemoryRef,
@@ -15,13 +13,12 @@ use bm_core::memory::{
     MemoryLongTermMutationReport as CoreMemoryLongTermMutationReport, MemoryLongTermTarget,
     MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryPrivacyClass,
     MemoryProjectionImpactReport, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionReport, ProjectionFaithfulnessCheck, QueryFacetInput,
-    RedactedTranscriptSlice, SessionTurnCommitReport, SkillEvolutionReport,
-    SubjectProjectionReport, SubjectScopedRuntime, TranscriptAttrEnvelope,
-    TranscriptAttrWriteRejection, TranscriptCommitReport, TranscriptEvidenceRef,
-    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRedactionReportItem,
-    TranscriptRepairReport, TranscriptReplayView, VaultManifest, VaultMigrationPreflight,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, QueryFacetInput,
+    RedactedTranscriptSlice, SessionMessage, SessionTurnCommitReport, SkillEvolutionReport,
+    SubjectScopedRuntime, TranscriptAttrEnvelope, TranscriptAttrWriteRejection,
+    TranscriptCommitReport, TranscriptEvidenceRef, TranscriptLifecycleReport,
+    TranscriptLifecycleTransition, TranscriptRedactionReportItem, TranscriptRepairReport,
+    TranscriptReplayView,
 };
 use bm_core::memory::{
     CompactMemoryGraph, EvidenceBacklink, FacetCoverageSelectionReport, FacetRankFusionReport,
@@ -33,18 +30,19 @@ use bm_core::skills::{
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentSkillRecallHit,
     AgentToolExperienceGovernanceReport, AgentToolExperienceStatusReport, AgentToolHint,
     AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
-    AgentToolUsageFeedback, ProjectedAgentSkillHint,
+    AgentToolUsageFeedback, ProjectedAgentSkillHint, RuntimeSkillCreationRef,
+    RuntimeSkillDeliveryDropReason, RuntimeSkillOwnerLocator, RuntimeSkillOwningScope,
 };
 use bm_core::{
     budget::{RuntimeBudgetReport, RuntimeRetentionQuotaReport},
     feature_gate::ProfileId,
+    Error, Result,
 };
 
 use crate::{
     IntelligenceReplayInspection, MemoryCapabilityCatalog, ParsedLongTermMemoryExtraction,
-    PostReplyMemoryMaintenanceOutcome, PromptMemoryContext, RuntimeSkillHit,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteOutcome, RuntimeSkillWriteSource,
-    StoreSnapshot, WorkingRecallInspection,
+    PostReplyMemoryMaintenanceOutcome, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    RuntimeSkillWriteOutcome, RuntimeSkillWriteSource, StoreSnapshot, WorkingRecallInspection,
 };
 use crate::{
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleModeInput, RuntimeLifecycleReport,
@@ -52,9 +50,12 @@ use crate::{
 };
 use bm_core::memory::PromptProjectionSource;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillListRequest {
+    pub owning_scope: RuntimeSkillOwningScope,
     pub query: Option<String>,
     pub include_disabled: bool,
     pub include_retired: bool,
@@ -63,7 +64,8 @@ pub struct RuntimeSkillListRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillSummary {
-    pub name: String,
+    pub locator: RuntimeSkillOwnerLocator,
+    pub owner_id: String,
     pub title: String,
     pub topic: String,
     pub status: String,
@@ -88,7 +90,7 @@ pub struct RuntimeSkillListReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillDetailRequest {
-    pub name: String,
+    pub locator: RuntimeSkillOwnerLocator,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,13 +108,11 @@ pub struct RuntimeSkillDetailReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillEditRequest {
-    pub name: String,
+    pub locator: RuntimeSkillOwnerLocator,
     pub title: String,
     pub topic: String,
     pub summary: String,
     pub procedure: String,
-    pub citations: Vec<String>,
-    pub source_chat_id: Option<String>,
     pub edit_reason: String,
     pub observed_at: u64,
 }
@@ -121,20 +121,24 @@ pub struct RuntimeSkillEditRequest {
 pub struct RuntimeSkillMutationReport {
     pub accepted: bool,
     pub changed: bool,
-    pub name: String,
+    pub previous_locator: RuntimeSkillOwnerLocator,
+    pub current_locator: RuntimeSkillOwnerLocator,
+    pub owner_id: String,
     pub operation: &'static str,
     pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillSetEnabledRequest {
-    pub name: String,
+    pub locator: RuntimeSkillOwnerLocator,
     pub enabled: bool,
+    pub observed_at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeSkillDeleteRequest {
-    pub name: String,
+pub struct RuntimeSkillRetireRequest {
+    pub locator: RuntimeSkillOwnerLocator,
+    pub observed_at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,18 +223,23 @@ pub enum MemoryEvidenceDocumentMutation {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryWriteRequest {
     Procedural {
-        writes: Vec<RuntimeSkillWrite>,
+        writes: Vec<GovernedRuntimeSkillWriteInput>,
+        owning_scope: RuntimeSkillOwningScope,
         source: RuntimeSkillWriteSource,
     },
     ProceduralPromotions {
         promotions: Vec<ProceduralMemoryPromotionInput>,
+        owning_scope: RuntimeSkillOwningScope,
         source: RuntimeSkillWriteSource,
     },
     LongTermExtraction {
         extraction: ParsedLongTermMemoryExtraction,
+        governed_skill_writes: Vec<GovernedRuntimeSkillWriteInput>,
+        runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
     },
     Candidates {
         candidates: Vec<bm_core::memory::MemoryWriteCandidate>,
+        runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
     },
     GovernedEvidenceDocuments {
         mutations: Vec<MemoryEvidenceDocumentMutation>,
@@ -238,6 +247,14 @@ pub enum MemoryWriteRequest {
     AgentToolUsageFeedback {
         feedback: AgentToolUsageFeedback,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedRuntimeSkillWriteInput {
+    pub write: RuntimeSkillWrite,
+    pub creation_ref: RuntimeSkillCreationRef,
+    pub privacy_class: MemoryPrivacyClass,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -278,12 +295,41 @@ pub struct MemoryWriteTransactionReport {
     pub partial_write: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryRecallTemporalOperation {
+    Current,
+    HistoricalAsOf { as_of_time: u64 },
+}
+
+impl<'de> Deserialize<'de> for MemoryRecallTemporalOperation {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum StrictTemporalOperation {
+            Current {},
+            HistoricalAsOf { as_of_time: u64 },
+        }
+
+        match StrictTemporalOperation::deserialize(deserializer)? {
+            StrictTemporalOperation::Current {} => Ok(Self::Current),
+            StrictTemporalOperation::HistoricalAsOf { as_of_time } => {
+                Ok(Self::HistoricalAsOf { as_of_time })
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryRecallRequest {
     pub query: String,
     pub limit: usize,
     pub structured_query_facets: Vec<QueryFacetInput>,
     pub tool_registry_refs: Vec<AgentToolRegistryRef>,
+    pub temporal_operation: MemoryRecallTemporalOperation,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -818,10 +864,21 @@ pub struct MemoryGraphIntegrityMaintenanceReport {
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProceduralMemoryDeliveryView {
+    pub candidate_ref: String,
+    pub matched: bool,
+    pub selected: bool,
+    pub rendered: bool,
+    pub drop_reasons: Vec<RuntimeSkillDeliveryDropReason>,
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryRecallReport {
     pub query: String,
-    pub procedural_hits: Vec<RuntimeSkillHit>,
+    pub temporal_operation: MemoryRecallTemporalOperation,
+    pub procedural_delivery_reports: Vec<ProceduralMemoryDeliveryView>,
     pub agent_skill_hits: Vec<AgentSkillRecallHit>,
     pub agent_tool_hints: Vec<AgentToolHint>,
     pub tool_experience_status: AgentToolExperienceStatusReport,
@@ -840,10 +897,27 @@ pub struct MemoryRecallReport {
     pub privacy_report: MemoryEvalRecallPrivacyReport,
     pub store_snapshot_consistent: bool,
     pub lifecycle_report: RuntimeLifecycleReport,
+    pub(crate) governed_public_report: Option<crate::GovernedRecallPublicReportV1>,
+    pub(crate) governed_operator_report: Option<crate::GovernedRecallOperatorReportV1>,
+}
+
+impl MemoryRecallReport {
+    pub fn governed_public_report(&self) -> &crate::GovernedRecallPublicReportV1 {
+        self.governed_public_report
+            .as_ref()
+            .expect("production recall must finalize its governed public report")
+    }
+
+    pub fn governed_operator_report(&self) -> &crate::GovernedRecallOperatorReportV1 {
+        self.governed_operator_report
+            .as_ref()
+            .expect("production recall must finalize its governed operator report")
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct MemoryProjectionRequest {
+    pub temporal_operation: MemoryRecallTemporalOperation,
     pub user_query: String,
     pub system_max_len: usize,
     pub recent_messages_limit: usize,
@@ -937,6 +1011,18 @@ pub struct MemoryProjectionDeliveryDigestEntry {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MemoryProjectionProceduralDigestContentEntry {
+    pub candidate_ref: String,
+    pub content_sha256: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MemoryProjectionProceduralDigestReceipt {
+    pub candidate_ref: String,
+    pub source_block_sha256: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryProjectionDeliveryDigestManifest {
     pub schema_version: u32,
     pub system_memory_block_sha256: String,
@@ -946,6 +1032,9 @@ pub struct MemoryProjectionDeliveryDigestManifest {
     pub deterministic_envelope_sha256: String,
     pub exact_render_match: bool,
     pub candidate_receipts: Vec<MemoryProjectionDeliveryDigestEntry>,
+    pub(crate) procedural_block_entries: Vec<MemoryProjectionProceduralDigestContentEntry>,
+    pub(crate) procedural_prompt_visible_entries: Vec<MemoryProjectionProceduralDigestContentEntry>,
+    pub(crate) procedural_candidate_receipts: Vec<MemoryProjectionProceduralDigestReceipt>,
     pub integrity_failures: Vec<String>,
 }
 
@@ -968,21 +1057,209 @@ pub struct PrivateDisclosureIntegrityReport {
     pub passed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProjectionSafeAuditReport {
+    pub projection_id: String,
+    pub source_budget_chars: usize,
+    pub render_budget_chars: usize,
+    pub injected: bool,
+    pub truncated: bool,
+    pub runtime_private_context_allowed: bool,
+    pub foreground_disclosure_allowed: bool,
+    pub private_gate_reason: String,
+    pub evidence_ref_count: usize,
+    pub budget_decision_count: usize,
+    pub privacy_decision_count: usize,
+    pub dropped_candidate_count: usize,
+    pub faithfulness_passed: bool,
+    pub unsupported_claim_count: usize,
+    pub disclosure_integrity_passed: bool,
+    pub raw_private_violation_count: u32,
+    pub graph_used: bool,
+    pub graph_maintenance_required: bool,
+    pub graph_read_path_mutation_delta: usize,
+    pub delivery_digest_verified: bool,
+    pub delivery_digest_candidate_count: usize,
+    pub agent_skill_selected_count: usize,
+    pub agent_tool_selected_count: usize,
+    pub agent_tool_cold_start_selection_used: bool,
+    pub agent_tool_rejection_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProjectionGatewayAuditView {
+    pub projection_id: String,
+    pub provider_projection_chars: usize,
+    pub block: String,
+    pub redacted: bool,
+    pub redacted_source_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryRecallDeliverySafeView {
+    pub selected_count: usize,
+    pub rendered_count: usize,
+    pub redacted_candidate_count: usize,
+    pub rendered_chars: usize,
+    pub render_growth: usize,
+    pub integrity_failures: Vec<String>,
+    pub delivery_drop_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderProjectionMaintenanceCarry {
+    pub(crate) runtime_skill_selected_ids: Vec<String>,
+    pub(crate) task_learning_selected_ids: Vec<String>,
+}
+
+impl ProviderProjectionMaintenanceCarry {
+    pub fn runtime_skill_selected_ids(&self) -> &[String] {
+        &self.runtime_skill_selected_ids
+    }
+
+    pub fn task_learning_selected_ids(&self) -> &[String] {
+        &self.task_learning_selected_ids
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderProjectionPayload {
+    pub(crate) system_memory_block: String,
+    pub(crate) recent_messages: Vec<SessionMessage>,
+    pub(crate) agent_tool_hints: Vec<AgentToolHint>,
+    pub(crate) maintenance_carry: ProviderProjectionMaintenanceCarry,
+}
+
+impl ProviderProjectionPayload {
+    pub fn system_memory_block(&self) -> &str {
+        &self.system_memory_block
+    }
+
+    pub fn recent_messages(&self) -> &[SessionMessage] {
+        &self.recent_messages
+    }
+
+    pub fn agent_tool_hints(&self) -> &[AgentToolHint] {
+        &self.agent_tool_hints
+    }
+
+    pub fn maintenance_carry(&self) -> &ProviderProjectionMaintenanceCarry {
+        &self.maintenance_carry
+    }
+}
+
+/// Public projection evidence intentionally excludes provider/private material.
+///
+/// ```compile_fail
+/// fn provider_prompt_is_not_public(report: &bm_sdk::MemoryProjectionReport) {
+///     let _ = report.system_memory_block();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn raw_context_is_not_public(report: &bm_sdk::MemoryProjectionReport) {
+///     let _ = report.context;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn runtime_envelope_is_not_public(report: &bm_sdk::MemoryProjectionReport) {
+///     let _ = report.runtime_projection;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn digest_manifest_is_not_public(report: &bm_sdk::MemoryProjectionReport) {
+///     let _ = report.delivery_digest_manifest;
+/// }
+/// ```
 pub struct MemoryProjectionReport {
-    pub system_memory_block: String,
-    pub context: PromptMemoryContext,
-    pub audit: MemoryProjectionAuditReport,
-    pub runtime_projection: LLMRuntimeProjectionEnvelope,
-    pub projection_surfaces: MemoryProjectionSurfaceSet,
-    pub life_projection: SoulLifeProjectionReport,
-    pub work_integrity: WorkIntegrityReport,
-    pub subject_projection: SubjectProjectionReport,
-    pub projection_faithfulness: ProjectionFaithfulnessCheck,
-    pub delivery_digest_manifest: MemoryProjectionDeliveryDigestManifest,
-    pub private_disclosure_integrity: PrivateDisclosureIntegrityReport,
-    pub recall_delivery_report: MemoryRecallDeliveryReport,
-    pub graph_index_report: MemoryGraphRecallIndexReport,
-    pub lifecycle_report: RuntimeLifecycleReport,
+    pub(crate) temporal_operation: MemoryRecallTemporalOperation,
+    pub(crate) ui_api_projection: String,
+    pub(crate) ui_api_chars: usize,
+    pub(crate) operator_projection: String,
+    pub(crate) shared_fact_projection: String,
+    pub(crate) agent_tool_hints: Vec<AgentToolHint>,
+    pub(crate) audit: MemoryProjectionSafeAuditReport,
+    pub(crate) gateway_audit: MemoryProjectionGatewayAuditView,
+    pub(crate) procedural_delivery_reports: Vec<ProceduralMemoryDeliveryView>,
+    pub(crate) recall_delivery: MemoryRecallDeliverySafeView,
+    pub(crate) lifecycle_report: RuntimeLifecycleReport,
+    pub(crate) governed_public_report: crate::GovernedRecallPublicReportV1,
+    pub(crate) governed_operator_report: crate::GovernedRecallOperatorReportV1,
+}
+
+impl MemoryProjectionReport {
+    pub const fn temporal_operation(&self) -> MemoryRecallTemporalOperation {
+        self.temporal_operation
+    }
+
+    pub fn ui_api_projection(&self) -> &str {
+        &self.ui_api_projection
+    }
+
+    pub const fn ui_api_chars(&self) -> usize {
+        self.ui_api_chars
+    }
+
+    pub fn operator_projection(&self) -> &str {
+        &self.operator_projection
+    }
+
+    pub fn shared_fact_projection(&self) -> &str {
+        &self.shared_fact_projection
+    }
+
+    pub fn agent_tool_hints(&self) -> &[AgentToolHint] {
+        &self.agent_tool_hints
+    }
+
+    pub fn audit(&self) -> &MemoryProjectionSafeAuditReport {
+        &self.audit
+    }
+
+    pub fn gateway_audit(&self) -> &MemoryProjectionGatewayAuditView {
+        &self.gateway_audit
+    }
+
+    pub fn procedural_delivery_reports(&self) -> &[ProceduralMemoryDeliveryView] {
+        &self.procedural_delivery_reports
+    }
+
+    pub fn recall_delivery(&self) -> &MemoryRecallDeliverySafeView {
+        &self.recall_delivery
+    }
+
+    pub fn governed_public_report(&self) -> &crate::GovernedRecallPublicReportV1 {
+        &self.governed_public_report
+    }
+
+    pub fn governed_operator_report(&self) -> &crate::GovernedRecallOperatorReportV1 {
+        &self.governed_operator_report
+    }
+
+    pub fn lifecycle_report(&self) -> &RuntimeLifecycleReport {
+        &self.lifecycle_report
+    }
+}
+
+pub struct MemoryProjectionOutput {
+    pub(crate) provider_payload: ProviderProjectionPayload,
+    pub(crate) report: MemoryProjectionReport,
+}
+
+impl MemoryProjectionOutput {
+    pub fn provider_payload(&self) -> &ProviderProjectionPayload {
+        &self.provider_payload
+    }
+
+    pub fn report(&self) -> &MemoryProjectionReport {
+        &self.report
+    }
+
+    pub fn into_parts(self) -> (ProviderProjectionPayload, MemoryProjectionReport) {
+        (self.provider_payload, self.report)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1246,24 +1523,396 @@ pub struct MemoryTranscriptExportReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySpaceScope {
+pub(crate) struct MemorySpaceScope {
     pub memory_space_id: String,
     pub mounted_subject_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryArchiveScope {
+    Subject {
+        memory_space_id: String,
+        mounted_subject_id: String,
+    },
+    SharedProgram {
+        memory_space_id: String,
+    },
+}
+
+impl MemoryArchiveScope {
+    pub fn subject(
+        memory_space_id: impl Into<String>,
+        mounted_subject_id: impl Into<String>,
+    ) -> Result<Self> {
+        let scope = Self::Subject {
+            memory_space_id: memory_space_id.into(),
+            mounted_subject_id: mounted_subject_id.into(),
+        };
+        scope.validate()?;
+        Ok(scope)
+    }
+
+    pub fn shared_program(memory_space_id: impl Into<String>) -> Result<Self> {
+        let scope = Self::SharedProgram {
+            memory_space_id: memory_space_id.into(),
+        };
+        scope.validate()?;
+        Ok(scope)
+    }
+
+    pub fn validate_exact_identity(&self, actual: &Self) -> Result<()> {
+        self.validate()?;
+        actual.validate()?;
+        if self == actual {
+            Ok(())
+        } else {
+            Err(Error::config(
+                "memory_archive_scope",
+                "archive scope kind or identity does not match exactly",
+            ))
+        }
+    }
+
+    pub fn memory_space_id(&self) -> &str {
+        match self {
+            Self::Subject {
+                memory_space_id, ..
+            }
+            | Self::SharedProgram { memory_space_id } => memory_space_id,
+        }
+    }
+
+    pub fn mounted_subject_id(&self) -> Option<&str> {
+        match self {
+            Self::Subject {
+                mounted_subject_id, ..
+            } => Some(mounted_subject_id),
+            Self::SharedProgram { .. } => None,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        match self {
+            Self::Subject {
+                memory_space_id,
+                mounted_subject_id,
+            } => {
+                require_canonical_archive_identity(memory_space_id, "memory_space_id")?;
+                require_canonical_archive_identity(mounted_subject_id, "mounted_subject_id")?;
+            }
+            Self::SharedProgram { memory_space_id } => {
+                require_canonical_archive_identity(memory_space_id, "memory_space_id")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn digest_fields(&self) -> (&'static str, &str, Option<&str>) {
+        match self {
+            Self::Subject {
+                memory_space_id,
+                mounted_subject_id,
+            } => ("subject", memory_space_id, Some(mounted_subject_id)),
+            Self::SharedProgram { memory_space_id } => ("shared_program", memory_space_id, None),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum GovernedScopeArchiveEntryKind {
+    Json,
+    Event,
+}
+
+impl GovernedScopeArchiveEntryKind {
+    const fn discriminant(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Event => "event",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedScopeArchiveEntry {
+    kind: GovernedScopeArchiveEntryKind,
+    namespace_or_plane: String,
+    key_or_event_id: String,
+    canonical_bytes: usize,
+    content_sha256: String,
+}
+
+impl GovernedScopeArchiveEntry {
+    pub fn json(namespace: &str, key: &str, value: &Value) -> Result<Self> {
+        Self::from_value(GovernedScopeArchiveEntryKind::Json, namespace, key, value)
+    }
+
+    pub fn event(plane: &str, event_id: &str, value: &Value) -> Result<Self> {
+        Self::from_value(GovernedScopeArchiveEntryKind::Event, plane, event_id, value)
+    }
+
+    fn from_value(
+        kind: GovernedScopeArchiveEntryKind,
+        namespace_or_plane: &str,
+        key_or_event_id: &str,
+        value: &Value,
+    ) -> Result<Self> {
+        require_canonical_archive_identity(namespace_or_plane, "namespace_or_plane")?;
+        require_canonical_archive_identity(key_or_event_id, "key_or_event_id")?;
+        let canonical = canonical_archive_json(value)?;
+        Ok(Self {
+            kind,
+            namespace_or_plane: namespace_or_plane.to_string(),
+            key_or_event_id: key_or_event_id.to_string(),
+            canonical_bytes: canonical.len(),
+            content_sha256: format!("{:x}", Sha256::digest(&canonical)),
+        })
+    }
+}
+
+pub const GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION: u32 = 1;
+const GOVERNED_SCOPE_ARCHIVE_ROOT_DIGEST_DOMAIN: &str =
+    "beetle_memory_governed_scope_archive_root_v1";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedScopeArchiveRootV1 {
+    pub schema_version: u32,
+    pub store_schema_id: String,
+    pub store_schema_version: u32,
+    pub scope: MemoryArchiveScope,
+    pub private_material_policy: MemorySpacePrivateMaterialPolicy,
+    pub json_doc_count: u64,
+    pub event_count: u64,
+    pub json_bytes: u64,
+    pub event_bytes: u64,
+    pub closure_sha256: String,
+}
+
+impl GovernedScopeArchiveRootV1 {
+    pub fn build(
+        scope: MemoryArchiveScope,
+        private_material_policy: MemorySpacePrivateMaterialPolicy,
+        entries: impl IntoIterator<Item = GovernedScopeArchiveEntry>,
+    ) -> Result<Self> {
+        scope.validate()?;
+        let mut entries = entries.into_iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| left.namespace_or_plane.cmp(&right.namespace_or_plane))
+                .then_with(|| left.key_or_event_id.cmp(&right.key_or_event_id))
+        });
+        if entries.windows(2).any(|pair| {
+            pair[0].kind == pair[1].kind
+                && pair[0].namespace_or_plane == pair[1].namespace_or_plane
+                && pair[0].key_or_event_id == pair[1].key_or_event_id
+        }) {
+            return Err(Error::config(
+                "governed_scope_archive_root",
+                "archive entries contain a duplicate canonical address",
+            ));
+        }
+
+        let mut json_doc_count = 0_usize;
+        let mut event_count = 0_usize;
+        let mut json_bytes = 0_usize;
+        let mut event_bytes = 0_usize;
+        for entry in &entries {
+            match entry.kind {
+                GovernedScopeArchiveEntryKind::Json => {
+                    json_doc_count = json_doc_count.checked_add(1).ok_or_else(|| {
+                        Error::config("governed_scope_archive_root", "JSON count overflow")
+                    })?;
+                    json_bytes =
+                        json_bytes
+                            .checked_add(entry.canonical_bytes)
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "governed_scope_archive_root",
+                                    "JSON byte count overflow",
+                                )
+                            })?;
+                }
+                GovernedScopeArchiveEntryKind::Event => {
+                    event_count = event_count.checked_add(1).ok_or_else(|| {
+                        Error::config("governed_scope_archive_root", "event count overflow")
+                    })?;
+                    event_bytes =
+                        event_bytes
+                            .checked_add(entry.canonical_bytes)
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "governed_scope_archive_root",
+                                    "event byte count overflow",
+                                )
+                            })?;
+                }
+            }
+        }
+
+        let closure_sha256 = archive_root_digest(
+            &scope,
+            private_material_policy,
+            json_doc_count,
+            event_count,
+            json_bytes,
+            event_bytes,
+            &entries,
+        )?;
+        Ok(Self {
+            schema_version: GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION,
+            store_schema_id: STORE_SCHEMA_ID.to_string(),
+            store_schema_version: STORE_SCHEMA_VERSION,
+            scope,
+            private_material_policy,
+            json_doc_count: bounded_archive_count("json_doc_count", json_doc_count)?,
+            event_count: bounded_archive_count("event_count", event_count)?,
+            json_bytes: bounded_archive_count("json_bytes", json_bytes)?,
+            event_bytes: bounded_archive_count("event_bytes", event_bytes)?,
+            closure_sha256,
+        })
+    }
+}
+
+fn require_canonical_archive_identity(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() || value != value.trim() {
+        return Err(Error::config(
+            "memory_archive_scope",
+            format!("{field} must be a canonical non-empty value"),
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_archive_count(field: &str, value: usize) -> Result<u64> {
+    u64::try_from(value).map_err(|_| {
+        Error::config(
+            "governed_scope_archive_root",
+            format!("{field} cannot be represented by the fixed-size archive root"),
+        )
+    })
+}
+
+fn canonical_archive_json(value: &Value) -> Result<Vec<u8>> {
+    fn write(value: &Value, output: &mut Vec<u8>) -> Result<()> {
+        match value {
+            Value::Array(values) => {
+                output.push(b'[');
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    write(value, output)?;
+                }
+                output.push(b']');
+            }
+            Value::Object(values) => {
+                output.push(b'{');
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    serde_json::to_writer(&mut *output, key).map_err(|error| {
+                        Error::config("governed_scope_archive_json", error.to_string())
+                    })?;
+                    output.push(b':');
+                    write(&values[key], output)?;
+                }
+                output.push(b'}');
+            }
+            _ => serde_json::to_writer(&mut *output, value)
+                .map_err(|error| Error::config("governed_scope_archive_json", error.to_string()))?,
+        }
+        Ok(())
+    }
+
+    let mut output = Vec::new();
+    write(value, &mut output)?;
+    Ok(output)
+}
+
+fn archive_root_digest(
+    scope: &MemoryArchiveScope,
+    private_material_policy: MemorySpacePrivateMaterialPolicy,
+    json_doc_count: usize,
+    event_count: usize,
+    json_bytes: usize,
+    event_bytes: usize,
+    entries: &[GovernedScopeArchiveEntry],
+) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hash_archive_field(
+        &mut hasher,
+        GOVERNED_SCOPE_ARCHIVE_ROOT_DIGEST_DOMAIN.as_bytes(),
+    );
+    hash_archive_field(
+        &mut hasher,
+        &GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION.to_be_bytes(),
+    );
+    hash_archive_field(&mut hasher, STORE_SCHEMA_ID.as_bytes());
+    hash_archive_field(&mut hasher, &STORE_SCHEMA_VERSION.to_be_bytes());
+    let (scope_kind, memory_space_id, mounted_subject_id) = scope.digest_fields();
+    hash_archive_field(&mut hasher, scope_kind.as_bytes());
+    hash_archive_field(&mut hasher, memory_space_id.as_bytes());
+    hash_archive_field(
+        &mut hasher,
+        mounted_subject_id.unwrap_or_default().as_bytes(),
+    );
+    hash_archive_field(
+        &mut hasher,
+        match private_material_policy {
+            MemorySpacePrivateMaterialPolicy::ExcludePrivate => b"exclude_private",
+            MemorySpacePrivateMaterialPolicy::IncludePrivate => b"include_private",
+        },
+    );
+    for count in [json_doc_count, event_count, json_bytes, event_bytes] {
+        let count = u64::try_from(count).map_err(|_| {
+            Error::config(
+                "governed_scope_archive_root",
+                "archive count cannot be represented canonically",
+            )
+        })?;
+        hash_archive_field(&mut hasher, &count.to_be_bytes());
+    }
+    for entry in entries {
+        hash_archive_field(&mut hasher, entry.kind.discriminant().as_bytes());
+        hash_archive_field(&mut hasher, entry.namespace_or_plane.as_bytes());
+        hash_archive_field(&mut hasher, entry.key_or_event_id.as_bytes());
+        let canonical_bytes = u64::try_from(entry.canonical_bytes).map_err(|_| {
+            Error::config(
+                "governed_scope_archive_root",
+                "entry byte count cannot be represented canonically",
+            )
+        })?;
+        hash_archive_field(&mut hasher, &canonical_bytes.to_be_bytes());
+        hash_archive_field(&mut hasher, entry.content_sha256.as_bytes());
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_archive_field(hasher: &mut Sha256, field: &[u8]) {
+    hasher.update((field.len() as u64).to_be_bytes());
+    hasher.update(field);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceProjectionScope {
-    pub scope: MemorySpaceScope,
-    pub includes_private: bool,
+    pub scope: MemoryArchiveScope,
+    pub private_material_policy: MemorySpacePrivateMaterialPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceExportRequest {
-    pub scope: MemorySpaceScope,
-    pub include_private: bool,
+    pub scope: MemoryArchiveScope,
+    pub private_material_policy: MemorySpacePrivateMaterialPolicy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemorySpacePrivateMaterialPolicy {
     ExcludePrivate,
     IncludePrivate,
@@ -1279,12 +1928,12 @@ impl MemorySpacePrivateMaterialPolicy {
 pub struct MemorySpaceExportReport {
     pub projection_scope: MemorySpaceProjectionScope,
     pub archive: MemorySpaceArchive,
-    pub export_report: StoreSnapshotExportReport,
     pub privacy_redactions: usize,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct MemorySpaceArchive {
+    root: GovernedScopeArchiveRootV1,
     snapshot: StoreSnapshot,
 }
 
@@ -1293,27 +1942,37 @@ impl std::fmt::Debug for MemorySpaceArchive {
         let report = self.snapshot.export_report();
         formatter
             .debug_struct("MemorySpaceArchive")
-            .field("schema_id", &report.schema_id)
-            .field("json_doc_count", &report.json_docs)
+            .field("root", &self.root)
+            .field("diagnostic_schema_id", &report.schema_id)
+            .field("diagnostic_json_doc_count", &report.json_docs)
             .field("blob_count", &report.blobs)
-            .field("event_count", &report.events)
-            .field("state_fingerprint", &report.state_fingerprint)
-            .field("event_fingerprint", &report.event_fingerprint)
+            .field("diagnostic_event_count", &report.events)
             .finish()
     }
 }
 
 impl MemorySpaceArchive {
-    pub(crate) fn from_snapshot(snapshot: StoreSnapshot) -> Self {
-        Self { snapshot }
+    pub(crate) fn from_snapshot(root: GovernedScopeArchiveRootV1, snapshot: StoreSnapshot) -> Self {
+        Self { root, snapshot }
+    }
+
+    pub fn root(&self) -> &GovernedScopeArchiveRootV1 {
+        &self.root
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn with_replaced_root_for_nonproduction_harness(
+        &self,
+        root: GovernedScopeArchiveRootV1,
+    ) -> Self {
+        Self {
+            root,
+            snapshot: self.snapshot.clone(),
+        }
     }
 
     pub(crate) fn snapshot(&self) -> &StoreSnapshot {
         &self.snapshot
-    }
-
-    pub(crate) fn into_snapshot(self) -> StoreSnapshot {
-        self.snapshot
     }
 
     pub fn contains_json_namespace(&self, namespace: &str) -> bool {
@@ -1321,6 +1980,13 @@ impl MemorySpaceArchive {
             .json_docs
             .iter()
             .any(|doc| doc.namespace == namespace)
+    }
+
+    pub fn contains_json_address(&self, namespace: &str, key: &str) -> bool {
+        self.snapshot
+            .json_docs
+            .iter()
+            .any(|doc| doc.namespace == namespace && doc.key == key)
     }
 
     pub fn json_doc_count(&self) -> usize {
@@ -1337,114 +2003,19 @@ impl MemorySpaceArchive {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemorySpaceImportRequest {
-    pub scope: MemorySpaceScope,
+    pub scope: MemoryArchiveScope,
     pub expected_private_material_policy: MemorySpacePrivateMaterialPolicy,
     pub archive: MemorySpaceArchive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceImportReport {
-    pub imported_scope: MemorySpaceScope,
-    pub import_report: StoreSnapshotImportReport,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MemorySpaceMigratePreviewRequest {
-    pub source_scope: MemorySpaceScope,
-    pub target_scope: MemorySpaceScope,
-    pub expected_private_material_policy: MemorySpacePrivateMaterialPolicy,
-    pub source_profile: ProfileId,
-    pub target_profile: ProfileId,
-    pub archive: MemorySpaceArchive,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySpaceMigrationPlaneReport {
-    pub plane: String,
-    pub records: usize,
-    pub privacy_class: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySpaceMigrationPrivacyReport {
-    pub privacy_class: String,
-    pub records: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySpaceIdentityRemapReport {
-    pub required: bool,
-    pub applied: bool,
-    pub reason: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySpaceMigrationManifest {
-    pub projection_scope: MemorySpaceProjectionScope,
-    pub target_scope: MemorySpaceScope,
-    pub schema_id: String,
-    pub identity_remap: MemorySpaceIdentityRemapReport,
-    pub planes: Vec<MemorySpaceMigrationPlaneReport>,
-    pub privacy: Vec<MemorySpaceMigrationPrivacyReport>,
-    pub conflict_risk: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MemorySpaceMigratePreviewReport {
-    pub source_scope: MemorySpaceScope,
-    pub target_scope: MemorySpaceScope,
-    pub schema_id: String,
-    pub json_docs: usize,
-    pub blobs: usize,
-    pub events: usize,
-    pub state_fingerprint: String,
-    pub event_fingerprint: String,
-    pub privacy_redactions: usize,
-    pub loss_risk: bool,
-    pub manifest: MemorySpaceMigrationManifest,
-    pub vault_manifest: VaultManifest,
-    pub vault_redaction: PrivateMaterialRedactionReport,
-    pub vault_preflight: VaultMigrationPreflight,
-    pub plan: MemorySpaceMigrationPlan,
-}
-
-#[derive(Clone, PartialEq)]
-pub struct MemorySpaceMigrationPlan {
-    pub(crate) target_scope: MemorySpaceScope,
-    pub(crate) expected_private_material_policy: MemorySpacePrivateMaterialPolicy,
-    pub(crate) snapshot: StoreSnapshot,
-    pub(crate) preflight: VaultMigrationPreflight,
-}
-
-impl std::fmt::Debug for MemorySpaceMigrationPlan {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let report = self.snapshot.export_report();
-        formatter
-            .debug_struct("MemorySpaceMigrationPlan")
-            .field("target_scope", &self.target_scope)
-            .field(
-                "expected_private_material_policy",
-                &self.expected_private_material_policy,
-            )
-            .field("schema_id", &report.schema_id)
-            .field("json_doc_count", &report.json_docs)
-            .field("blob_count", &report.blobs)
-            .field("event_count", &report.events)
-            .field("state_fingerprint", &report.state_fingerprint)
-            .field("event_fingerprint", &report.event_fingerprint)
-            .finish()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MemorySpaceMigrateApplyRequest {
-    pub plan: MemorySpaceMigrationPlan,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemorySpaceMigrateApplyReport {
-    pub target_scope: MemorySpaceScope,
-    pub import_report: StoreSnapshotImportReport,
+    pub imported_scope: MemoryArchiveScope,
+    pub archive_root: GovernedScopeArchiveRootV1,
+    pub deleted_json_docs: usize,
+    pub inserted_json_docs: usize,
+    pub deleted_events: usize,
+    pub inserted_events: usize,
 }
 
 #[derive(Clone, Debug)]

@@ -25,7 +25,7 @@ fn snapshot_shape_is_stable_and_reviewable() {
     let snapshot = platform_capability_snapshot(&catalog);
     let value = serde_json::to_value(&snapshot).expect("snapshot json");
 
-    assert_eq!(value["schema"], "beetle-memory.platform.capability.v1");
+    assert_eq!(value["schema"], "beetle-memory.platform.capability.v2");
     assert_eq!(value["profile"], "profile-esp-standalone-memory");
     assert_eq!(value["target"], "target-esp");
     assert_eq!(value["role"], "role-standalone-memory");
@@ -37,5 +37,17 @@ fn snapshot_shape_is_stable_and_reviewable() {
     assert_eq!(
         value["entry"]["llm_gateway_server"]["server_allowed"],
         false
+    );
+    assert_eq!(
+        value["governed_state"]["dynamic_state_recall"]["profile_allowed"],
+        true
+    );
+    assert_eq!(
+        value["governed_state"]["dynamic_state_recall"]["visible"],
+        false
+    );
+    assert_eq!(
+        value["governed_state"]["runtime_skill_recall_transport"],
+        "unavailable"
     );
 }

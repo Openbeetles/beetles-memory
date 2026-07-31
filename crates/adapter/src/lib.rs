@@ -7,15 +7,20 @@ mod payload;
 mod policy;
 
 pub use contract::{
-    AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterEvent, AdapterOperation,
-    AdapterProjectionAuditSummary, AdapterProjectionReport, AdapterRequestIdentity,
-    AdapterRequestIdentityError, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
-    AdapterSource, TransportKind, TransportMode,
+    AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterEvent,
+    AdapterGovernedProjectSafeReportV1, AdapterGovernedRecallSafeReportV1,
+    AdapterGovernedSafeReportV1, AdapterOperation, AdapterProjectionAuditSummary,
+    AdapterProjectionReport, AdapterRequestIdentity, AdapterRequestIdentityError,
+    AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport, AdapterSource, TransportKind,
+    TransportMode,
 };
 pub use dispatch::{
     dispatch_adapter_command, dispatch_adapter_command_with_services, project_adapter_report,
     AdapterRuntimeServices,
 };
 pub use error::{AdapterError, AdapterErrorKey};
-pub use payload::{decode_json_adapter_command, AdapterJsonCommandOptions};
+pub use payload::{
+    decode_json_adapter_command, governed_adapter_json_command_schema, AdapterJsonCommandOptions,
+    GovernedAdapterJsonCommandSchema,
+};
 pub use policy::{AdapterBudget, AdapterPolicy};

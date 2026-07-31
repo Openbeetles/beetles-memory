@@ -12,7 +12,12 @@ fn sdk_memory_harness_runs_through_runtime_on_host_native_profile() {
         .run
         .report_fragments
         .iter()
-        .any(|fragment| fragment.contains("runtime_skill__release_guard")));
+        .any(|fragment| fragment.contains("procedural_delivery_reports=0 selected_count=0")));
+    assert!(report
+        .run
+        .report_fragments
+        .iter()
+        .all(|fragment| !fragment.contains("runtime_skill__release_guard")));
 }
 
 #[test]
@@ -24,4 +29,14 @@ fn esp_standalone_runs_compact_sdk_harness_without_sqlite() {
 
     assert!(report.run.passed, "{:?}", report.run.failures);
     assert_eq!(report.run.profile, ProfileId::EspStandaloneMemory);
+    assert!(report
+        .run
+        .report_fragments
+        .iter()
+        .any(|fragment| fragment.contains("procedural_delivery_reports=1 selected_count=1")));
+    assert!(report
+        .run
+        .report_fragments
+        .iter()
+        .all(|fragment| !fragment.contains("runtime_skill__release_guard")));
 }

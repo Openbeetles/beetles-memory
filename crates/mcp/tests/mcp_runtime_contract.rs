@@ -43,8 +43,30 @@ fn write_arguments(name: &str, summary: &str) -> String {
         "title": format!("MCP write {name}"),
         "summary": summary,
         "content": "Dispatch this write through the governed EntryRuntime path.",
+        "owning_scope": {
+            "kind": "subject",
+            "mounted_subject_id": "agent:mcp-agent",
+        },
+        "creation_ref": {
+            "kind": "replay_promotion",
+            "candidate_ref": format!("test:mcp:{name}"),
+            "verification_receipt_digest":
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        },
+        "privacy_class": "shared_with_subject",
     })
     .to_string()
+}
+
+fn assert_exact_governed_result(content: &str) {
+    let value: Value = serde_json::from_str(content).expect("governed response JSON");
+    let result = value["result"].clone();
+    let dto: bm_adapter::AdapterGovernedSafeReportV1 =
+        serde_json::from_value(result.clone()).expect("strict adapter governed safe DTO");
+    assert_eq!(
+        serde_json::to_value(dto).expect("serialize adapter governed safe DTO"),
+        result
+    );
 }
 
 #[test]
@@ -160,7 +182,10 @@ fn mcp_tool_call_dispatches_through_entry_runtime_without_private_raw() {
     let result = server
         .call(
             &runtime,
-            McpToolCall::json("memory_recall", r#"{"query":"release","limit":2}"#),
+            McpToolCall::json(
+                "memory_recall",
+                r#"{"temporal_operation":{"kind":"current"},"query":"release","limit":2}"#,
+            ),
         )
         .expect("tool call");
 
@@ -168,6 +193,7 @@ fn mcp_tool_call_dispatches_through_entry_runtime_without_private_raw() {
     assert!(!result.private_raw_allowed);
     assert!(result.content.contains("\"query\""));
     assert!(result.budget_report_id.starts_with("rtb-v2-"));
+    assert_exact_governed_result(&result.content);
 }
 
 #[test]
@@ -178,7 +204,7 @@ fn mcp_tool_server_decodes_declared_memory_tools() {
         ("memory_capabilities", r#"{}"#),
         (
             "memory_project",
-            r#"{"query":"release","system_max_len":1024}"#,
+            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
         ),
         (
             "memory_inspect",
@@ -187,7 +213,7 @@ fn mcp_tool_server_decodes_declared_memory_tools() {
         ("memory_long_term_list", r#"{"query":{},"limit":2}"#),
         (
             "memory_write_candidate",
-            r#"{"name":"runtime_skill__mcp_write","topic":"mcp","title":"MCP write","summary":"MCP write summary","content":"1. Decode MCP tool payload.\n2. Dispatch through EntryRuntime."}"#,
+            r#"{"name":"runtime_skill__mcp_write","topic":"mcp","title":"MCP write","summary":"MCP write summary","content":"1. Decode MCP tool payload.\n2. Dispatch through EntryRuntime.","owning_scope":{"kind":"subject","mounted_subject_id":"agent:mcp-agent"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:mcp:runtime_skill__mcp_write","verification_receipt_digest":"sha256:4444444444444444444444444444444444444444444444444444444444444444"},"privacy_class":"shared_with_subject"}"#,
         ),
     ];
 
@@ -229,16 +255,25 @@ fn mcp_project_tool_exposes_only_the_adapter_projection_surface() {
             &runtime,
             McpToolCall::json(
                 "memory_project",
-                r#"{"query":"release","system_max_len":1024}"#,
+                r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
             ),
         )
         .expect("project tool call");
     let content: Value = serde_json::from_str(&result.content).expect("project tool json");
 
-    assert_eq!(content["projection_surface"], "ui_api");
-    assert!(content.get("projection_block").is_some());
-    assert!(content.get("chars").is_some());
+    assert_eq!(content["status"], "accepted");
+    assert_eq!(content["result"]["operation"], "project");
+    assert_eq!(
+        content["result"]["report"]["temporal_operation"]["kind"],
+        "current"
+    );
+    assert!(content["result"]["report"]
+        .get("projection_block")
+        .is_some());
+    assert!(content["result"]["report"].get("chars").is_some());
+    assert!(content["result"]["report"].get("governed_recall").is_some());
     assert!(content.get("system_memory_block").is_none());
+    assert!(content.get("projection_surface").is_none());
     assert!(!result.content.contains("runtime_projection"));
     assert!(!result.content.contains("delivery_digest_manifest"));
 }
@@ -350,6 +385,12 @@ fn json_rpc_tools_list_uses_mcp_input_schema_shape() {
     assert!(recall.get("inputSchema").is_some(), "{recall}");
     assert!(
         recall.pointer("/inputSchema/properties/query").is_some(),
+        "{recall}"
+    );
+    assert!(
+        recall
+            .pointer("/inputSchema/properties/temporal_operation")
+            .is_some(),
         "{recall}"
     );
     assert!(

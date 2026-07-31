@@ -1,4 +1,5 @@
 use crate::feature_gate::ProfileId;
+use crate::skills::RuntimeSkillCreationRef;
 use crate::util::{collect_retrieval_terms, normalize_retrieval_text};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,13 +12,13 @@ use super::governed_evidence_document::{
 use super::governed_post_image::{
     revision_is_exact_successor, GovernedDocumentImage, GovernedPostImageValidation,
 };
-use super::long_term::{scoped_long_term_memory_storage_key, LongTermMemoryEntry};
+use super::long_term_version::LongTermMemoryVersionMaterialImage;
 use super::recall_anchor::canonical_recall_evidence_group;
 use super::CoreRevisionConflictClass;
 use super::{
     governed_memory_recall_candidate_id, CoreRevisionLedger, CoreRevisionOutcome,
     CoreRevisionRecord, CoreRevisionRecordChange, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
-    RelationshipConstitutionAudit, SelfAuthoredCore, TurnSoulFeedbackLedger,
+    MemoryPrivacyClass, RelationshipConstitutionAudit, SelfAuthoredCore, TurnSoulFeedbackLedger,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -902,7 +903,7 @@ pub struct MemoryGraphPostImageClosure {
     pub mounted_subject_id: String,
     pub allow_missing_before_owners: bool,
     pub validate_transition_successors: bool,
-    pub long_term_owners: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    pub long_term_owners: Vec<LongTermMemoryVersionMaterialImage>,
     pub evidence_document_owners: Vec<GovernedDocumentImage<GovernedEvidenceDocument>>,
     pub manifest: GovernedDocumentImage<MemoryGraphScopeManifest>,
     pub revision: GovernedDocumentImage<MemoryGraphRevisionDoc>,
@@ -956,14 +957,10 @@ pub fn validate_memory_graph_post_image(
             .push(membership);
     }
     for image in &closure.long_term_owners {
-        let Some(observed_owner) = image.after.as_ref().or(image.before.as_ref()) else {
+        if image.after.is_none() && image.before.is_none() {
             continue;
-        };
-        let logical_id = observed_owner.id.as_str();
-        if scoped_long_term_memory_storage_key(memory_space_id, logical_id)
-            .map(|expected| image.physical_key != expected)
-            .unwrap_or(true)
-        {
+        }
+        if !image.has_exact_physical_closure(memory_space_id, mounted_subject_id) {
             failures.push("memory_graph_owner_physical_key_drift".to_string());
         }
         if closure.validate_transition_successors
@@ -976,12 +973,10 @@ pub fn validate_memory_graph_post_image(
             failures.push("memory_graph_owner_revision_successor_drift".to_string());
         }
         if let Some(owner) = image.after.as_ref() {
-            let owner_ref =
-                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone());
             append_graph_owner_bindings(
-                owner_ref,
+                owner.owner_ref.clone(),
                 owner.owner_revision,
-                owner.privacy.projection_content_allowed(),
+                owner.privacy_class.projection_content_allowed(),
                 &memberships_by_owner,
                 &mut owner_refs,
                 &mut owner_bindings,
@@ -1277,14 +1272,12 @@ fn memory_graph_before_image(closure: &MemoryGraphPostImageClosure) -> MemoryGra
             .long_term_owners
             .iter()
             .filter(|image| {
-                image.before.as_ref().is_some_and(|owner| {
-                    before_owner_refs.contains(&GovernedMemoryOwnerRef::new(
-                        GovernedMemoryOwnerPlane::LongTerm,
-                        owner.id.clone(),
-                    ))
-                })
+                image
+                    .before
+                    .as_ref()
+                    .is_some_and(|owner| before_owner_refs.contains(&owner.owner_ref))
             })
-            .map(graph_before_image)
+            .map(long_term_graph_before_image)
             .collect(),
         evidence_document_owners: closure
             .evidence_document_owners
@@ -1318,9 +1311,7 @@ fn graph_missing_before_owner_ids(
         .long_term_owners
         .iter()
         .filter_map(|image| image.before.as_ref())
-        .map(|owner| {
-            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone())
-        })
+        .map(|owner| owner.owner_ref.clone())
         .collect::<BTreeSet<_>>();
     available_owner_refs.extend(
         closure
@@ -1349,6 +1340,17 @@ fn graph_before_image<T: Clone>(image: &GovernedDocumentImage<T>) -> GovernedDoc
     GovernedDocumentImage {
         physical_key: image.physical_key.clone(),
         before: None,
+        after: image.before.clone(),
+    }
+}
+
+fn long_term_graph_before_image(
+    image: &LongTermMemoryVersionMaterialImage,
+) -> LongTermMemoryVersionMaterialImage {
+    LongTermMemoryVersionMaterialImage {
+        before_physical_key: None,
+        before: None,
+        after_physical_key: image.before_physical_key.clone(),
         after: image.before.clone(),
     }
 }
@@ -4547,9 +4549,11 @@ impl Default for ProceduralMemoryPromotionPolicy {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProceduralMemoryPromotionInput {
     pub task_id: String,
+    pub learning_id: String,
+    pub learning_digest: String,
     pub trigger: String,
     pub procedure: String,
     pub constraints: Vec<String>,
@@ -4559,6 +4563,7 @@ pub struct ProceduralMemoryPromotionInput {
     pub quality_score: u8,
     pub repeated_evidence_count: usize,
     pub capability_affinity: Vec<String>,
+    pub privacy_class: MemoryPrivacyClass,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -4589,6 +4594,14 @@ pub fn promote_task_experience_to_procedure(
     }
     if input.failure_modes.is_empty() {
         blocked_reasons.push("procedural_failure_modes_empty".to_string());
+    }
+    if !(RuntimeSkillCreationRef::TaskLearningPromotion {
+        learning_id: input.learning_id.clone(),
+        learning_digest: input.learning_digest.clone(),
+    })
+    .validate_contract()
+    {
+        blocked_reasons.push("procedural_learning_authority_invalid".to_string());
     }
 
     let genome = ProcedureGenome {

@@ -3,20 +3,23 @@
 mod support;
 
 use bm_core::memory::{
-    governed_memory_recall_candidate_id, scoped_long_term_memory_storage_key, LongTermMemoryEntry,
+    governed_memory_recall_candidate_id, long_term_version_head_key,
+    long_term_version_material_key, scoped_long_term_memory_storage_key, GovernedOwnerRevisionRef,
+    LongTermInvalidationContract, LongTermInvalidationReasonCode, LongTermMemoryEntry,
+    LongTermMemoryHeadManifest, LongTermMemoryStaleHint, LongTermMemoryVersionMaterial,
     MemoryGraphNodeMembership, MemoryGraphScopeManifest, MEMORY_GRAPH_SCHEMA_VERSION,
 };
 use bm_sdk::{
     EvidenceBacklink, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, LongTermMemoryDraft,
-    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvalRecallBenchmarkContext,
-    MemoryEvalRecallRequest, MemoryEvidenceAuthority, MemoryGraphEdge, MemoryGraphEdgeKind,
-    MemoryGraphIntegrityMaintenanceRequest, MemoryGraphNode, MemoryGraphNodeKind,
-    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermTarget,
-    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemorySemanticJudgmentSource,
-    MemoryStoreHandle, MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
-    PressureLevel, RuntimeLifecycleModeInput, TemporalMemoryGraphNodeOwnerRef,
-    TemporalMemoryGraphWriteRequest, TemporalValidity,
+    LongTermMemoryKind, LongTermMemoryQuery, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvalRecallBenchmarkContext, MemoryEvalRecallRequest, MemoryEvidenceAuthority,
+    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphIntegrityMaintenanceRequest, MemoryGraphNode,
+    MemoryGraphNodeKind, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallReport,
+    MemoryRecallRequest, MemorySemanticJudgmentSource, MemoryStoreHandle, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, RuntimeLifecycleModeInput,
+    TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, TemporalValidity,
 };
 
 use support::test_runtime;
@@ -43,7 +46,7 @@ fn draft(topic: &str, content: &str, evidence_ref: &str) -> LongTermMemoryDraft 
     }
 }
 
-fn tamper_delete_owner(
+fn tamper_delete_legacy_owner(
     platform: &MemoryStoreHandle,
     memory_space_id: &str,
     entry: &LongTermMemoryEntry,
@@ -116,6 +119,8 @@ fn seed_drafts(
 ) -> Vec<bm_sdk::LongTermMemoryEntry> {
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: drafts,
                 deletes: Vec::new(),
@@ -125,7 +130,7 @@ fn seed_drafts(
         .expect("seed governed owners");
     platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list owners")
@@ -184,6 +189,298 @@ fn owner_ids(
 
 fn entry_topic_matches(entry: &bm_sdk::LongTermMemoryEntry, expected: &str) -> bool {
     entry.topic == expected.replace(' ', "_")
+}
+
+fn recall(runtime: &bm_sdk::MemoryRuntime, query: &str) -> MemoryRecallReport {
+    runtime
+        .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            query: query.to_string(),
+            limit: 8,
+            structured_query_facets: Vec::new(),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("production recall")
+}
+
+fn assert_owner_reaches_every_graph_delivery_stage(
+    recall: &MemoryRecallReport,
+    owner_ref: &GovernedMemoryOwnerRef,
+    content: &str,
+) {
+    let candidate_id = governed_memory_recall_candidate_id(owner_ref);
+    assert!(recall.source_candidate_ids.contains(&candidate_id));
+    assert!(recall.graph_anchor_candidate_ids.contains(&candidate_id));
+    assert!(
+        recall
+            .facet_index_report
+            .exact_facet_candidate_ids
+            .contains(&candidate_id)
+            || recall
+                .facet_index_report
+                .expanded_facet_candidate_ids
+                .contains(&candidate_id)
+    );
+    assert!(recall
+        .rank_fusion_report
+        .candidate_reports
+        .iter()
+        .any(|candidate| candidate.candidate_id == candidate_id));
+    assert!(recall
+        .coverage_selection_report
+        .selected_candidate_ids
+        .contains(&candidate_id));
+    assert!(
+        recall.graph_index_report.used,
+        "{:#?}",
+        recall.graph_index_report
+    );
+    assert!(recall
+        .graph_index_report
+        .expanded_node_ids
+        .contains(&candidate_id));
+    assert!(recall.graph_rerank.candidate_ids.contains(&candidate_id));
+    assert!(recall
+        .graph_rerank
+        .reranked_candidate_ids
+        .contains(&candidate_id));
+    assert!(recall
+        .compact_graph
+        .nodes
+        .iter()
+        .any(|node| node.node_id == candidate_id));
+    assert!(recall
+        .delivery_report
+        .selected_candidate_ids
+        .contains(&candidate_id));
+    assert!(recall
+        .delivery_report
+        .selection_decisions
+        .iter()
+        .any(|decision| decision.candidate_id == candidate_id));
+    assert!(recall
+        .delivery_report
+        .rendered_capsules
+        .iter()
+        .any(|capsule| capsule.candidate_id == candidate_id && capsule.content.contains(content)));
+    assert!(recall
+        .delivery_report
+        .render_decisions
+        .iter()
+        .any(|decision| decision.candidate_id == candidate_id));
+}
+
+fn assert_owner_reaches_graph_as_neighbor(
+    recall: &MemoryRecallReport,
+    owner_ref: &GovernedMemoryOwnerRef,
+) {
+    let candidate_id = governed_memory_recall_candidate_id(owner_ref);
+    assert!(
+        !recall.source_candidate_ids.contains(&candidate_id),
+        "the graph-neighbor control must not be a source-query hit"
+    );
+    assert!(
+        recall.graph_index_report.used,
+        "{:#?}",
+        recall.graph_index_report
+    );
+    assert!(recall
+        .graph_index_report
+        .expanded_node_ids
+        .contains(&candidate_id));
+    assert!(recall
+        .graph_rerank
+        .expanded_candidate_ids
+        .contains(&candidate_id));
+    assert!(recall
+        .graph_rerank
+        .graph_neighbor_ids
+        .contains(&candidate_id));
+    assert!(recall
+        .graph_rerank
+        .reranked_candidate_ids
+        .contains(&candidate_id));
+    assert!(recall
+        .compact_graph
+        .nodes
+        .iter()
+        .any(|node| node.node_id == candidate_id));
+}
+
+fn assert_owner_is_exact_zero_after_graph_expansion(
+    recall: &MemoryRecallReport,
+    owner_ref: &GovernedMemoryOwnerRef,
+    content: &str,
+) {
+    let candidate_id = governed_memory_recall_candidate_id(owner_ref);
+    assert!(!recall
+        .working
+        .long_term_memory_text
+        .as_deref()
+        .is_some_and(|text| text.contains(content)));
+    for candidates in [
+        &recall.source_candidate_ids,
+        &recall.graph_anchor_candidate_ids,
+        &recall.facet_index_report.exact_facet_candidate_ids,
+        &recall.facet_index_report.expanded_facet_candidate_ids,
+        &recall.coverage_selection_report.selected_candidate_ids,
+        &recall
+            .coverage_selection_report
+            .coverage_dropped_candidate_ids,
+        &recall
+            .coverage_selection_report
+            .fusion_dropped_candidate_ids,
+        &recall
+            .coverage_selection_report
+            .budget_truncated_candidate_ids,
+        &recall.graph_index_report.source_anchor_ids,
+        &recall.graph_index_report.unmatched_source_anchor_ids,
+        &recall.graph_index_report.expanded_node_ids,
+        &recall.graph_rerank.candidate_ids,
+        &recall.graph_rerank.expanded_candidate_ids,
+        &recall.graph_rerank.graph_neighbor_ids,
+        &recall.graph_rerank.reranked_candidate_ids,
+        &recall.delivery_report.selected_candidate_ids,
+    ] {
+        assert!(!candidates.contains(&candidate_id));
+    }
+    assert!(!recall
+        .rank_fusion_report
+        .candidate_reports
+        .iter()
+        .any(|candidate| candidate.candidate_id == candidate_id));
+    assert!(!recall
+        .graph_rerank
+        .score_breakdown
+        .iter()
+        .any(|score| score.candidate_id == candidate_id));
+    assert!(!recall
+        .graph_candidate_evidence_ref_index
+        .iter()
+        .any(|entry| entry.candidate_id == candidate_id));
+    assert!(!recall
+        .compact_graph
+        .nodes
+        .iter()
+        .any(|node| node.node_id == candidate_id));
+    assert!(!recall
+        .compact_graph
+        .edges
+        .iter()
+        .any(|edge| edge.from_node_id == candidate_id || edge.to_node_id == candidate_id));
+    assert!(!recall
+        .delivery_report
+        .selection_decisions
+        .iter()
+        .any(|decision| {
+            decision.candidate_id == candidate_id || decision.owner_ref.as_ref() == Some(owner_ref)
+        }));
+    assert!(!recall
+        .delivery_report
+        .rendered_capsules
+        .iter()
+        .any(|capsule| {
+            capsule.candidate_id == candidate_id
+                || &capsule.owner_ref == owner_ref
+                || capsule.content.contains(content)
+        }));
+    assert!(!recall
+        .delivery_report
+        .render_decisions
+        .iter()
+        .any(|decision| decision.candidate_id == candidate_id));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GraphExclusionCase {
+    Delete,
+    Forget,
+    Invalidate,
+    Privacy,
+    Supersede,
+}
+
+fn apply_graph_exclusion(
+    runtime: &bm_sdk::MemoryRuntime,
+    target: &LongTermMemoryEntry,
+    case: GraphExclusionCase,
+) {
+    let operation = match case {
+        GraphExclusionCase::Delete => MemoryLongTermMutation::Delete {
+            target: MemoryLongTermTarget::RecordId(target.id.clone()),
+        },
+        GraphExclusionCase::Forget => {
+            let selector = bm_sdk::MemoryLongTermSelector {
+                query: LongTermMemoryQuery {
+                    kind: Some(target.kind.clone()),
+                    topic: Some(target.topic.clone()),
+                    limit: 8,
+                    ..LongTermMemoryQuery::default()
+                },
+                evidence_ref: None,
+            };
+            let preview = runtime
+                .mutate_long_term_memory(MemoryLongTermMutationRequest {
+                    operation: MemoryLongTermMutation::ForgetByQuery {
+                        selector: selector.clone(),
+                        confirmation_token: None,
+                    },
+                    reason: "preview graph exact-zero forget".to_string(),
+                    dry_run: true,
+                    mode_input: RuntimeLifecycleModeInput::default(),
+                })
+                .expect("forget preview");
+            let confirmation_token = preview
+                .policy_decision
+                .confirmation_token
+                .expect("forget confirmation token");
+            MemoryLongTermMutation::ForgetByQuery {
+                selector,
+                confirmation_token: Some(confirmation_token),
+            }
+        }
+        GraphExclusionCase::Invalidate => MemoryLongTermMutation::Invalidate {
+            contract: LongTermInvalidationContract {
+                target: MemoryLongTermTarget::RecordId(target.id.clone()),
+                reason_code: LongTermInvalidationReasonCode::ContradictedByGovernedEvidence,
+                governed_evidence_refs: vec![GovernedOwnerRevisionRef::try_new(
+                    GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::EvidenceDocument,
+                        "graph-matrix-invalidation-evidence",
+                    ),
+                    1,
+                )
+                .expect("invalidation evidence ref")],
+                actor_subject_id: runtime.scoped_runtime().actor_subject_id.clone(),
+                audit_reason: "graph matrix invalidation".to_string(),
+            },
+        },
+        GraphExclusionCase::Privacy => MemoryLongTermMutation::ChangePrivacy {
+            target: MemoryLongTermTarget::RecordId(target.id.clone()),
+            privacy: MemoryPrivacyClass::SoulPrivate,
+        },
+        GraphExclusionCase::Supersede => MemoryLongTermMutation::Supersede {
+            target: MemoryLongTermTarget::RecordId(target.id.clone()),
+            replacement: draft(
+                "graph matrix replacement",
+                "A new owner replaces the excluded graph target.",
+                "evidence:graph-matrix-replacement",
+            ),
+        },
+    };
+    let reason = match case {
+        GraphExclusionCase::Invalidate => "graph matrix invalidation".to_string(),
+        _ => format!("graph exact-zero matrix {case:?}"),
+    };
+    let report = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation,
+            reason,
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("apply graph exclusion");
+    assert!(report.accepted, "{case:?}: {report:#?}");
 }
 
 #[test]
@@ -245,6 +542,7 @@ fn graph_v2_write_binds_governed_owners_and_exactly_replaces_scope_closure() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "graph left".to_string(),
             limit: 4,
             structured_query_facets: Vec::new(),
@@ -289,6 +587,375 @@ fn graph_v2_write_binds_governed_owners_and_exactly_replaces_scope_closure() {
             .count(),
         1
     );
+}
+
+#[test]
+fn stale_neighbor_reintroduced_after_control_is_exact_zero_before_graph_rerank() {
+    let platform = support::empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime(platform.clone(), support::host_test_profile());
+    let entries = seed_drafts(
+        &platform,
+        &runtime,
+        vec![
+            draft(
+                "eligible graph anchor",
+                "Eligible graph anchor remains available.",
+                "evidence:eligible-anchor",
+            ),
+            draft(
+                "stale graph neighbor",
+                "Stale graph neighbor must never influence recall.",
+                "evidence:stale-neighbor",
+            ),
+        ],
+    );
+    let (anchor_id, stale_id) =
+        owner_ids(&entries, "eligible graph anchor", "stale graph neighbor");
+    runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::MarkStale {
+                target: MemoryLongTermTarget::RecordId(stale_id.clone()),
+                stale_hint: LongTermMemoryStaleHint::VerifyAgainstCurrentState,
+            },
+            reason: "graph exact-zero regression fixture".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("mark neighbor stale");
+
+    let graph_write = write_shared_graph(&runtime, &anchor_id, &stale_id);
+    assert!(graph_write.accepted, "{:?}", graph_write.gate_failures);
+
+    let recall = runtime
+        .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            query: "eligible graph anchor".to_string(),
+            limit: 4,
+            structured_query_facets: Vec::new(),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("recall through persistent graph");
+    let anchor_candidate = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        anchor_id,
+    ));
+    let stale_candidate = governed_memory_recall_candidate_id(&GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        stale_id,
+    ));
+
+    assert!(recall.source_candidate_ids.contains(&anchor_candidate));
+    assert!(
+        recall.graph_index_report.used,
+        "{:#?}",
+        recall.graph_index_report
+    );
+    assert!(recall
+        .graph_rerank
+        .reranked_candidate_ids
+        .contains(&anchor_candidate));
+    assert!(!recall
+        .graph_index_report
+        .expanded_node_ids
+        .contains(&stale_candidate));
+    assert!(!recall.graph_rerank.candidate_ids.contains(&stale_candidate));
+    assert!(!recall
+        .graph_rerank
+        .expanded_candidate_ids
+        .contains(&stale_candidate));
+    assert!(!recall
+        .graph_rerank
+        .graph_neighbor_ids
+        .contains(&stale_candidate));
+    assert!(!recall
+        .graph_rerank
+        .reranked_candidate_ids
+        .contains(&stale_candidate));
+    assert!(!recall
+        .graph_rerank
+        .score_breakdown
+        .iter()
+        .any(|score| score.candidate_id == stale_candidate));
+    assert!(!recall
+        .graph_candidate_evidence_ref_index
+        .iter()
+        .any(|entry| entry.candidate_id == stale_candidate));
+    assert!(!recall
+        .compact_graph
+        .nodes
+        .iter()
+        .any(|node| node.node_id == stale_candidate));
+    assert!(!recall.compact_graph.edges.iter().any(|edge| {
+        edge.from_node_id == stale_candidate || edge.to_node_id == stale_candidate
+    }));
+}
+
+#[test]
+fn terminal_privacy_and_supersede_graph_matrix_has_non_vacuous_positive_controls() {
+    for case in [
+        GraphExclusionCase::Delete,
+        GraphExclusionCase::Forget,
+        GraphExclusionCase::Invalidate,
+        GraphExclusionCase::Privacy,
+        GraphExclusionCase::Supersede,
+    ] {
+        let platform = support::empty_store_platform(support::host_test_profile());
+        let runtime = test_runtime(platform.clone(), support::host_test_profile());
+        let case_label = format!("{case:?}").to_lowercase();
+        let anchor_topic = "surviving lighthouse".to_string();
+        let anchor_content = "Stable lighthouse remains available.".to_string();
+        let target_topic = "retired compass".to_string();
+        let target_content = "Obsolete compass disappears from delivery.".to_string();
+        let entries = seed_drafts(
+            &platform,
+            &runtime,
+            vec![
+                draft(
+                    &anchor_topic,
+                    &anchor_content,
+                    &format!("evidence:graph-matrix-anchor-{case_label}"),
+                ),
+                draft(
+                    &target_topic,
+                    &target_content,
+                    &format!("evidence:graph-matrix-target-{case_label}"),
+                ),
+            ],
+        );
+        let (anchor_id, target_id) = owner_ids(&entries, &anchor_topic, &target_topic);
+        let anchor = entries
+            .iter()
+            .find(|entry| entry.id == anchor_id)
+            .expect("matrix anchor");
+        let target = entries
+            .iter()
+            .find(|entry| entry.id == target_id)
+            .expect("matrix target");
+        assert!(
+            write_shared_graph(&runtime, &anchor_id, &target_id).accepted,
+            "{case:?}"
+        );
+
+        let positive_control = recall(&runtime, &target_topic);
+        assert_owner_reaches_every_graph_delivery_stage(
+            &positive_control,
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, target.id.clone()),
+            &target.content,
+        );
+        let graph_neighbor_control = recall(&runtime, &anchor_topic);
+        assert_owner_reaches_every_graph_delivery_stage(
+            &graph_neighbor_control,
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, anchor.id.clone()),
+            &anchor.content,
+        );
+        assert_owner_reaches_graph_as_neighbor(
+            &graph_neighbor_control,
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, target.id.clone()),
+        );
+
+        apply_graph_exclusion(&runtime, target, case);
+
+        let after_target_query = recall(&runtime, &target_topic);
+        assert_owner_is_exact_zero_after_graph_expansion(
+            &after_target_query,
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, target.id.clone()),
+            &target.content,
+        );
+
+        let after_anchor_query = recall(&runtime, &anchor_topic);
+        assert_owner_reaches_every_graph_delivery_stage(
+            &after_anchor_query,
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, anchor.id.clone()),
+            &anchor.content,
+        );
+        assert_owner_is_exact_zero_after_graph_expansion(
+            &after_anchor_query,
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, target.id.clone()),
+            &target.content,
+        );
+    }
+}
+
+#[test]
+fn typed_head_and_material_revision_drift_fail_closed_in_recall_eval_and_projection() {
+    for drift in ["head", "material"] {
+        let platform = support::empty_store_platform(support::host_test_profile());
+        let runtime = test_runtime(platform.clone(), support::host_test_profile());
+        let target_topic = format!("typed {drift} drift target");
+        let target_content = format!("Typed {drift} drift must fail every production read.");
+        let anchor_topic = format!("typed {drift} drift anchor");
+        let entries = seed_drafts(
+            &platform,
+            &runtime,
+            vec![
+                draft(
+                    &anchor_topic,
+                    &format!("Typed {drift} drift anchor remains valid."),
+                    &format!("evidence:typed-{drift}-drift-anchor"),
+                ),
+                draft(
+                    &target_topic,
+                    &target_content,
+                    &format!("evidence:typed-{drift}-drift-target"),
+                ),
+            ],
+        );
+        let (anchor_id, target_id) = owner_ids(&entries, &anchor_topic, &target_topic);
+        let target = entries
+            .iter()
+            .find(|entry| entry.id == target_id)
+            .expect("typed drift target");
+        assert!(write_shared_graph(&runtime, &anchor_id, &target_id).accepted);
+
+        let baseline = recall(&runtime, &target_topic);
+        assert_owner_reaches_every_graph_delivery_stage(
+            &baseline,
+            &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, target.id.clone()),
+            &target.content,
+        );
+        let baseline_eval = runtime
+            .eval_recall(MemoryEvalRecallRequest {
+                query: target_topic.clone(),
+                k: 8,
+                include_expanded_candidates: true,
+                include_graph_neighbors: true,
+                include_score_breakdown: true,
+                include_missing_evidence: false,
+                benchmark_context: None,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect("typed drift eval positive control");
+        assert!(baseline_eval.graph_index_report.used);
+        let baseline_projection = runtime
+            .project(MemoryProjectionRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+                user_query: target_topic.clone(),
+                system_max_len: 4096,
+                recent_messages_limit: 4,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect("typed drift projection positive control");
+        assert!(baseline_projection.report().audit().graph_used);
+        assert!(baseline_projection
+            .provider_payload()
+            .system_memory_block()
+            .contains(&target_content));
+
+        let owner_ref =
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, target.id.clone());
+        match drift {
+            "head" => {
+                let key = long_term_version_head_key(
+                    runtime.memory_space_id(),
+                    runtime.subject_id(),
+                    &owner_ref,
+                )
+                .expect("head key");
+                let mut head = platform
+                    .replay_harness()
+                    .read_json_namespace_unchecked_for_nonproduction_harness(
+                        "long_term_head_manifests",
+                    )
+                    .expect("head docs")
+                    .into_iter()
+                    .find(|doc| doc.key == key)
+                    .map(|doc| {
+                        serde_json::from_value::<LongTermMemoryHeadManifest>(doc.value)
+                            .expect("typed head")
+                    })
+                    .expect("target head");
+                head.current_revision = head.current_revision.saturating_add(1);
+                platform
+                    .replay_harness()
+                    .tamper_json_document_for_nonproduction_harness(
+                        "long_term_head_manifests",
+                        &key,
+                        serde_json::to_value(head).expect("tampered head"),
+                    )
+                    .expect("inject head revision drift");
+            }
+            "material" => {
+                let key = long_term_version_material_key(
+                    runtime.memory_space_id(),
+                    runtime.subject_id(),
+                    &owner_ref,
+                    target.owner_revision,
+                )
+                .expect("material key");
+                let mut material = platform
+                    .replay_harness()
+                    .read_json_namespace_unchecked_for_nonproduction_harness(
+                        "long_term_version_materials",
+                    )
+                    .expect("material docs")
+                    .into_iter()
+                    .find(|doc| doc.key == key)
+                    .map(|doc| {
+                        serde_json::from_value::<LongTermMemoryVersionMaterial>(doc.value)
+                            .expect("typed material")
+                    })
+                    .expect("target material");
+                material.owner_revision = material.owner_revision.saturating_add(1);
+                platform
+                    .replay_harness()
+                    .tamper_json_document_for_nonproduction_harness(
+                        "long_term_version_materials",
+                        &key,
+                        serde_json::to_value(material).expect("tampered material"),
+                    )
+                    .expect("inject material revision drift");
+            }
+            _ => unreachable!("fixed drift matrix"),
+        }
+        let expected_stage = match drift {
+            "head" => "long_term_version_head_binding",
+            "material" => "recall_long_term_owner_closure",
+            _ => unreachable!("fixed drift matrix"),
+        };
+
+        let recall_error = runtime
+            .recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+                query: target_topic.clone(),
+                limit: 8,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect_err("typed revision drift must fail recall");
+        assert_eq!(recall_error.stage(), expected_stage);
+        let eval_error = runtime
+            .eval_recall(MemoryEvalRecallRequest {
+                query: target_topic.clone(),
+                k: 8,
+                include_expanded_candidates: true,
+                include_graph_neighbors: true,
+                include_score_breakdown: true,
+                include_missing_evidence: false,
+                benchmark_context: None,
+                structured_query_facets: Vec::new(),
+                tool_registry_refs: Vec::new(),
+            })
+            .expect_err("typed revision drift must fail eval");
+        assert_eq!(eval_error.stage(), expected_stage);
+        let projection_error = match runtime.project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            user_query: target_topic,
+            system_max_len: 4096,
+            recent_messages_limit: 4,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            structured_query_facets: Vec::new(),
+            tool_registry_refs: Vec::new(),
+        }) {
+            Ok(_) => panic!("typed revision drift must fail projection"),
+            Err(error) => error,
+        };
+        assert_eq!(projection_error.stage(), expected_stage);
+    }
 }
 
 #[test]
@@ -420,6 +1087,7 @@ fn graph_node_identity_is_independent_from_its_typed_governed_owner() {
     let owner_candidate_id = governed_memory_recall_candidate_id(&membership.owner_ref);
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "independent graph owner".to_string(),
             limit: 4,
@@ -502,6 +1170,7 @@ fn owner_projection_preserves_edge_only_evidence_between_same_owner_anchors() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "multi anchor projection owner".to_string(),
             limit: 4,
@@ -526,7 +1195,7 @@ fn owner_projection_preserves_edge_only_evidence_between_same_owner_anchors() {
 }
 
 #[test]
-fn recall_eval_and_project_fail_closed_on_owner_drift_without_graph_mutation() {
+fn raw_legacy_owner_loss_does_not_override_typed_owner_or_mutate_graph() {
     let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let entries = seed_drafts(
@@ -552,32 +1221,25 @@ fn recall_eval_and_project_fail_closed_on_owner_drift_without_graph_mutation() {
         .iter()
         .find(|entry| entry.id == drifted_id)
         .expect("drifted owner");
-    tamper_delete_owner(&platform, runtime.memory_space_id(), drifted_entry);
+    tamper_delete_legacy_owner(&platform, runtime.memory_space_id(), drifted_entry);
     let graph_before_reads = graph_docs(&platform);
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "pure read anchor".to_string(),
             limit: 8,
             structured_query_facets: Vec::new(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("recall incident");
-    assert!(!recall.graph_index_report.used);
-    assert!(!recall.graph_index_report.manifest_contract_verified);
-    assert!(!recall.graph_index_report.selected_dependency_chain_verified);
+        .expect("recall from typed owner");
+    assert!(recall.graph_index_report.used);
+    assert!(recall.graph_index_report.manifest_contract_verified);
+    assert!(recall.graph_index_report.selected_dependency_chain_verified);
     assert!(!recall.graph_index_report.full_scope_closure_verified);
-    assert!(recall.graph_index_report.maintenance_required);
+    assert!(!recall.graph_index_report.maintenance_required);
     assert_eq!(recall.graph_index_report.read_path_mutation_delta, 0);
-    let incident_token = recall
-        .graph_index_report
-        .incident_token
-        .clone()
-        .expect("opaque incident token");
-    assert!(incident_token.starts_with("graph_incident:"));
-    let safe_incident = format!("{:?}", recall.graph_index_report);
-    assert!(!safe_incident.contains(&drifted_id));
-    assert!(!safe_incident.contains("evidence:shared"));
+    assert!(recall.graph_index_report.incident_token.is_none());
     assert_eq!(graph_docs(&platform), graph_before_reads);
 
     let eval = runtime
@@ -592,13 +1254,15 @@ fn recall_eval_and_project_fail_closed_on_owner_drift_without_graph_mutation() {
             structured_query_facets: Vec::new(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("eval incident");
+        .expect("eval from typed owner");
     assert_eq!(eval.graph_index_report.read_path_mutation_delta, 0);
-    assert!(eval.graph_index_report.maintenance_required);
+    assert!(eval.graph_index_report.used);
+    assert!(!eval.graph_index_report.maintenance_required);
     assert_eq!(graph_docs(&platform), graph_before_reads);
 
     let project = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "pure read anchor".to_string(),
             system_max_len: 4096,
             recent_messages_limit: 4,
@@ -607,9 +1271,10 @@ fn recall_eval_and_project_fail_closed_on_owner_drift_without_graph_mutation() {
             structured_query_facets: Vec::new(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("project incident");
-    assert_eq!(project.graph_index_report.read_path_mutation_delta, 0);
-    assert!(project.graph_index_report.maintenance_required);
+        .expect("project from typed owner");
+    assert_eq!(project.report().audit().graph_read_path_mutation_delta, 0);
+    assert!(project.report().audit().graph_used);
+    assert!(!project.report().audit().graph_maintenance_required);
     assert_eq!(graph_docs(&platform), graph_before_reads);
 }
 
@@ -657,7 +1322,7 @@ fn eval_report_canonicalizes_benchmark_locators_before_they_reach_the_public_rep
 }
 
 #[test]
-fn explicit_maintenance_rejects_generation_drift_then_removes_ownerless_closure() {
+fn explicit_maintenance_rejects_generation_drift_without_reviving_legacy_owner_authority() {
     let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let entries = seed_drafts(
@@ -693,41 +1358,24 @@ fn explicit_maintenance_rejects_generation_drift_then_removes_ownerless_closure(
         .contains(&"memory_graph_manifest_generation_drift".to_string()));
     assert_eq!(graph_docs(&platform), before_generation_drift);
 
-    let stale_entry = entries
+    let legacy_entry = entries
         .iter()
         .find(|entry| entry.id == stale_id)
-        .expect("stale owner");
-    tamper_delete_owner(&platform, runtime.memory_space_id(), stale_entry);
-    let incident = runtime
+        .expect("legacy owner");
+    tamper_delete_legacy_owner(&platform, runtime.memory_space_id(), legacy_entry);
+    let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "maintenance anchor".to_string(),
             limit: 8,
             structured_query_facets: Vec::new(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("maintenance incident")
-        .graph_index_report
-        .incident_token
-        .expect("incident token");
-
-    let repaired = runtime
-        .run_graph_integrity_maintenance(MemoryGraphIntegrityMaintenanceRequest {
-            expected_manifest_generation: 1,
-            incident_token: Some(incident),
-        })
-        .expect("explicit graph maintenance");
-    assert!(repaired.accepted, "{:?}", repaired.failures);
-    assert!(repaired.committed);
-    assert_eq!(repaired.manifest_generation, Some(2));
-    assert_eq!(repaired.removed_node_count, 1);
-    assert_eq!(repaired.removed_edge_count, 1);
-    assert_eq!(repaired.retained_shared_backlink_count, 1);
-    assert!(repaired.transaction.is_some());
-    let after = graph_docs(&platform);
-    assert!(!after.iter().any(|(_, _, value)| value.contains(&stale_id)));
-    assert!(after
-        .iter()
-        .any(|(namespace, _, _)| namespace == "memory_graph_backlinks"));
+        .expect("typed-owner recall");
+    assert!(recall.graph_index_report.used);
+    assert!(!recall.graph_index_report.maintenance_required);
+    assert!(recall.graph_index_report.incident_token.is_none());
+    assert_eq!(graph_docs(&platform), before_generation_drift);
 }
 
 #[test]
@@ -828,12 +1476,13 @@ fn candidate_and_extraction_owner_updates_cascade_graph_in_the_same_transaction(
     let runtime = test_runtime(platform.clone(), support::host_test_profile());
     runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![candidate("candidate cascade", "Initial candidate owner.")],
         })
         .expect("seed candidate owner");
     let candidate_owner = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("owners")
@@ -860,6 +1509,7 @@ fn candidate_and_extraction_owner_updates_cascade_graph_in_the_same_transaction(
 
     let candidate_update = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![candidate(
                 "candidate cascade",
                 "Updated candidate owner removes stale graph material.",
@@ -902,6 +1552,8 @@ fn candidate_and_extraction_owner_updates_cascade_graph_in_the_same_transaction(
         "Updated extraction owner removes stale graph material.".to_string();
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_update],
                 deletes: Vec::new(),

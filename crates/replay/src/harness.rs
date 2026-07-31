@@ -1,6 +1,7 @@
 use bm_sdk::{
-    MemoryIdentity, MemoryScope, MemoryStoreHandle, ProfileId, RuntimeSkillWrite,
-    StoreBackendConfig,
+    default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryPrivacyClass,
+    MemoryStoreHandle, ProfileId, RuntimeSkillCreationRef, RuntimeSkillOwningScope,
+    RuntimeSkillWrite, StoreBackendConfig,
 };
 
 use crate::{
@@ -23,16 +24,28 @@ pub fn build_sdk_memory_harness_fixture(profile: ProfileId) -> bm_core::Result<R
         store_snapshot: snapshot,
         operations: vec![
             ReplayOperation::WriteProcedural {
-                writes: vec![RuntimeSkillWrite {
-                    name: "release_guard".to_string(),
-                    topic: "release".to_string(),
-                    title: "Release artifact guard".to_string(),
-                    summary: "Verify release artifacts before publishing.".to_string(),
-                    content: "1. inspect artifacts\n2. verify manifest\n3. publish".to_string(),
-                    citations: vec!["replay harness".to_string()],
-                    source_chat_id: Some("replay-chat".to_string()),
-                    observed_at: 1_800_000_000,
+                writes: vec![GovernedRuntimeSkillWriteInput {
+                    write: RuntimeSkillWrite {
+                        name: "release_guard".to_string(),
+                        topic: "release".to_string(),
+                        title: "Release artifact guard".to_string(),
+                        summary: "Verify release artifacts before publishing.".to_string(),
+                        content: "1. inspect artifacts\n2. verify manifest\n3. publish".to_string(),
+                        citations: vec!["replay harness".to_string()],
+                        source_chat_id: Some("replay-chat".to_string()),
+                        observed_at: 1_800_000_000,
+                    },
+                    creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                        candidate_ref: "replay:sdk-memory-harness:release-guard".to_string(),
+                        verification_receipt_digest:
+                            "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+                                .to_string(),
+                    },
+                    privacy_class: MemoryPrivacyClass::SharedWithSubject,
                 }],
+                owning_scope: RuntimeSkillOwningScope::Subject {
+                    mounted_subject_id: default_agent_subject_id("replay-agent"),
+                },
             },
             ReplayOperation::Recall {
                 query: "release artifact".to_string(),
@@ -58,7 +71,7 @@ pub fn build_sdk_memory_harness_fixture(profile: ProfileId) -> bm_core::Result<R
             min_reports: 4,
             required_report_fragments: vec![
                 "write accepted=true".to_string(),
-                "runtime_skill__release_guard".to_string(),
+                "recall query=release artifact".to_string(),
                 "inspect query=release".to_string(),
             ],
         },
@@ -67,9 +80,7 @@ pub fn build_sdk_memory_harness_fixture(profile: ProfileId) -> bm_core::Result<R
 
 pub fn run_sdk_memory_harness(backend: StoreBackendConfig) -> bm_core::Result<MemoryHarnessReport> {
     let fixture = build_sdk_memory_harness_fixture(backend.profile())?;
-    let mut config = ReplayRunnerConfig::for_backend(backend)?;
-    config.identity = MemoryIdentity::new("harness-agent", "harness-owner")?;
-    config.scope = MemoryScope::new("harness", "replay-chat")?;
+    let config = ReplayRunnerConfig::for_backend(backend)?;
     let run = run_replay_fixture(&fixture, config)?;
     Ok(MemoryHarnessReport {
         fixture_id: fixture.fixture_id,

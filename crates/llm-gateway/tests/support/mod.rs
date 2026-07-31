@@ -3,6 +3,10 @@ use bm_entry::{
     EntryLocalTransport, EntryOperationCapability,
 };
 use bm_llm_gateway::GatewayScopeRequest;
+use bm_sdk::{
+    default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryPrivacyClass,
+    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
+};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 
@@ -28,6 +32,27 @@ pub fn loopback_auth(principal: &str) -> EntryAuthDecision {
 #[allow(dead_code)]
 pub fn loopback_scope_request(principal: &str) -> GatewayScopeRequest {
     GatewayScopeRequest::new(loopback_auth(principal))
+}
+
+#[allow(dead_code)]
+pub fn governed_runtime_skill_write(write: RuntimeSkillWrite) -> GovernedRuntimeSkillWriteInput {
+    GovernedRuntimeSkillWriteInput {
+        write,
+        creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+            candidate_ref: "test:llm-gateway-runtime-skill".to_string(),
+            verification_receipt_digest:
+                "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+                    .to_string(),
+        },
+        privacy_class: MemoryPrivacyClass::SharedWithSubject,
+    }
+}
+
+#[allow(dead_code)]
+pub fn runtime_skill_subject_scope(agent_id: &str) -> RuntimeSkillOwningScope {
+    RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: default_agent_subject_id(agent_id),
+    }
 }
 
 #[allow(dead_code)]

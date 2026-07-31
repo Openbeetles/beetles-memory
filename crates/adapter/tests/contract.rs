@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bm_adapter::{
     decode_json_adapter_command, dispatch_adapter_command, dispatch_adapter_command_with_services,
-    AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
-    AdapterJsonCommandOptions, AdapterOperation, AdapterRequestIdentityError,
+    governed_adapter_json_command_schema, AdapterAuthContext, AdapterCommand, AdapterEnvelope,
+    AdapterErrorKey, AdapterJsonCommandOptions, AdapterOperation, AdapterRequestIdentityError,
     AdapterRequestIdentityOwner, AdapterResponse, AdapterRuntimeServices, AdapterSdkReport,
     AdapterSource, TransportKind, TransportMode,
 };
@@ -139,7 +139,7 @@ fn adapter_write_time_is_runtime_owned_and_payload_time_is_rejected() {
     let options = AdapterJsonCommandOptions::new("accepted-at-contract");
     let error = decode_json_adapter_command(
         AdapterOperation::Write,
-        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock","observed_at":1800000000}"#,
+        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock","owning_scope":{"kind":"subject","mounted_subject_id":"agent:agent-main"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:adapter-clock","verification_receipt_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"privacy_class":"shared_with_subject","observed_at":1800000000}"#,
         &options,
     )
     .expect_err("payload observed_at must not be part of the adapter contract");
@@ -148,7 +148,7 @@ fn adapter_write_time_is_runtime_owned_and_payload_time_is_rejected() {
 
     let mut command = decode_json_adapter_command(
         AdapterOperation::Write,
-        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock"}"#,
+        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock","owning_scope":{"kind":"subject","mounted_subject_id":"agent:agent-main"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:adapter-clock","verification_receipt_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"privacy_class":"shared_with_subject"}"#,
         &options,
     )
     .expect("write command");
@@ -156,7 +156,7 @@ fn adapter_write_time_is_runtime_owned_and_payload_time_is_rejected() {
     let AdapterCommand::Write(MemoryWriteRequest::Procedural { writes, .. }) = command else {
         panic!("procedural write");
     };
-    assert_eq!(writes[0].observed_at, 1_912_345_678);
+    assert_eq!(writes[0].write.observed_at, 1_912_345_678);
 }
 
 #[test]
@@ -326,6 +326,7 @@ fn recall_command_dispatches_through_memory_runtime() {
         envelope(
             AdapterOperation::Recall,
             AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
@@ -357,6 +358,7 @@ fn project_command_returns_only_the_adapter_projection_contract() {
         envelope(
             AdapterOperation::Project,
             AdapterCommand::Project(MemoryProjectionRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: "release".to_string(),
                 system_max_len: 1024,
@@ -384,6 +386,29 @@ fn project_command_returns_only_the_adapter_projection_contract() {
 }
 
 #[test]
+fn adapter_projection_path_has_no_provider_payload_capability() {
+    let contract = include_str!("../src/contract.rs");
+    let dispatch = include_str!("../src/dispatch.rs");
+
+    for forbidden in [
+        "MemoryProjectionOutput",
+        "ProviderProjectionPayload",
+        "provider_payload",
+        "system_memory_block",
+    ] {
+        assert!(
+            !contract.contains(forbidden),
+            "adapter contract gained provider capability: {forbidden}"
+        );
+        assert!(
+            !dispatch.contains(forbidden),
+            "adapter dispatch gained provider capability: {forbidden}"
+        );
+    }
+    assert!(dispatch.contains(".project_safe(request)"));
+}
+
+#[test]
 fn operation_mismatch_is_rejected_before_runtime_call() {
     let runtime = runtime();
     let response = dispatch_adapter_command(
@@ -391,6 +416,7 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
         envelope(
             AdapterOperation::Write,
             AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
@@ -414,6 +440,7 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
     let recall = decode_json_adapter_command(
         AdapterOperation::Recall,
         r#"{
+            "temporal_operation":{"kind":"current"},
             "query":"typed entity",
             "structured_query_facets":[
                 {"kind":"unresolved_entity","value":"Alice"}
@@ -433,6 +460,7 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
     let project = decode_json_adapter_command(
         AdapterOperation::Project,
         r#"{
+            "temporal_operation":{"kind":"current"},
             "user_query":"typed temporal",
             "system_max_len":4096,
             "structured_query_facets":[
@@ -449,6 +477,198 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
         project.structured_query_facets,
         vec![QueryFacetInput::UnresolvedTemporal("last week".to_string())]
     );
+}
+
+#[test]
+fn recall_and_project_json_require_strict_typed_temporal_operation() {
+    let options = AdapterJsonCommandOptions::new("adapter-temporal-contract");
+    let recall = decode_json_adapter_command(
+        AdapterOperation::Recall,
+        r#"{
+            "temporal_operation":{"kind":"historical_as_of","as_of_time":1700000000},
+            "query":"typed historical recall"
+        }"#,
+        &options,
+    )
+    .expect("typed historical recall");
+    let AdapterCommand::Recall(recall) = recall else {
+        panic!("expected recall command");
+    };
+    assert_eq!(
+        recall.temporal_operation,
+        bm_sdk::MemoryRecallTemporalOperation::HistoricalAsOf {
+            as_of_time: 1_700_000_000
+        }
+    );
+
+    for body in [
+        r#"{"query":"missing temporal"}"#,
+        r#"{"temporal_operation":{"kind":"unknown"},"query":"unknown variant"}"#,
+        r#"{"temporal_operation":{"kind":"current"},"query":"unknown field","legacy":true}"#,
+    ] {
+        assert!(
+            decode_json_adapter_command(AdapterOperation::Recall, body, &options).is_err(),
+            "strict recall payload unexpectedly accepted: {body}"
+        );
+    }
+
+    let project = decode_json_adapter_command(
+        AdapterOperation::Project,
+        r#"{
+            "temporal_operation":{"kind":"historical_as_of","as_of_time":1700000001},
+            "user_query":"typed historical project",
+            "system_max_len":4096
+        }"#,
+        &options,
+    )
+    .expect("typed historical project");
+    let AdapterCommand::Project(project) = project else {
+        panic!("expected project command");
+    };
+    assert_eq!(
+        project.temporal_operation,
+        bm_sdk::MemoryRecallTemporalOperation::HistoricalAsOf {
+            as_of_time: 1_700_000_001
+        }
+    );
+    assert!(decode_json_adapter_command(
+        AdapterOperation::Project,
+        r#"{
+            "temporal_operation":{"kind":"current"},
+            "query":"legacy alias",
+            "system_max_len":4096
+        }"#,
+        &options,
+    )
+    .is_err());
+}
+
+#[test]
+fn adapter_safe_dto_is_strict_and_all_protocol_sources_delegate_to_its_owner() {
+    let runtime = runtime();
+    let response = dispatch_adapter_command(
+        &runtime,
+        envelope(
+            AdapterOperation::Recall,
+            AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+                structured_query_facets: Vec::new(),
+                query: "governed safe dto".to_string(),
+                limit: 2,
+                tool_registry_refs: Vec::new(),
+            }),
+        ),
+    )
+    .expect("dispatch governed recall");
+    let AdapterResponse::Accepted {
+        report: AdapterSdkReport::Recall(report),
+        ..
+    } = response
+    else {
+        panic!("accepted governed recall report");
+    };
+    let dto = AdapterSdkReport::Recall(report)
+        .governed_safe_report()
+        .expect("governed safe DTO");
+    let encoded = serde_json::to_string(&dto).expect("serialize governed safe DTO");
+    for forbidden in [
+        "owner_id",
+        "owner_revision_ref",
+        "procedure_content",
+        "private_garden",
+        "state_digest",
+    ] {
+        assert!(
+            !encoded.contains(forbidden),
+            "adapter safe DTO leaked {forbidden}: {encoded}"
+        );
+    }
+    let decoded: bm_adapter::AdapterGovernedSafeReportV1 =
+        serde_json::from_str(&encoded).expect("strict governed safe DTO round-trip");
+    assert_eq!(decoded, dto);
+    let mut unknown: serde_json::Value =
+        serde_json::from_str(&encoded).expect("safe DTO JSON value");
+    unknown["unknown_business_field"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<bm_adapter::AdapterGovernedSafeReportV1>(unknown).is_err());
+
+    for source in [
+        include_str!("../../http/src/lib.rs"),
+        include_str!("../../wss/src/lib.rs"),
+        include_str!("../../mcp/src/lib.rs"),
+        include_str!("../../a2a/src/lib.rs"),
+        include_str!("../../cli/src/lib.rs"),
+    ] {
+        assert!(source.contains(".governed_safe_report()"));
+        assert!(!source.contains("procedural_delivery_reports"));
+    }
+}
+
+#[test]
+fn governed_request_schema_is_owned_once_by_the_adapter_contract() {
+    let recall =
+        governed_adapter_json_command_schema(AdapterOperation::Recall).expect("recall schema");
+    assert_eq!(
+        recall.field_names,
+        [
+            "temporal_operation",
+            "query",
+            "limit",
+            "structured_query_facets",
+            "tool_registry_refs",
+        ]
+    );
+    assert_eq!(
+        recall.input_schema["required"],
+        json!(["temporal_operation", "query"])
+    );
+    assert_eq!(recall.input_schema["additionalProperties"], false);
+    assert!(recall.input_schema["properties"]["temporal_operation"]["oneOf"].is_array());
+    assert_eq!(
+        recall.input_schema["properties"]["temporal_operation"]["oneOf"][1]["properties"]
+            ["as_of_time"]["minimum"],
+        1
+    );
+
+    let project =
+        governed_adapter_json_command_schema(AdapterOperation::Project).expect("project schema");
+    assert_eq!(
+        project.field_names,
+        [
+            "temporal_operation",
+            "user_query",
+            "system_max_len",
+            "recent_messages_limit",
+            "pressure",
+            "mode_input",
+            "structured_query_facets",
+            "tool_registry_refs",
+        ]
+    );
+    assert_eq!(
+        project.input_schema["required"],
+        json!(["temporal_operation", "user_query", "system_max_len"])
+    );
+    assert_eq!(project.input_schema["additionalProperties"], false);
+    assert!(governed_adapter_json_command_schema(AdapterOperation::Inspect).is_none());
+}
+
+#[test]
+fn macos_standalone_profile_forwarding_is_exact_for_wss_and_mcp() {
+    for manifest in [
+        include_str!("../../wss/Cargo.toml"),
+        include_str!("../../mcp/Cargo.toml"),
+    ] {
+        assert_eq!(
+            manifest
+                .lines()
+                .filter(|line| line.starts_with("profile-desktop-macos-standalone-memory ="))
+                .count(),
+            1
+        );
+        assert!(manifest.contains(
+            "profile-desktop-macos-standalone-memory = [\"bm-adapter/profile-desktop-macos-standalone-memory\"]"
+        ));
+    }
 }
 
 #[test]
@@ -615,12 +835,15 @@ fn json_decoder_covers_adapter_memory_operations() {
     let cases = [
         (
             AdapterOperation::Write,
-            r#"{"name":"runtime_skill__adapter_write","topic":"adapter","title":"Adapter write","summary":"Adapter write summary","content":"1. Decode write payload.\n2. Dispatch common adapter command."}"#,
+            r#"{"name":"runtime_skill__adapter_write","topic":"adapter","title":"Adapter write","summary":"Adapter write summary","content":"1. Decode write payload.\n2. Dispatch common adapter command.","owning_scope":{"kind":"subject","mounted_subject_id":"agent:agent-main"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:adapter-write","verification_receipt_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"privacy_class":"shared_with_subject"}"#,
         ),
-        (AdapterOperation::Recall, r#"{"query":"release","limit":2}"#),
+        (
+            AdapterOperation::Recall,
+            r#"{"temporal_operation":{"kind":"current"},"query":"release","limit":2}"#,
+        ),
         (
             AdapterOperation::Project,
-            r#"{"query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
+            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
         ),
         (
             AdapterOperation::Maintain,
@@ -668,7 +891,10 @@ fn json_decoder_covers_adapter_memory_operations() {
 fn projection_and_inspection_require_runtime_owned_render_budget() {
     let options = AdapterJsonCommandOptions::new("test-adapter");
     for (operation, body) in [
-        (AdapterOperation::Project, r#"{"query":"release"}"#),
+        (
+            AdapterOperation::Project,
+            r#"{"temporal_operation":{"kind":"current"},"user_query":"release"}"#,
+        ),
         (AdapterOperation::Inspect, r#"{"query":"release"}"#),
     ] {
         let error = decode_json_adapter_command(operation, body, &options)

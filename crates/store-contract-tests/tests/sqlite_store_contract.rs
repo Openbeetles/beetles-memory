@@ -24,6 +24,7 @@ fn seed_governed_archive(
 
 fn tiny_store_budget() -> StoreRuntimeBudget {
     StoreRuntimeBudget {
+        metric_source_max_items: 1,
         event_log_max_items: 2,
         kv_max_entries: 256,
         blob_max_bytes: 4,
@@ -44,14 +45,13 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
     let path = root.join("memory.sqlite3");
     let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
 
-    {
+    let skill = {
         let platform = support::open_store(config.clone()).unwrap();
         platform
             .state_fs()
             .write("runtime/state.json", b"state")
             .unwrap();
         let skill = support::seed_runtime_skill(&platform, "runtime_skill__alpha");
-        assert!(!skill.is_empty());
         platform
             .session_store()
             .append("chat-a", "user", "hello")
@@ -101,21 +101,24 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
             .unwrap()
             .iter()
             .any(|event| event.kind_name == "memory.write"));
-    }
+        skill
+    };
 
     let reopened = support::open_store(config).unwrap();
     assert_eq!(
         reopened.state_fs().read("runtime/state.json").unwrap(),
         Some(b"state".to_vec())
     );
-    assert!(!reopened
-        .skill_storage()
-        .read("runtime_skill__alpha")
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        support::read_runtime_skill_owner(&reopened, &skill.physical_key),
+        skill
+    );
     assert_eq!(
         reopened
-            .scoped_long_term_memory_read_store("space:test")
+            .scoped_long_term_memory_read_store(
+                "space:test",
+                &reopened.config().event_scope().subject_id,
+            )
             .expect("scoped long-term read store")
             .recall("archive", Some("chat-a"), 4)
             .unwrap()

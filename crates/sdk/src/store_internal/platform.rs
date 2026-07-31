@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::agent::{ActiveWorkRecord, ActiveWorkStore};
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_core::budget::{BenchmarkStoreCapacityExtension, StoreRuntimeBudget};
-use bm_core::budget::{RuntimeBudgetAuthority, RuntimeBudgetReport};
+use bm_core::budget::{GovernedStateRuntimeBudget, RuntimeBudgetAuthority, RuntimeBudgetReport};
 use bm_core::memory::*;
 use bm_core::platform::{MemorySystemKind, Platform, SkillMetaStore, SkillStorage, StateFs};
 use bm_core::resource::RuntimeResourceProbe;
@@ -16,7 +16,10 @@ use bm_core::runtime::{
     RuntimeLifecycleEffect, RuntimeLifecycleEvent, RuntimeLifecycleEventKind,
     RuntimeLifecycleEventSink, RuntimeLifecycleOperation, RuntimeLifecycleTrigger,
 };
-use bm_core::skills::runtime_skill_owner_updated_at;
+use bm_core::skills::{
+    runtime_skill_scope_manifest_key, RuntimeSkillOwnerBinding, RuntimeSkillOwnerRecord,
+    RuntimeSkillOwningScope, RuntimeSkillScopeManifest,
+};
 use bm_core::task::{normalize_task_item, TaskItem, TaskQuery, TaskStore};
 use bm_core::task_execution::{
     TaskArtifactRecord, TaskArtifactStore, TaskLearningRecord, TaskLearningStore, TaskRunRecord,
@@ -30,20 +33,28 @@ use crate::store_internal::config::{open_runtime_budget_authority, resolve_store
 use crate::store_internal::recall_index::{
     decode_typed_recall_index, next_entry_revision, remove_recall_index_address,
     replace_recall_index_address, ActiveTaskRunByChatIndex, ArchiveRecallManifest,
-    ContinuityCapsuleScopeIndex, ConversationRecallManifest, RecallIndexAddress,
-    RecallIndexAddressKind, RuntimeSkillRecallManifest, TaskLearningByChatIndex, TypedRecallIndex,
-    ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE, ARCHIVE_RECALL_MANIFEST_NAMESPACE,
-    CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE, CONVERSATION_RECALL_MANIFEST_NAMESPACE,
-    RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE, TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
+    ContinuityCapsuleScopeIndex, ConversationRecallManifest, ConversationTranscriptAuxManifest,
+    ConversationTranscriptPageIndex, RecallIndexAddress, RecallIndexAddressKind,
+    TaskLearningByChatIndex, TypedRecallIndex, ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE,
+    ARCHIVE_RECALL_MANIFEST_NAMESPACE, CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE,
+    CONVERSATION_RECALL_MANIFEST_NAMESPACE, CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE,
+    CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE, CONVERSATION_TRANSCRIPT_PAGE_SIZE,
+    TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
-use crate::store_internal::recall_read::RecallImmutableReadContext;
+use crate::store_internal::recall_read::{
+    RecallImmutableReadContext, RecallReadSetClosureEvidence,
+};
 use crate::store_internal::schema::{
+    admit_store_json_address, admit_store_json_document, classify_store_blob_address,
     control_plane_scope_manifest_key, governed_evidence_source_claim_manifest_key,
-    recall_owner_scope_binding_key, ControlPlaneScopeEntry, ControlPlaneScopeManifest,
-    GovernedEvidenceSourceClaimManifest, RecallOwnerScopeBinding,
+    recall_owner_scope_binding_key, store_memory_space_archive_json_namespaces,
+    ControlPlaneScopeEntry, ControlPlaneScopeManifest, GovernedEvidenceSourceClaimManifest,
+    RecallOwnerScopeBinding, StoreAddressAdmission, StoreBlobDecoderKind, StoreJsonDecoderKind,
     CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
     RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
 };
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::store_internal::schema::{store_v6_blob_namespaces, store_v6_json_namespaces};
 #[cfg(feature = "sqlite-store")]
 use crate::store_internal::sqlite::SqliteStoreEngine;
 use crate::store_internal::transaction::{
@@ -51,21 +62,30 @@ use crate::store_internal::transaction::{
     ConditionalDeleteEventTemplate, GraphRepairAuthority, StoreAdmissionAuthority,
     StoreGovernedEvidenceExactReadRequest, StoreGovernedEvidenceExactReadResult,
 };
+
+pub(crate) struct RecallImmutableReadSessionOutcome<T> {
+    pub(crate) output: T,
+    pub(crate) receipt: StoreReadReceipt,
+    pub(crate) read_set: RecallReadSetClosureEvidence,
+    pub(crate) session_open_count: u64,
+    pub(crate) receipt_count: u64,
+}
 use crate::{
     enforce_event_key_budget, enforce_logical_key_budget, store_budget_error,
     store_internal::embedded::EmbeddedStoreEngine, store_internal::file::FileStoreEngine,
     InMemoryStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
     StoreBackendKind, StoreCapacityBudget, StoreEngine, StoreEngineMutation, StoreEventLog,
-    StoreEventScope, StoreJsonPrecondition, StoreMutation, StoreMutationBatch,
-    StoreMutationBatchReport, StoreOpenReport, StoreReadReceipt, StoreRepairReport,
-    StoreSchemaManifest, StoreScopedProjectionReplaceRequest, StoreScopedProjectionRequest,
-    StoreScopedProjectionScope, StoreSnapshot, StoreSnapshotImportReport, StoreSnapshotJsonDoc,
-    StoreTransactionAdmission, StoreTransactionRequest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
+    StoreEventScope, StoreJsonPrecondition, StoreMetricEventSourceRead, StoreMutation,
+    StoreMutationBatch, StoreMutationBatchReport, StoreOpenReport, StoreReadReceipt,
+    StoreRepairReport, StoreSchemaManifest, StoreScopedProjectionReplaceReport,
+    StoreScopedProjectionReplaceRequest, StoreScopedProjectionRequest, StoreScopedProjectionScope,
+    StoreSnapshot, StoreSnapshotJsonDoc, StoreTransactionAdmission, StoreTransactionRequest,
+    STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
-use crate::{StoreSnapshotBlob, StoreSnapshotExportReport};
+use crate::{StoreSnapshotBlob, StoreSnapshotExportReport, StoreSnapshotImportReport};
 
-static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static EVENT_SEQUENCE: Mutex<u64> = Mutex::new(1);
 
 type RecallIndexMutationPlan = (
     &'static str,
@@ -76,6 +96,60 @@ type RecallIndexMutationPlan = (
 
 pub(crate) const GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE: &str = "governed_evidence_documents";
 pub(crate) const GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE: &str = "governed_evidence_source_refs";
+
+pub(crate) struct StoreOpenPreflight {
+    capacity: StoreCapacityBudget,
+    governed_state_budget: GovernedStateRuntimeBudget,
+    required_open_event: MemoryStoreEvent,
+}
+
+impl StoreOpenPreflight {
+    fn new(
+        capacity: StoreCapacityBudget,
+        governed_state_budget: &GovernedStateRuntimeBudget,
+        required_open_event: MemoryStoreEvent,
+    ) -> Self {
+        Self {
+            capacity,
+            governed_state_budget: *governed_state_budget,
+            required_open_event,
+        }
+    }
+
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
+    pub(crate) fn for_nonproduction_harness(
+        config: &StoreBackendConfig,
+        capacity: StoreCapacityBudget,
+    ) -> Result<Self> {
+        let preparation = StorePlatformPreparation::prepare(config.clone(), None)?;
+        Ok(Self::new(
+            capacity,
+            &preparation.runtime_budget.governed_state_budget,
+            build_runtime_event(config, "open", current_unix_secs()),
+        ))
+    }
+
+    pub(crate) fn admit_snapshot(
+        &self,
+        snapshot: &StoreSnapshot,
+        stage: &'static str,
+    ) -> Result<()> {
+        if snapshot.events.len() >= self.capacity.event_log_max_items {
+            return Err(Error::config(
+                stage,
+                format!(
+                    "existing store event count {} leaves no capacity for the required open event",
+                    snapshot.events.len()
+                ),
+            ));
+        }
+        let mut post_open = snapshot.clone();
+        post_open.events.push(self.required_open_event.clone());
+        validate_snapshot_import_contract(snapshot, &self.governed_state_budget, self.capacity)
+            .and_then(|_| enforce_snapshot_logical_budget(self.capacity, &post_open))
+            .map_err(|error| Error::config(stage, error.to_string()))
+    }
+}
 
 #[derive(Clone)]
 pub struct StorePlatform {
@@ -88,9 +162,11 @@ pub struct StorePlatform {
     runtime_budget_authority: Arc<RuntimeBudgetAuthority>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StoreMemorySpaceProjectionReport {
     pub omitted_private_entries: usize,
+    pub operation_capacity: StoreCapacityBudget,
+    pub max_retained_long_term_revisions_per_owner: usize,
 }
 
 pub(crate) struct StorePlatformPreparation {
@@ -195,7 +271,7 @@ impl StorePlatformPreparation {
 pub(crate) struct ScopedLongTermMemoryStore {
     platform: StorePlatform,
     memory_space_id: String,
-    key_prefix: String,
+    mounted_subject_id: String,
 }
 
 #[derive(Clone)]
@@ -262,6 +338,18 @@ impl StorePlatform {
             .map(|(platform, _report)| platform)
     }
 
+    #[cfg(all(test, feature = "nonproduction-replay-harness"))]
+    pub(crate) fn engine_for_test(&self) -> Arc<dyn StoreEngine> {
+        self.engine.clone()
+    }
+
+    #[cfg(all(test, feature = "nonproduction-replay-harness"))]
+    pub(crate) fn with_engine_for_test(&self, engine: Arc<dyn StoreEngine>) -> Self {
+        let mut platform = self.clone();
+        platform.engine = engine;
+        platform
+    }
+
     #[cfg(feature = "nonproduction-replay-harness")]
     pub fn tamper_json_document_for_nonproduction_harness(
         &self,
@@ -270,6 +358,33 @@ impl StorePlatform {
         value: serde_json::Value,
     ) -> Result<()> {
         self.engine.put_json_value(namespace, key, value)
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn delete_json_document_for_nonproduction_harness(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<()> {
+        self.engine.delete_json_value(namespace, key).map(|_| ())
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn read_json_namespace_unchecked_for_nonproduction_harness(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<StoreSnapshotJsonDoc>> {
+        let mut docs = Vec::new();
+        for key in self.engine.list_json_keys(namespace)? {
+            if let Some(value) = self.engine.get_json_value(namespace, &key)? {
+                docs.push(StoreSnapshotJsonDoc {
+                    namespace: namespace.to_string(),
+                    key,
+                    value,
+                });
+            }
+        }
+        Ok(docs)
     }
 
     #[cfg(any(test, feature = "nonproduction-replay-harness"))]
@@ -293,13 +408,16 @@ impl StorePlatform {
     pub fn scoped_long_term_memory_read_store(
         &self,
         memory_space_id: &str,
+        mounted_subject_id: &str,
     ) -> Result<Arc<dyn bm_core::memory::LongTermMemoryReadStore>> {
         let memory_space_id = memory_space_id.trim().to_string();
-        let key_prefix = scoped_long_term_memory_storage_prefix(&memory_space_id)?;
+        let mounted_subject_id = mounted_subject_id.trim().to_string();
+        scoped_long_term_memory_storage_prefix(&memory_space_id)?;
+        long_term_version_scope_manifest_key(&memory_space_id, &mounted_subject_id)?;
         Ok(Arc::new(ScopedLongTermMemoryStore {
             platform: self.clone(),
             memory_space_id,
-            key_prefix,
+            mounted_subject_id,
         }))
     }
 
@@ -399,12 +517,18 @@ impl StorePlatform {
             store_medium: _,
             consumption: _,
         } = preparation;
+        let open_event = build_runtime_event(&config, "open", now_secs);
         let (engine, repair, schema_manifest): (
             Arc<dyn StoreEngine>,
             StoreRepairReport,
             StoreSchemaManifest,
         ) = {
             let admission_authority = StoreAdmissionAuthority::new();
+            let open_preflight = StoreOpenPreflight::new(
+                capacity,
+                &current_report.governed_state_budget,
+                open_event.clone(),
+            );
             match config.backend {
                 StoreBackendKind::InMemory => (
                     Arc::new(InMemoryStoreEngine::new_with_admission_authority(
@@ -428,12 +552,17 @@ impl StorePlatform {
                             &config,
                             capacity,
                             admission_authority.clone(),
+                            &open_preflight,
                         )?;
                     (Arc::new(engine), repair, manifest)
                 }
                 StoreBackendKind::Sqlite => {
-                    let (engine, manifest) =
-                        sqlite_engine(&config, capacity, admission_authority.clone())?;
+                    let (engine, manifest) = sqlite_engine(
+                        &config,
+                        capacity,
+                        admission_authority.clone(),
+                        &open_preflight,
+                    )?;
                     (engine, StoreRepairReport::clean(), manifest)
                 }
             }
@@ -452,12 +581,20 @@ impl StorePlatform {
             open_report: report.clone(),
             runtime_budget_authority,
         };
-        platform.emit_runtime_event("open")?;
+        platform.append_validated_event(open_event)?;
         Ok((platform, report))
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     pub fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
         self.engine.read_events()
+    }
+
+    pub(crate) fn read_metric_events(
+        &self,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreMetricEventSourceRead> {
+        self.engine.read_metric_events(capacity)
     }
 
     fn lock_transaction(&self, stage: &'static str) -> Result<std::sync::MutexGuard<'_, ()>> {
@@ -466,11 +603,11 @@ impl StorePlatform {
             .map_err(|_| Error::config(stage, "transaction mutex poisoned"))
     }
 
-    pub fn read_file_store_events(
+    pub(crate) fn read_file_metric_events(
         root: impl AsRef<Path>,
         capacity: StoreCapacityBudget,
-    ) -> Result<Vec<MemoryStoreEvent>> {
-        crate::store_internal::file::read_events_from_root(root.as_ref(), capacity)
+    ) -> Result<StoreMetricEventSourceRead> {
+        crate::store_internal::file::read_metric_events_from_root(root.as_ref(), capacity)
     }
 
     pub(crate) fn current_runtime_budget(&self, now_secs: u64) -> RuntimeBudgetReport {
@@ -485,7 +622,7 @@ impl StorePlatform {
         &self,
         runtime_budget: &RuntimeBudgetReport,
         read: impl FnOnce(&mut RecallImmutableReadContext<'_>) -> Result<T>,
-    ) -> Result<(T, StoreReadReceipt)> {
+    ) -> Result<RecallImmutableReadSessionOutcome<T>> {
         let now_secs = current_unix_secs();
         runtime_budget.validate_for_admission(now_secs)?;
         let active_report = crate::RuntimeBudgetLease::active_report(
@@ -504,11 +641,31 @@ impl StorePlatform {
             ));
         }
         let capacity = StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget);
+        let mut session_open_count = 0u64;
         let session = self.engine.open_immutable_read_session(capacity)?;
+        session_open_count = session_open_count.checked_add(1).ok_or_else(|| {
+            Error::config(
+                "recall_immutable_read_session",
+                "immutable session-open count overflow",
+            )
+        })?;
         let mut context = RecallImmutableReadContext::new(session);
         let output = read(&mut context)?;
-        let receipt = context.receipt()?;
-        Ok((output, receipt))
+        let mut receipt_count = 0u64;
+        let (receipt, read_set) = context.finish()?;
+        receipt_count = receipt_count.checked_add(1).ok_or_else(|| {
+            Error::config(
+                "recall_immutable_read_session",
+                "immutable receipt count overflow",
+            )
+        })?;
+        Ok(RecallImmutableReadSessionOutcome {
+            output,
+            receipt,
+            read_set,
+            session_open_count,
+            receipt_count,
+        })
     }
 
     pub(crate) fn refresh_runtime_resource_snapshot(
@@ -553,6 +710,14 @@ impl StorePlatform {
 
     pub fn open_report(&self) -> &StoreOpenReport {
         &self.open_report
+    }
+
+    pub(crate) fn exact_runtime_skill_manifest_materializer_available(&self) -> bool {
+        self.schema_manifest.schema_id == STORE_SCHEMA_ID
+            && self.schema_manifest.schema_version == STORE_SCHEMA_VERSION
+            && self.schema_manifest.backend == self.config.backend.as_str()
+            && self.schema_manifest.profile == self.config.profile.as_str()
+            && self.schema_manifest.memory_system_kind == self.config.memory_system_kind.as_str()
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -630,11 +795,6 @@ impl StorePlatform {
         let mut preconditions = preconditions.to_vec();
         let transaction_timestamp =
             canonical_transaction_timestamp(&batch, runtime_timestamp_unix_secs)?;
-        self.append_runtime_skill_recall_index_closure(
-            &mut batch,
-            &mut preconditions,
-            transaction_timestamp,
-        )?;
         self.append_conversation_derived_ref_recall_index_closure(
             &mut batch,
             &mut preconditions,
@@ -671,7 +831,9 @@ impl StorePlatform {
         let operation_capacity =
             StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget);
 
-        validate_batch_mutation_namespaces(&batch)?;
+        validate_batch_mutation_namespaces(&batch, &preconditions, |namespace, key| {
+            self.engine.get_blob(namespace, key)
+        })?;
         validate_protected_json_mutation_preconditions(&batch, &preconditions)?;
         validate_recall_index_mutation_closure(
             &batch,
@@ -696,7 +858,7 @@ impl StorePlatform {
                     plane,
                     record_key,
                 } => {
-                    ensure_batch_json_namespace(namespace)?;
+                    ensure_batch_json_address(namespace, key)?;
                     enforce_logical_key_budget(
                         operation_capacity,
                         namespace,
@@ -735,7 +897,7 @@ impl StorePlatform {
                     plane,
                     record_key,
                 } => {
-                    ensure_batch_json_namespace(namespace)?;
+                    ensure_batch_json_address(namespace, key)?;
                     enforce_logical_key_budget(
                         operation_capacity,
                         namespace,
@@ -764,7 +926,7 @@ impl StorePlatform {
                     plane,
                     record_key,
                 } => {
-                    ensure_batch_blob_namespace(namespace)?;
+                    ensure_batch_blob_address(namespace, key, Some(value))?;
                     enforce_logical_key_budget(
                         operation_capacity,
                         namespace,
@@ -802,7 +964,11 @@ impl StorePlatform {
                     plane,
                     record_key,
                 } => {
-                    ensure_batch_blob_namespace(namespace)?;
+                    ensure_batch_blob_address(
+                        namespace,
+                        key,
+                        self.engine.get_blob(namespace, key)?.as_deref(),
+                    )?;
                     enforce_logical_key_budget(
                         operation_capacity,
                         namespace,
@@ -827,7 +993,7 @@ impl StorePlatform {
                     enforce_event_key_budget(operation_capacity, event, "memory_write_transaction")
                         .map_err(memory_write_transaction_preflight_error)?;
                     engine_mutations.push(StoreEngineMutation::AppendEvent {
-                        event: Box::new(event.clone()),
+                        event: event.clone(),
                     });
                 }
             }
@@ -840,6 +1006,16 @@ impl StorePlatform {
             preconditions,
             engine_mutations,
             Some(Box::new(batch.clone())),
+        )
+        .with_governed_long_term_retention_limit(
+            runtime_budget
+                .governed_state_budget
+                .max_retained_long_term_revisions_per_owner,
+        )
+        .with_governed_runtime_skill_owner_limit(
+            runtime_budget
+                .governed_state_budget
+                .max_retained_runtime_skill_owners_per_scope,
         )
         .include_governed_json_reads(governed_json_reads);
         if batch.mutations.iter().any(|mutation| {
@@ -1222,6 +1398,7 @@ impl StorePlatform {
         let mut docs = Vec::new();
         for key in self.engine.list_json_keys(namespace)? {
             if let Some(value) = self.engine.get_json_value(namespace, &key)? {
+                admit_store_json_document(namespace, &key, &value, "store_json_namespace_read")?;
                 docs.push(StoreSnapshotJsonDoc {
                     namespace: namespace.to_string(),
                     key,
@@ -1281,7 +1458,7 @@ impl StorePlatform {
             .iter()
             .filter(|(namespace, key)| seen.insert((namespace.as_str(), key.as_str())))
             .map(|(namespace, key)| {
-                ensure_json_snapshot_namespace(namespace, "store_json_namespace_read")?;
+                admit_store_json_address(namespace, key, "store_json_known_key_read")?;
                 Ok((namespace.clone(), key.clone()))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1298,29 +1475,83 @@ impl StorePlatform {
             false,
             StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget),
         )?;
-        Ok(result
-            .json
-            .into_iter()
-            .filter_map(|read| {
-                read.value.map(|value| StoreSnapshotJsonDoc {
+        let mut docs = Vec::new();
+        for read in result.json {
+            if let Some(value) = read.value {
+                admit_store_json_document(
+                    &read.namespace,
+                    &read.key,
+                    &value,
+                    "store_json_known_key_read",
+                )?;
+                docs.push(StoreSnapshotJsonDoc {
                     namespace: read.namespace,
                     key: read.key,
                     value,
-                })
+                });
+            }
+        }
+        Ok(docs)
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub(crate) fn p8_read_json_addresses_with_receipt(
+        &self,
+        addresses: &[(String, String)],
+    ) -> Result<(Vec<StoreSnapshotJsonDoc>, StoreReadReceipt)> {
+        let mut seen = BTreeSet::new();
+        let addresses = addresses
+            .iter()
+            .filter(|(namespace, key)| seen.insert((namespace.as_str(), key.as_str())))
+            .map(|(namespace, key)| {
+                admit_store_json_address(namespace, key, "p8_forget_post_image_read")?;
+                Ok((namespace.clone(), key.clone()))
             })
-            .collect())
+            .collect::<Result<Vec<_>>>()?;
+        let runtime_budget = self.current_runtime_budget(current_unix_secs());
+        if runtime_budget.resource_snapshot.stale {
+            return Err(Error::config(
+                "p8_forget_post_image_read",
+                "post-Forget exact-zero read requires a fresh runtime budget report",
+            ));
+        }
+        let result = self.engine.read_consistent_known_keys(
+            &addresses,
+            &[],
+            false,
+            StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget),
+        )?;
+        let mut docs = Vec::new();
+        for read in result.json {
+            if let Some(value) = read.value {
+                admit_store_json_document(
+                    &read.namespace,
+                    &read.key,
+                    &value,
+                    "p8_forget_post_image_read",
+                )?;
+                docs.push(StoreSnapshotJsonDoc {
+                    namespace: read.namespace,
+                    key: read.key,
+                    value,
+                });
+            }
+        }
+        Ok((docs, result.receipt))
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
     pub fn export_store_snapshot_with_report(
         &self,
     ) -> Result<(StoreSnapshot, StoreSnapshotExportReport)> {
+        let runtime_budget = self.current_runtime_budget(current_unix_secs());
         let mut json_docs = Vec::new();
-        for namespace in JSON_SNAPSHOT_NAMESPACES {
+        for namespace in store_v6_json_namespaces() {
             for key in self.engine.list_json_keys(namespace)? {
                 if let Some(value) = self.engine.get_json_value(namespace, &key)? {
+                    admit_store_json_document(namespace, &key, &value, "store_snapshot_export")?;
                     json_docs.push(StoreSnapshotJsonDoc {
-                        namespace: (*namespace).to_string(),
+                        namespace: namespace.to_string(),
                         key,
                         value,
                     });
@@ -1328,11 +1559,11 @@ impl StorePlatform {
             }
         }
         let mut blobs = Vec::new();
-        for namespace in BLOB_SNAPSHOT_NAMESPACES {
+        for namespace in store_v6_blob_namespaces() {
             for key in self.engine.list_blob_keys(namespace)? {
                 if let Some(value) = self.engine.get_blob(namespace, &key)? {
                     blobs.push(StoreSnapshotBlob {
-                        namespace: (*namespace).to_string(),
+                        namespace: namespace.to_string(),
                         key,
                         value,
                     });
@@ -1345,6 +1576,14 @@ impl StorePlatform {
             blobs,
             self.read_events()?,
         );
+        validate_snapshot_import_contract(
+            &snapshot,
+            &runtime_budget.governed_state_budget,
+            self.capacity,
+        )
+        .map_err(|error| Error::config("store_snapshot_export", error.to_string()))?;
+        enforce_snapshot_logical_budget(self.capacity, &snapshot)
+            .map_err(|error| Error::config("store_snapshot_export", error.to_string()))?;
         self.enforce_snapshot_budget(&snapshot, self.capacity.export_max_bytes, "export")?;
         let report = snapshot.export_report();
         Ok((snapshot, report))
@@ -1352,8 +1591,7 @@ impl StorePlatform {
 
     pub(crate) fn export_memory_space_projection_with_report(
         &self,
-        memory_space_id: &str,
-        mounted_subject_id: &str,
+        scope: &StoreScopedProjectionScope,
         pinned_runtime_budget: Option<&RuntimeBudgetReport>,
     ) -> Result<(StoreSnapshot, StoreMemorySpaceProjectionReport)> {
         let owned_runtime_budget;
@@ -1367,10 +1605,9 @@ impl StorePlatform {
             StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget);
         let projection = self.engine.read_scoped_projection(
             &StoreScopedProjectionRequest {
-                scope: StoreScopedProjectionScope::new(memory_space_id, mounted_subject_id)?,
-                json_namespaces: JSON_SNAPSHOT_NAMESPACES
-                    .iter()
-                    .map(|value| (*value).to_string())
+                scope: scope.clone(),
+                json_namespaces: store_memory_space_archive_json_namespaces()
+                    .map(str::to_string)
                     .collect(),
                 include_events: true,
             },
@@ -1391,25 +1628,20 @@ impl StorePlatform {
             snapshot,
             StoreMemorySpaceProjectionReport {
                 omitted_private_entries: 0,
+                operation_capacity,
+                max_retained_long_term_revisions_per_owner: runtime_budget
+                    .governed_state_budget
+                    .max_retained_long_term_revisions_per_owner,
             },
         ))
     }
 
     pub(crate) fn replace_memory_space_projection_with_report(
         &self,
-        memory_space_id: &str,
-        mounted_subject_id: &str,
+        scope: &StoreScopedProjectionScope,
         snapshot: &StoreSnapshot,
         pinned_runtime_budget: Option<&RuntimeBudgetReport>,
-    ) -> Result<StoreSnapshotImportReport> {
-        validate_snapshot_import_contract(snapshot)?;
-        validate_scoped_projection_governed_closure(snapshot, memory_space_id, mounted_subject_id)?;
-        if !snapshot.blobs.is_empty() {
-            return Err(Error::config(
-                "memory_space_import",
-                "typed memory-space archive must not contain unowned blobs",
-            ));
-        }
+    ) -> Result<StoreScopedProjectionReplaceReport> {
         let owned_runtime_budget;
         let runtime_budget = if let Some(runtime_budget) = pinned_runtime_budget {
             runtime_budget
@@ -1417,30 +1649,33 @@ impl StorePlatform {
             owned_runtime_budget = self.current_runtime_budget(current_unix_secs());
             &owned_runtime_budget
         };
+        let operation_capacity =
+            StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget);
+        validate_snapshot_import_contract(
+            snapshot,
+            &runtime_budget.governed_state_budget,
+            operation_capacity,
+        )?;
+        validate_scoped_projection_governed_closure(snapshot, scope)?;
+        if !snapshot.blobs.is_empty() {
+            return Err(Error::config(
+                "memory_space_import",
+                "typed memory-space archive must not contain unowned blobs",
+            ));
+        }
         let admission = self.store_transaction_admission_for_report(runtime_budget)?;
         let replace = self.engine.replace_scoped_projection(
             &StoreScopedProjectionReplaceRequest {
-                scope: StoreScopedProjectionScope::new(memory_space_id, mounted_subject_id)?,
-                json_namespaces: JSON_SNAPSHOT_NAMESPACES
-                    .iter()
-                    .map(|value| (*value).to_string())
+                scope: scope.clone(),
+                json_namespaces: store_memory_space_archive_json_namespaces()
+                    .map(str::to_string)
                     .collect(),
                 json_docs: snapshot.json_docs.clone(),
                 events: snapshot.events.clone(),
             },
             &admission,
         )?;
-        Ok(StoreSnapshotImportReport {
-            schema_id: snapshot.schema_id.clone(),
-            json_docs: replace.inserted_json,
-            blobs: 0,
-            json_deleted: replace.deleted_json,
-            blobs_deleted: 0,
-            events_imported: replace.inserted_events,
-            events_skipped: 0,
-            state_fingerprint: snapshot.state_fingerprint(),
-            event_fingerprint: snapshot.event_fingerprint(),
-        })
+        Ok(replace)
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -1454,13 +1689,20 @@ impl StorePlatform {
         &self,
         snapshot: &StoreSnapshot,
     ) -> Result<StoreSnapshotImportReport> {
-        validate_snapshot_import_contract(snapshot)?;
+        let runtime_budget = self.current_runtime_budget(current_unix_secs());
+        validate_snapshot_import_contract(
+            snapshot,
+            &runtime_budget.governed_state_budget,
+            self.capacity,
+        )?;
         enforce_snapshot_logical_budget(self.capacity, snapshot)?;
         self.enforce_snapshot_budget(snapshot, self.capacity.import_max_bytes, "import")?;
         let _transaction_guard = self.lock_transaction("store_snapshot_import")?;
+        let json_namespaces = store_v6_json_namespaces().collect::<Vec<_>>();
+        let blob_namespaces = store_v6_blob_namespaces().collect::<Vec<_>>();
         let replace_report = self.engine.replace_snapshot(
-            JSON_SNAPSHOT_NAMESPACES,
-            BLOB_SNAPSHOT_NAMESPACES,
+            &json_namespaces,
+            &blob_namespaces,
             &snapshot.json_docs,
             &snapshot.blobs,
             &snapshot.events,
@@ -1482,10 +1724,13 @@ impl StorePlatform {
     where
         T: DeserializeOwned,
     {
-        self.engine
-            .get_json_value(namespace, key)?
-            .map(serde_json::from_value)
-            .transpose()
+        let Some(value) = self.engine.get_json_value(namespace, key)? else {
+            admit_store_json_address(namespace, key, "store_json_decode")?;
+            return Ok(None);
+        };
+        admit_store_json_document(namespace, key, &value, "store_json_decode")?;
+        serde_json::from_value(value)
+            .map(Some)
             .map_err(|error| Error::config("store_json_decode", error.to_string()))
     }
 
@@ -1769,196 +2014,6 @@ impl StorePlatform {
         Ok(())
     }
 
-    fn plan_runtime_skill_index_upsert(
-        &self,
-        name: &str,
-        content: &[u8],
-        updated_at: u64,
-    ) -> Result<RecallIndexMutationPlan> {
-        let scope = &self.config.event_scope;
-        let key = RuntimeSkillRecallManifest::build(
-            1,
-            &scope.memory_space_id,
-            &scope.agent_id,
-            std::iter::empty(),
-        )?
-        .physical_key;
-        let (previous, before) =
-            self.load_typed_recall_index::<RuntimeSkillRecallManifest>(&key)?;
-        let previous_entries = previous
-            .as_ref()
-            .map(|index| index.entries.as_slice())
-            .unwrap_or(&[]);
-        let address = RecallIndexAddress::blob(
-            "skills",
-            name,
-            next_entry_revision(
-                previous_entries,
-                RecallIndexAddressKind::Blob,
-                "skills",
-                name,
-            ),
-            updated_at,
-            content,
-        )?;
-        let next = RuntimeSkillRecallManifest::build(
-            previous
-                .as_ref()
-                .map(|index| index.revision.saturating_add(1))
-                .unwrap_or(1),
-            &scope.memory_space_id,
-            &scope.agent_id,
-            replace_recall_index_address(previous_entries, address),
-        )?;
-        Ok((
-            RuntimeSkillRecallManifest::NAMESPACE,
-            key,
-            serde_json::to_value(next).map_err(|error| {
-                Error::config("runtime_skill_recall_manifest", error.to_string())
-            })?,
-            before,
-        ))
-    }
-
-    fn plan_runtime_skill_index_remove(&self, name: &str) -> Result<RecallIndexMutationPlan> {
-        let scope = &self.config.event_scope;
-        let key = RuntimeSkillRecallManifest::build(
-            1,
-            &scope.memory_space_id,
-            &scope.agent_id,
-            std::iter::empty(),
-        )?
-        .physical_key;
-        let (previous, before) =
-            self.load_typed_recall_index::<RuntimeSkillRecallManifest>(&key)?;
-        let previous = previous.ok_or_else(|| {
-            Error::config(
-                "runtime_skill_recall_manifest",
-                "skill exists without its required recall manifest",
-            )
-        })?;
-        let next = RuntimeSkillRecallManifest::build(
-            previous.revision.saturating_add(1),
-            &scope.memory_space_id,
-            &scope.agent_id,
-            remove_recall_index_address(
-                &previous.entries,
-                RecallIndexAddressKind::Blob,
-                "skills",
-                name,
-            ),
-        )?;
-        Ok((
-            RuntimeSkillRecallManifest::NAMESPACE,
-            key,
-            serde_json::to_value(next).map_err(|error| {
-                Error::config("runtime_skill_recall_manifest", error.to_string())
-            })?,
-            before,
-        ))
-    }
-
-    fn append_runtime_skill_recall_index_closure(
-        &self,
-        batch: &mut StoreMutationBatch,
-        preconditions: &mut Vec<StoreJsonPrecondition>,
-        canonical_updated_at: u64,
-    ) -> Result<()> {
-        let skill_mutations = batch
-            .mutations
-            .iter()
-            .filter(|mutation| {
-                matches!(mutation,
-                StoreMutation::PutBlob { namespace, .. }
-                | StoreMutation::DeleteBlob { namespace, .. } if namespace == "skills")
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if skill_mutations.is_empty()
-            || batch.mutations.iter().any(|mutation| {
-                matches!(mutation,
-                StoreMutation::PutJson { namespace, .. }
-                | StoreMutation::DeleteJson { namespace, .. }
-                    if namespace == RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE)
-            })
-        {
-            return Ok(());
-        }
-        let key = RuntimeSkillRecallManifest::build(
-            1,
-            &batch.scope.memory_space_id,
-            &batch.scope.agent_id,
-            std::iter::empty(),
-        )?
-        .physical_key;
-        let (previous, before) =
-            self.load_typed_recall_index::<RuntimeSkillRecallManifest>(&key)?;
-        let mut entries = previous
-            .as_ref()
-            .map(|index| index.entries.clone())
-            .unwrap_or_default();
-        for mutation in skill_mutations {
-            match mutation {
-                StoreMutation::PutBlob { key, value, .. } => {
-                    let address = RecallIndexAddress::blob(
-                        "skills",
-                        &key,
-                        next_entry_revision(&entries, RecallIndexAddressKind::Blob, "skills", &key),
-                        canonical_updated_at,
-                        &value,
-                    )?;
-                    entries = replace_recall_index_address(&entries, address);
-                }
-                StoreMutation::DeleteBlob { key, .. } => {
-                    if previous.is_none() {
-                        return Err(Error::config(
-                            "runtime_skill_recall_manifest",
-                            "skill delete requires an existing typed recall manifest",
-                        ));
-                    }
-                    entries = remove_recall_index_address(
-                        &entries,
-                        RecallIndexAddressKind::Blob,
-                        "skills",
-                        &key,
-                    );
-                }
-                _ => unreachable!("filtered skill mutations"),
-            }
-        }
-        let next = RuntimeSkillRecallManifest::build(
-            previous
-                .as_ref()
-                .map(|index| index.revision.saturating_add(1))
-                .unwrap_or(1),
-            &batch.scope.memory_space_id,
-            &batch.scope.agent_id,
-            entries,
-        )?;
-        preconditions.push(match before {
-            Some(value) => StoreJsonPrecondition::Exact {
-                namespace: RuntimeSkillRecallManifest::NAMESPACE.to_string(),
-                key: key.clone(),
-                value,
-            },
-            None => StoreJsonPrecondition::Absent {
-                namespace: RuntimeSkillRecallManifest::NAMESPACE.to_string(),
-                key: key.clone(),
-            },
-        });
-        batch.mutations.push(StoreMutation::PutJson {
-            namespace: RuntimeSkillRecallManifest::NAMESPACE.to_string(),
-            key: key.clone(),
-            value: serde_json::to_value(next).map_err(|error| {
-                Error::config("runtime_skill_recall_manifest", error.to_string())
-            })?,
-            event_kind: MemoryStoreEventKind::MemoryWrite,
-            plane: RuntimeSkillRecallManifest::NAMESPACE.to_string(),
-            record_key: key,
-        });
-        Ok(())
-    }
-
     fn append_conversation_derived_ref_recall_index_closure(
         &self,
         batch: &mut StoreMutationBatch,
@@ -1966,7 +2021,7 @@ impl StorePlatform {
         canonical_updated_at: u64,
     ) -> Result<()> {
         let mut groups =
-            BTreeMap::<(String, String, String), Vec<(String, serde_json::Value)>>::new();
+            BTreeMap::<(String, String, String, String), Vec<(String, serde_json::Value)>>::new();
         for mutation in &batch.mutations {
             let StoreMutation::PutJson {
                 namespace,
@@ -2012,44 +2067,44 @@ impl StorePlatform {
                     derived.source.memory_space_id,
                     derived.source.channel_id,
                     derived.source.conversation_id,
+                    derived.source.turn_id,
                 ))
                 .or_default()
                 .push((key.clone(), value.clone()));
         }
 
-        for ((memory_space_id, channel_id, conversation_id), owners) in groups {
+        for ((memory_space_id, channel_id, conversation_id, turn_id), owners) in groups {
             let conversation_key =
                 ConversationKey::new(memory_space_id, channel_id, conversation_id)?;
-            let manifest_key = ConversationRecallManifest::build(
+            let manifest_key = ConversationTranscriptAuxManifest::build(
                 1,
                 &conversation_key.memory_space_id,
                 &batch.scope.subject_id,
                 &conversation_key.channel_id,
                 &conversation_key.conversation_id,
+                &turn_id,
                 std::iter::empty(),
             )?
             .physical_key;
             let existing_position = batch.mutations.iter().position(|mutation| {
                 matches!(mutation,
                     StoreMutation::PutJson { namespace, key, .. }
-                        if namespace == ConversationRecallManifest::NAMESPACE && key == &manifest_key)
+                        if namespace == ConversationTranscriptAuxManifest::NAMESPACE
+                            && key == &manifest_key)
             });
 
             let (before, revision, mut entries) = if let Some(position) = existing_position {
                 let StoreMutation::PutJson { value, .. } = &batch.mutations[position] else {
                     unreachable!("matched conversation recall manifest put")
                 };
-                let pending = decode_typed_recall_index::<ConversationRecallManifest>(
+                let pending = decode_typed_recall_index::<ConversationTranscriptAuxManifest>(
                     &manifest_key,
                     value.clone(),
                 )?;
                 (None, pending.revision, pending.entries)
             } else {
-                let (previous, before) =
-                    self.load_typed_recall_index::<ConversationRecallManifest>(&manifest_key)?;
-                if let Some(previous) = previous.as_ref() {
-                    self.validate_conversation_manifest_subject(previous, &batch.scope.subject_id)?;
-                }
+                let (previous, before) = self
+                    .load_typed_recall_index::<ConversationTranscriptAuxManifest>(&manifest_key)?;
                 let revision = previous
                     .as_ref()
                     .map(|index| index.revision.saturating_add(1))
@@ -2076,17 +2131,17 @@ impl StorePlatform {
                 )?;
                 entries = replace_recall_index_address(&entries, address);
             }
-            let next = ConversationRecallManifest::build(
+            let next = ConversationTranscriptAuxManifest::build(
                 revision,
                 &conversation_key.memory_space_id,
                 &batch.scope.subject_id,
                 &conversation_key.channel_id,
                 &conversation_key.conversation_id,
+                &turn_id,
                 entries,
             )?;
-            let next_value = serde_json::to_value(next).map_err(|error| {
-                Error::config("conversation_recall_manifest", error.to_string())
-            })?;
+            let next_value = serde_json::to_value(next)
+                .map_err(|error| Error::config("conversation_transcript_aux", error.to_string()))?;
             if let Some(position) = existing_position {
                 let StoreMutation::PutJson { value, .. } = &mut batch.mutations[position] else {
                     unreachable!("matched conversation recall manifest put")
@@ -2095,21 +2150,21 @@ impl StorePlatform {
             } else {
                 preconditions.push(match before {
                     Some(value) => StoreJsonPrecondition::Exact {
-                        namespace: ConversationRecallManifest::NAMESPACE.to_string(),
+                        namespace: ConversationTranscriptAuxManifest::NAMESPACE.to_string(),
                         key: manifest_key.clone(),
                         value,
                     },
                     None => StoreJsonPrecondition::Absent {
-                        namespace: ConversationRecallManifest::NAMESPACE.to_string(),
+                        namespace: ConversationTranscriptAuxManifest::NAMESPACE.to_string(),
                         key: manifest_key.clone(),
                     },
                 });
                 batch.mutations.push(StoreMutation::PutJson {
-                    namespace: ConversationRecallManifest::NAMESPACE.to_string(),
+                    namespace: ConversationTranscriptAuxManifest::NAMESPACE.to_string(),
                     key: manifest_key.clone(),
                     value: next_value,
                     event_kind: MemoryStoreEventKind::MemoryWrite,
-                    plane: ConversationRecallManifest::NAMESPACE.to_string(),
+                    plane: ConversationTranscriptAuxManifest::NAMESPACE.to_string(),
                     record_key: manifest_key,
                 });
             }
@@ -2126,18 +2181,33 @@ impl StorePlatform {
         Option<ConversationRecallManifest>,
         Option<serde_json::Value>,
     )> {
-        let physical_key = ConversationRecallManifest::build(
+        let physical_key = Self::conversation_head_physical_key(key, mounted_subject_id)?;
+        let value = self
+            .engine
+            .get_json_value(ConversationRecallManifest::NAMESPACE, &physical_key)?;
+        let manifest = value
+            .clone()
+            .map(|value| {
+                decode_typed_recall_index::<ConversationRecallManifest>(&physical_key, value)
+            })
+            .transpose()?;
+        Ok((physical_key, manifest, value))
+    }
+
+    fn conversation_head_physical_key(
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+    ) -> Result<String> {
+        Ok(ConversationRecallManifest::build(
             1,
             &key.memory_space_id,
             mounted_subject_id,
             &key.channel_id,
             &key.conversation_id,
-            std::iter::empty(),
+            0,
+            0,
         )?
-        .physical_key;
-        let (manifest, value) =
-            self.load_typed_recall_index::<ConversationRecallManifest>(&physical_key)?;
-        Ok((physical_key, manifest, value))
+        .physical_key)
     }
 
     fn validate_conversation_manifest_subject(
@@ -2151,96 +2221,17 @@ impl StorePlatform {
                 "conversation manifest subject differs from the requested owner",
             ));
         }
-        for entry in &manifest.entries {
-            let owner_subject = match entry.namespace.as_str() {
-                "conversation_transcript" => self
-                    .engine
-                    .get_json_value(&entry.namespace, &entry.key)?
-                    .map(|value| {
-                        serde_json::from_value::<TranscriptTurnRecord>(value)
-                            .map(|record| record.subject)
-                    })
-                    .transpose()
-                    .map_err(|error| {
-                        Error::config("conversation_recall_manifest", error.to_string())
-                    })?,
-                "conversation_transcript_derived_ref" => self
-                    .engine
-                    .get_json_value(&entry.namespace, &entry.key)?
-                    .map(|value| {
-                        serde_json::from_value::<DerivedMemoryRef>(value).and_then(|derived| {
-                            derived
-                                .subject_id
-                                .or(derived.source.subject_id)
-                                .ok_or_else(|| {
-                                    serde::de::Error::custom(
-                                        "derived memory ref has no subject owner",
-                                    )
-                                })
-                        })
-                    })
-                    .transpose()
-                    .map_err(|error| {
-                        Error::config("conversation_recall_manifest", error.to_string())
-                    })?,
-                "conversation_transcript_attr" => self
-                    .engine
-                    .get_json_value(&entry.namespace, &entry.key)?
-                    .map(|value| {
-                        serde_json::from_value::<TranscriptAttrEnvelope>(value).and_then(|attr| {
-                            let turn_key = transcript_turn_storage_key(
-                                &attr.target.key,
-                                mounted_subject_id,
-                                &attr.target.turn_id,
-                            );
-                            self.engine
-                                .get_json_value("conversation_transcript", &turn_key)
-                                .map_err(serde::de::Error::custom)?
-                                .ok_or_else(|| {
-                                    serde::de::Error::custom(
-                                        "transcript attr target owner is missing",
-                                    )
-                                })
-                                .and_then(|turn| {
-                                    serde_json::from_value::<TranscriptTurnRecord>(turn)
-                                        .map(|record| record.subject)
-                                })
-                        })
-                    })
-                    .transpose()
-                    .map_err(|error| {
-                        Error::config("conversation_recall_manifest", error.to_string())
-                    })?,
-                _ => {
-                    return Err(Error::config(
-                        "conversation_recall_manifest",
-                        "conversation manifest contains a non-conversation owner namespace",
-                    ));
-                }
-            };
-            let owner_subject = owner_subject.ok_or_else(|| {
-                Error::config(
-                    "conversation_recall_manifest",
-                    "conversation manifest owner is missing",
-                )
-            })?;
-            if owner_subject != mounted_subject_id {
-                return Err(Error::config(
-                    "conversation_recall_manifest",
-                    "conversation manifest owner subject differs from its root scope",
-                ));
-            }
-        }
         Ok(())
     }
 
-    fn plan_conversation_index(
+    fn plan_conversation_head(
         &self,
         key: &ConversationKey,
         mounted_subject_id: &str,
         previous: Option<&ConversationRecallManifest>,
         before: Option<serde_json::Value>,
-        entries: Vec<RecallIndexAddress>,
+        turn_count: u64,
+        last_sequence: u64,
     ) -> Result<RecallIndexMutationPlan> {
         let next = ConversationRecallManifest::build(
             previous
@@ -2250,7 +2241,8 @@ impl StorePlatform {
             mounted_subject_id,
             &key.channel_id,
             &key.conversation_id,
-            entries,
+            turn_count,
+            last_sequence,
         )?;
         let physical_key = next.physical_key.clone();
         Ok((
@@ -2261,6 +2253,250 @@ impl StorePlatform {
             })?,
             before,
         ))
+    }
+
+    fn conversation_page_id(page_id: u64) -> String {
+        format!("{page_id:020}")
+    }
+
+    fn load_conversation_transcript_page(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        page_id: u64,
+    ) -> Result<(
+        String,
+        Option<ConversationTranscriptPageIndex>,
+        Option<serde_json::Value>,
+    )> {
+        let page_id = Self::conversation_page_id(page_id);
+        let physical_key = ConversationTranscriptPageIndex::build(
+            1,
+            &key.memory_space_id,
+            mounted_subject_id,
+            &key.channel_id,
+            &key.conversation_id,
+            &page_id,
+            std::iter::empty(),
+        )?
+        .physical_key;
+        let (page, value) =
+            self.load_typed_recall_index::<ConversationTranscriptPageIndex>(&physical_key)?;
+        Ok((physical_key, page, value))
+    }
+
+    fn plan_conversation_transcript_page(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        page_id: u64,
+        previous: Option<&ConversationTranscriptPageIndex>,
+        before: Option<serde_json::Value>,
+        entries: Vec<RecallIndexAddress>,
+    ) -> Result<RecallIndexMutationPlan> {
+        let page_id = Self::conversation_page_id(page_id);
+        let next = ConversationTranscriptPageIndex::build(
+            previous
+                .map(|page| page.revision.saturating_add(1))
+                .unwrap_or(1),
+            &key.memory_space_id,
+            mounted_subject_id,
+            &key.channel_id,
+            &key.conversation_id,
+            &page_id,
+            entries,
+        )?;
+        Ok((
+            ConversationTranscriptPageIndex::NAMESPACE,
+            next.physical_key.clone(),
+            serde_json::to_value(next).map_err(|error| {
+                Error::config("conversation_transcript_page", error.to_string())
+            })?,
+            before,
+        ))
+    }
+
+    fn load_conversation_transcript_aux(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        turn_id: &str,
+    ) -> Result<(
+        String,
+        Option<ConversationTranscriptAuxManifest>,
+        Option<serde_json::Value>,
+    )> {
+        let physical_key = ConversationTranscriptAuxManifest::build(
+            1,
+            &key.memory_space_id,
+            mounted_subject_id,
+            &key.channel_id,
+            &key.conversation_id,
+            turn_id,
+            std::iter::empty(),
+        )?
+        .physical_key;
+        let (manifest, value) =
+            self.load_typed_recall_index::<ConversationTranscriptAuxManifest>(&physical_key)?;
+        Ok((physical_key, manifest, value))
+    }
+
+    fn plan_conversation_transcript_aux(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        turn_id: &str,
+        previous: Option<&ConversationTranscriptAuxManifest>,
+        before: Option<serde_json::Value>,
+        entries: Vec<RecallIndexAddress>,
+    ) -> Result<RecallIndexMutationPlan> {
+        let next = ConversationTranscriptAuxManifest::build(
+            previous
+                .map(|manifest| manifest.revision.saturating_add(1))
+                .unwrap_or(1),
+            &key.memory_space_id,
+            mounted_subject_id,
+            &key.channel_id,
+            &key.conversation_id,
+            turn_id,
+            entries,
+        )?;
+        Ok((
+            ConversationTranscriptAuxManifest::NAMESPACE,
+            next.physical_key.clone(),
+            serde_json::to_value(next)
+                .map_err(|error| Error::config("conversation_transcript_aux", error.to_string()))?,
+            before,
+        ))
+    }
+
+    fn conversation_page_for_sequence(sequence: u64) -> Result<u64> {
+        if sequence == 0 {
+            return Err(Error::config(
+                "conversation_transcript_page",
+                "turn sequence must be greater than zero",
+            ));
+        }
+        let page_size = u64::try_from(CONVERSATION_TRANSCRIPT_PAGE_SIZE).map_err(|_| {
+            Error::config(
+                "conversation_transcript_page",
+                "page size does not fit the sequence domain",
+            )
+        })?;
+        Ok(sequence.saturating_sub(1) / page_size)
+    }
+
+    fn load_validated_conversation_page_records(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        head: &ConversationRecallManifest,
+        page_id: u64,
+    ) -> Result<Vec<TranscriptTurnRecord>> {
+        if page_id >= head.page_count {
+            return Err(Error::config(
+                "conversation_transcript_page",
+                "requested page is outside the conversation head",
+            ));
+        }
+        let (_, page, _) =
+            self.load_conversation_transcript_page(key, mounted_subject_id, page_id)?;
+        let page = page.ok_or_else(|| {
+            Error::config(
+                "conversation_transcript_page",
+                "conversation head references a missing page",
+            )
+        })?;
+        let expected_page_id = Self::conversation_page_id(page_id);
+        if page.memory_space_id != key.memory_space_id
+            || page.mounted_subject_id != mounted_subject_id
+            || page.channel_id != key.channel_id
+            || page.conversation_id != key.conversation_id
+            || page.page_id != expected_page_id
+        {
+            return Err(Error::config(
+                "conversation_transcript_page",
+                "page scope differs from the conversation head",
+            ));
+        }
+        let page_size = u64::try_from(CONVERSATION_TRANSCRIPT_PAGE_SIZE).map_err(|_| {
+            Error::config(
+                "conversation_transcript_page",
+                "page size does not fit the sequence domain",
+            )
+        })?;
+        let first_sequence = page_id.saturating_mul(page_size).saturating_add(1);
+        let expected_count = if page_id == head.active_page_id {
+            head.active_page_entry_count
+        } else {
+            CONVERSATION_TRANSCRIPT_PAGE_SIZE
+        };
+        if page.entries.len() != expected_count {
+            return Err(Error::config(
+                "conversation_transcript_page",
+                "page entry count differs from the conversation head",
+            ));
+        }
+        let mut records = Vec::with_capacity(page.entries.len());
+        for entry in &page.entries {
+            if entry.kind != RecallIndexAddressKind::Json
+                || entry.namespace != "conversation_transcript"
+            {
+                return Err(Error::config(
+                    "conversation_transcript_page",
+                    "page contains a non-transcript owner",
+                ));
+            }
+            let value = self
+                .engine
+                .get_json_value("conversation_transcript", &entry.key)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_page",
+                        "indexed transcript owner is missing",
+                    )
+                })?;
+            let record =
+                serde_json::from_value::<TranscriptTurnRecord>(value.clone()).map_err(|error| {
+                    Error::config("conversation_transcript_page", error.to_string())
+                })?;
+            let expected_address = RecallIndexAddress::json(
+                "conversation_transcript",
+                &entry.key,
+                entry.revision,
+                entry.updated_at,
+                &value,
+            )?;
+            if expected_address.content_sha256 != entry.content_sha256
+                || record.key != *key
+                || record.subject != mounted_subject_id
+                || transcript_turn_storage_key(key, mounted_subject_id, &record.turn_id)
+                    != entry.key
+                || Self::conversation_page_for_sequence(record.sequence)? != page_id
+            {
+                return Err(Error::config(
+                    "conversation_transcript_page",
+                    "transcript owner binding differs from its page",
+                ));
+            }
+            records.push(record);
+        }
+        records.sort_by(|left, right| {
+            left.sequence
+                .cmp(&right.sequence)
+                .then_with(|| left.turn_id.cmp(&right.turn_id))
+        });
+        for (offset, record) in records.iter().enumerate() {
+            let expected_sequence =
+                first_sequence.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
+            if record.sequence != expected_sequence {
+                return Err(Error::config(
+                    "conversation_transcript_page",
+                    "page contains a sequence gap or duplicate",
+                ));
+            }
+        }
+        Ok(records)
     }
 
     fn json_put<T>(&self, namespace: &str, key: &str, value: &T) -> Result<()>
@@ -2482,19 +2718,6 @@ impl StorePlatform {
         .with_payload("operation", batch.operation.as_str())
     }
 
-    fn emit_runtime_event(&self, operation: &str) -> Result<()> {
-        let event = MemoryStoreEvent::new(
-            next_event_id(),
-            MemoryStoreEventKind::RuntimeLifecycle,
-            StoreEventScope::system(operation),
-            current_unix_secs(),
-        )
-        .with_payload("backend", self.config.backend.as_str())
-        .with_payload("profile", self.config.profile.as_str())
-        .with_payload("result", "ok");
-        self.append_validated_event(event)
-    }
-
     fn append_validated_event(&self, event: MemoryStoreEvent) -> Result<()> {
         let _transaction_guard = self.lock_transaction("store_event_log")?;
         let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&self.runtime_budget_authority))?;
@@ -2538,7 +2761,11 @@ fn validate_protected_json_mutation_preconditions(
     preconditions: &[StoreJsonPrecondition],
 ) -> Result<()> {
     const PROTECTED_NAMESPACES: &[&str] = &[
-        "long_term",
+        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+        crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE,
+        crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
         GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
         GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
         GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
@@ -2552,7 +2779,6 @@ fn validate_protected_json_mutation_preconditions(
         "memory_graph_manifests",
         CONVERSATION_RECALL_MANIFEST_NAMESPACE,
         ARCHIVE_RECALL_MANIFEST_NAMESPACE,
-        RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE,
         CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE,
         ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE,
         TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
@@ -2605,8 +2831,9 @@ fn validate_recall_index_mutation_closure(
 ) -> Result<()> {
     let index_namespaces = [
         CONVERSATION_RECALL_MANIFEST_NAMESPACE,
+        CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE,
+        CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE,
         ARCHIVE_RECALL_MANIFEST_NAMESPACE,
-        RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE,
         CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE,
         ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE,
         TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
@@ -2643,6 +2870,42 @@ fn validate_recall_index_mutation_closure(
                                 "conversation index scope differs from transaction scope",
                             ));
                         }
+                        Vec::new()
+                    }
+                    CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE => {
+                        let index = decode_typed_recall_index::<ConversationTranscriptPageIndex>(
+                            key,
+                            value.clone(),
+                        )?;
+                        if index.memory_space_id != batch.scope.memory_space_id
+                            || index.mounted_subject_id != batch.scope.subject_id
+                            || index.channel_id != batch.scope.channel
+                            || batch.scope.conversation_id.as_deref()
+                                != Some(index.conversation_id.as_str())
+                        {
+                            return Err(Error::config(
+                                "recall_index_mutation_closure",
+                                "conversation page scope differs from transaction scope",
+                            ));
+                        }
+                        index.entries
+                    }
+                    CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE => {
+                        let index = decode_typed_recall_index::<ConversationTranscriptAuxManifest>(
+                            key,
+                            value.clone(),
+                        )?;
+                        if index.memory_space_id != batch.scope.memory_space_id
+                            || index.mounted_subject_id != batch.scope.subject_id
+                            || index.channel_id != batch.scope.channel
+                            || batch.scope.conversation_id.as_deref()
+                                != Some(index.conversation_id.as_str())
+                        {
+                            return Err(Error::config(
+                                "recall_index_mutation_closure",
+                                "conversation aux scope differs from transaction scope",
+                            ));
+                        }
                         index.entries
                     }
                     ARCHIVE_RECALL_MANIFEST_NAMESPACE => {
@@ -2654,21 +2917,6 @@ fn validate_recall_index_mutation_closure(
                             return Err(Error::config(
                                 "recall_index_mutation_closure",
                                 "archive index scope differs from transaction scope",
-                            ));
-                        }
-                        index.entries
-                    }
-                    RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE => {
-                        let index = decode_typed_recall_index::<RuntimeSkillRecallManifest>(
-                            key,
-                            value.clone(),
-                        )?;
-                        if index.memory_space_id != batch.scope.memory_space_id
-                            || index.agent_id != batch.scope.agent_id
-                        {
-                            return Err(Error::config(
-                                "recall_index_mutation_closure",
-                                "runtime skill index scope differs from transaction scope",
                             ));
                         }
                         index.entries
@@ -2908,7 +3156,7 @@ fn validate_recall_index_mutation_closure(
         }
     }
     let scope =
-        StoreScopedProjectionScope::new(&batch.scope.memory_space_id, &batch.scope.subject_id)?;
+        StoreScopedProjectionScope::subject(&batch.scope.memory_space_id, &batch.scope.subject_id)?;
     for mutation in &batch.mutations {
         let StoreMutation::PutJson {
             namespace,
@@ -3007,12 +3255,15 @@ fn expected_json_owner_recall_roots(
                         Error::config("recall_index_mutation_closure", error.to_string())
                     })?;
                 Ok((
-                    ConversationRecallManifest::build(
+                    ConversationTranscriptPageIndex::build(
                         1,
                         &record.key.memory_space_id,
                         &record.subject,
                         &record.key.channel_id,
                         &record.key.conversation_id,
+                        &StorePlatform::conversation_page_id(
+                            StorePlatform::conversation_page_for_sequence(record.sequence)?,
+                        ),
                         std::iter::empty(),
                     )?
                     .physical_key,
@@ -3025,12 +3276,13 @@ fn expected_json_owner_recall_roots(
                         Error::config("recall_index_mutation_closure", error.to_string())
                     })?;
                 Ok((
-                    ConversationRecallManifest::build(
+                    ConversationTranscriptAuxManifest::build(
                         1,
                         &attr.target.key.memory_space_id,
                         &batch.scope.subject_id,
                         &attr.target.key.channel_id,
                         &attr.target.key.conversation_id,
+                        &attr.target.turn_id,
                         std::iter::empty(),
                     )?
                     .physical_key,
@@ -3044,12 +3296,13 @@ fn expected_json_owner_recall_roots(
                     })?;
                 let subject_id = exact_derived_owner_subject(&derived)?;
                 Ok((
-                    ConversationRecallManifest::build(
+                    ConversationTranscriptAuxManifest::build(
                         1,
                         &derived.source.memory_space_id,
                         subject_id,
                         &derived.source.channel_id,
                         &derived.source.conversation_id,
+                        &derived.source.turn_id,
                         std::iter::empty(),
                     )?
                     .physical_key,
@@ -3162,13 +3415,6 @@ fn expected_blob_owner_recall_root(batch: &StoreMutationBatch, namespace: &str) 
             std::iter::empty(),
         )?
         .physical_key),
-        "skills" => Ok(RuntimeSkillRecallManifest::build(
-            1,
-            &batch.scope.memory_space_id,
-            &batch.scope.agent_id,
-            std::iter::empty(),
-        )?
-        .physical_key),
         _ => Err(Error::config(
             "recall_index_mutation_closure",
             format!("unsupported indexed blob owner {namespace}"),
@@ -3178,9 +3424,10 @@ fn expected_blob_owner_recall_root(batch: &StoreMutationBatch, namespace: &str) 
 
 fn recall_index_namespace_for_json_owner(namespace: &str) -> Option<&'static str> {
     match namespace {
-        "conversation_transcript"
-        | "conversation_transcript_attr"
-        | "conversation_transcript_derived_ref" => Some(CONVERSATION_RECALL_MANIFEST_NAMESPACE),
+        "conversation_transcript" => Some(CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE),
+        "conversation_transcript_attr" | "conversation_transcript_derived_ref" => {
+            Some(CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE)
+        }
         "session"
         | "session_summary"
         | "active_work"
@@ -3196,7 +3443,6 @@ fn recall_index_namespace_for_json_owner(namespace: &str) -> Option<&'static str
 fn recall_index_namespace_for_blob_owner(namespace: &str) -> Option<&'static str> {
     match namespace {
         "daily" | "memory" => Some(ARCHIVE_RECALL_MANIFEST_NAMESPACE),
-        "skills" => Some(RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE),
         _ => None,
     }
 }
@@ -3485,11 +3731,488 @@ pub(crate) fn validate_governed_transaction_post_image(
     before: &BackendTransactionState,
     after: &BackendTransactionState,
     graph_repair_authorized: bool,
+    governed_long_term_retention_limit: Option<usize>,
+    governed_runtime_skill_owner_limit: Option<usize>,
+    operation_capacity: StoreCapacityBudget,
 ) -> Result<()> {
-    validate_evidence_source_ref_post_image(batch, before, after)?;
+    validate_evidence_source_ref_post_image(
+        batch,
+        before,
+        after,
+        operation_capacity.kv_max_entries,
+    )?;
+    validate_long_term_version_root_post_image(batch, after, governed_long_term_retention_limit)?;
+    validate_runtime_skill_owner_post_image(
+        batch,
+        before,
+        after,
+        governed_runtime_skill_owner_limit,
+    )?;
     validate_facet_post_image(batch, before, after)?;
     validate_graph_post_image(batch, before, after, graph_repair_authorized)?;
     validate_control_post_image(batch, before, after)
+}
+
+fn validate_long_term_version_root_post_image(
+    batch: &StoreMutationBatch,
+    after: &BackendTransactionState,
+    governed_long_term_retention_limit: Option<usize>,
+) -> Result<()> {
+    let material_namespace = crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE;
+    let head_namespace = crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE;
+    let root_namespace = crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE;
+    if !batch_mutates_namespace(batch, material_namespace)
+        && !batch_mutates_namespace(batch, head_namespace)
+        && !batch_mutates_namespace(batch, root_namespace)
+        && !batch_mutates_namespace(batch, LONG_TERM_CONTROL_REVISION_NAMESPACE)
+    {
+        return Ok(());
+    }
+    let max_retained = governed_long_term_retention_limit
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| {
+            Error::config(
+                "memory_write_transaction_long_term_root_post_image_invalid",
+                "typed long-term mutations require a positive request-pinned retention limit",
+            )
+        })?;
+    let memory_space_id = batch.scope.memory_space_id.as_str();
+    let mounted_subject_id = match &batch.scope.physical_owning_scope {
+        crate::store_internal::StorePhysicalOwningScope::Subject { mounted_subject_id } => {
+            mounted_subject_id.as_str()
+        }
+        crate::store_internal::StorePhysicalOwningScope::SharedProgram => {
+            return Err(Error::config(
+                "memory_write_transaction_long_term_root_post_image_invalid",
+                "long-term memory requires a subject physical owning scope",
+            ));
+        }
+    };
+    validate_long_term_version_scope_image(
+        after,
+        memory_space_id,
+        mounted_subject_id,
+        max_retained,
+        "memory_write_transaction_long_term_root_post_image_invalid",
+    )
+}
+
+fn validate_long_term_version_scope_image(
+    state: &BackendTransactionState,
+    memory_space_id: &str,
+    mounted_subject_id: &str,
+    max_retained: usize,
+    stage: &'static str,
+) -> Result<()> {
+    let material_namespace = crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE;
+    let head_namespace = crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE;
+    let root_namespace = crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE;
+    let root_key = long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)?;
+    let root_value = state
+        .json
+        .get(&(root_namespace.to_string(), root_key.clone()))
+        .ok_or_else(|| {
+            Error::config(
+                stage,
+                "typed long-term owners require their exact scope root",
+            )
+        })?;
+    let root = serde_json::from_value::<LongTermMemoryVersionScopeManifest>(root_value.clone())
+        .map_err(|error| {
+            Error::config(
+                stage,
+                format!("long-term scope root decode failed: {error}"),
+            )
+        })?;
+    if root.physical_key != root_key
+        || root.memory_space_id != memory_space_id
+        || root.mounted_subject_id != mounted_subject_id
+    {
+        return Err(Error::config(
+            stage,
+            "long-term root differs from the requested physical scope",
+        ));
+    }
+    let heads = state
+        .json
+        .iter()
+        .filter(|((namespace, _), _)| namespace == head_namespace)
+        .map(|(_, value)| {
+            serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone()).map_err(|error| {
+                Error::config(stage, format!("long-term head decode failed: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|head| {
+            head.memory_space_id == memory_space_id && head.mounted_subject_id == mounted_subject_id
+        })
+        .collect::<Vec<_>>();
+    let materials = state
+        .json
+        .iter()
+        .filter(|((namespace, _), _)| namespace == material_namespace)
+        .map(|(_, value)| {
+            serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone()).map_err(
+                |error| Error::config(stage, format!("long-term material decode failed: {error}")),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|material| {
+            material.memory_space_id == memory_space_id
+                && material.mounted_subject_id == mounted_subject_id
+        })
+        .collect::<Vec<_>>();
+    let scoped_control_revisions = state
+        .json
+        .iter()
+        .filter(|((namespace, _), _)| namespace == LONG_TERM_CONTROL_REVISION_NAMESPACE)
+        .map(|((_, physical_key), value)| {
+            let revision = serde_json::from_value::<LongTermMemoryControlRevision>(value.clone())
+                .map_err(|error| {
+                Error::config(
+                    stage,
+                    format!("long-term control revision decode failed: {error}"),
+                )
+            })?;
+            Ok((physical_key.clone(), revision))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, revision)| {
+            revision.memory_space_id == memory_space_id
+                && revision.mounted_subject_id == mounted_subject_id
+        })
+        .collect::<Vec<_>>();
+    let purged_owner_refs = scoped_control_revisions
+        .iter()
+        .filter(|(_, revision)| {
+            matches!(
+                revision.transition.termination,
+                GovernedOwnerTermination::Deleted | GovernedOwnerTermination::Forgotten
+            )
+        })
+        .map(|(_, revision)| revision.transition.predecessor.owner_ref.clone())
+        .collect::<BTreeSet<_>>();
+    let required_control_keys = scoped_control_revisions
+        .iter()
+        .filter(|(_, revision)| {
+            !purged_owner_refs.contains(&revision.transition.predecessor.owner_ref)
+        })
+        .map(|(physical_key, _)| physical_key.clone())
+        .collect::<BTreeSet<_>>();
+    let root_control_keys = root
+        .transition_bindings
+        .iter()
+        .map(|binding| binding.control_revision_physical_key.clone())
+        .collect::<BTreeSet<_>>();
+    if required_control_keys != root_control_keys {
+        return Err(Error::config(
+            stage,
+            "long-term version root and bind-required control revisions differ",
+        ));
+    }
+    let mut transitions = Vec::new();
+    for binding in &root.transition_bindings {
+        let value = state
+            .json
+            .get(&(
+                LONG_TERM_CONTROL_REVISION_NAMESPACE.to_string(),
+                binding.control_revision_physical_key.clone(),
+            ))
+            .ok_or_else(|| {
+                Error::config(
+                    stage,
+                    "long-term transition binding is missing its control revision",
+                )
+            })?;
+        let revision = serde_json::from_value::<LongTermMemoryControlRevision>(value.clone())
+            .map_err(|error| {
+                Error::config(
+                    stage,
+                    format!("long-term control revision decode failed: {error}"),
+                )
+            })?;
+        if revision.validate_contract().is_err()
+            || revision.transition.predecessor != binding.predecessor
+            || revision.content_digest != binding.control_revision_content_digest
+        {
+            return Err(Error::config(
+                stage,
+                "long-term transition control binding digest or predecessor drift",
+            ));
+        }
+        transitions.push(revision.transition);
+    }
+    let validation = root.validate_exact(
+        &heads,
+        &materials,
+        &transitions,
+        &root.transition_bindings,
+        max_retained,
+    );
+    if validation.accepted {
+        Ok(())
+    } else {
+        let rebuilt = LongTermMemoryVersionScopeManifest::build(
+            memory_space_id,
+            mounted_subject_id,
+            root.manifest_revision,
+            &heads,
+            &materials,
+            &transitions,
+            &root.transition_bindings,
+            max_retained,
+        );
+        Err(Error::config(
+            stage,
+            format!(
+                "long-term root exact closure rejected: {:?}; observed=({},{},{},{}); rebuilt={:?}",
+                validation.failures,
+                root.head_count,
+                root.material_count,
+                root.transition_count,
+                root.closure_digest,
+                rebuilt.as_ref().map(|manifest| (
+                    manifest.head_count,
+                    manifest.material_count,
+                    manifest.transition_count,
+                    manifest.closure_digest.as_str(),
+                ))
+            ),
+        ))
+    }
+}
+
+fn validate_long_term_version_store_image(
+    state: &BackendTransactionState,
+    max_retained: usize,
+    stage: &'static str,
+) -> Result<()> {
+    if max_retained == 0 {
+        return Err(Error::config(
+            stage,
+            "long-term footprint validation requires a positive pinned retention limit",
+        ));
+    }
+    let material_namespace = crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE;
+    let head_namespace = crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE;
+    let root_namespace = crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE;
+    let mut scopes = BTreeSet::new();
+    for ((namespace, _), value) in &state.json {
+        match namespace.as_str() {
+            namespace if namespace == material_namespace => {
+                let material =
+                    serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone())
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                scopes.insert((material.memory_space_id, material.mounted_subject_id));
+            }
+            namespace if namespace == head_namespace => {
+                let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
+                    .map_err(|error| Error::config(stage, error.to_string()))?;
+                scopes.insert((head.memory_space_id, head.mounted_subject_id));
+            }
+            namespace if namespace == root_namespace => {
+                let root =
+                    serde_json::from_value::<LongTermMemoryVersionScopeManifest>(value.clone())
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                scopes.insert((root.memory_space_id, root.mounted_subject_id));
+            }
+            namespace if namespace == LONG_TERM_CONTROL_REVISION_NAMESPACE => {
+                let revision =
+                    serde_json::from_value::<LongTermMemoryControlRevision>(value.clone())
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                if !matches!(
+                    revision.transition.termination,
+                    GovernedOwnerTermination::Deleted | GovernedOwnerTermination::Forgotten
+                ) {
+                    scopes.insert((revision.memory_space_id, revision.mounted_subject_id));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (memory_space_id, mounted_subject_id) in scopes {
+        validate_long_term_version_scope_image(
+            state,
+            &memory_space_id,
+            &mounted_subject_id,
+            max_retained,
+            stage,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_skill_owner_post_image(
+    batch: &StoreMutationBatch,
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+    governed_runtime_skill_owner_limit: Option<usize>,
+) -> Result<()> {
+    let owner_namespace = crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE;
+    let manifest_namespace = crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE;
+    if !batch_mutates_namespace(batch, owner_namespace)
+        && !batch_mutates_namespace(batch, manifest_namespace)
+    {
+        return Ok(());
+    }
+    let max_owners = governed_runtime_skill_owner_limit
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| {
+            Error::config(
+                "memory_write_transaction_runtime_skill_post_image_invalid",
+                "typed runtime skill mutations require a positive request-pinned owner limit",
+            )
+        })?;
+
+    let mut scopes = BTreeSet::<(String, RuntimeSkillOwningScope)>::new();
+    for state in [before, after] {
+        for ((namespace, _), value) in &state.json {
+            if namespace == owner_namespace {
+                if let Ok(record) = serde_json::from_value::<RuntimeSkillOwnerRecord>(value.clone())
+                {
+                    scopes.insert((record.memory_space_id, record.owning_scope));
+                }
+            } else if namespace == manifest_namespace {
+                if let Ok(manifest) =
+                    serde_json::from_value::<RuntimeSkillScopeManifest>(value.clone())
+                {
+                    scopes.insert((manifest.memory_space_id, manifest.owning_scope));
+                }
+            }
+        }
+    }
+    if scopes.is_empty() {
+        return Err(Error::config(
+            "memory_write_transaction_runtime_skill_post_image_invalid",
+            "runtime skill mutation has no decodable physical owning scope",
+        ));
+    }
+
+    for (memory_space_id, owning_scope) in scopes {
+        let batch_owning_scope = match &batch.scope.physical_owning_scope {
+            crate::store_internal::StorePhysicalOwningScope::Subject { mounted_subject_id } => {
+                RuntimeSkillOwningScope::Subject {
+                    mounted_subject_id: mounted_subject_id.clone(),
+                }
+            }
+            crate::store_internal::StorePhysicalOwningScope::SharedProgram => {
+                RuntimeSkillOwningScope::SharedProgram
+            }
+        };
+        if memory_space_id != batch.scope.memory_space_id || owning_scope != batch_owning_scope {
+            return Err(Error::config(
+                "memory_write_transaction_runtime_skill_post_image_invalid",
+                "runtime skill owner scope differs from the transaction physical authority",
+            ));
+        }
+        validate_runtime_skill_scope_image(
+            after,
+            &memory_space_id,
+            &owning_scope,
+            max_owners,
+            "memory_write_transaction_runtime_skill_post_image_invalid",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_skill_scope_image(
+    state: &BackendTransactionState,
+    memory_space_id: &str,
+    owning_scope: &RuntimeSkillOwningScope,
+    max_owners: usize,
+    stage: &'static str,
+) -> Result<()> {
+    let owner_namespace = crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE;
+    let manifest_namespace = crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE;
+    let records = state
+        .json
+        .iter()
+        .filter(|((namespace, _), _)| namespace == owner_namespace)
+        .map(|(_, value)| {
+            serde_json::from_value::<RuntimeSkillOwnerRecord>(value.clone()).map_err(|error| {
+                Error::config(stage, format!("runtime skill owner decode failed: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|record| {
+            record.memory_space_id == memory_space_id && record.owning_scope == *owning_scope
+        })
+        .collect::<Vec<_>>();
+    let bindings = records
+        .iter()
+        .map(RuntimeSkillOwnerBinding::from_record)
+        .collect::<Result<Vec<_>>>()?;
+    let manifest_key = runtime_skill_scope_manifest_key(memory_space_id, owning_scope)?;
+    let manifest_value = state
+        .json
+        .get(&(manifest_namespace.to_string(), manifest_key));
+    if bindings.is_empty() {
+        if manifest_value.is_some() {
+            return Err(Error::config(
+                stage,
+                "empty runtime skill scope must not retain a manifest",
+            ));
+        }
+        return Ok(());
+    }
+    let manifest_value = manifest_value.ok_or_else(|| {
+        Error::config(
+            stage,
+            "runtime skill owners require their exact scope manifest",
+        )
+    })?;
+    let manifest = serde_json::from_value::<RuntimeSkillScopeManifest>(manifest_value.clone())
+        .map_err(|error| {
+            Error::config(
+                stage,
+                format!("runtime skill scope manifest decode failed: {error}"),
+            )
+        })?;
+    manifest
+        .validate_exact(memory_space_id, owning_scope, bindings, max_owners)
+        .map_err(|error| Error::config(stage, error.to_string()))
+}
+
+fn validate_runtime_skill_store_image(
+    state: &BackendTransactionState,
+    max_owners: usize,
+    stage: &'static str,
+) -> Result<()> {
+    if max_owners == 0 {
+        return Err(Error::config(
+            stage,
+            "runtime skill footprint validation requires a positive pinned owner limit",
+        ));
+    }
+    let owner_namespace = crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE;
+    let manifest_namespace = crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE;
+    let mut scopes = BTreeSet::new();
+    for ((namespace, _), value) in &state.json {
+        if namespace == owner_namespace {
+            let record = serde_json::from_value::<RuntimeSkillOwnerRecord>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            scopes.insert((record.memory_space_id, record.owning_scope));
+        } else if namespace == manifest_namespace {
+            let manifest = serde_json::from_value::<RuntimeSkillScopeManifest>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            scopes.insert((manifest.memory_space_id, manifest.owning_scope));
+        }
+    }
+    for (memory_space_id, owning_scope) in scopes {
+        validate_runtime_skill_scope_image(
+            state,
+            &memory_space_id,
+            &owning_scope,
+            max_owners,
+            stage,
+        )?;
+    }
+    Ok(())
 }
 
 fn governed_transaction_dependency_json_reads(
@@ -3556,9 +4279,11 @@ fn governed_transaction_dependency_json_reads(
                     value,
                     "evidence source claim",
                 )?;
-                reads.insert(governed_owner_storage_address(
+                reads.extend(governed_owner_storage_addresses(
                     &batch.scope.memory_space_id,
+                    &batch.scope.subject_id,
                     &claim.owner_ref,
+                    claim.owner_revision,
                 )?);
             }
             MEMORY_FACET_POSTING_NAMESPACE => {
@@ -3580,9 +4305,11 @@ fn governed_transaction_dependency_json_reads(
                                 )
                             })?,
                         ));
-                        reads.insert(governed_owner_storage_address(
+                        reads.extend(governed_owner_storage_addresses(
                             &batch.scope.memory_space_id,
+                            &batch.scope.subject_id,
                             &owner.owner_ref,
+                            owner.owner_revision,
                         )?);
                     }
                     reads.extend(manifest.posting_revisions.into_iter().map(|posting| {
@@ -3598,9 +4325,11 @@ fn governed_transaction_dependency_json_reads(
                     value,
                     "memory facet owner",
                 )?;
-                reads.insert(governed_owner_storage_address(
+                reads.extend(governed_owner_storage_addresses(
                     &batch.scope.memory_space_id,
+                    &batch.scope.subject_id,
                     &facet.owner_ref,
+                    facet.owner_revision,
                 )?);
             }
             MEMORY_GRAPH_MANIFEST_NAMESPACE => {
@@ -3656,9 +4385,11 @@ fn governed_transaction_dependency_json_reads(
                         .into_iter()
                         .map(|key| (MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE.to_string(), key)),
                 );
-                reads.insert(governed_owner_storage_address(
+                reads.extend(governed_owner_storage_addresses(
                     &batch.scope.memory_space_id,
+                    &batch.scope.subject_id,
                     &membership.owner_ref,
+                    membership.owner_revision,
                 )?);
             }
             MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE => {
@@ -3692,21 +4423,19 @@ fn governed_transaction_dependency_json_reads(
                     value,
                     "long-term control revision",
                 )?;
-                reads.insert((
-                    "long_term".to_string(),
-                    scoped_long_term_memory_storage_key(
+                reads.extend(governed_owner_storage_addresses(
+                    &batch.scope.memory_space_id,
+                    &batch.scope.subject_id,
+                    &revision.transition.predecessor.owner_ref,
+                    revision.transition.predecessor.owner_revision,
+                )?);
+                if let Some(successor) = revision.transition.successor {
+                    reads.extend(governed_owner_storage_addresses(
                         &batch.scope.memory_space_id,
-                        &revision.record_id,
-                    )?,
-                ));
-                if let Some(successor) = revision.successor_record_id {
-                    reads.insert((
-                        "long_term".to_string(),
-                        scoped_long_term_memory_storage_key(
-                            &batch.scope.memory_space_id,
-                            &successor,
-                        )?,
-                    ));
+                        &batch.scope.subject_id,
+                        &successor.owner_ref,
+                        successor.owner_revision,
+                    )?);
                 }
             }
             LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE => {
@@ -3714,13 +4443,15 @@ fn governed_transaction_dependency_json_reads(
                     value,
                     "long-term control tombstone",
                 )?;
-                reads.insert((
-                    "long_term".to_string(),
-                    scoped_long_term_memory_storage_key(
-                        &batch.scope.memory_space_id,
-                        &tombstone.record_id,
-                    )?,
-                ));
+                reads.extend(governed_owner_storage_addresses(
+                    &batch.scope.memory_space_id,
+                    &batch.scope.subject_id,
+                    &GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        tombstone.record_id,
+                    ),
+                    tombstone.last_owner_revision,
+                )?);
             }
             _ => {}
         }
@@ -3728,19 +4459,32 @@ fn governed_transaction_dependency_json_reads(
     Ok(reads)
 }
 
-fn governed_owner_storage_address(
+fn governed_owner_storage_addresses(
     memory_space_id: &str,
+    mounted_subject_id: &str,
     owner_ref: &GovernedMemoryOwnerRef,
-) -> Result<(String, String)> {
+    owner_revision: u64,
+) -> Result<Vec<(String, String)>> {
     match owner_ref.owner_plane {
-        GovernedMemoryOwnerPlane::LongTerm => Ok((
-            "long_term".to_string(),
-            scoped_long_term_memory_storage_key(memory_space_id, &owner_ref.owner_id)?,
-        )),
-        GovernedMemoryOwnerPlane::EvidenceDocument => Ok((
+        GovernedMemoryOwnerPlane::LongTerm => Ok(vec![
+            (
+                crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                long_term_version_head_key(memory_space_id, mounted_subject_id, owner_ref)?,
+            ),
+            (
+                crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                long_term_version_material_key(
+                    memory_space_id,
+                    mounted_subject_id,
+                    owner_ref,
+                    owner_revision,
+                )?,
+            ),
+        ]),
+        GovernedMemoryOwnerPlane::EvidenceDocument => Ok(vec![(
             GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE.to_string(),
             scoped_governed_evidence_document_key(memory_space_id, &owner_ref.owner_id)?,
-        )),
+        )]),
         _ => Err(Error::config(
             "memory_write_transaction_dependency_read_set",
             format!(
@@ -3767,6 +4511,7 @@ fn validate_evidence_source_ref_post_image(
     batch: &StoreMutationBatch,
     before: &BackendTransactionState,
     after: &BackendTransactionState,
+    max_scope_entries: usize,
 ) -> Result<()> {
     let stage = "memory_write_transaction_evidence_source_ref_post_image_invalid";
     let mut owner_keys = BTreeSet::new();
@@ -3852,8 +4597,8 @@ fn validate_evidence_source_ref_post_image(
             )?;
         }
     }
-    validate_evidence_source_claim_manifest_image(before, batch, false, stage)?;
-    validate_evidence_source_claim_manifest_image(after, batch, true, stage)?;
+    validate_evidence_source_claim_manifest_image(before, batch, false, max_scope_entries, stage)?;
+    validate_evidence_source_claim_manifest_image(after, batch, true, max_scope_entries, stage)?;
     Ok(())
 }
 
@@ -3861,6 +4606,7 @@ fn validate_evidence_source_claim_manifest_image(
     image: &BackendTransactionState,
     batch: &StoreMutationBatch,
     required: bool,
+    max_scope_entries: usize,
     stage: &'static str,
 ) -> Result<()> {
     let manifest_key = governed_evidence_source_claim_manifest_key(
@@ -3888,7 +4634,7 @@ fn validate_evidence_source_claim_manifest_image(
         &batch.scope.memory_space_id,
         &batch.scope.subject_id,
         manifest.owner_claim_bindings.clone(),
-        manifest.owner_count.max(1),
+        max_scope_entries,
     )?;
     for owner_key in &manifest.owner_keys {
         let owner = decode_optional_governed_doc::<GovernedEvidenceDocument>(
@@ -4049,6 +4795,113 @@ fn governed_image<T: DeserializeOwned>(
     })
 }
 
+fn long_term_current_material_in_state(
+    state: &BackendTransactionState,
+    memory_space_id: &str,
+    mounted_subject_id: &str,
+    owner_ref: &GovernedMemoryOwnerRef,
+) -> Result<Option<(String, LongTermMemoryVersionMaterial)>> {
+    let head_key = long_term_version_head_key(memory_space_id, mounted_subject_id, owner_ref)?;
+    let Some(head_value) = state.json.get(&(
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+        head_key.clone(),
+    )) else {
+        return Ok(None);
+    };
+    let head = serde_json::from_value::<LongTermMemoryHeadManifest>(head_value.clone()).map_err(
+        |error| {
+            Error::config(
+                "memory_write_transaction_typed_owner_resolver_failed",
+                format!("invalid long-term head {head_key}: {error}"),
+            )
+        },
+    )?;
+    if !head.validate_contract().accepted
+        || head.memory_space_id != memory_space_id
+        || head.mounted_subject_id != mounted_subject_id
+        || head.owner_ref != *owner_ref
+    {
+        return Err(Error::config(
+            "memory_write_transaction_typed_owner_resolver_failed",
+            format!("long-term head {head_key} has invalid scope or owner binding"),
+        ));
+    }
+    if head.terminal_transition_ref.is_some() {
+        return Ok(None);
+    }
+    let retained = head
+        .retained_revision_digests
+        .iter()
+        .find(|retained| retained.owner_revision == head.current_revision)
+        .ok_or_else(|| {
+            Error::config(
+                "memory_write_transaction_typed_owner_resolver_failed",
+                format!("long-term head {head_key} has no current retained material"),
+            )
+        })?;
+    let material_key = long_term_version_material_key(
+        memory_space_id,
+        mounted_subject_id,
+        owner_ref,
+        head.current_revision,
+    )?;
+    let material_value = state
+        .json
+        .get(&(
+            crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+            material_key.clone(),
+        ))
+        .ok_or_else(|| {
+            Error::config(
+                "memory_write_transaction_typed_owner_resolver_failed",
+                format!("long-term current material {material_key} is missing"),
+            )
+        })?;
+    let material = serde_json::from_value::<LongTermMemoryVersionMaterial>(material_value.clone())
+        .map_err(|error| {
+            Error::config(
+                "memory_write_transaction_typed_owner_resolver_failed",
+                format!("invalid long-term material {material_key}: {error}"),
+            )
+        })?;
+    if !material.validate_contract().accepted
+        || material.memory_space_id != memory_space_id
+        || material.mounted_subject_id != mounted_subject_id
+        || material.owner_ref != *owner_ref
+        || material.owner_revision != head.current_revision
+        || material.content_digest != retained.content_digest
+    {
+        return Err(Error::config(
+            "memory_write_transaction_typed_owner_resolver_failed",
+            format!("long-term material {material_key} differs from its exact head binding"),
+        ));
+    }
+    Ok(Some((material_key, material)))
+}
+
+fn governed_long_term_material_image(
+    memory_space_id: &str,
+    mounted_subject_id: &str,
+    owner_ref: &GovernedMemoryOwnerRef,
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+) -> Result<LongTermMemoryVersionMaterialImage> {
+    let before_material = long_term_current_material_in_state(
+        before,
+        memory_space_id,
+        mounted_subject_id,
+        owner_ref,
+    )?;
+    let after_material =
+        long_term_current_material_in_state(after, memory_space_id, mounted_subject_id, owner_ref)?;
+    Ok(LongTermMemoryVersionMaterialImage {
+        before_physical_key: before_material.as_ref().map(|(key, _)| key.clone()),
+        before: before_material.map(|(_, material)| material),
+        after_physical_key: after_material.as_ref().map(|(key, _)| key.clone()),
+        after: after_material.map(|(_, material)| material),
+    })
+}
+
 fn ensure_post_image_validation(
     stage: &'static str,
     validation: GovernedPostImageValidation,
@@ -4112,8 +4965,13 @@ fn validate_facet_post_image(
     before: &BackendTransactionState,
     after: &BackendTransactionState,
 ) -> Result<()> {
-    let facet_touched = batch_mutates_namespace(batch, "long_term")
-        || batch_mutates_namespace(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE)
+    let facet_touched = batch_mutates_namespace(
+        batch,
+        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+    ) || batch_mutates_namespace(
+        batch,
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+    ) || batch_mutates_namespace(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE)
         || batch_mutates_namespace(batch, MEMORY_FACET_INDEX_NAMESPACE)
         || batch_mutates_namespace(batch, MEMORY_FACET_POSTING_NAMESPACE);
     if !facet_touched {
@@ -4197,37 +5055,31 @@ fn validate_facet_post_image(
     for mutation in &batch.mutations {
         match mutation {
             StoreMutation::PutJson {
-                namespace,
-                value,
-                record_key,
-                ..
-            } if namespace == "long_term" => {
-                let owner = serde_json::from_value::<LongTermMemoryEntry>(value.clone()).map_err(
-                    |error| {
+                namespace, value, ..
+            } if namespace
+                == crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE =>
+            {
+                let material =
+                    serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone())
+                        .map_err(|error| {
+                            Error::config(
+                                "memory_write_transaction_post_image_decode_failed",
+                                error.to_string(),
+                            )
+                        })?;
+                owner_refs.insert(material.owner_ref);
+            }
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+                let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
+                    .map_err(|error| {
                         Error::config(
                             "memory_write_transaction_post_image_decode_failed",
                             error.to_string(),
                         )
-                    },
-                )?;
-                owner_refs.insert(GovernedMemoryOwnerRef::new(
-                    GovernedMemoryOwnerPlane::LongTerm,
-                    owner.id,
-                ));
-                owner_refs.insert(GovernedMemoryOwnerRef::new(
-                    GovernedMemoryOwnerPlane::LongTerm,
-                    record_key.clone(),
-                ));
-            }
-            StoreMutation::DeleteJson {
-                namespace,
-                record_key,
-                ..
-            } if namespace == "long_term" => {
-                owner_refs.insert(GovernedMemoryOwnerRef::new(
-                    GovernedMemoryOwnerPlane::LongTerm,
-                    record_key.clone(),
-                ));
+                    })?;
+                owner_refs.insert(head.owner_ref);
             }
             StoreMutation::PutJson {
                 namespace,
@@ -4269,11 +5121,10 @@ fn validate_facet_post_image(
     for owner_ref in owner_refs {
         match owner_ref.owner_plane {
             GovernedMemoryOwnerPlane::LongTerm => {
-                let key =
-                    scoped_long_term_memory_storage_key(memory_space_id, &owner_ref.owner_id)?;
-                long_term_owners.push(governed_image::<LongTermMemoryEntry>(
-                    "long_term",
-                    &key,
+                long_term_owners.push(governed_long_term_material_image(
+                    memory_space_id,
+                    subject_id,
+                    &owner_ref,
                     before,
                     after,
                 )?);
@@ -4596,6 +5447,39 @@ fn validate_graph_post_image(
     }
 
     let mut owner_refs = BTreeSet::new();
+    for namespace in [
+        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+    ] {
+        for key in batch_json_keys(batch, namespace) {
+            let owner_ref = match namespace {
+                crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE => {
+                    let image = governed_image::<LongTermMemoryVersionMaterial>(
+                        namespace, &key, before, after,
+                    )?;
+                    image
+                        .after
+                        .as_ref()
+                        .or(image.before.as_ref())
+                        .map(|material| material.owner_ref.clone())
+                }
+                crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+                    let image = governed_image::<LongTermMemoryHeadManifest>(
+                        namespace, &key, before, after,
+                    )?;
+                    image
+                        .after
+                        .as_ref()
+                        .or(image.before.as_ref())
+                        .map(|head| head.owner_ref.clone())
+                }
+                _ => None,
+            };
+            if let Some(owner_ref) = owner_ref {
+                owner_refs.insert(owner_ref);
+            }
+        }
+    }
     for key in batch_json_keys(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE) {
         let image = governed_image::<GovernedEvidenceDocument>(
             GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
@@ -4669,11 +5553,10 @@ fn validate_graph_post_image(
     for owner_ref in owner_refs {
         match owner_ref.owner_plane {
             GovernedMemoryOwnerPlane::LongTerm => {
-                let key =
-                    scoped_long_term_memory_storage_key(memory_space_id, &owner_ref.owner_id)?;
-                long_term_owners.push(governed_image::<LongTermMemoryEntry>(
-                    "long_term",
-                    &key,
+                long_term_owners.push(governed_long_term_material_image(
+                    memory_space_id,
+                    subject_id,
+                    &owner_ref,
                     before,
                     after,
                 )?);
@@ -4800,9 +5683,9 @@ fn validate_control_post_image(
     let mut owner_ids = BTreeSet::new();
     for image in &revisions {
         if let Some(value) = image.after.as_ref().or(image.before.as_ref()) {
-            owner_ids.insert(value.record_id.clone());
-            if let Some(successor_record_id) = value.successor_record_id.as_ref() {
-                owner_ids.insert(successor_record_id.clone());
+            owner_ids.insert(value.transition.predecessor.owner_ref.owner_id.clone());
+            if let Some(successor) = value.transition.successor.as_ref() {
+                owner_ids.insert(successor.owner_ref.owner_id.clone());
             }
         }
     }
@@ -4814,8 +5697,13 @@ fn validate_control_post_image(
     let owner_records = owner_ids
         .into_iter()
         .map(|owner_id| {
-            let key = scoped_long_term_memory_storage_key(memory_space_id, &owner_id)?;
-            governed_image::<LongTermMemoryEntry>("long_term", &key, before, after)
+            governed_long_term_material_image(
+                memory_space_id,
+                batch.scope.subject_id.as_str(),
+                &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner_id),
+                before,
+                after,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     ensure_post_image_validation(
@@ -4851,8 +5739,8 @@ pub(crate) fn validate_control_document_for_scope(
                     format!("control revision decode failed: {error}"),
                 )
             })?;
-            if revision.memory_space_id.as_deref() != Some(memory_space_id)
-                || revision.owner_subject_id != mounted_subject_id
+            if revision.memory_space_id != memory_space_id
+                || revision.mounted_subject_id != mounted_subject_id
             {
                 return Err(Error::config(
                     "control_plane_scope_manifest",
@@ -4869,7 +5757,7 @@ pub(crate) fn validate_control_document_for_scope(
                         format!("control tombstone decode failed: {error}"),
                     )
                 })?;
-            if tombstone.memory_space_id.as_deref() != Some(memory_space_id)
+            if tombstone.memory_space_id != memory_space_id
                 || tombstone.owner_subject_id != mounted_subject_id
             {
                 return Err(Error::config(
@@ -4910,7 +5798,8 @@ pub(crate) fn validate_control_document_for_scope(
                 || audit.owner_subject_id != mounted_subject_id
                 || audit.effects.iter().any(|effect| match effect {
                     ControlEffectRef::Revision {
-                        owner_subject_id, ..
+                        mounted_subject_id: owner_subject_id,
+                        ..
                     }
                     | ControlEffectRef::Tombstone {
                         owner_subject_id, ..
@@ -5104,7 +5993,8 @@ fn validate_control_audit_closure(
                         "control revision record_key does not match revision_id",
                     ));
                 }
-                required_record_ids.insert(revision.record_id);
+                required_record_ids
+                    .insert(revision.transition.predecessor.owner_ref.owner_id.clone());
             }
             LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE => {
                 let tombstone = serde_json::from_value::<LongTermMemoryTombstone>(
@@ -5165,8 +6055,13 @@ fn validate_control_audit_closure(
                 }
                 for effect in audit.effects {
                     match effect {
-                        ControlEffectRef::Revision { record_id, .. }
-                        | ControlEffectRef::Tombstone { record_id, .. } => {
+                        ControlEffectRef::Revision { transition, .. } => {
+                            audited_record_ids.insert(transition.predecessor.owner_ref.owner_id);
+                            if let Some(successor) = transition.successor {
+                                audited_record_ids.insert(successor.owner_ref.owner_id);
+                            }
+                        }
+                        ControlEffectRef::Tombstone { record_id, .. } => {
                             audited_record_ids.insert(record_id);
                         }
                         ControlEffectRef::Policy { policy_id, .. } => {
@@ -5229,19 +6124,131 @@ fn control_mutation_value(
     }
 }
 
-fn validate_batch_mutation_namespaces(batch: &StoreMutationBatch) -> Result<()> {
+fn validate_batch_mutation_namespaces(
+    batch: &StoreMutationBatch,
+    preconditions: &[StoreJsonPrecondition],
+    mut get_blob: impl FnMut(&str, &str) -> Result<Option<Vec<u8>>>,
+) -> Result<()> {
+    for precondition in preconditions {
+        let (namespace, key) = match precondition {
+            StoreJsonPrecondition::Absent { namespace, key }
+            | StoreJsonPrecondition::Exact { namespace, key, .. } => (namespace, key),
+        };
+        ensure_batch_json_address(namespace, key)?;
+    }
     for mutation in &batch.mutations {
         match mutation {
-            StoreMutation::PutJson { namespace, .. }
-            | StoreMutation::DeleteJson { namespace, .. } => {
-                ensure_batch_json_namespace(namespace)?;
+            StoreMutation::PutJson {
+                namespace,
+                key,
+                value,
+                ..
+            } => {
+                let decoder = ensure_batch_json_address(namespace, key)?;
+                validate_typed_json_mutation(
+                    decoder,
+                    namespace,
+                    key,
+                    Some(value),
+                    preconditions,
+                    false,
+                )?;
             }
-            StoreMutation::PutBlob { namespace, .. }
-            | StoreMutation::DeleteBlob { namespace, .. } => {
-                ensure_batch_blob_namespace(namespace)?;
+            StoreMutation::DeleteJson { namespace, key, .. } => {
+                let decoder = ensure_batch_json_address(namespace, key)?;
+                validate_typed_json_mutation(decoder, namespace, key, None, preconditions, true)?;
             }
-            StoreMutation::AppendEvent { .. } => {}
+            StoreMutation::PutBlob {
+                namespace,
+                key,
+                value,
+                ..
+            } => {
+                ensure_batch_blob_address(namespace, key, Some(value))?;
+            }
+            StoreMutation::DeleteBlob { namespace, key, .. } => {
+                let existing = get_blob(namespace, key)?;
+                ensure_batch_blob_address(namespace, key, existing.as_deref())?;
+            }
+            StoreMutation::AppendEvent { event } => {
+                event.validate_current_schema("memory_write_transaction_preflight_failed")?;
+            }
         }
+    }
+    Ok(())
+}
+
+fn validate_typed_json_mutation(
+    decoder: StoreJsonDecoderKind,
+    namespace: &str,
+    key: &str,
+    put_value: Option<&serde_json::Value>,
+    preconditions: &[StoreJsonPrecondition],
+    deleting: bool,
+) -> Result<()> {
+    if !matches!(
+        decoder,
+        StoreJsonDecoderKind::LongTermVersionMaterial
+            | StoreJsonDecoderKind::LongTermHeadManifest
+            | StoreJsonDecoderKind::LongTermVersionScopeManifest
+            | StoreJsonDecoderKind::RuntimeSkillOwnerRecord
+            | StoreJsonDecoderKind::RuntimeSkillScopeManifest
+    ) {
+        return Ok(());
+    }
+    let precondition = preconditions
+        .iter()
+        .find(|precondition| match precondition {
+            StoreJsonPrecondition::Absent {
+                namespace: expected_namespace,
+                key: expected_key,
+            }
+            | StoreJsonPrecondition::Exact {
+                namespace: expected_namespace,
+                key: expected_key,
+                ..
+            } => expected_namespace == namespace && expected_key == key,
+        });
+    let prior_value = match precondition {
+        Some(StoreJsonPrecondition::Exact { value, .. }) => Some(value),
+        _ => None,
+    };
+    if deleting && prior_value.is_none() {
+        return Err(Error::config(
+            "memory_write_transaction_typed_precondition_missing",
+            format!("typed delete requires Exact precondition for {namespace}:{key}"),
+        ));
+    }
+    if !deleting && precondition.is_none() {
+        return Err(Error::config(
+            "memory_write_transaction_typed_precondition_missing",
+            format!("typed put requires Absent or Exact precondition for {namespace}:{key}"),
+        ));
+    }
+    if decoder == StoreJsonDecoderKind::LongTermVersionMaterial
+        && put_value.is_some()
+        && !matches!(precondition, Some(StoreJsonPrecondition::Absent { .. }))
+    {
+        return Err(Error::config(
+            "memory_write_transaction_typed_precondition_invalid",
+            "immutable long-term material put requires Absent precondition",
+        ));
+    }
+    if let Some(value) = prior_value {
+        admit_store_json_document(
+            namespace,
+            key,
+            value,
+            "memory_write_transaction_typed_document_invalid",
+        )?;
+    }
+    if let Some(value) = put_value {
+        admit_store_json_document(
+            namespace,
+            key,
+            value,
+            "memory_write_transaction_typed_document_invalid",
+        )?;
     }
     Ok(())
 }
@@ -5250,23 +6257,65 @@ fn validate_governed_owner_facet_closure(
     batch: &StoreMutationBatch,
     preconditions: &[StoreJsonPrecondition],
 ) -> Result<()> {
-    let owner_refs = batch
-        .mutations
-        .iter()
-        .filter_map(|mutation| match mutation {
+    let mut owner_refs = BTreeSet::new();
+    for mutation in &batch.mutations {
+        match mutation {
             StoreMutation::PutJson {
-                namespace,
-                record_key,
-                ..
+                namespace, value, ..
+            } if namespace
+                == crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE =>
+            {
+                let material =
+                    serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone())
+                        .map_err(|error| {
+                            Error::config(
+                                "memory_write_transaction_owner_facet_closure_invalid",
+                                format!("invalid long-term material: {error}"),
+                            )
+                        })?;
+                owner_refs.insert(material.owner_ref);
             }
-            | StoreMutation::DeleteJson {
-                namespace,
-                record_key,
-                ..
-            } if namespace == "long_term" => Some(GovernedMemoryOwnerRef::new(
-                GovernedMemoryOwnerPlane::LongTerm,
-                record_key.clone(),
-            )),
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+                let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
+                    .map_err(|error| {
+                        Error::config(
+                            "memory_write_transaction_owner_facet_closure_invalid",
+                            format!("invalid long-term head: {error}"),
+                        )
+                    })?;
+                owner_refs.insert(head.owner_ref);
+            }
+            StoreMutation::DeleteJson { namespace, key, .. }
+                if namespace
+                    == crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE =>
+            {
+                let value = preconditions
+                    .iter()
+                    .find_map(|precondition| match precondition {
+                        StoreJsonPrecondition::Exact {
+                            namespace: expected_namespace,
+                            key: expected_key,
+                            value,
+                        } if expected_namespace == namespace && expected_key == key => Some(value),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::config(
+                            "memory_write_transaction_owner_facet_closure_invalid",
+                            "long-term head delete requires an exact typed precondition",
+                        )
+                    })?;
+                let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
+                    .map_err(|error| {
+                        Error::config(
+                            "memory_write_transaction_owner_facet_closure_invalid",
+                            format!("invalid prior long-term head: {error}"),
+                        )
+                    })?;
+                owner_refs.insert(head.owner_ref);
+            }
             StoreMutation::PutJson {
                 namespace,
                 record_key,
@@ -5277,14 +6326,14 @@ fn validate_governed_owner_facet_closure(
                 record_key,
                 ..
             } if namespace == GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE => {
-                Some(GovernedMemoryOwnerRef::new(
+                owner_refs.insert(GovernedMemoryOwnerRef::new(
                     GovernedMemoryOwnerPlane::EvidenceDocument,
                     record_key.clone(),
-                ))
+                ));
             }
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
+            _ => {}
+        }
+    }
     if owner_refs.is_empty() {
         return Ok(());
     }
@@ -5347,28 +6396,48 @@ fn validate_governed_owner_facet_closure(
     ))
 }
 
-fn ensure_batch_json_namespace(namespace: &str) -> Result<()> {
-    ensure_json_snapshot_namespace(namespace, "memory_write_transaction_preflight_failed")
+fn ensure_batch_json_address(namespace: &str, key: &str) -> Result<StoreJsonDecoderKind> {
+    admit_store_json_address(namespace, key, "memory_write_transaction_preflight_failed")
 }
 
 fn ensure_json_snapshot_namespace(namespace: &str, stage: &'static str) -> Result<()> {
-    if JSON_SNAPSHOT_NAMESPACES.contains(&namespace) {
-        return Ok(());
-    }
-    Err(Error::config(
-        stage,
-        format!("unsupported json namespace {namespace}"),
-    ))
+    admit_store_json_address(namespace, "_namespace_probe", stage).map(|_| ())
 }
 
-fn ensure_batch_blob_namespace(namespace: &str) -> Result<()> {
-    if BLOB_SNAPSHOT_NAMESPACES.contains(&namespace) {
-        return Ok(());
+fn ensure_batch_blob_address(
+    namespace: &str,
+    key: &str,
+    value: Option<&[u8]>,
+) -> Result<StoreBlobDecoderKind> {
+    match classify_store_blob_address(namespace, key, value)? {
+        StoreAddressAdmission::Active(kind) => Ok(kind),
+        StoreAddressAdmission::ForbiddenLegacy(kind) => Err(Error::config(
+            "memory_write_transaction_preflight_failed",
+            format!("forbidden legacy blob address {namespace}:{key} ({kind:?})"),
+        )),
+        StoreAddressAdmission::Unknown => Err(Error::config(
+            "memory_write_transaction_preflight_failed",
+            format!("unsupported blob namespace {namespace}"),
+        )),
     }
-    Err(Error::config(
-        "memory_write_transaction_preflight_failed",
-        format!("unsupported blob namespace {namespace}"),
-    ))
+}
+
+fn ensure_snapshot_blob_address(
+    namespace: &str,
+    key: &str,
+    value: Option<&[u8]>,
+) -> Result<StoreBlobDecoderKind> {
+    match classify_store_blob_address(namespace, key, value)? {
+        StoreAddressAdmission::Active(kind) => Ok(kind),
+        StoreAddressAdmission::ForbiddenLegacy(kind) => Err(Error::config(
+            "store_snapshot_import",
+            format!("forbidden legacy blob address {namespace}:{key} ({kind:?})"),
+        )),
+        StoreAddressAdmission::Unknown => Err(Error::config(
+            "store_snapshot_import",
+            format!("unknown blob namespace {namespace}"),
+        )),
+    }
 }
 
 fn memory_write_transaction_preflight_error(error: Error) -> Error {
@@ -5394,73 +6463,6 @@ fn memory_write_transaction_commit_error(error: Error) -> Error {
         _ => Error::config("memory_write_transaction_commit_failed", error.to_string()),
     }
 }
-
-const JSON_SNAPSHOT_NAMESPACES: &[&str] = &[
-    "skill_meta",
-    "active_work",
-    "execution_state",
-    "long_term_extraction_state",
-    "turn_ledger",
-    "self_model",
-    "self_authored_core",
-    "core_revision_ledger",
-    "self_continuity",
-    "relationship_constitution",
-    "relationship_portfolio",
-    "relationship_topology",
-    "world_sense",
-    "outer_voice",
-    "autonomy_strategy",
-    "inner_life",
-    "felt_significance",
-    "temperament_continuity",
-    "inner_conflict",
-    "mental_privacy",
-    "private_doc",
-    "conversation_transcript",
-    "conversation_transcript_alias",
-    "conversation_transcript_attr",
-    "conversation_transcript_derived_ref",
-    "memory_graph_nodes",
-    "memory_graph_edges",
-    "memory_graph_backlinks",
-    "memory_graph_indexes",
-    "memory_graph_revisions",
-    "memory_graph_manifests",
-    "memory_graph_node_memberships",
-    "memory_graph_edge_memberships",
-    "memory_graph_backlink_memberships",
-    "memory_facet_indexes",
-    "memory_facet_postings",
-    LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
-    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
-    LONG_TERM_CONTROL_AUDIT_NAMESPACE,
-    CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE,
-    "session_summary",
-    "session",
-    "long_term",
-    GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
-    GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
-    GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
-    "continuity_capsule",
-    "turn_continuity_evidence",
-    "private_garden",
-    "remind_at",
-    "task",
-    "task_run",
-    "task_artifact",
-    "task_learning",
-    CONVERSATION_RECALL_MANIFEST_NAMESPACE,
-    ARCHIVE_RECALL_MANIFEST_NAMESPACE,
-    RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE,
-    CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE,
-    ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE,
-    TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
-    RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
-];
-
-const BLOB_SNAPSHOT_NAMESPACES: &[&str] = &["state_fs", "skills", "memory", "daily"];
 
 pub(crate) fn snapshot_namespace_requires_private_export(namespace: &str) -> bool {
     matches!(
@@ -5524,47 +6526,77 @@ impl StoreEventLog for StorePlatform {
         self.append_validated_event(event)
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
         self.engine.read_events()
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeLifecycleStoreBinding<'a> {
+    Direct,
+    Transaction {
+        operation: &'a str,
+        transaction_id: &'a str,
+    },
+}
+
+pub(crate) fn materialize_runtime_lifecycle_store_event(
+    event: &RuntimeLifecycleEvent,
+    binding: RuntimeLifecycleStoreBinding<'_>,
+) -> Result<MemoryStoreEvent> {
+    event.validate_for_recording()?;
+    let event_value = serde_json::to_value(event)
+        .map_err(|error| Error::config("runtime_lifecycle_event", error.to_string()))?;
+    let content_hash = stable_hash_json(&event_value)?;
+    let kind = match event.kind {
+        RuntimeLifecycleEventKind::RuntimeLifecycle => MemoryStoreEventKind::RuntimeLifecycle,
+        RuntimeLifecycleEventKind::OperatorAction => MemoryStoreEventKind::OperatorAction,
+    };
+    let operation = match binding {
+        RuntimeLifecycleStoreBinding::Direct => event.operation.as_str(),
+        RuntimeLifecycleStoreBinding::Transaction { operation, .. } => operation,
+    };
+    let mut store_event = MemoryStoreEvent::new(
+        event.event_id.clone(),
+        kind,
+        StoreEventScope::system(event.operation.as_str()),
+        event.timestamp_unix_secs,
+    )
+    .with_plane("runtime_lifecycle")
+    .with_record_key(event.operation.as_str())
+    .with_content_hash(content_hash)
+    .with_payload("runtime_operation", event.operation.as_str())
+    .with_payload("operation", operation)
+    .with_payload("trigger", event.trigger.as_str())
+    .with_payload("disposition", event.disposition.as_str())
+    .with_payload("effect", event.effect.as_str())
+    .with_payload("profile", event.profile.as_str())
+    .with_payload("mode", event.mode.as_str())
+    .with_payload(
+        "pressure",
+        format!("{:?}", event.pressure).to_ascii_lowercase(),
+    )
+    .with_payload("reason", event.reason.clone())
+    .with_payload("success", event.success().to_string())
+    .with_payload("result", event.result())
+    .with_payload("result_summary", event.result_summary())
+    .with_payload("error_stage", event.error_stage.clone().unwrap_or_default());
+    if let RuntimeLifecycleStoreBinding::Transaction { transaction_id, .. } = binding {
+        store_event = store_event.with_payload("transaction_id", transaction_id);
+    }
+    for (key, value) in event.payload() {
+        store_event = store_event.with_payload(key.clone(), value.clone());
+    }
+    Ok(store_event)
+}
+
 impl RuntimeLifecycleEventSink for StorePlatform {
     fn record_lifecycle_event(&self, event: RuntimeLifecycleEvent) -> Result<()> {
-        let event_value = serde_json::to_value(&event)
-            .map_err(|error| Error::config("runtime_lifecycle_event", error.to_string()))?;
-        let content_hash = stable_hash_json(&event_value)?;
-        let kind = match event.kind {
-            RuntimeLifecycleEventKind::RuntimeLifecycle => MemoryStoreEventKind::RuntimeLifecycle,
-            RuntimeLifecycleEventKind::OperatorAction => MemoryStoreEventKind::OperatorAction,
-        };
-        let mut store_event = MemoryStoreEvent::new(
-            event.event_id,
-            kind,
-            StoreEventScope::system(event.operation.as_str()),
-            event.timestamp_unix_secs,
-        )
-        .with_plane("runtime_lifecycle")
-        .with_record_key(event.operation.as_str())
-        .with_content_hash(content_hash);
-        store_event = store_event
-            .with_payload("operation", event.operation.as_str())
-            .with_payload("trigger", event.trigger.as_str())
-            .with_payload("disposition", event.disposition.as_str())
-            .with_payload("effect", event.effect.as_str())
-            .with_payload("profile", event.profile.as_str())
-            .with_payload("mode", event.mode.as_str())
-            .with_payload(
-                "pressure",
-                format!("{:?}", event.pressure).to_ascii_lowercase(),
-            )
-            .with_payload("reason", event.reason)
-            .with_payload("result", event.result)
-            .with_payload("error_stage", event.error_stage.unwrap_or_default());
-        for (key, value) in event.payload {
-            store_event = store_event.with_payload(key, value);
-        }
-        self.append_validated_event(store_event)
+        self.append_validated_event(materialize_runtime_lifecycle_store_event(
+            &event,
+            RuntimeLifecycleStoreBinding::Direct,
+        )?)
     }
 }
 
@@ -5761,16 +6793,8 @@ impl SkillStorage for StorePlatform {
     }
 
     fn write(&self, name: &str, content: &[u8]) -> Result<()> {
-        let _transaction_guard = self.lock_transaction("runtime_skill_recall_index_write")?;
-        let updated_at = runtime_skill_owner_updated_at(name, content).ok_or_else(|| {
-            Error::config(
-                "runtime_skill_recall_manifest",
-                "runtime skill content must provide a canonical typed owner timestamp",
-            )
-        })?;
-        let index = self.plan_runtime_skill_index_upsert(name, content, updated_at)?;
-        self.commit_recall_indexed_mutations_at(
-            "runtime_skill.write",
+        self.commit_recall_indexed_mutations(
+            "skill.write",
             self.recall_scope(),
             vec![StoreMutation::PutBlob {
                 namespace: "skills".to_string(),
@@ -5780,26 +6804,17 @@ impl SkillStorage for StorePlatform {
                 plane: "skills".to_string(),
                 record_key: name.to_string(),
             }],
-            vec![index],
-            Some(updated_at),
+            Vec::new(),
         )?;
         Ok(())
     }
 
     fn remove(&self, name: &str) -> Result<()> {
-        let _transaction_guard = self.lock_transaction("runtime_skill_recall_index_delete")?;
-        let Some(content) = self.engine.get_blob("skills", name)? else {
+        if self.engine.get_blob("skills", name)?.is_none() {
             return Ok(());
-        };
-        let updated_at = runtime_skill_owner_updated_at(name, &content).ok_or_else(|| {
-            Error::config(
-                "runtime_skill_recall_manifest",
-                "runtime skill delete requires a canonical typed owner timestamp",
-            )
-        })?;
-        let index = self.plan_runtime_skill_index_remove(name)?;
-        self.commit_recall_indexed_mutations_at(
-            "runtime_skill.delete",
+        }
+        self.commit_recall_indexed_mutations(
+            "skill.delete",
             self.recall_scope(),
             vec![StoreMutation::DeleteBlob {
                 namespace: "skills".to_string(),
@@ -5808,8 +6823,7 @@ impl SkillStorage for StorePlatform {
                 plane: "skills".to_string(),
                 record_key: name.to_string(),
             }],
-            vec![index],
-            Some(updated_at),
+            Vec::new(),
         )?;
         Ok(())
     }
@@ -6257,43 +7271,56 @@ impl ConversationTranscriptStore for StorePlatform {
     fn append_turn(&self, record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport> {
         let _transaction_guard = self.lock_transaction("conversation_recall_manifest_append")?;
         let key = transcript_turn_storage_key(&record.key, &record.subject, &record.turn_id);
-        let (_, manifest, manifest_before) =
+        let (_, head, head_before) =
             self.load_conversation_recall_manifest(&record.key, &record.subject)?;
-        if let Some(manifest) = manifest.as_ref() {
-            self.validate_conversation_manifest_subject(manifest, &record.subject)?;
+        if let Some(head) = head.as_ref() {
+            self.validate_conversation_manifest_subject(head, &record.subject)?;
         }
-        let before_count = manifest
+        let before_count = head
             .as_ref()
-            .map(|manifest| {
-                manifest
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.namespace == "conversation_transcript")
-                    .count()
-            })
+            .map(|head| usize::try_from(head.turn_count).unwrap_or(usize::MAX))
             .unwrap_or(0);
-        if self
+        if let Some(value) = self
             .engine
             .get_json_value("conversation_transcript", &key)?
-            .is_some()
         {
-            let indexed = manifest.as_ref().is_some_and(|manifest| {
-                manifest.entries.iter().any(|entry| {
-                    entry.kind == RecallIndexAddressKind::Json
-                        && entry.namespace == "conversation_transcript"
-                        && entry.key == key
-                })
-            });
-            if !indexed {
+            let existing =
+                serde_json::from_value::<TranscriptTurnRecord>(value.clone()).map_err(|error| {
+                    Error::config("conversation_transcript_page", error.to_string())
+                })?;
+            let head = head.as_ref().ok_or_else(|| {
+                Error::config(
+                    "conversation_transcript_head",
+                    "transcript owner exists without its required head",
+                )
+            })?;
+            let page_id = Self::conversation_page_for_sequence(existing.sequence)?;
+            let records = self.load_validated_conversation_page_records(
+                &record.key,
+                &record.subject,
+                head,
+                page_id,
+            )?;
+            if !records.iter().any(|candidate| candidate == &existing) {
                 return Err(Error::config(
-                    "conversation_recall_manifest",
-                    "transcript owner exists without its required manifest binding",
+                    "conversation_transcript_page",
+                    "transcript owner exists without its required page binding",
+                ));
+            }
+            let mut requested = record.clone();
+            if requested.sequence == 0 {
+                requested.sequence = existing.sequence;
+            }
+            if requested != existing {
+                return Err(Error::config(
+                    "conversation_transcript_append",
+                    "turn id already exists with divergent payload",
                 ));
             }
             return Ok(TranscriptCommitReport {
-                key: record.key.clone(),
-                turn_id: record.turn_id.clone(),
-                sequence: record.sequence,
+                key: existing.key,
+                turn_id: existing.turn_id,
+                sequence: existing.sequence,
                 committed: false,
                 before_count,
                 after_count: before_count,
@@ -6301,17 +7328,27 @@ impl ConversationTranscriptStore for StorePlatform {
             });
         }
         let mut record = record.clone();
+        let next_sequence = head
+            .as_ref()
+            .map(|head| head.last_sequence.saturating_add(1))
+            .unwrap_or(1);
         if record.sequence == 0 {
-            record.sequence = u64::try_from(before_count)
-                .unwrap_or(u64::MAX)
-                .saturating_add(1);
+            record.sequence = next_sequence;
+        } else if record.sequence != next_sequence {
+            return Err(Error::config(
+                "conversation_transcript_append",
+                "turn sequence must be the exact next conversation sequence",
+            ));
         }
         let sequence = record.sequence;
         let value = serde_json::to_value(&record)
-            .map_err(|error| Error::config("conversation_recall_manifest", error.to_string()))?;
-        let previous_entries = manifest
+            .map_err(|error| Error::config("conversation_transcript_page", error.to_string()))?;
+        let page_id = Self::conversation_page_for_sequence(sequence)?;
+        let (_, page, page_before) =
+            self.load_conversation_transcript_page(&record.key, &record.subject, page_id)?;
+        let previous_entries = page
             .as_ref()
-            .map(|manifest| manifest.entries.as_slice())
+            .map(|page| page.entries.as_slice())
             .unwrap_or(&[]);
         let address = RecallIndexAddress::json(
             "conversation_transcript",
@@ -6326,12 +7363,21 @@ impl ConversationTranscriptStore for StorePlatform {
             &value,
         )?;
         let entries = replace_recall_index_address(previous_entries, address);
-        let index = self.plan_conversation_index(
+        let page_plan = self.plan_conversation_transcript_page(
             &record.key,
             &record.subject,
-            manifest.as_ref(),
-            manifest_before,
+            page_id,
+            page.as_ref(),
+            page_before,
             entries,
+        )?;
+        let head_plan = self.plan_conversation_head(
+            &record.key,
+            &record.subject,
+            head.as_ref(),
+            head_before,
+            sequence,
+            sequence,
         )?;
         let mut scope = self.recall_scope();
         scope
@@ -6351,7 +7397,7 @@ impl ConversationTranscriptStore for StorePlatform {
                 plane: "conversation_transcript".to_string(),
                 record_key: key,
             }],
-            vec![index],
+            vec![head_plan, page_plan],
         )?;
         Ok(TranscriptCommitReport {
             key: record.key,
@@ -6450,32 +7496,36 @@ impl ConversationTranscriptStore for StorePlatform {
         mounted_subject_id: &str,
         turn_id: &str,
     ) -> Result<Option<TranscriptTurnRecord>> {
-        let (_, manifest, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
-        let Some(manifest) = manifest else {
+        let owner_key = transcript_turn_storage_key(key, mounted_subject_id, turn_id);
+        let Some(value) = self
+            .engine
+            .get_json_value("conversation_transcript", &owner_key)?
+        else {
             return Ok(None);
         };
-        self.validate_conversation_manifest_subject(&manifest, mounted_subject_id)?;
-        let owner_key = transcript_turn_storage_key(key, mounted_subject_id, turn_id);
-        let indexed = manifest.entries.iter().any(|entry| {
-            entry.kind == RecallIndexAddressKind::Json
-                && entry.namespace == "conversation_transcript"
-                && entry.key == owner_key
-        });
-        if !indexed {
-            return Ok(None);
-        }
-        let record = self
-            .json_get::<TranscriptTurnRecord>("conversation_transcript", &owner_key)?
-            .ok_or_else(|| {
-                Error::config(
-                    "conversation_recall_manifest",
-                    "indexed transcript owner is missing",
-                )
-            })?;
+        let record = serde_json::from_value::<TranscriptTurnRecord>(value)
+            .map_err(|error| Error::config("conversation_transcript_page", error.to_string()))?;
         if record.key != *key || record.subject != mounted_subject_id {
             return Err(Error::config(
                 "conversation_recall_manifest",
                 "transcript owner scope differs from the requested subject root",
+            ));
+        }
+        let (_, head, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
+        let head = head.ok_or_else(|| {
+            Error::config(
+                "conversation_transcript_head",
+                "transcript owner exists without its required head",
+            )
+        })?;
+        self.validate_conversation_manifest_subject(&head, mounted_subject_id)?;
+        let page_id = Self::conversation_page_for_sequence(record.sequence)?;
+        let records =
+            self.load_validated_conversation_page_records(key, mounted_subject_id, &head, page_id)?;
+        if !records.iter().any(|candidate| candidate == &record) {
+            return Err(Error::config(
+                "conversation_transcript_page",
+                "transcript owner is not bound by its sequence page",
             ));
         }
         Ok(Some(record))
@@ -6487,49 +7537,146 @@ impl ConversationTranscriptStore for StorePlatform {
         mounted_subject_id: &str,
         limit: usize,
     ) -> Result<Vec<TranscriptTurnRecord>> {
-        let (_, manifest, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
-        let Some(manifest) = manifest else {
+        let (_, head, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
+        let Some(head) = head else {
             return Ok(Vec::new());
         };
-        self.validate_conversation_manifest_subject(&manifest, mounted_subject_id)?;
+        self.validate_conversation_manifest_subject(&head, mounted_subject_id)?;
+        let requested = if limit == 0 {
+            head.turn_count
+        } else {
+            u64::try_from(limit)
+                .unwrap_or(u64::MAX)
+                .min(head.turn_count)
+        };
+        if requested == 0 {
+            return Ok(Vec::new());
+        }
+        let first_sequence = head
+            .last_sequence
+            .saturating_sub(requested)
+            .saturating_add(1);
+        let first_page = Self::conversation_page_for_sequence(first_sequence)?;
         let mut records = Vec::new();
-        for entry in &manifest.entries {
-            if entry.kind != RecallIndexAddressKind::Json
-                || entry.namespace != "conversation_transcript"
-            {
-                continue;
-            }
-            if let Some(record) =
-                self.json_get::<TranscriptTurnRecord>("conversation_transcript", &entry.key)?
-            {
-                if record.key != *key
-                    || record.subject != mounted_subject_id
-                    || transcript_turn_storage_key(key, mounted_subject_id, &record.turn_id)
-                        != entry.key
-                {
-                    return Err(Error::config(
-                        "conversation_recall_manifest",
-                        "transcript owner scope or storage key differs from its subject root",
-                    ));
-                }
-                records.push(record);
-            } else {
+        for page_id in first_page..head.page_count {
+            records.extend(self.load_validated_conversation_page_records(
+                key,
+                mounted_subject_id,
+                &head,
+                page_id,
+            )?);
+        }
+        records.retain(|record| record.sequence >= first_sequence);
+        Ok(records)
+    }
+
+    fn turn_count(&self, key: &ConversationKey, mounted_subject_id: &str) -> Result<usize> {
+        let (_, head, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
+        let Some(head) = head else {
+            return Ok(0);
+        };
+        self.validate_conversation_manifest_subject(&head, mounted_subject_id)?;
+        usize::try_from(head.turn_count).map_err(|_| {
+            Error::config(
+                "conversation_transcript_head",
+                "turn count does not fit the platform",
+            )
+        })
+    }
+
+    fn list_turns_page(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<TranscriptTurnPage> {
+        let decoded_cursor = cursor
+            .map(str::trim)
+            .filter(|cursor| !cursor.is_empty())
+            .map(|encoded| TranscriptTurnCursor::decode_for_scope(encoded, key, mounted_subject_id))
+            .transpose()?;
+        let (_, head, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
+        let Some(head) = head else {
+            if decoded_cursor.is_some() {
                 return Err(Error::config(
-                    "conversation_recall_manifest",
-                    "indexed transcript owner is missing",
+                    "conversation_transcript_page",
+                    "cursor_not_found",
                 ));
             }
+            return Ok(TranscriptTurnPage {
+                key: key.clone(),
+                turns: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+            });
+        };
+        self.validate_conversation_manifest_subject(&head, mounted_subject_id)?;
+        let start_sequence = match decoded_cursor {
+            Some(cursor) => {
+                let turn = self
+                    .get_turn(key, mounted_subject_id, &cursor.turn_id)?
+                    .ok_or_else(|| {
+                        Error::config("conversation_transcript_page", "cursor_not_found")
+                    })?;
+                if turn.sequence != cursor.sequence {
+                    return Err(Error::config(
+                        "conversation_transcript_page",
+                        "cursor_sequence_mismatch",
+                    ));
+                }
+                cursor.sequence.saturating_add(1)
+            }
+            None => 1,
+        };
+        if start_sequence > head.last_sequence {
+            return Ok(TranscriptTurnPage {
+                key: key.clone(),
+                turns: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+            });
         }
-        records.sort_by(|left, right| {
-            left.sequence
-                .cmp(&right.sequence)
-                .then_with(|| left.created_at.cmp(&right.created_at))
-                .then_with(|| left.turn_id.cmp(&right.turn_id))
-        });
-        if limit > 0 && records.len() > limit {
-            records = records[records.len() - limit..].to_vec();
+        let limit = limit.max(1);
+        let first_page = Self::conversation_page_for_sequence(start_sequence)?;
+        let mut turns = Vec::with_capacity(limit.saturating_add(1));
+        for page_id in first_page..head.page_count {
+            for turn in self.load_validated_conversation_page_records(
+                key,
+                mounted_subject_id,
+                &head,
+                page_id,
+            )? {
+                if turn.sequence >= start_sequence {
+                    turns.push(turn);
+                }
+                if turns.len() > limit {
+                    break;
+                }
+            }
+            if turns.len() > limit {
+                break;
+            }
         }
-        Ok(records)
+        let has_more = turns.len() > limit;
+        if has_more {
+            turns.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            turns
+                .last()
+                .map(TranscriptTurnCursor::for_record)
+                .map(|cursor| cursor.encode())
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(TranscriptTurnPage {
+            key: key.clone(),
+            turns,
+            next_cursor,
+            has_more,
+        })
     }
 
     fn upsert_transcript_attrs(
@@ -6539,19 +7686,25 @@ impl ConversationTranscriptStore for StorePlatform {
         attrs: &[TranscriptAttrEnvelope],
     ) -> Result<TranscriptAttrWriteReport> {
         let _transaction_guard = self.lock_transaction("conversation_recall_manifest_attrs")?;
-        let (_, manifest, manifest_before) =
-            self.load_conversation_recall_manifest(key, mounted_subject_id)?;
-        let manifest = manifest.ok_or_else(|| {
+        let (_, head, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
+        let head = head.ok_or_else(|| {
             Error::config(
                 "conversation_recall_manifest",
                 "transcript attrs require an existing conversation recall manifest",
             )
         })?;
-        self.validate_conversation_manifest_subject(&manifest, mounted_subject_id)?;
+        self.validate_conversation_manifest_subject(&head, mounted_subject_id)?;
         let mut accepted_attrs = Vec::new();
         let mut rejected_attrs = Vec::new();
         let mut mutations = Vec::new();
-        let mut entries = manifest.entries.clone();
+        let mut aux_by_turn = BTreeMap::<
+            String,
+            (
+                Option<ConversationTranscriptAuxManifest>,
+                Option<serde_json::Value>,
+                Vec<RecallIndexAddress>,
+            ),
+        >::new();
         let mut seen_keys = BTreeSet::new();
         let mut owner_subject_id = None::<String>;
         for attr in attrs {
@@ -6592,14 +7745,28 @@ impl ConversationTranscriptStore for StorePlatform {
                 ));
                 continue;
             }
-            let value = serde_json::to_value(attr).map_err(|error| {
-                Error::config("conversation_recall_manifest", error.to_string())
-            })?;
+            if !aux_by_turn.contains_key(&attr.target.turn_id) {
+                let (_, manifest, before) = self.load_conversation_transcript_aux(
+                    key,
+                    mounted_subject_id,
+                    &attr.target.turn_id,
+                )?;
+                let entries = manifest
+                    .as_ref()
+                    .map(|manifest| manifest.entries.clone())
+                    .unwrap_or_default();
+                aux_by_turn.insert(attr.target.turn_id.clone(), (manifest, before, entries));
+            }
+            let (_, _, entries) = aux_by_turn
+                .get_mut(&attr.target.turn_id)
+                .expect("turn aux initialized");
+            let value = serde_json::to_value(attr)
+                .map_err(|error| Error::config("conversation_transcript_aux", error.to_string()))?;
             let address = RecallIndexAddress::json(
                 "conversation_transcript_attr",
                 &owner_key,
                 next_entry_revision(
-                    &entries,
+                    entries,
                     RecallIndexAddressKind::Json,
                     "conversation_transcript_attr",
                     &owner_key,
@@ -6607,7 +7774,7 @@ impl ConversationTranscriptStore for StorePlatform {
                 attr.created_at,
                 &value,
             )?;
-            entries = replace_recall_index_address(&entries, address);
+            *entries = replace_recall_index_address(entries, address);
             mutations.push(StoreMutation::PutJson {
                 namespace: "conversation_transcript_attr".to_string(),
                 key: owner_key.clone(),
@@ -6619,13 +7786,17 @@ impl ConversationTranscriptStore for StorePlatform {
             accepted_attrs.push(attr.clone());
         }
         if !mutations.is_empty() {
-            let index = self.plan_conversation_index(
-                key,
-                mounted_subject_id,
-                Some(&manifest),
-                manifest_before,
-                entries,
-            )?;
+            let mut indexes = Vec::with_capacity(aux_by_turn.len());
+            for (turn_id, (manifest, before, entries)) in aux_by_turn {
+                indexes.push(self.plan_conversation_transcript_aux(
+                    key,
+                    mounted_subject_id,
+                    &turn_id,
+                    manifest.as_ref(),
+                    before,
+                    entries,
+                )?);
+            }
             let mut scope = self.recall_scope();
             scope.memory_space_id.clone_from(&key.memory_space_id);
             let owner_subject_id = owner_subject_id.expect("accepted attrs have a subject owner");
@@ -6642,7 +7813,7 @@ impl ConversationTranscriptStore for StorePlatform {
                 "conversation.transcript_attrs.upsert",
                 scope,
                 mutations,
-                vec![index],
+                indexes,
             )?;
         }
         Ok(TranscriptAttrWriteReport {
@@ -6658,52 +7829,68 @@ impl ConversationTranscriptStore for StorePlatform {
         mounted_subject_id: &str,
         turn_id: Option<&str>,
     ) -> Result<Vec<TranscriptAttrEnvelope>> {
-        let (_, manifest, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
-        let Some(manifest) = manifest else {
-            return Ok(Vec::new());
+        let turns = match turn_id {
+            Some(turn_id) => self
+                .get_turn(key, mounted_subject_id, turn_id)?
+                .into_iter()
+                .collect::<Vec<_>>(),
+            None => self.list_turns(key, mounted_subject_id, usize::MAX)?,
         };
-        self.validate_conversation_manifest_subject(&manifest, mounted_subject_id)?;
         let mut attrs = Vec::new();
-        for entry in &manifest.entries {
-            if entry.kind != RecallIndexAddressKind::Json
-                || entry.namespace != "conversation_transcript_attr"
-            {
+        for turn in turns {
+            let (_, manifest, _) =
+                self.load_conversation_transcript_aux(key, mounted_subject_id, &turn.turn_id)?;
+            let Some(manifest) = manifest else {
                 continue;
-            }
-            let Some(value) = self
-                .engine
-                .get_json_value("conversation_transcript_attr", &entry.key)?
-            else {
-                return Err(Error::config(
-                    "conversation_recall_manifest",
-                    "indexed transcript attr owner is missing",
-                ));
             };
-            let attr =
-                serde_json::from_value::<TranscriptAttrEnvelope>(value).map_err(|error| {
-                    Error::config("conversation_recall_manifest", error.to_string())
-                })?;
-            if attr.target.key != *key
-                || transcript_attr_storage_key(key, mounted_subject_id, &attr) != entry.key
+            if manifest.memory_space_id != key.memory_space_id
+                || manifest.mounted_subject_id != mounted_subject_id
+                || manifest.channel_id != key.channel_id
+                || manifest.conversation_id != key.conversation_id
+                || manifest.turn_id != turn.turn_id
             {
                 return Err(Error::config(
-                    "conversation_recall_manifest",
-                    "transcript attr owner scope or storage key differs from its subject root",
+                    "conversation_transcript_aux",
+                    "transcript aux scope differs from its target turn",
                 ));
             }
-            let turn = self
-                .get_turn(key, mounted_subject_id, &attr.target.turn_id)?
-                .ok_or_else(|| {
-                    Error::config(
-                        "conversation_recall_manifest",
-                        "transcript attr target turn is missing",
-                    )
-                })?;
-            attr.validate_for_record(&turn)?;
-            if turn_id
-                .map(|turn_id| attr.target.turn_id == turn_id)
-                .unwrap_or(true)
-            {
+            for entry in &manifest.entries {
+                if entry.kind != RecallIndexAddressKind::Json
+                    || entry.namespace != "conversation_transcript_attr"
+                {
+                    continue;
+                }
+                let value = self
+                    .engine
+                    .get_json_value("conversation_transcript_attr", &entry.key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_aux",
+                            "indexed transcript attr owner is missing",
+                        )
+                    })?;
+                let attr = serde_json::from_value::<TranscriptAttrEnvelope>(value.clone())
+                    .map_err(|error| {
+                        Error::config("conversation_transcript_aux", error.to_string())
+                    })?;
+                let expected_address = RecallIndexAddress::json(
+                    "conversation_transcript_attr",
+                    &entry.key,
+                    entry.revision,
+                    entry.updated_at,
+                    &value,
+                )?;
+                if expected_address.content_sha256 != entry.content_sha256
+                    || attr.target.key != *key
+                    || attr.target.turn_id != turn.turn_id
+                    || transcript_attr_storage_key(key, mounted_subject_id, &attr) != entry.key
+                {
+                    return Err(Error::config(
+                        "conversation_transcript_aux",
+                        "transcript attr owner binding differs from its turn aux",
+                    ));
+                }
+                attr.validate_for_record(&turn)?;
                 attrs.push(attr);
             }
         }
@@ -6723,157 +7910,140 @@ impl ConversationTranscriptStore for StorePlatform {
         key: &ConversationKey,
         mounted_subject_id: &str,
     ) -> Result<TranscriptRepairInspection> {
-        let (_, manifest, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
-        let Some(manifest) = manifest else {
-            return Ok(TranscriptRepairInspection::default());
-        };
-        if manifest.memory_space_id != key.memory_space_id
-            || manifest.mounted_subject_id != mounted_subject_id
-            || manifest.channel_id != key.channel_id
-            || manifest.conversation_id != key.conversation_id
-        {
-            return Err(Error::config(
-                "conversation_recall_manifest",
-                "conversation repair manifest identity differs from the requested subject root",
-            ));
-        }
+        let (_, head, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
         let mut inspection = TranscriptRepairInspection::default();
-        for entry in &manifest.entries {
-            if entry.kind != RecallIndexAddressKind::Json {
-                inspection.issues.push(TranscriptRepairIssue {
-                    kind: TranscriptRepairIssueKind::CorruptRecord,
-                    turn_id: String::new(),
-                    message_id: None,
-                    derived_ref: None,
-                    reason: "conversation_manifest_contains_non_json_owner".to_string(),
-                });
-                continue;
+        if let Some(head) = head {
+            self.validate_conversation_manifest_subject(&head, mounted_subject_id)?;
+            for page_id in 0..head.page_count {
+                inspection
+                    .turns
+                    .extend(self.load_validated_conversation_page_records(
+                        key,
+                        mounted_subject_id,
+                        &head,
+                        page_id,
+                    )?);
             }
-            let Some(value) = self.engine.get_json_value(&entry.namespace, &entry.key)? else {
-                inspection.issues.push(TranscriptRepairIssue {
-                    kind: TranscriptRepairIssueKind::CorruptRecord,
-                    turn_id: String::new(),
-                    message_id: None,
-                    derived_ref: None,
-                    reason: format!(
-                        "conversation_manifest_owner_missing:{}:{}",
-                        entry.namespace, entry.key
-                    ),
-                });
+        }
+        inspection.checked_turns = inspection.turns.len();
+        for aux_key in self
+            .engine
+            .list_json_keys(CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE)?
+        {
+            let Some(aux_value) = self
+                .engine
+                .get_json_value(CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE, &aux_key)?
+            else {
                 continue;
             };
-            match entry.namespace.as_str() {
-                "conversation_transcript" => {
-                    inspection.checked_turns = inspection.checked_turns.saturating_add(1);
-                    match serde_json::from_value::<TranscriptTurnRecord>(value.clone()) {
-                        Ok(record)
-                            if record.key == *key
-                                && record.subject == mounted_subject_id
-                                && transcript_turn_storage_key(
-                                    key,
-                                    mounted_subject_id,
-                                    &record.turn_id,
-                                ) == entry.key =>
-                        {
-                            inspection.turns.push(record);
-                        }
-                        Ok(record) => inspection.issues.push(TranscriptRepairIssue {
-                            kind: TranscriptRepairIssueKind::CorruptRecord,
-                            turn_id: record.turn_id,
-                            message_id: None,
-                            derived_ref: None,
-                            reason: "transcript_owner_scope_or_storage_key_mismatch".to_string(),
-                        }),
-                        Err(error) => inspection.issues.push(TranscriptRepairIssue {
-                            kind: TranscriptRepairIssueKind::CorruptRecord,
-                            turn_id: value
-                                .get("turn_id")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
-                            message_id: None,
-                            derived_ref: None,
-                            reason: format!("transcript_turn_decode_failed:{error}"),
-                        }),
-                    }
-                }
-                "conversation_transcript_attr" => {
-                    inspection.checked_attrs = inspection.checked_attrs.saturating_add(1);
-                    match serde_json::from_value::<TranscriptAttrEnvelope>(value.clone()) {
-                        Ok(attr)
-                            if attr.target.key == *key
-                                && transcript_attr_storage_key(key, mounted_subject_id, &attr)
-                                    == entry.key =>
-                        {
-                            inspection.attrs.push(attr);
-                        }
-                        Ok(attr) => inspection.issues.push(TranscriptRepairIssue {
-                            kind: TranscriptRepairIssueKind::MismatchedAttrSourceKey,
-                            turn_id: attr.target.turn_id,
-                            message_id: attr.target.message_id,
-                            derived_ref: None,
-                            reason: "transcript_attr_owner_scope_or_storage_key_mismatch"
-                                .to_string(),
-                        }),
-                        Err(error) => {
-                            let (turn_id, message_id) =
-                                transcript_attr_repair_target_from_value(&value);
-                            inspection.issues.push(TranscriptRepairIssue {
-                                kind: TranscriptRepairIssueKind::CorruptTranscriptAttrRecord,
-                                turn_id,
-                                message_id,
+            let aux = decode_typed_recall_index::<ConversationTranscriptAuxManifest>(
+                &aux_key, aux_value,
+            )?;
+            if aux.memory_space_id != key.memory_space_id
+                || aux.mounted_subject_id != mounted_subject_id
+                || aux.channel_id != key.channel_id
+                || aux.conversation_id != key.conversation_id
+            {
+                continue;
+            }
+            for entry in &aux.entries {
+                let Some(value) = self.engine.get_json_value(&entry.namespace, &entry.key)? else {
+                    inspection.issues.push(TranscriptRepairIssue {
+                        kind: TranscriptRepairIssueKind::CorruptRecord,
+                        turn_id: aux.turn_id.clone(),
+                        message_id: None,
+                        derived_ref: None,
+                        reason: format!(
+                            "conversation_aux_owner_missing:{}:{}",
+                            entry.namespace, entry.key
+                        ),
+                    });
+                    continue;
+                };
+                match entry.namespace.as_str() {
+                    "conversation_transcript_attr" => {
+                        inspection.checked_attrs = inspection.checked_attrs.saturating_add(1);
+                        match serde_json::from_value::<TranscriptAttrEnvelope>(value.clone()) {
+                            Ok(attr)
+                                if attr.target.key == *key
+                                    && attr.target.turn_id == aux.turn_id
+                                    && transcript_attr_storage_key(
+                                        key,
+                                        mounted_subject_id,
+                                        &attr,
+                                    ) == entry.key =>
+                            {
+                                inspection.attrs.push(attr);
+                            }
+                            Ok(attr) => inspection.issues.push(TranscriptRepairIssue {
+                                kind: TranscriptRepairIssueKind::MismatchedAttrSourceKey,
+                                turn_id: attr.target.turn_id,
+                                message_id: attr.target.message_id,
                                 derived_ref: None,
-                                reason: format!("transcript_attr_decode_failed:{error}"),
-                            });
+                                reason: "transcript_attr_owner_scope_or_storage_key_mismatch"
+                                    .to_string(),
+                            }),
+                            Err(error) => {
+                                let (turn_id, message_id) =
+                                    transcript_attr_repair_target_from_value(&value);
+                                inspection.issues.push(TranscriptRepairIssue {
+                                    kind: TranscriptRepairIssueKind::CorruptTranscriptAttrRecord,
+                                    turn_id,
+                                    message_id,
+                                    derived_ref: None,
+                                    reason: format!("transcript_attr_decode_failed:{error}"),
+                                });
+                            }
                         }
                     }
-                }
-                "conversation_transcript_derived_ref" => {
-                    inspection.checked_derived_refs =
-                        inspection.checked_derived_refs.saturating_add(1);
-                    match serde_json::from_value::<DerivedMemoryRef>(value) {
-                        Ok(derived)
-                            if validate_derived_ref_matches_key(key, &derived).is_ok()
-                                && exact_derived_owner_subject(&derived).ok()
-                                    == Some(mounted_subject_id)
-                                && transcript_derived_ref_storage_key(
-                                    key,
-                                    mounted_subject_id,
-                                    &derived,
-                                )
-                                .ok()
-                                .as_deref()
-                                    == Some(entry.key.as_str()) =>
-                        {
-                            inspection.derived_refs.push(derived);
+                    "conversation_transcript_derived_ref" => {
+                        inspection.checked_derived_refs =
+                            inspection.checked_derived_refs.saturating_add(1);
+                        match serde_json::from_value::<DerivedMemoryRef>(value) {
+                            Ok(derived)
+                                if validate_derived_ref_matches_key(key, &derived).is_ok()
+                                    && derived.source.turn_id == aux.turn_id
+                                    && exact_derived_owner_subject(&derived).ok()
+                                        == Some(mounted_subject_id)
+                                    && transcript_derived_ref_storage_key(
+                                        key,
+                                        mounted_subject_id,
+                                        &derived,
+                                    )
+                                    .ok()
+                                    .as_deref()
+                                        == Some(entry.key.as_str()) =>
+                            {
+                                inspection.derived_refs.push(derived);
+                            }
+                            Ok(derived) => inspection.issues.push(TranscriptRepairIssue {
+                                kind: TranscriptRepairIssueKind::MismatchedSourceKey,
+                                turn_id: derived.source.turn_id.clone(),
+                                message_id: derived.source.message_id.clone(),
+                                derived_ref: Some(derived),
+                                reason: "derived_memory_ref_owner_scope_or_storage_key_mismatch"
+                                    .to_string(),
+                            }),
+                            Err(error) => inspection.issues.push(TranscriptRepairIssue {
+                                kind: TranscriptRepairIssueKind::CorruptRecord,
+                                turn_id: aux.turn_id.clone(),
+                                message_id: None,
+                                derived_ref: None,
+                                reason: format!("derived_memory_ref_decode_failed:{error}"),
+                            }),
                         }
-                        Ok(derived) => inspection.issues.push(TranscriptRepairIssue {
-                            kind: TranscriptRepairIssueKind::MismatchedSourceKey,
-                            turn_id: derived.source.turn_id.clone(),
-                            message_id: derived.source.message_id.clone(),
-                            derived_ref: Some(derived),
-                            reason: "derived_memory_ref_owner_scope_or_storage_key_mismatch"
-                                .to_string(),
-                        }),
-                        Err(error) => inspection.issues.push(TranscriptRepairIssue {
-                            kind: TranscriptRepairIssueKind::CorruptRecord,
-                            turn_id: String::new(),
-                            message_id: None,
-                            derived_ref: None,
-                            reason: format!("derived_memory_ref_decode_failed:{error}"),
-                        }),
                     }
+                    _ => inspection.issues.push(TranscriptRepairIssue {
+                        kind: TranscriptRepairIssueKind::CorruptRecord,
+                        turn_id: aux.turn_id.clone(),
+                        message_id: None,
+                        derived_ref: None,
+                        reason: format!(
+                            "conversation_aux_contains_non_aux_owner:{}",
+                            entry.namespace
+                        ),
+                    }),
                 }
-                _ => inspection.issues.push(TranscriptRepairIssue {
-                    kind: TranscriptRepairIssueKind::CorruptRecord,
-                    turn_id: String::new(),
-                    message_id: None,
-                    derived_ref: None,
-                    reason: format!(
-                        "conversation_manifest_contains_non_conversation_owner:{}",
-                        entry.namespace
-                    ),
-                }),
             }
         }
         Ok(inspection)
@@ -6923,40 +8093,69 @@ impl ConversationTranscriptStore for StorePlatform {
         mounted_subject_id: &str,
         turn_id: Option<&str>,
     ) -> Result<Vec<DerivedMemoryRef>> {
-        let (_, manifest, _) = self.load_conversation_recall_manifest(key, mounted_subject_id)?;
-        let Some(manifest) = manifest else {
-            return Ok(Vec::new());
+        let turns = match turn_id {
+            Some(turn_id) => self
+                .get_turn(key, mounted_subject_id, turn_id)?
+                .into_iter()
+                .collect::<Vec<_>>(),
+            None => self.list_turns(key, mounted_subject_id, usize::MAX)?,
         };
-        self.validate_conversation_manifest_subject(&manifest, mounted_subject_id)?;
         let mut refs = Vec::new();
-        for entry in &manifest.entries {
-            if entry.kind != RecallIndexAddressKind::Json
-                || entry.namespace != "conversation_transcript_derived_ref"
-            {
+        for turn in turns {
+            let (_, manifest, _) =
+                self.load_conversation_transcript_aux(key, mounted_subject_id, &turn.turn_id)?;
+            let Some(manifest) = manifest else {
                 continue;
-            }
-            let Some(derived) = self
-                .json_get::<DerivedMemoryRef>("conversation_transcript_derived_ref", &entry.key)?
-            else {
-                return Err(Error::config(
-                    "conversation_recall_manifest",
-                    "indexed transcript derived owner is missing",
-                ));
             };
-            validate_derived_ref_matches_key(key, &derived)?;
-            if exact_derived_owner_subject(&derived)? != mounted_subject_id
-                || transcript_derived_ref_storage_key(key, mounted_subject_id, &derived)?
-                    != entry.key
+            if manifest.memory_space_id != key.memory_space_id
+                || manifest.mounted_subject_id != mounted_subject_id
+                || manifest.channel_id != key.channel_id
+                || manifest.conversation_id != key.conversation_id
+                || manifest.turn_id != turn.turn_id
             {
                 return Err(Error::config(
-                    "conversation_recall_manifest",
-                    "transcript derived owner scope or storage key differs from its subject root",
+                    "conversation_transcript_aux",
+                    "transcript aux scope differs from its target turn",
                 ));
             }
-            if turn_id
-                .map(|turn_id| derived.source.turn_id == turn_id)
-                .unwrap_or(true)
-            {
+            for entry in &manifest.entries {
+                if entry.kind != RecallIndexAddressKind::Json
+                    || entry.namespace != "conversation_transcript_derived_ref"
+                {
+                    continue;
+                }
+                let value = self
+                    .engine
+                    .get_json_value("conversation_transcript_derived_ref", &entry.key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_aux",
+                            "indexed transcript derived owner is missing",
+                        )
+                    })?;
+                let derived =
+                    serde_json::from_value::<DerivedMemoryRef>(value.clone()).map_err(|error| {
+                        Error::config("conversation_transcript_aux", error.to_string())
+                    })?;
+                let expected_address = RecallIndexAddress::json(
+                    "conversation_transcript_derived_ref",
+                    &entry.key,
+                    entry.revision,
+                    entry.updated_at,
+                    &value,
+                )?;
+                validate_derived_ref_matches_key(key, &derived)?;
+                if expected_address.content_sha256 != entry.content_sha256
+                    || derived.source.turn_id != turn.turn_id
+                    || exact_derived_owner_subject(&derived)? != mounted_subject_id
+                    || transcript_derived_ref_storage_key(key, mounted_subject_id, &derived)?
+                        != entry.key
+                {
+                    return Err(Error::config(
+                        "conversation_transcript_aux",
+                        "transcript derived owner binding differs from its turn aux",
+                    ));
+                }
                 refs.push(derived);
             }
         }
@@ -6976,22 +8175,35 @@ impl ConversationTranscriptStore for StorePlatform {
         request: &TranscriptLifecycleRequest,
     ) -> Result<TranscriptLifecycleReport> {
         let _transaction_guard = self.lock_transaction("conversation_recall_manifest_lifecycle")?;
-        let (_, manifest, manifest_before) =
+        let (_, head, _) =
             self.load_conversation_recall_manifest(&request.key, mounted_subject_id)?;
-        let manifest = manifest.ok_or_else(|| {
+        let head = head.ok_or_else(|| {
             Error::config(
                 "conversation_recall_manifest",
                 "transcript lifecycle transition requires its typed recall manifest",
             )
         })?;
-        self.validate_conversation_manifest_subject(&manifest, mounted_subject_id)?;
+        self.validate_conversation_manifest_subject(&head, mounted_subject_id)?;
         let mut affected_turns = 0usize;
         let mut affected_turn_ids = Vec::new();
         let mut affected_message_ids = Vec::new();
         let mut affected_host_refs = Vec::new();
         let mut mutations = Vec::new();
-        let mut entries = manifest.entries.clone();
-        let mut records = self.list_turns(&request.key, mounted_subject_id, usize::MAX)?;
+        let mut pages = BTreeMap::<
+            u64,
+            (
+                Option<ConversationTranscriptPageIndex>,
+                Option<serde_json::Value>,
+                Vec<RecallIndexAddress>,
+            ),
+        >::new();
+        let mut records = match request.turn_id.as_deref() {
+            Some(turn_id) => self
+                .get_turn(&request.key, mounted_subject_id, turn_id)?
+                .into_iter()
+                .collect::<Vec<_>>(),
+            None => self.list_turns(&request.key, mounted_subject_id, usize::MAX)?,
+        };
         let mut owner_subject_id = None::<String>;
         for record in &mut records {
             let matches_turn = request
@@ -7019,6 +8231,24 @@ impl ConversationTranscriptStore for StorePlatform {
                 }
                 affected_host_refs.extend(record.host_refs.clone());
                 record.apply_lifecycle_transition(request.transition, request.requested_at);
+                let page_id = Self::conversation_page_for_sequence(record.sequence)?;
+                if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(page_id) {
+                    let (_, page, before) = self.load_conversation_transcript_page(
+                        &request.key,
+                        mounted_subject_id,
+                        page_id,
+                    )?;
+                    let entries =
+                        page.as_ref()
+                            .map(|page| page.entries.clone())
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "conversation_transcript_page",
+                                    "lifecycle target page is missing",
+                                )
+                            })?;
+                    entry.insert((page, before, entries));
+                }
                 let record_key =
                     transcript_turn_storage_key(&request.key, mounted_subject_id, &record.turn_id);
                 let value = serde_json::to_value(&*record).map_err(|error| {
@@ -7028,7 +8258,15 @@ impl ConversationTranscriptStore for StorePlatform {
                     "conversation_transcript",
                     &record_key,
                     next_entry_revision(
-                        &entries,
+                        &pages
+                            .get(&page_id)
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "conversation_transcript_page",
+                                    "lifecycle page state is missing",
+                                )
+                            })?
+                            .2,
                         RecallIndexAddressKind::Json,
                         "conversation_transcript",
                         &record_key,
@@ -7036,7 +8274,13 @@ impl ConversationTranscriptStore for StorePlatform {
                     record.updated_at,
                     &value,
                 )?;
-                entries = replace_recall_index_address(&entries, address);
+                let page_state = pages.get_mut(&page_id).ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_page",
+                        "lifecycle page state is missing",
+                    )
+                })?;
+                page_state.2 = replace_recall_index_address(&page_state.2, address);
                 mutations.push(StoreMutation::PutJson {
                     namespace: "conversation_transcript".to_string(),
                     key: record_key.clone(),
@@ -7049,13 +8293,17 @@ impl ConversationTranscriptStore for StorePlatform {
             }
         }
         if !mutations.is_empty() {
-            let index = self.plan_conversation_index(
-                &request.key,
-                mounted_subject_id,
-                Some(&manifest),
-                manifest_before,
-                entries,
-            )?;
+            let mut indexes = Vec::with_capacity(pages.len());
+            for (page_id, (page, before, entries)) in pages {
+                indexes.push(self.plan_conversation_transcript_page(
+                    &request.key,
+                    mounted_subject_id,
+                    page_id,
+                    page.as_ref(),
+                    before,
+                    entries,
+                )?);
+            }
             let mut scope = self.recall_scope();
             scope
                 .memory_space_id
@@ -7067,14 +8315,17 @@ impl ConversationTranscriptStore for StorePlatform {
                 "conversation.transcript.lifecycle",
                 scope,
                 mutations,
-                vec![index],
+                indexes,
             )?;
         }
-        let derived_memory_refs = self
-            .list_derived_memory_refs(&request.key, mounted_subject_id, None)?
-            .into_iter()
-            .filter(|derived| affected_turn_ids.contains(&derived.source.turn_id))
-            .collect::<Vec<_>>();
+        let mut derived_memory_refs = Vec::new();
+        for turn_id in &affected_turn_ids {
+            derived_memory_refs.extend(self.list_derived_memory_refs(
+                &request.key,
+                mounted_subject_id,
+                Some(turn_id),
+            )?);
+        }
         Ok(TranscriptLifecycleReport {
             key: request.key.clone(),
             transition: request.transition,
@@ -7305,8 +8556,64 @@ fn transcript_attr_repair_target_from_value(value: &serde_json::Value) -> (Strin
 }
 
 impl ScopedLongTermMemoryStore {
-    fn physical_key(&self, logical_owner_id: &str) -> Result<String> {
-        scoped_long_term_memory_storage_key(&self.memory_space_id, logical_owner_id)
+    fn scope_manifest(&self) -> Result<Option<LongTermMemoryVersionScopeManifest>> {
+        let key =
+            long_term_version_scope_manifest_key(&self.memory_space_id, &self.mounted_subject_id)?;
+        let manifest = self
+            .platform
+            .json_get::<LongTermMemoryVersionScopeManifest>(
+                crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+                &key,
+            )?;
+        if manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.physical_key != key)
+        {
+            return Err(Error::config(
+                "long_term_storage_scope",
+                "long-term scope manifest physical key drift",
+            ));
+        }
+        Ok(manifest)
+    }
+
+    fn current_projection_for_head(
+        &self,
+        head: &LongTermMemoryHeadManifest,
+    ) -> Result<LongTermMemoryEntry> {
+        let material_key = long_term_version_material_key(
+            &self.memory_space_id,
+            &self.mounted_subject_id,
+            &head.owner_ref,
+            head.current_revision,
+        )?;
+        let material = self
+            .platform
+            .json_get::<LongTermMemoryVersionMaterial>(
+                crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                &material_key,
+            )?
+            .ok_or_else(|| {
+                Error::config(
+                    "long_term_storage_scope",
+                    "head current material is missing",
+                )
+            })?;
+        let expected_digest = head
+            .retained_revision_digests
+            .iter()
+            .find(|entry| entry.owner_revision == head.current_revision)
+            .map(|entry| entry.content_digest.as_str());
+        if material.owner_ref != head.owner_ref
+            || material.owner_revision != head.current_revision
+            || expected_digest != Some(material.content_digest.as_str())
+        {
+            return Err(Error::config(
+                "long_term_storage_scope",
+                "head current material identity or digest drift",
+            ));
+        }
+        material.to_current_projection()
     }
 }
 
@@ -7343,28 +8650,55 @@ impl bm_core::memory::LongTermMemoryReadStore for ScopedLongTermMemoryStore {
     }
 
     fn get(&self, id: &str) -> Result<Option<LongTermMemoryEntry>> {
-        self.platform.json_get("long_term", &self.physical_key(id)?)
+        let owner_ref =
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, id.to_string());
+        let key = long_term_version_head_key(
+            &self.memory_space_id,
+            &self.mounted_subject_id,
+            &owner_ref,
+        )?;
+        let Some(head) = self.platform.json_get::<LongTermMemoryHeadManifest>(
+            crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+            &key,
+        )?
+        else {
+            return Ok(None);
+        };
+        if head.owner_ref != owner_ref || !head.validate_contract().accepted {
+            return Err(Error::config(
+                "long_term_storage_scope",
+                "long-term head identity or contract drift",
+            ));
+        }
+        if head.terminal_transition_ref.is_some() {
+            return Ok(None);
+        }
+        self.current_projection_for_head(&head).map(Some)
     }
 
     fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
+        let Some(manifest) = self.scope_manifest()? else {
+            return Ok(Vec::new());
+        };
         let mut entries = Vec::new();
-        for key in self.platform.engine.list_json_keys("long_term")? {
-            if !key.starts_with(&self.key_prefix) {
-                continue;
-            }
-            let Some(entry) = self
+        for binding in &manifest.head_bindings {
+            let head = self
                 .platform
-                .json_get::<LongTermMemoryEntry>("long_term", &key)?
-            else {
-                continue;
-            };
-            if self.physical_key(&entry.id)? != key {
+                .json_get::<LongTermMemoryHeadManifest>(
+                    crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                    &binding.head_physical_key,
+                )?
+                .ok_or_else(|| Error::config("long_term_storage_scope", "scope head is missing"))?;
+            if LongTermMemoryVersionHeadBinding::from_head(&head)? != *binding {
                 return Err(Error::config(
                     "long_term_storage_scope",
-                    "scoped long-term owner key does not match logical owner id",
+                    "scope head binding drift",
                 ));
             }
-            entries.push(entry);
+            if head.terminal_transition_ref.is_some() {
+                continue;
+            }
+            entries.push(self.current_projection_for_head(&head)?);
         }
         entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
         if limit > 0 {
@@ -7374,13 +8708,7 @@ impl bm_core::memory::LongTermMemoryReadStore for ScopedLongTermMemoryStore {
     }
 
     fn count(&self) -> Result<usize> {
-        Ok(self
-            .platform
-            .engine
-            .list_json_keys("long_term")?
-            .into_iter()
-            .filter(|key| key.starts_with(&self.key_prefix))
-            .count())
+        Ok(bm_core::memory::LongTermMemoryReadStore::list(self, usize::MAX)?.len())
     }
 }
 
@@ -7479,13 +8807,9 @@ impl LongTermMemoryControlReadStore for ScopedLongTermMemoryControlReadStore {
     ) -> Result<Vec<LongTermMemoryControlRevision>> {
         let mut revisions = self
             .list_scoped::<LongTermMemoryControlRevision>(LONG_TERM_CONTROL_REVISION_NAMESPACE)?;
-        revisions.retain(|revision| revision.record_id == record_id);
-        revisions.sort_by(|left, right| {
-            right
-                .owner_revision
-                .cmp(&left.owner_revision)
-                .then_with(|| right.created_at.cmp(&left.created_at))
-        });
+        revisions
+            .retain(|revision| revision.transition.predecessor.owner_ref.owner_id == record_id);
+        revisions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         revisions.truncate(limit);
         Ok(revisions)
     }
@@ -8298,19 +9622,6 @@ fn canonical_transaction_timestamp(
         )),
         (Some(runtime), _) => Ok(runtime),
         (None, Some(event)) => Ok(event),
-        (None, None)
-            if batch.mutations.iter().any(|mutation| {
-                matches!(mutation,
-                    StoreMutation::PutBlob { namespace, .. }
-                    | StoreMutation::DeleteBlob { namespace, .. }
-                        if namespace == "skills")
-            }) =>
-        {
-            Err(Error::config(
-                "runtime_skill_recall_manifest",
-                "skill mutation requires an explicit runtime or typed owner timestamp",
-            ))
-        }
         (None, None) => Ok(current_unix_secs()),
     }
 }
@@ -8327,9 +9638,14 @@ fn sqlite_engine(
     config: &StoreBackendConfig,
     capacity: StoreCapacityBudget,
     admission_authority: StoreAdmissionAuthority,
+    open_preflight: &StoreOpenPreflight,
 ) -> Result<(Arc<dyn StoreEngine>, StoreSchemaManifest)> {
-    let (engine, manifest) =
-        SqliteStoreEngine::open_with_capacity_and_authority(config, capacity, admission_authority)?;
+    let (engine, manifest) = SqliteStoreEngine::open_with_capacity_and_authority(
+        config,
+        capacity,
+        admission_authority,
+        open_preflight,
+    )?;
     Ok((Arc::new(engine), manifest))
 }
 
@@ -8338,6 +9654,7 @@ fn sqlite_engine(
     _config: &StoreBackendConfig,
     _capacity: StoreCapacityBudget,
     _admission_authority: StoreAdmissionAuthority,
+    _open_preflight: &StoreOpenPreflight,
 ) -> Result<(Arc<dyn StoreEngine>, StoreSchemaManifest)> {
     Err(Error::config(
         "store_platform_open",
@@ -8346,7 +9663,12 @@ fn sqlite_engine(
 }
 
 fn next_event_id() -> String {
-    let sequence = EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut counter = EVENT_SEQUENCE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sequence = *counter;
+    *counter = counter.wrapping_add(1);
+    drop(counter);
     format!(
         "evt_{:032x}_{:08x}_{sequence:016x}",
         current_unix_nanos(),
@@ -8370,7 +9692,11 @@ fn stable_hash_id<T: Hash>(prefix: &str, value: &T) -> String {
     format!("{prefix}_{}", stable_hash_hex(value))
 }
 
-fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
+fn validate_snapshot_import_contract(
+    snapshot: &StoreSnapshot,
+    governed_state_budget: &GovernedStateRuntimeBudget,
+    capacity: StoreCapacityBudget,
+) -> Result<()> {
     if snapshot.schema_id != STORE_SCHEMA_ID {
         return Err(Error::config(
             "store_snapshot_import",
@@ -8396,22 +9722,18 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
         ));
     }
 
-    let json_namespaces = JSON_SNAPSHOT_NAMESPACES
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
     let mut json_keys = HashSet::new();
     let mut snapshot_json = BTreeMap::new();
     let mut evidence_documents = BTreeMap::new();
     let mut evidence_source_claims = BTreeMap::new();
     let mut evidence_claim_manifests = BTreeMap::new();
     for doc in &snapshot.json_docs {
-        if !json_namespaces.contains(doc.namespace.as_str()) {
-            return Err(Error::config(
-                "store_snapshot_import",
-                format!("unknown json namespace {}", doc.namespace),
-            ));
-        }
+        admit_store_json_document(
+            &doc.namespace,
+            &doc.key,
+            &doc.value,
+            "store_snapshot_import",
+        )?;
         if !json_keys.insert((doc.namespace.clone(), doc.key.clone())) {
             return Err(Error::config(
                 "store_snapshot_import",
@@ -8428,12 +9750,6 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
             }
             ARCHIVE_RECALL_MANIFEST_NAMESPACE => {
                 decode_typed_recall_index::<ArchiveRecallManifest>(&doc.key, doc.value.clone())?;
-            }
-            RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE => {
-                decode_typed_recall_index::<RuntimeSkillRecallManifest>(
-                    &doc.key,
-                    doc.value.clone(),
-                )?;
             }
             CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE => {
                 decode_typed_recall_index::<ContinuityCapsuleScopeIndex>(
@@ -8464,7 +9780,7 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
                         .map_err(|error| {
                             Error::config("store_snapshot_import", error.to_string())
                         })?;
-                manifest.validate(snapshot.json_docs.len().max(1))?;
+                manifest.validate(capacity.kv_max_entries)?;
                 if manifest.physical_key != doc.key {
                     return Err(Error::config(
                         "store_snapshot_import",
@@ -8516,9 +9832,24 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
             );
         }
     }
+    let typed_state = BackendTransactionState {
+        json: snapshot_json.clone(),
+        blobs: BTreeMap::new(),
+        events: Vec::new(),
+    };
+    validate_long_term_version_store_image(
+        &typed_state,
+        governed_state_budget.max_retained_long_term_revisions_per_owner,
+        "store_snapshot_import",
+    )?;
+    validate_runtime_skill_store_image(
+        &typed_state,
+        governed_state_budget.max_retained_runtime_skill_owners_per_scope,
+        "store_snapshot_import",
+    )?;
     crate::store_internal::transaction::validate_control_plane_manifest_set(
         &snapshot_json,
-        snapshot.json_docs.len().max(1),
+        capacity.kv_max_entries,
     )?;
     for document in evidence_documents.values() {
         let expected_claim = governed_evidence_source_ref_from_document(document)
@@ -8594,23 +9925,16 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
             &memory_space_id,
             &mounted_subject_id,
             bindings,
-            snapshot.json_docs.len().max(1),
+            capacity.kv_max_entries,
         )?;
     }
 
-    let blob_namespaces = BLOB_SNAPSHOT_NAMESPACES
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
+    validate_complete_snapshot_facet_graph_closure(&snapshot_json)?;
+
     let mut blob_keys = HashSet::new();
     let mut snapshot_blobs = BTreeMap::new();
     for blob in &snapshot.blobs {
-        if !blob_namespaces.contains(blob.namespace.as_str()) {
-            return Err(Error::config(
-                "store_snapshot_import",
-                format!("unknown blob namespace {}", blob.namespace),
-            ));
-        }
+        ensure_snapshot_blob_address(&blob.namespace, &blob.key, Some(&blob.value))?;
         if !blob_keys.insert((blob.namespace.clone(), blob.key.clone())) {
             return Err(Error::config(
                 "store_snapshot_import",
@@ -8629,6 +9953,7 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
 
     let mut event_ids = HashSet::new();
     for event in &snapshot.events {
+        event.validate_current_schema("store_snapshot_import")?;
         if !event_ids.insert(event.event_id.clone()) {
             return Err(Error::config(
                 "store_snapshot_import",
@@ -8639,10 +9964,272 @@ fn validate_snapshot_import_contract(snapshot: &StoreSnapshot) -> Result<()> {
     Ok(())
 }
 
+fn validate_complete_snapshot_facet_graph_closure(
+    snapshot_json: &BTreeMap<(String, String), serde_json::Value>,
+) -> Result<()> {
+    const SCOPE_BEARING_NAMESPACES: &[&str] = &[
+        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+        GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+        GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
+        GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
+        CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE,
+        MEMORY_FACET_INDEX_NAMESPACE,
+        MEMORY_FACET_POSTING_NAMESPACE,
+        MEMORY_GRAPH_MANIFEST_NAMESPACE,
+        MEMORY_GRAPH_REVISION_NAMESPACE,
+        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_INDEX_NAMESPACE,
+    ];
+    const FACET_INPUT_NAMESPACES: &[&str] = &[
+        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+        MEMORY_FACET_INDEX_NAMESPACE,
+        MEMORY_FACET_POSTING_NAMESPACE,
+    ];
+    const GRAPH_INPUT_NAMESPACES: &[&str] = &[
+        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+        MEMORY_GRAPH_MANIFEST_NAMESPACE,
+        MEMORY_GRAPH_REVISION_NAMESPACE,
+        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_INDEX_NAMESPACE,
+    ];
+
+    fn exact_graph_document_membership_closure(
+        snapshot_json: &BTreeMap<(String, String), serde_json::Value>,
+    ) -> Result<()> {
+        let actual = |namespace: &str| {
+            snapshot_json
+                .keys()
+                .filter_map(|(candidate_namespace, key)| {
+                    (candidate_namespace == namespace).then_some(key.clone())
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let expected_nodes = snapshot_json
+            .iter()
+            .filter(|((namespace, _), _)| namespace == MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE)
+            .map(|(_, value)| {
+                serde_json::from_value::<MemoryGraphNodeMembership>(value.clone())
+                    .map(|membership| membership.document_key)
+                    .map_err(|error| Error::config("store_snapshot_import", error.to_string()))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        let expected_edges = snapshot_json
+            .iter()
+            .filter(|((namespace, _), _)| namespace == MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE)
+            .map(|(_, value)| {
+                serde_json::from_value::<MemoryGraphEdgeMembership>(value.clone())
+                    .map(|membership| membership.document_key)
+                    .map_err(|error| Error::config("store_snapshot_import", error.to_string()))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        let expected_backlinks = snapshot_json
+            .iter()
+            .filter(|((namespace, _), _)| namespace == MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE)
+            .map(|(_, value)| {
+                serde_json::from_value::<MemoryGraphBacklinkMembership>(value.clone())
+                    .map(|membership| membership.document_key)
+                    .map_err(|error| Error::config("store_snapshot_import", error.to_string()))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        for (namespace, expected) in [
+            (MEMORY_GRAPH_NODE_NAMESPACE, expected_nodes),
+            (MEMORY_GRAPH_EDGE_NAMESPACE, expected_edges),
+            (MEMORY_GRAPH_BACKLINK_NAMESPACE, expected_backlinks),
+        ] {
+            if actual(namespace) != expected {
+                return Err(Error::config(
+                    "store_snapshot_import",
+                    format!(
+                        "complete snapshot {namespace} documents must exactly equal membership-owned keys"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn scope_subjects(namespace: &str, value: &serde_json::Value) -> Result<Vec<(String, String)>> {
+        let memory_space_id = value
+            .get("memory_space_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                Error::config(
+                    "store_snapshot_import",
+                    format!("{namespace} is missing its exact memory-space scope"),
+                )
+            })?;
+        let mut subjects = Vec::new();
+        for field in ["mounted_subject_id", "subject_id"] {
+            if let Some(subject_id) = value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                subjects.push(subject_id.to_string());
+            }
+        }
+        if let Some(values) = value.get("subject_ids") {
+            let values = values.as_array().ok_or_else(|| {
+                Error::config(
+                    "store_snapshot_import",
+                    format!("{namespace} subject_ids must be an exact array"),
+                )
+            })?;
+            for subject_id in values {
+                let subject_id = subject_id
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        Error::config(
+                            "store_snapshot_import",
+                            format!("{namespace} contains an invalid subject scope"),
+                        )
+                    })?;
+                subjects.push(subject_id.to_string());
+            }
+        }
+        subjects.sort();
+        subjects.dedup();
+        if subjects.is_empty() {
+            return Err(Error::config(
+                "store_snapshot_import",
+                format!("{namespace} is missing its exact mounted-subject scope"),
+            ));
+        }
+        Ok(subjects
+            .into_iter()
+            .map(|subject_id| (memory_space_id.to_string(), subject_id))
+            .collect())
+    }
+
+    fn matches_scope(
+        namespace: &str,
+        value: &serde_json::Value,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+    ) -> Result<bool> {
+        if !SCOPE_BEARING_NAMESPACES.contains(&namespace) {
+            return Ok(false);
+        }
+        Ok(scope_subjects(namespace, value)?
+            .iter()
+            .any(|(space, subject)| space == memory_space_id && subject == mounted_subject_id))
+    }
+
+    fn batch_for_scope(
+        snapshot_json: &BTreeMap<(String, String), serde_json::Value>,
+        namespaces: &[&str],
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        operation: &str,
+    ) -> Result<StoreMutationBatch> {
+        let mutations = snapshot_json
+            .iter()
+            .filter_map(|((namespace, key), value)| {
+                if !namespaces.contains(&namespace.as_str()) {
+                    return None;
+                }
+                Some(
+                    matches_scope(namespace, value, memory_space_id, mounted_subject_id).map(
+                        |matches| {
+                            matches.then(|| StoreMutation::PutJson {
+                                namespace: namespace.clone(),
+                                key: key.clone(),
+                                value: value.clone(),
+                                event_kind: MemoryStoreEventKind::MemoryMaintenance,
+                                plane: namespace.clone(),
+                                record_key: if namespace == GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE {
+                                    value
+                                        .get("document_id")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or(key)
+                                        .to_string()
+                                } else {
+                                    key.clone()
+                                },
+                            })
+                        },
+                    ),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(StoreMutationBatch {
+            transaction_id: format!("{operation}:{memory_space_id}:{mounted_subject_id}"),
+            operation: operation.to_string(),
+            scope: StoreEventScope::system(operation)
+                .with_memory_space(memory_space_id)
+                .with_subject(mounted_subject_id),
+            mutations,
+        })
+    }
+
+    exact_graph_document_membership_closure(snapshot_json)?;
+
+    let mut scopes = BTreeSet::new();
+    for ((namespace, _), value) in snapshot_json {
+        if SCOPE_BEARING_NAMESPACES.contains(&namespace.as_str()) {
+            scopes.extend(scope_subjects(namespace, value)?);
+        }
+    }
+    if scopes.is_empty() {
+        return Ok(());
+    }
+
+    let state = BackendTransactionState {
+        json: snapshot_json.clone(),
+        blobs: BTreeMap::new(),
+        events: Vec::new(),
+    };
+    for (memory_space_id, mounted_subject_id) in scopes {
+        let facet_batch = batch_for_scope(
+            snapshot_json,
+            FACET_INPUT_NAMESPACES,
+            &memory_space_id,
+            &mounted_subject_id,
+            "store_snapshot_facet_validation",
+        )?;
+        if !facet_batch.mutations.is_empty() {
+            validate_facet_post_image(&facet_batch, &state, &state)?;
+        }
+
+        let graph_batch = batch_for_scope(
+            snapshot_json,
+            GRAPH_INPUT_NAMESPACES,
+            &memory_space_id,
+            &mounted_subject_id,
+            "store_snapshot_graph_validation",
+        )?;
+        let graph_closure_present = graph_batch.mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                StoreMutation::PutJson { namespace, .. }
+                    if namespace.starts_with("memory_graph_")
+            )
+        });
+        if graph_closure_present {
+            validate_graph_post_image(&graph_batch, &state, &state, false)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_scoped_projection_governed_closure(
     snapshot: &StoreSnapshot,
-    memory_space_id: &str,
-    mounted_subject_id: &str,
+    projection_scope: &StoreScopedProjectionScope,
 ) -> Result<()> {
     let after = BackendTransactionState {
         json: snapshot
@@ -8654,17 +10241,20 @@ pub(crate) fn validate_scoped_projection_governed_closure(
         events: snapshot.events.clone(),
     };
     let before = after.clone();
-    let projection_scope = StoreScopedProjectionScope::new(memory_space_id, mounted_subject_id)?;
     crate::store_internal::transaction::validate_scoped_recall_manifest_documents(
         &after.json,
         &after.blobs,
-        &projection_scope,
+        projection_scope,
     )?;
     crate::store_internal::transaction::validate_scoped_control_plane_documents(
         &after.json,
-        &projection_scope,
+        projection_scope,
         snapshot.json_docs.len().max(1),
     )?;
+    let Some(mounted_subject_id) = projection_scope.mounted_subject_id() else {
+        return Ok(());
+    };
+    let memory_space_id = projection_scope.memory_space_id.as_str();
     let scope = StoreEventScope::system("memory_space_import_validation")
         .with_memory_space(memory_space_id)
         .with_subject(mounted_subject_id);
@@ -8690,7 +10280,9 @@ pub(crate) fn validate_scoped_projection_governed_closure(
     const FACET_CLOSURE_NAMESPACES: &[&str] =
         &[MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE];
     let governed_owner_present = snapshot.json_docs.iter().any(|doc| {
-        doc.namespace == "long_term" || doc.namespace == GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE
+        doc.namespace == crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE
+            || doc.namespace == crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE
+            || doc.namespace == GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE
     });
     let facet_batch = build_batch(
         "memory_space_import_facet_validation",
@@ -8727,14 +10319,41 @@ pub(crate) fn validate_scoped_projection_governed_closure(
     Ok(())
 }
 
-#[cfg(feature = "nonproduction-replay-harness")]
 fn enforce_snapshot_logical_budget(
     capacity: StoreCapacityBudget,
     snapshot: &StoreSnapshot,
 ) -> Result<()> {
+    let entry_count = snapshot
+        .json_docs
+        .len()
+        .checked_add(snapshot.blobs.len())
+        .ok_or_else(|| store_budget_error("snapshot entry count overflow"))?;
+    if entry_count > capacity.kv_max_entries {
+        return Err(store_budget_error(format!(
+            "snapshot entries {entry_count} exceed {}",
+            capacity.kv_max_entries
+        )));
+    }
+    if snapshot.events.len() > capacity.event_log_max_items {
+        return Err(store_budget_error(format!(
+            "snapshot event lineage items {} exceed {}",
+            snapshot.events.len(),
+            capacity.event_log_max_items
+        )));
+    }
+
+    let mut json_event_bytes = 0_usize;
     for doc in &snapshot.json_docs {
         enforce_logical_key_budget(capacity, &doc.namespace, &doc.key, "store_snapshot_import")?;
+        json_event_bytes = json_event_bytes
+            .checked_add(
+                serde_json::to_vec(&doc.value)
+                    .map_err(|error| Error::config("store_snapshot_import", error.to_string()))?
+                    .len(),
+            )
+            .ok_or_else(|| store_budget_error("snapshot JSON byte count overflow"))?;
     }
+    let mut blob_bytes = 0_usize;
     for blob in &snapshot.blobs {
         enforce_logical_key_budget(
             capacity,
@@ -8742,11 +10361,51 @@ fn enforce_snapshot_logical_budget(
             &blob.key,
             "store_snapshot_import",
         )?;
+        blob_bytes = blob_bytes
+            .checked_add(blob.value.len())
+            .ok_or_else(|| store_budget_error("snapshot blob byte count overflow"))?;
     }
     for event in &snapshot.events {
         enforce_event_key_budget(capacity, event, "store_snapshot_import")?;
+        json_event_bytes = json_event_bytes
+            .checked_add(
+                serde_json::to_vec(event)
+                    .map_err(|error| Error::config("store_snapshot_import", error.to_string()))?
+                    .len()
+                    .saturating_add(1),
+            )
+            .ok_or_else(|| store_budget_error("snapshot event byte count overflow"))?;
+    }
+    if json_event_bytes > capacity.snapshot_max_bytes {
+        return Err(store_budget_error(format!(
+            "snapshot JSON and event bytes {json_event_bytes} exceed {}",
+            capacity.snapshot_max_bytes
+        )));
+    }
+    if blob_bytes > capacity.blob_max_bytes {
+        return Err(store_budget_error(format!(
+            "snapshot blob bytes {blob_bytes} exceed {}",
+            capacity.blob_max_bytes
+        )));
     }
     Ok(())
+}
+
+fn build_runtime_event(
+    config: &StoreBackendConfig,
+    operation: &str,
+    timestamp_unix_secs: u64,
+) -> MemoryStoreEvent {
+    MemoryStoreEvent::new(
+        next_event_id(),
+        MemoryStoreEventKind::RuntimeLifecycle,
+        StoreEventScope::system(operation),
+        timestamp_unix_secs,
+    )
+    .with_payload("backend", config.backend.as_str())
+    .with_payload("profile", config.profile.as_str())
+    .with_payload("success", "true")
+    .with_payload("result", "ok")
 }
 
 fn tail<T>(mut values: Vec<T>, limit: usize) -> Vec<T> {
@@ -8811,6 +10470,90 @@ mod transaction_error_contract_tests {
     }
 
     #[test]
+    fn direct_and_transaction_lifecycle_materialization_share_typed_completion_fields() {
+        let profile = ProfileId::native_dev_full().expect("native dev-full profile");
+        let admission = bm_core::runtime::RuntimeLifecycleEngine.admit(
+            bm_core::runtime::RuntimeLifecycleOperation::Maintain,
+            bm_core::runtime::RuntimeLifecycleTrigger::SdkCall,
+            bm_core::runtime::RuntimeLifecycleModeInput {
+                profile,
+                pressure: bm_core::orchestrator::PressureLevel::Normal,
+                ..bm_core::runtime::RuntimeLifecycleModeInput::default()
+            },
+        );
+        let report = bm_core::runtime::RuntimeLifecycleReport::from_admission(admission, 10)
+            .finish_success(11, true, "maintenance_completed");
+        let event = bm_core::runtime::RuntimeLifecycleEvent::from_report(
+            bm_core::runtime::RuntimeLifecycleEventKind::RuntimeLifecycle,
+            bm_core::runtime::RuntimeLifecycleEffect::RunMaintenance,
+            &report,
+            11,
+        )
+        .with_payload("changed", "true");
+
+        let direct =
+            materialize_runtime_lifecycle_store_event(&event, RuntimeLifecycleStoreBinding::Direct)
+                .expect("direct lifecycle event");
+        let transaction = materialize_runtime_lifecycle_store_event(
+            &event,
+            RuntimeLifecycleStoreBinding::Transaction {
+                operation: "write.candidates",
+                transaction_id: "transaction-1",
+            },
+        )
+        .expect("transaction lifecycle event");
+
+        assert_eq!(
+            direct.payload.get("operation").map(String::as_str),
+            Some("maintain")
+        );
+        assert_eq!(
+            transaction.payload.get("operation").map(String::as_str),
+            Some("write.candidates")
+        );
+        assert_eq!(
+            direct.payload.get("runtime_operation").map(String::as_str),
+            Some("maintain")
+        );
+        assert_eq!(
+            transaction
+                .payload
+                .get("runtime_operation")
+                .map(String::as_str),
+            Some("maintain")
+        );
+        for key in [
+            "runtime_operation",
+            "trigger",
+            "disposition",
+            "effect",
+            "profile",
+            "mode",
+            "pressure",
+            "reason",
+            "success",
+            "result",
+            "result_summary",
+            "error_stage",
+            "changed",
+        ] {
+            assert_eq!(
+                direct.payload.get(key),
+                transaction.payload.get(key),
+                "{key}"
+            );
+        }
+        assert!(!direct.payload.contains_key("transaction_id"));
+        assert_eq!(
+            transaction
+                .payload
+                .get("transaction_id")
+                .map(String::as_str),
+            Some("transaction-1")
+        );
+    }
+
+    #[test]
     fn backend_conflict_busy_and_repair_stages_survive_the_production_coordinator() {
         for stage in [
             "memory_write_transaction_precondition_failed",
@@ -8823,7 +10566,42 @@ mod transaction_error_contract_tests {
     }
 
     #[test]
-    fn skill_transaction_timestamp_requires_one_canonical_runtime_authority() {
+    fn long_term_post_image_rejects_missing_request_pinned_retention_limit() {
+        let batch = StoreMutationBatch {
+            transaction_id: "long-term-pinned-retention".to_string(),
+            operation: "long_term.correct".to_string(),
+            scope: StoreEventScope::new("agent", "owner", "runtime", "test")
+                .with_memory_space("space")
+                .with_subject("subject"),
+            mutations: vec![StoreMutation::PutJson {
+                namespace:
+                    crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
+                        .to_string(),
+                key: "root".to_string(),
+                value: serde_json::json!({}),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
+                    .to_string(),
+                record_key: "root".to_string(),
+            }],
+        };
+
+        let error = validate_long_term_version_root_post_image(
+            &batch,
+            &BackendTransactionState::default(),
+            None,
+        )
+        .expect_err("locked post-image validation must not derive its own retention cap");
+
+        assert_eq!(
+            error.stage(),
+            "memory_write_transaction_long_term_root_post_image_invalid"
+        );
+        assert!(error.to_string().contains("request-pinned retention limit"));
+    }
+
+    #[test]
+    fn generic_skill_transaction_uses_the_normal_transaction_clock_contract() {
         let scope = StoreEventScope::new("agent", "owner", "console", "chat")
             .with_memory_space("space")
             .with_subject("subject");
@@ -8840,9 +10618,11 @@ mod transaction_error_contract_tests {
                 record_key: "runtime_skill__release".to_string(),
             }],
         };
-        let missing = canonical_transaction_timestamp(&skill_batch, None)
-            .expect_err("skill timestamp must not fall back to wall clock");
-        assert_eq!(missing.stage(), "runtime_skill_recall_manifest");
+        assert!(
+            canonical_transaction_timestamp(&skill_batch, None)
+                .expect("generic skills use the normal transaction clock")
+                > 0
+        );
         assert_eq!(
             canonical_transaction_timestamp(&skill_batch, Some(1_800_000_001))
                 .expect("explicit runtime clock"),
@@ -8851,12 +10631,12 @@ mod transaction_error_contract_tests {
 
         let mut mismatched = skill_batch;
         mismatched.mutations.push(StoreMutation::AppendEvent {
-            event: MemoryStoreEvent::new(
+            event: Box::new(MemoryStoreEvent::new(
                 "event-skill-edit",
                 MemoryStoreEventKind::MemoryWrite,
                 scope,
                 1_800_000_000,
-            ),
+            )),
         });
         let mismatch = canonical_transaction_timestamp(&mismatched, Some(1_800_000_001))
             .expect_err("two timestamp authorities must not diverge");
@@ -8925,20 +10705,32 @@ mod transaction_error_contract_tests {
     struct ControlledResourceProbe {
         ttl_ms: u64,
         memory_available_bytes: AtomicU64,
+        firmware_memory: bool,
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
     impl ControlledResourceProbe {
-        fn new(ttl_ms: u64) -> Self {
+        fn new(ttl_ms: u64, firmware_memory: bool) -> Self {
             Self {
                 ttl_ms,
-                memory_available_bytes: AtomicU64::new(512 * 1024 * 1024),
+                memory_available_bytes: AtomicU64::new(if firmware_memory {
+                    512 * 1024
+                } else {
+                    512 * 1024 * 1024
+                }),
+                firmware_memory,
             }
         }
 
         fn contract_memory_budget(&self) {
-            self.memory_available_bytes
-                .store(128 * 1024 * 1024, Ordering::Release);
+            self.memory_available_bytes.store(
+                if self.firmware_memory {
+                    128 * 1024
+                } else {
+                    128 * 1024 * 1024
+                },
+                Ordering::Release,
+            );
         }
     }
 
@@ -8951,14 +10743,17 @@ mod transaction_error_contract_tests {
                 stale: false,
                 pressure: PressureLevel::Normal,
                 available_parallelism: Some(4),
-                memory_total_bytes: Some(1024 * 1024 * 1024),
-                memory_available_bytes: Some(self.memory_available_bytes.load(Ordering::Acquire)),
-                internal_heap_free_bytes: Some(512 * 1024),
-                internal_heap_minimum_free_bytes: Some(256 * 1024),
-                internal_heap_largest_block_bytes: Some(128 * 1024),
-                psram_total_bytes: Some(8 * 1024 * 1024),
-                psram_free_bytes: Some(4 * 1024 * 1024),
-                psram_largest_block_bytes: Some(2 * 1024 * 1024),
+                memory_total_bytes: (!self.firmware_memory).then_some(1024 * 1024 * 1024),
+                memory_available_bytes: (!self.firmware_memory)
+                    .then(|| self.memory_available_bytes.load(Ordering::Acquire)),
+                internal_heap_free_bytes: self
+                    .firmware_memory
+                    .then(|| self.memory_available_bytes.load(Ordering::Acquire)),
+                internal_heap_minimum_free_bytes: self.firmware_memory.then_some(64 * 1024),
+                internal_heap_largest_block_bytes: self.firmware_memory.then_some(64 * 1024),
+                psram_total_bytes: self.firmware_memory.then_some(8 * 1024 * 1024),
+                psram_free_bytes: self.firmware_memory.then_some(4 * 1024 * 1024),
+                psram_largest_block_bytes: self.firmware_memory.then_some(2 * 1024 * 1024),
                 storage_total_bytes: Some(1024 * 1024 * 1024),
                 storage_available_bytes: Some(512 * 1024 * 1024),
                 unavailable_reason: None,
@@ -8999,7 +10794,8 @@ mod transaction_error_contract_tests {
         configs
             .into_iter()
             .map(|(name, config)| {
-                let probe = Arc::new(ControlledResourceProbe::new(ttl_ms));
+                let firmware_memory = name == "embedded";
+                let probe = Arc::new(ControlledResourceProbe::new(ttl_ms, firmware_memory));
                 let platform = StorePlatform::open_with_nonproduction_probe(
                     config,
                     Arc::clone(&probe) as Arc<dyn RuntimeResourceProbe>,
@@ -9027,7 +10823,7 @@ mod transaction_error_contract_tests {
     #[cfg(feature = "nonproduction-replay-harness")]
     fn empty_scoped_replace() -> StoreScopedProjectionReplaceRequest {
         StoreScopedProjectionReplaceRequest {
-            scope: StoreScopedProjectionScope::new("space:admission", "subject:admission")
+            scope: StoreScopedProjectionScope::subject("space:admission", "subject:admission")
                 .expect("scope"),
             json_namespaces: Vec::new(),
             json_docs: Vec::new(),

@@ -23,8 +23,11 @@ use bm_ollama_transparent::{
     TransitionOutcome, TransitionStep, TransitionStepReport,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
-    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    default_agent_subject_id, LongTermMemoryKind, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryCapabilityPolicy, MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemorySemanticJudgmentSource, MemoryWriteCandidate,
+    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
     StoreBackendConfig,
 };
 use serde_json::Value;
@@ -53,6 +56,30 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
+fn runtime_skill_http_write_body(name: &str, summary: &str, content: &str) -> String {
+    serde_json::json!({
+        "name": name,
+        "topic": "release",
+        "title": "Release guard",
+        "summary": summary,
+        "content": content,
+        "source": "manual",
+        "citations": ["http-test"],
+        "owning_scope": {
+            "kind": "subject",
+            "mounted_subject_id": default_agent_subject_id("http-console-agent"),
+        },
+        "creation_ref": RuntimeSkillCreationRef::ReplayPromotion {
+            candidate_ref: format!("http-test:{name}"),
+            verification_receipt_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+        },
+        "privacy_class": MemoryPrivacyClass::SharedWithSubject,
+    })
+    .to_string()
+}
+
 fn runtime_with_file_store(path: &Path) -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
@@ -78,28 +105,39 @@ fn runtime_with_file_store(path: &Path) -> EntryRuntime {
 }
 
 fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "transparent ollama metrics".to_string(),
+    };
     runtime
         .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "transparent_ollama_metrics".to_string(),
-                topic: "transparent ollama metrics".to_string(),
-                title: "Transparent Ollama metrics".to_string(),
-                summary: "Transparent Ollama memory activity must be visible in overview."
-                    .to_string(),
-                content:
-                    "1. read transparent Ollama store events\n2. merge them into Console Overview\n3. report writes and projection hits from the shared telemetry stream"
-                        .to_string(),
-                citations: vec!["http console overview contract".to_string()],
-                source_chat_id: Some("chat-1".to_string()),
-                observed_at: 1_800_000_000,
+        .write(MemoryWriteRequest::Candidates {
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: "transparent-ollama-metrics".to_string(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                content: MemoryCandidateContent::Text {
+                    topic: "transparent ollama metrics".to_string(),
+                    body: "Console metrics consume the SDK/Core event report.".to_string(),
+                    keywords: vec!["console".to_string(), "metrics".to_string()],
+                },
+                evidence_refs: vec!["http console overview contract".to_string()],
+                canonical_entities: Vec::new(),
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::LlmGovernance,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "http_console_metrics_fixture".to_string(),
+                }),
             }],
-            source: RuntimeSkillWriteSource::Manual,
+            runtime_skill_owning_scope: None,
         })
         .expect("write");
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should transparent Ollama metrics appear?".to_string(),
             system_max_len: 4096,
@@ -350,18 +388,35 @@ fn console_workbench_report_route_exposes_runtime_report_summaries() {
         report["projectionInspector"]["disclosureIntegrityPassed"],
         true
     );
+    let report_object = report.as_object().expect("workbench report object");
+    assert!(!report_object.contains_key("vaultMigration"));
+    let archive = &report["archiveRestore"];
     #[cfg(feature = "nonproduction-replay-harness")]
     {
-        assert_eq!(report["vaultMigration"]["preflightPassed"], false);
-        assert_eq!(report["vaultMigration"]["status"]["status"], "limited");
-        assert!(report["vaultMigration"]["preflightFailures"]
-            .as_array()
-            .expect("vault preflight failures")
-            .iter()
-            .any(|failure| failure == "scoped_projection_does_not_rewrite_identity"));
+        assert_eq!(archive["status"]["status"], "ready");
+        assert_eq!(archive["status"]["available"], true);
+        assert_eq!(archive["status"]["reason"], "typed_archive_export_ready");
+        assert!(archive["archiveRoot"].is_object());
     }
     #[cfg(not(feature = "nonproduction-replay-harness"))]
-    assert_eq!(report["vaultMigration"]["preflightPassed"], false);
+    {
+        assert_eq!(archive["status"]["status"], "blocked");
+        assert_eq!(archive["status"]["available"], false);
+        assert_eq!(
+            archive["status"]["reason"],
+            "config: export.memory_space is not visible for current profile (stage: memory_runtime_operation)"
+        );
+        assert!(archive["archiveRoot"].is_null());
+    }
+    assert_eq!(archive["scope"]["kind"], "subject");
+    assert_eq!(archive["scope"]["memory_space_id"], "space:owner-default");
+    assert_eq!(
+        archive["scope"]["mounted_subject_id"],
+        "agent:http-console-agent"
+    );
+    assert_eq!(archive["privateMaterialPolicy"], "exclude_private");
+    let archive_object = archive.as_object().expect("archive summary object");
+    assert_eq!(archive_object.len(), 4);
 }
 
 #[test]
@@ -749,22 +804,21 @@ fn console_overview_reflects_real_memory_operations() {
     let before: Value = serde_json::from_str(&before.body).expect("overview before json");
     assert_eq!(before["overview"]["writesToday"]["value"], "0");
 
+    let write_body = runtime_skill_http_write_body(
+        "release_patch_flow",
+        "Patch the release and verify the result",
+        "1. inspect release diff\n2. patch rollback guards\n3. verify logs",
+    );
     let write = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json(
-            "/memory/write",
-            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"manual"}"#,
-        ),
+        HttpRuntimeRequest::post_json("/memory/write", &write_body),
     )
     .expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);
 
     let duplicate_write = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json(
-            "/memory/write",
-            r#"{"name":"release_patch_flow","topic":"release_patch_flow","title":"Release patch flow","summary":"Patch the release and verify the result","content":"1. inspect release diff\n2. patch rollback guards\n3. verify logs","source":"manual"}"#,
-        ),
+        HttpRuntimeRequest::post_json("/memory/write", &write_body),
     )
     .expect("duplicate write");
     assert_eq!(duplicate_write.status_code, 200, "{}", duplicate_write.body);
@@ -773,7 +827,7 @@ fn console_overview_reflects_real_memory_operations() {
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/recall",
-            r#"{"query":"release_patch_flow","limit":4}"#,
+            r#"{"temporal_operation":{"kind":"current"},"query":"release_patch_flow","limit":4}"#,
         ),
     )
     .expect("recall");
@@ -783,8 +837,12 @@ fn console_overview_reflects_real_memory_operations() {
         handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
             .expect("overview after");
     let after: Value = serde_json::from_str(&after.body).expect("overview after json");
+    let safe_overview_json = after.to_string();
+    assert!(!safe_overview_json.contains("release_patch_flow"));
+    assert!(!safe_overview_json.contains("Patch the release and verify the result"));
+    assert!(!safe_overview_json.contains("patch rollback guards"));
     assert_eq!(after["overview"]["writesToday"]["value"], "1");
-    assert_eq!(after["overview"]["recall"]["value"], "100.0%");
+    assert_eq!(after["overview"]["recall"]["value"], "0.0%");
     assert!(after["overview"]["recentEvents"]
         .as_array()
         .expect("events")
@@ -792,10 +850,19 @@ fn console_overview_reflects_real_memory_operations() {
         .any(|event| event["text"]
             .as_str()
             .is_some_and(|text| text.contains("Memory write accepted"))));
+    let recent_events = after["overview"]["recentEvents"]
+        .as_array()
+        .expect("events");
+    assert!(recent_events
+        .iter()
+        .any(|event| event["text"] == "Recall completed"));
+    assert!(recent_events.iter().all(|event| event["text"]
+        .as_str()
+        .is_some_and(|text| !text.contains("release_patch_flow"))));
 }
 
 #[test]
-fn console_overview_aggregates_extra_memory_event_store_paths() {
+fn console_overview_aggregates_one_external_memory_event_authority_root() {
     let transparent_store_path = test_store_dir("transparent-ollama-events");
     let transparent_runtime = runtime_with_file_store(&transparent_store_path);
     seed_memory_runtime_activity(&transparent_runtime);
@@ -814,10 +881,10 @@ fn console_overview_aggregates_extra_memory_event_store_paths() {
     assert_eq!(overview.status_code, 200, "{}", overview.body);
     let body: Value = serde_json::from_str(&overview.body).expect("overview json");
     assert_eq!(body["overview"]["writesToday"]["value"], "1");
-    assert_eq!(body["overview"]["recall"]["value"], "100.0%");
+    assert_eq!(body["overview"]["recall"]["value"], "0.0%");
     assert_eq!(
         body["overview"]["recall"]["desc"],
-        "1 recall requests / 1 with hits"
+        "0 recall requests / 0 with hits"
     );
     assert!(body["overview"]["projection"]["desc"]
         .as_str()
@@ -833,7 +900,44 @@ fn console_overview_aggregates_extra_memory_event_store_paths() {
 }
 
 #[test]
-fn http_parser_accepts_delete_for_console_skill_routes() {
+fn console_overview_rejects_metric_authority_roots_beyond_the_active_budget() {
+    let transparent_store_path = test_store_dir("transparent-ollama-events-over-budget");
+    let transparent_runtime = runtime_with_file_store(&transparent_store_path);
+    seed_memory_runtime_activity(&transparent_runtime);
+
+    let runtime = runtime();
+    let event_store_paths = vec![transparent_store_path.clone(), transparent_store_path];
+    let services = HttpConsoleServices::none().with_memory_event_store_paths(&event_store_paths);
+
+    let error = handle_http_in_process_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/overview"),
+        services,
+    )
+    .expect_err("raw authority roots beyond the active budget must fail closed");
+
+    assert_eq!(error.stage(), "runtime_metrics_source_store_capacity");
+}
+
+#[test]
+fn console_overview_fails_closed_when_external_metric_evidence_is_unreadable() {
+    let runtime = runtime();
+    let missing_store = test_store_dir("missing-metric-evidence");
+    let event_store_paths = vec![missing_store];
+    let services = HttpConsoleServices::none().with_memory_event_store_paths(&event_store_paths);
+
+    let error = handle_http_in_process_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::get("/console/overview"),
+        services,
+    )
+    .expect_err("unreadable metric evidence must not become a zero report");
+
+    assert_eq!(error.stage(), "runtime_metrics_event_store_root");
+}
+
+#[test]
+fn legacy_name_based_console_skill_route_is_not_available() {
     let runtime = runtime();
     let response = handle_http_in_process_request(
         &runtime,
@@ -848,7 +952,7 @@ fn http_parser_accepts_delete_for_console_skill_routes() {
         },
     )
     .expect("delete");
-    assert_eq!(response.status_code, 404);
+    assert_eq!(response.status_code, 405);
 }
 
 #[test]
@@ -869,12 +973,14 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
         create_forbidden.body
     );
 
+    let seed_body = runtime_skill_http_write_body(
+        "runtime_skill__release",
+        "Check artifacts before publishing.",
+        "1. run gates\n2. inspect artifacts\n3. dry run publish",
+    );
     let seeded = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json(
-            "/memory/write",
-            r#"{"name":"runtime_skill__release","topic":"release","title":"Release guard","summary":"Check artifacts before publishing.","content":"1. run gates\n2. inspect artifacts\n3. dry run publish","source":"manual","citations":["http-test"]}"#,
-        ),
+        HttpRuntimeRequest::post_json("/memory/write", &seed_body),
     )
     .expect("seed runtime skill");
     assert_eq!(seeded.status_code, 200, "{}", seeded.body);
@@ -884,46 +990,95 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     assert_eq!(list.status_code, 200);
     assert!(list.body.contains("Release guard"));
     assert!(list.body.contains("runtimeLearned"));
+    let list_body: Value = serde_json::from_str(&list.body).expect("list json");
+    let locator = list_body["skills"]["skills"][0]["locator"].clone();
+    assert!(locator.get("owner_revision_ref").is_none());
 
     let detail = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::get("/console/skills/runtime_skill__release"),
+        HttpRuntimeRequest::post_json("/console/skills/detail", locator.to_string()),
     )
     .expect("detail");
     assert_eq!(detail.status_code, 200, "{}", detail.body);
     assert!(detail.body.contains("run gates"));
 
+    let mut missing_locator = locator.clone();
+    missing_locator["owner_id"] = Value::String(format!("runtime_skill:sha256:{}", "0".repeat(64)));
+    let missing = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/skills/detail", missing_locator.to_string()),
+    )
+    .expect("missing detail response");
+    assert_eq!(missing.status_code, 404, "{}", missing.body);
+
+    let mut invalid_locator = locator.clone();
+    invalid_locator["owner_revision_ref"] = serde_json::json!({
+        "owner_ref": {
+            "owner_plane": "long_term",
+            "owner_id": "legacy-raw-owner"
+        },
+        "owner_revision": 1
+    });
+    let invalid = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/skills/detail", invalid_locator.to_string()),
+    )
+    .expect_err("legacy raw locator must fail strict JSON decoding");
+    assert_eq!(invalid.stage(), "console_json");
+
+    let edit_body = serde_json::json!({
+        "locator": locator,
+        "title": "Release guard",
+        "topic": "release",
+        "summary": "Check artifacts and changelog before publishing.",
+        "procedure": "1. run gates\n2. inspect artifacts\n3. inspect changelog",
+        "editReason": "http_test_edit",
+    })
+    .to_string();
     let edited = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::patch_json(
-            "/console/skills/runtime_skill__release",
-            r#"{"title":"Release guard","topic":"release","summary":"Check artifacts and changelog before publishing.","procedure":"1. run gates\n2. inspect artifacts\n3. inspect changelog","citations":["http-test-edit"]}"#,
-        ),
+        HttpRuntimeRequest::patch_json("/console/skills", &edit_body),
     )
     .expect("edit");
     assert_eq!(edited.status_code, 200, "{}", edited.body);
+    let edited_body: Value = serde_json::from_str(&edited.body).expect("edit json");
+    let edited_locator = edited_body["mutation"]["currentLocator"].clone();
 
+    let stale_edit = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::patch_json("/console/skills", &edit_body),
+    )
+    .expect("stale edit response");
+    assert_eq!(stale_edit.status_code, 409, "{}", stale_edit.body);
+
+    let disabled_body = serde_json::json!({
+        "locator": edited_locator,
+        "enabled": false,
+    })
+    .to_string();
     let disabled = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::patch_json(
-            "/console/skills/runtime_skill__release/enabled",
-            r#"{"enabled":false}"#,
-        ),
+        HttpRuntimeRequest::patch_json("/console/skills/enabled", &disabled_body),
     )
     .expect("disable");
     assert_eq!(disabled.status_code, 200, "{}", disabled.body);
+    let disabled_body: Value = serde_json::from_str(&disabled.body).expect("disable json");
+    let disabled_locator = disabled_body["mutation"]["currentLocator"].clone();
 
-    let deleted = handle_http_in_process_request(
+    let retired = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::delete("/console/skills/runtime_skill__release"),
+        HttpRuntimeRequest::post_json("/console/skills/retire", disabled_locator.to_string()),
     )
-    .expect("delete");
-    assert_eq!(deleted.status_code, 200, "{}", deleted.body);
+    .expect("retire");
+    assert_eq!(retired.status_code, 200, "{}", retired.body);
+    let retired_body: Value = serde_json::from_str(&retired.body).expect("retire json");
+    let retired_locator = retired_body["mutation"]["currentLocator"].clone();
 
-    let detail_after_delete = handle_http_in_process_request(
+    let detail_after_retire = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::get("/console/skills/runtime_skill__release"),
+        HttpRuntimeRequest::post_json("/console/skills/detail", retired_locator.to_string()),
     )
-    .expect("detail after delete");
-    assert_eq!(detail_after_delete.status_code, 404);
+    .expect("detail after retire");
+    assert_eq!(detail_after_retire.status_code, 200);
+    assert!(detail_after_retire.body.contains("\"status\":\"retired\""));
 }

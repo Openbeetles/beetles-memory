@@ -6,16 +6,18 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const RECALL_INDEX_SCHEMA_VERSION: u32 = 1;
 pub(crate) const CONVERSATION_RECALL_MANIFEST_NAMESPACE: &str = "conversation_recall_manifests";
+pub(crate) const CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE: &str = "conversation_transcript_pages";
+pub(crate) const CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE: &str =
+    "conversation_transcript_aux_manifests";
 pub(crate) const ARCHIVE_RECALL_MANIFEST_NAMESPACE: &str = "archive_recall_manifests";
-pub(crate) const RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE: &str = "runtime_skill_recall_manifests";
 pub(crate) const CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE: &str =
     "continuity_capsule_scope_indexes";
 pub(crate) const ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE: &str = "active_task_run_by_chat_indexes";
 pub(crate) const TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE: &str = "task_learning_by_chat_indexes";
 
-pub(crate) const MAX_CONVERSATION_RECALL_ENTRIES: usize = 512;
+pub(crate) const CONVERSATION_TRANSCRIPT_PAGE_SIZE: usize = 64;
+pub(crate) const MAX_CONVERSATION_TRANSCRIPT_AUX_ENTRIES: usize = 128;
 pub(crate) const MAX_ARCHIVE_RECALL_ENTRIES: usize = 512;
-pub(crate) const MAX_RUNTIME_SKILL_RECALL_ENTRIES: usize = 128;
 pub(crate) const MAX_CONTINUITY_SCOPE_RECALL_ENTRIES: usize = 16;
 pub(crate) const MAX_ACTIVE_TASK_RUN_RECALL_ENTRIES: usize = 16;
 pub(crate) const MAX_TASK_LEARNING_RECALL_ENTRIES: usize = 64;
@@ -240,16 +242,255 @@ macro_rules! typed_recall_index {
     };
 }
 
+fn conversation_page_shape(turn_count: u64) -> Result<(u64, u64, usize)> {
+    if turn_count == 0 {
+        return Ok((0, 0, 0));
+    }
+    let page_size = u64::try_from(CONVERSATION_TRANSCRIPT_PAGE_SIZE).map_err(|_| {
+        Error::config(
+            "conversation_transcript_head",
+            "page size does not fit the sequence domain",
+        )
+    })?;
+    let page_count = turn_count.saturating_add(page_size - 1) / page_size;
+    let active_page_id = page_count.saturating_sub(1);
+    let active_page_entry_count = usize::try_from(
+        (turn_count.saturating_sub(1) % page_size).saturating_add(1),
+    )
+    .map_err(|_| {
+        Error::config(
+            "conversation_transcript_head",
+            "active page entry count does not fit the platform",
+        )
+    })?;
+    Ok((page_count, active_page_id, active_page_entry_count))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conversation_head_digest(
+    revision: u64,
+    memory_space_id: &str,
+    mounted_subject_id: &str,
+    channel_id: &str,
+    conversation_id: &str,
+    turn_count: u64,
+    last_sequence: u64,
+    page_count: u64,
+    active_page_id: u64,
+    active_page_entry_count: usize,
+) -> String {
+    let mut hasher = Sha256::new();
+    for field in [
+        "conversation_transcript_head_v2".to_string(),
+        RECALL_INDEX_SCHEMA_VERSION.to_string(),
+        revision.to_string(),
+        memory_space_id.to_string(),
+        mounted_subject_id.to_string(),
+        channel_id.to_string(),
+        conversation_id.to_string(),
+        turn_count.to_string(),
+        last_sequence.to_string(),
+        page_count.to_string(),
+        active_page_id.to_string(),
+        active_page_entry_count.to_string(),
+    ] {
+        hash_field(&mut hasher, field.as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConversationRecallManifest {
+    pub schema_version: u32,
+    pub physical_key: String,
+    pub revision: u64,
+    pub memory_space_id: String,
+    pub mounted_subject_id: String,
+    pub channel_id: String,
+    pub conversation_id: String,
+    pub turn_count: u64,
+    pub last_sequence: u64,
+    pub page_count: u64,
+    pub active_page_id: u64,
+    pub active_page_entry_count: usize,
+    pub head_digest: String,
+}
+
+impl ConversationRecallManifest {
+    pub(crate) fn build(
+        revision: u64,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        channel_id: &str,
+        conversation_id: &str,
+        turn_count: u64,
+        last_sequence: u64,
+    ) -> Result<Self> {
+        for (value, name) in [
+            (memory_space_id, "memory_space_id"),
+            (mounted_subject_id, "mounted_subject_id"),
+            (channel_id, "channel_id"),
+            (conversation_id, "conversation_id"),
+        ] {
+            require_component(value, name)?;
+        }
+        if revision == 0 {
+            return Err(Error::config(
+                "conversation_transcript_head",
+                "revision must be greater than zero",
+            ));
+        }
+        let (page_count, active_page_id, active_page_entry_count) =
+            conversation_page_shape(turn_count)?;
+        let physical_key = recall_index_physical_key(
+            Self::KIND,
+            &[
+                memory_space_id,
+                mounted_subject_id,
+                channel_id,
+                conversation_id,
+            ],
+        )?;
+        let head_digest = conversation_head_digest(
+            revision,
+            memory_space_id,
+            mounted_subject_id,
+            channel_id,
+            conversation_id,
+            turn_count,
+            last_sequence,
+            page_count,
+            active_page_id,
+            active_page_entry_count,
+        );
+        let value = Self {
+            schema_version: RECALL_INDEX_SCHEMA_VERSION,
+            physical_key,
+            revision,
+            memory_space_id: memory_space_id.to_string(),
+            mounted_subject_id: mounted_subject_id.to_string(),
+            channel_id: channel_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            turn_count,
+            last_sequence,
+            page_count,
+            active_page_id,
+            active_page_entry_count,
+            head_digest,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+
+impl TypedRecallIndex for ConversationRecallManifest {
+    const KIND: &'static str = "conversation_recall_manifest_v1";
+    const NAMESPACE: &'static str = CONVERSATION_RECALL_MANIFEST_NAMESPACE;
+    const MAX_ENTRIES: usize = 0;
+
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn physical_key(&self) -> &str {
+        &self.physical_key
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn entry_count(&self) -> usize {
+        0
+    }
+
+    fn entries(&self) -> &[RecallIndexAddress] {
+        &[]
+    }
+
+    fn entries_digest(&self) -> &str {
+        &self.head_digest
+    }
+
+    fn expected_physical_key(&self) -> Result<String> {
+        recall_index_physical_key(
+            Self::KIND,
+            &[
+                &self.memory_space_id,
+                &self.mounted_subject_id,
+                &self.channel_id,
+                &self.conversation_id,
+            ],
+        )
+    }
+
+    fn scope_digest_parts(&self) -> Vec<&str> {
+        vec![
+            &self.memory_space_id,
+            &self.mounted_subject_id,
+            &self.channel_id,
+            &self.conversation_id,
+        ]
+    }
+
+    fn validate(&self) -> Result<()> {
+        let (page_count, active_page_id, active_page_entry_count) =
+            conversation_page_shape(self.turn_count)?;
+        let expected_digest = conversation_head_digest(
+            self.revision,
+            &self.memory_space_id,
+            &self.mounted_subject_id,
+            &self.channel_id,
+            &self.conversation_id,
+            self.turn_count,
+            self.last_sequence,
+            self.page_count,
+            self.active_page_id,
+            self.active_page_entry_count,
+        );
+        if self.schema_version != RECALL_INDEX_SCHEMA_VERSION
+            || self.revision == 0
+            || self.physical_key != self.expected_physical_key()?
+            || self.last_sequence != self.turn_count
+            || self.page_count != page_count
+            || self.active_page_id != active_page_id
+            || self.active_page_entry_count != active_page_entry_count
+            || self.head_digest != expected_digest
+        {
+            return Err(Error::config(
+                "conversation_transcript_head",
+                "head schema, scope, sequence, page shape, or digest is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
 typed_recall_index!(
-    ConversationRecallManifest,
-    "conversation_recall_manifest_v1",
-    CONVERSATION_RECALL_MANIFEST_NAMESPACE,
-    MAX_CONVERSATION_RECALL_ENTRIES,
+    ConversationTranscriptPageIndex,
+    "conversation_transcript_page_v1",
+    CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE,
+    CONVERSATION_TRANSCRIPT_PAGE_SIZE,
     {
         memory_space_id,
         mounted_subject_id,
         channel_id,
-        conversation_id
+        conversation_id,
+        page_id
+    }
+);
+typed_recall_index!(
+    ConversationTranscriptAuxManifest,
+    "conversation_transcript_aux_manifest_v1",
+    CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE,
+    MAX_CONVERSATION_TRANSCRIPT_AUX_ENTRIES,
+    {
+        memory_space_id,
+        mounted_subject_id,
+        channel_id,
+        conversation_id,
+        turn_id
     }
 );
 typed_recall_index!(
@@ -258,13 +499,6 @@ typed_recall_index!(
     ARCHIVE_RECALL_MANIFEST_NAMESPACE,
     MAX_ARCHIVE_RECALL_ENTRIES,
     { memory_space_id, mounted_subject_id }
-);
-typed_recall_index!(
-    RuntimeSkillRecallManifest,
-    "runtime_skill_recall_manifest_v1",
-    RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE,
-    MAX_RUNTIME_SKILL_RECALL_ENTRIES,
-    { memory_space_id, agent_id }
 );
 typed_recall_index!(
     ContinuityCapsuleScopeIndex,
@@ -442,8 +676,10 @@ mod tests {
 
     #[test]
     fn typed_index_rejects_old_schema_and_digest_drift() {
-        let address = RecallIndexAddress::blob("skills", "a.md", 1, 10, b"body").unwrap();
-        let index = RuntimeSkillRecallManifest::build(1, "space", "agent", [address]).unwrap();
+        let address =
+            RecallIndexAddress::json("owner", "key", 1, 10, &serde_json::json!({"body": true}))
+                .unwrap();
+        let index = ArchiveRecallManifest::build(1, "space", "subject", [address]).unwrap();
         index.validate().unwrap();
 
         let mut old = index.clone();
@@ -463,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_typed_indexes_enforce_key_count_and_digest() {
+    fn all_typed_indexes_enforce_key_count_and_digest() {
         let address =
             RecallIndexAddress::json("owner", "key", 1, 9, &serde_json::json!({"value": 1}))
                 .unwrap();
@@ -471,12 +707,36 @@ mod tests {
             Box::new({
                 let address = address.clone();
                 move || {
-                    ConversationRecallManifest::build(
+                    let _ = &address;
+                    ConversationRecallManifest::build(1, "ms", "subject", "ch", "cv", 1, 1)?
+                        .validate()
+                }
+            }),
+            Box::new({
+                let address = address.clone();
+                move || {
+                    ConversationTranscriptPageIndex::build(
                         1,
                         "ms",
                         "subject",
                         "ch",
                         "cv",
+                        "00000000000000000000",
+                        [address.clone()],
+                    )?
+                    .validate()
+                }
+            }),
+            Box::new({
+                let address = address.clone();
+                move || {
+                    ConversationTranscriptAuxManifest::build(
+                        1,
+                        "ms",
+                        "subject",
+                        "ch",
+                        "cv",
+                        "turn-1",
                         [address.clone()],
                     )?
                     .validate()
@@ -486,13 +746,6 @@ mod tests {
                 let address = address.clone();
                 move || {
                     ArchiveRecallManifest::build(1, "ms", "subject", [address.clone()])?.validate()
-                }
-            }),
-            Box::new({
-                let address = address.clone();
-                move || {
-                    RuntimeSkillRecallManifest::build(1, "ms", "agent", [address.clone()])?
-                        .validate()
                 }
             }),
             Box::new({

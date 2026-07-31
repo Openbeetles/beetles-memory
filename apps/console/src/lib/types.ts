@@ -11,12 +11,13 @@ export type StatusKind =
   | "active"
   | "stale"
   | "low_value"
+  | "superseded"
   | "retired";
 export type Lang = "zh-CN" | "en";
 export type Theme = "light" | "dark";
 export type TransportId = "http" | "wss" | "mcp" | "a2a" | "llm-gateway";
 export type DeviceConfirmAction = "rotate_key" | "disable";
-export type SkillModal = "edit" | "delete" | null;
+export type SkillModal = "edit" | "retire" | null;
 export type SkillStatusFilter = "all" | "active" | "disabled" | "retired";
 
 export type Page = { id: PageId; label: string; count?: string; eyebrow: string; title: string };
@@ -272,7 +273,7 @@ export type ConsoleApiWorkbenchBenchmarkWall = {
 export type ConsoleApiWorkbenchRecallInspector = {
   status: ConsoleApiWorkbenchStatus;
   query: string;
-  proceduralHits: number;
+  proceduralDeliveryReports: number;
   runtimeSkillSelected: number;
   workingSelectedSurfaces: number;
   graphNodes: number;
@@ -309,7 +310,8 @@ export type ConsoleApiWorkbenchProjectionInspector = {
   agentToolRejections: number;
 };
 export type ConsoleApiWorkbenchSkillRef = {
-  name: string;
+  locator: ConsoleApiRuntimeSkillOwnerLocator;
+  ownerId: string;
   title: string;
   topic: string;
   status: StatusKind;
@@ -323,19 +325,36 @@ export type ConsoleApiWorkbenchProceduralEvolution = {
   disabled: number;
   topSkills: ConsoleApiWorkbenchSkillRef[];
 };
-export type ConsoleApiWorkbenchVaultMigration = {
+export type ConsoleApiMemoryArchiveScope =
+  | {
+      kind: "subject";
+      memory_space_id: string;
+      mounted_subject_id: string;
+    }
+  | {
+      kind: "shared_program";
+      memory_space_id: string;
+    };
+export type ConsoleApiMemorySpacePrivateMaterialPolicy =
+  | "exclude_private"
+  | "include_private";
+export type ConsoleApiGovernedScopeArchiveRoot = {
+  schema_version: number;
+  store_schema_id: string;
+  store_schema_version: number;
+  scope: ConsoleApiMemoryArchiveScope;
+  private_material_policy: ConsoleApiMemorySpacePrivateMaterialPolicy;
+  json_doc_count: number;
+  event_count: number;
+  json_bytes: number;
+  event_bytes: number;
+  closure_sha256: string;
+};
+export type ConsoleApiWorkbenchArchiveRestore = {
   status: ConsoleApiWorkbenchStatus;
-  sourceMemorySpaceId: string;
-  targetMemorySpaceId: string;
-  jsonDocs: number;
-  blobs: number;
-  events: number;
-  privacyRedactions: number;
-  lossRisk: boolean;
-  preflightPassed: boolean;
-  preflightFailures: string[];
-  snapshotFingerprint: string;
-  eventFingerprint: string;
+  scope: ConsoleApiMemoryArchiveScope;
+  privateMaterialPolicy: ConsoleApiMemorySpacePrivateMaterialPolicy;
+  archiveRoot: ConsoleApiGovernedScopeArchiveRoot | null;
 };
 export type ConsoleApiWorkbenchSoulHealth = {
   status: ConsoleApiWorkbenchStatus;
@@ -375,7 +394,7 @@ export type ConsoleApiWorkbenchReport = {
   facetInspector: ConsoleApiWorkbenchFacetInspector;
   projectionInspector: ConsoleApiWorkbenchProjectionInspector;
   proceduralEvolution: ConsoleApiWorkbenchProceduralEvolution;
-  vaultMigration: ConsoleApiWorkbenchVaultMigration;
+  archiveRestore: ConsoleApiWorkbenchArchiveRestore;
   soulHealth: ConsoleApiWorkbenchSoulHealth;
 };
 export type ConsoleApiRuntimeShape = {
@@ -396,7 +415,8 @@ export type ConsoleApiMetric = {
   progress: number | null;
 };
 export type ConsoleApiSkillSummary = {
-  name: string;
+  locator: ConsoleApiRuntimeSkillOwnerLocator;
+  ownerId: string;
   title: string;
   topic: string;
   status: StatusKind;
@@ -430,9 +450,23 @@ export type ConsoleApiSkillDetail = {
 export type ConsoleApiSkillMutation = {
   accepted: boolean;
   changed: boolean;
-  name: string;
+  previousLocator: ConsoleApiRuntimeSkillOwnerLocator;
+  currentLocator: ConsoleApiRuntimeSkillOwnerLocator;
+  ownerId: string;
   operation: string;
   reason: string;
+};
+export type ConsoleApiRuntimeSkillOwnerLocator = {
+  owning_scope:
+    | { kind: "subject"; mounted_subject_id: string }
+    | { kind: "shared_program" };
+  owner_revision_ref: {
+    owner_ref: {
+      owner_plane: "runtime_skill";
+      owner_id: string;
+    };
+    owner_revision: number;
+  };
 };
 export type SkillForm = {
   title: string;

@@ -5,6 +5,12 @@ type DesktopConsoleResponse = {
   body: string;
 };
 
+export class ConsoleApiResponseError extends Error {
+  constructor(public readonly statusCode: number, message: string) {
+    super(message);
+  }
+}
+
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (isTauriRuntime()) {
     return await tauriJson<T>(path, init);
@@ -21,7 +27,7 @@ async function httpJson<T>(path: string, init: RequestInit): Promise<T> {
     headers,
   });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    throw new ConsoleApiResponseError(response.status, `${response.status} ${response.statusText}`);
   }
   return await response.json() as T;
 }
@@ -35,7 +41,7 @@ async function tauriJson<T>(path: string, init: RequestInit): Promise<T> {
     },
   });
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new Error(`${response.statusCode} ${response.body}`);
+    throw new ConsoleApiResponseError(response.statusCode, `${response.statusCode} ${response.body}`);
   }
   return JSON.parse(response.body) as T;
 }

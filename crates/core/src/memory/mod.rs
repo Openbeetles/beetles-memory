@@ -23,6 +23,7 @@ mod execution_state;
 mod felt_significance;
 mod governed_evidence_document;
 mod governed_memory_owner;
+mod governed_memory_validity;
 mod governed_post_image;
 #[cfg(all(
     any(test, feature = "nonproduction-replay-harness"),
@@ -38,6 +39,7 @@ mod llm_json;
 mod long_term;
 mod long_term_control;
 mod long_term_extraction;
+mod long_term_version;
 mod maintenance;
 mod memory_facet;
 mod memory_governance;
@@ -203,6 +205,24 @@ pub use governed_evidence_document::{
 pub use governed_memory_owner::{
     governed_long_term_owner_evidence_bindings, governed_memory_recall_candidate_id,
     GovernedEvidenceBinding, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    GovernedOwnerRevisionRef,
+};
+pub use governed_memory_validity::{
+    build_current_dynamic_state_resolution_report, build_governed_recall_eligibility_report,
+    build_historical_dynamic_state_resolution_report, build_memory_update_lineage_report,
+    build_procedural_memory_delivery_report, build_public_safe_procedural_memory_delivery_report,
+    build_runtime_skill_premise_evaluation_report, decide_governed_recall_eligibility,
+    finalize_procedural_memory_delivery_report, primary_governed_recall_reason,
+    DynamicStateResolutionReport, ForgettingDecisionReport, ForgettingOperation,
+    GovernedContractFailure, GovernedContractValidation, GovernedOwnerTermination,
+    GovernedOwnerValidity, GovernedProfileBudgetDrop, GovernedRecallAuthorityGates,
+    GovernedRecallDisclosure, GovernedRecallEligibility, GovernedRecallEligibilityDecision,
+    GovernedRecallEligibilityReason, GovernedRecallEligibilityReport, GovernedRecallLifecycleFacts,
+    GovernedRecallTemporalQuery, GovernedRequiredPremiseGate, GovernedUpdateLineageItem,
+    MemoryUpdateLineageFailure, MemoryUpdateLineageReport, PremiseEvaluationDecision,
+    PremiseEvaluationItem, PremiseEvaluationReport, PremiseTypedSource,
+    ProceduralMemoryDeliveryReport, GOVERNED_MEMORY_LIFECYCLE_SCHEMA_VERSION,
+    MAX_GOVERNED_ELIGIBILITY_REASONS,
 };
 pub use governed_post_image::{GovernedDocumentImage, GovernedPostImageValidation};
 pub(crate) use hygiene::run_memory_hygiene_jobs;
@@ -260,15 +280,19 @@ pub(crate) use long_term::{
     select_long_term_recall_entries, LongTermMemoryMergeGuardDecision,
 };
 pub use long_term_control::{
+    bind_long_term_control_audit_batch, bind_long_term_version_mutation,
     get_long_term_memory_control_detail, list_long_term_memory_control_page,
     plan_long_term_memory_control_mutation, plan_long_term_memory_governance_policy_mutation,
-    validate_long_term_control_post_image, ControlEffectRef, LongTermControlOperation,
-    LongTermControlPostImageClosure, LongTermMemoryControlAuditEvent,
+    validate_long_term_control_post_image, BoundLongTermVersionReportIdentity,
+    BoundLongTermVersionRetention, BoundVersionMutation, ControlEffectRef,
+    LongTermControlOperation, LongTermControlPostImageClosure, LongTermInvalidationContract,
+    LongTermInvalidationReasonCode, LongTermMemoryControlAuditEvent,
     LongTermMemoryControlDetailRequest, LongTermMemoryControlListRequest,
     LongTermMemoryControlMutationPlan, LongTermMemoryControlMutationRequest,
-    LongTermMemoryControlReadStore, LongTermMemoryControlRecordVersion,
-    LongTermMemoryControlRevision, LongTermMemoryControlWrite,
+    LongTermMemoryControlReadStore, LongTermMemoryControlRevision,
+    LongTermMemoryControlRevisionIntent, LongTermMemoryControlWrite,
     LongTermMemoryGovernancePolicyMutationPlan, LongTermMemoryOwnerWrite, LongTermMemoryTombstone,
+    LongTermMemoryVersionMutationIntent, LongTermVersionOwnerSnapshot,
     MemoryDeferredGovernanceImpactReport, MemoryGovernancePolicyMutation,
     MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryLongTermAffectedFacetDoc,
@@ -297,6 +321,25 @@ pub use long_term_extraction::{
     ParsedLongTermMemoryExtraction, LONG_TERM_MEMORY_EXTRACTION_BATCH,
     LONG_TERM_MEMORY_EXTRACTION_RECENT_N, LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT,
     REL_PATH_LONG_TERM_EXTRACTION_STATES,
+};
+pub use long_term_version::{
+    bind_long_term_version_creation, build_long_term_current_recall_authority,
+    build_long_term_historical_recall_authority, BoundLongTermVersionCreation,
+    LongTermCurrentRecallAuthority, LongTermHistoricalRecallAuthority,
+    LongTermMemoryVersionCreateIntent, LongTermVersionRetentionLease,
+};
+pub use long_term_version::{
+    long_term_version_head_key, long_term_version_material_key,
+    long_term_version_scope_manifest_key, project_current_long_term_recall_lifecycle_facts,
+    project_historical_long_term_recall_lifecycle_facts, project_long_term_owner_validity,
+    select_long_term_current_recall_query_time, select_long_term_historical_recall_query_time,
+    select_long_term_version_as_of, select_long_term_version_current,
+    validate_long_term_version_head_closure, GovernedOwnerTransition,
+    LongTermMemoryGovernedContent, LongTermMemoryHeadManifest,
+    LongTermMemoryRetainedRevisionDigest, LongTermMemoryVersionHeadBinding,
+    LongTermMemoryVersionMaterial, LongTermMemoryVersionMaterialImage, LongTermMemoryVersionOrigin,
+    LongTermMemoryVersionReadProjection, LongTermMemoryVersionScopeManifest,
+    LongTermMemoryVersionTransitionBinding, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
 pub use maintenance::{
     run_post_reply_memory_maintenance, ContinuityCapsuleMaintenanceOutcome,
@@ -634,7 +677,8 @@ pub use transcript::{
     TranscriptLifecycleTransition, TranscriptMessageRecord, TranscriptRedactionReason,
     TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairInspection,
     TranscriptRepairIssue, TranscriptRepairIssueKind, TranscriptRepairReport,
-    TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage, TranscriptTurnRecord,
+    TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnCursor, TranscriptTurnPage,
+    TranscriptTurnRecord,
 };
 pub use turn_commit::{
     canonical_user_delta, commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,

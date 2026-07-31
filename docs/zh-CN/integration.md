@@ -232,7 +232,7 @@ if let Some(record) = page.records.first() {
 
 `forget_by_query` 这类批量遗忘必须先 dry-run preview，再带 confirmation token 执行。`MemoryLongTermPolicyRequest` 用于“以后不要记这类事情”或暂停某个 scope 的未来长期记忆更新；policy 不 retroactively 删除已接受记录。
 
-Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它会报告受影响的 `DerivedMemoryRef`，但撤销对应长期记忆仍然要走 `mutate_long_term_memory`。运行时 Skill 的 edit/delete 只管理 procedural memory 中的 runtime skill，不是普通长期记忆管理面。
+Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它会报告受影响的 `DerivedMemoryRef`，但撤销对应长期记忆仍然要走 `mutate_long_term_memory`。运行时 Skill 的 edit/retire 只管理 procedural memory 中的 runtime skill，不是普通长期记忆管理面；retire 追加 terminal revision 并保留 lineage，不物理删除 owner。
 
 ## 10. 宿主回合生命周期
 
@@ -244,16 +244,16 @@ Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它�
 4. 需要 transcript governance 时，通过 canonical turn 语义 finalize 当前回合。
 5. 用 `recall` 和 `project` 生成模型上下文；宿主不自己拼 memory plane。
 6. 用 `inspect` 提供运维可见性和安全恢复上下文。
-7. 替换或发布闸口走 memory-space export、迁移 dry-run、apply/import 和 replay。
+7. 替换或发布闸口走 typed memory-space export、直接同 scope import 和 replay。
 
 `fixtures/sdk-host-readiness/` 里的 generic host fixture 与 Beetle-derived fixture 走同一条路径。Beetle-derived 数据只是当前合同的 host evidence，不是 SDK 特殊分支或兼容分支。
 
-## 11. 迁移 dry-run、Import、Replay
+## 11. Archive Import 与 Replay
 
 ```rust
 use bm_sdk::{
-    apply_memory_space_migration, preview_memory_space_migration, MemoryReplayRequest,
-    MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest,
+    MemoryArchiveScope, MemoryReplayRequest, MemorySpaceExportRequest, MemorySpaceImportRequest,
+    MemorySpacePrivateMaterialPolicy,
 };
 
 let replay = runtime.replay(MemoryReplayRequest {
@@ -261,40 +261,27 @@ let replay = runtime.replay(MemoryReplayRequest {
     limit: 32,
 })?;
 
-let space = runtime.export_memory_space(MemorySpaceExportRequest {
-    scope: bm_sdk::MemorySpaceScope {
-        memory_space_id: runtime.memory_space_id().to_string(),
-        mounted_subject_id: runtime.subject_id().to_string(),
-    },
-    include_private: true,
+let scope = MemoryArchiveScope::subject(
+    runtime.memory_space_id(),
+    runtime.subject_id(),
+)?;
+let private_material_policy = MemorySpacePrivateMaterialPolicy::IncludePrivate;
+let exported = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: scope.clone(),
+    private_material_policy,
 })?;
-let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-    source_scope: space.projection_scope.scope.clone(),
-    target_scope: space.projection_scope.scope.clone(),
-    expected_private_material_policy:
-        bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
-    source_profile: profile,
-    target_profile: profile,
-    archive: space.archive,
+
+assert_eq!(&exported.archive.root().scope, &scope);
+target_runtime.import_memory_space(MemorySpaceImportRequest {
+    scope,
+    expected_private_material_policy: private_material_policy,
+    archive: exported.archive,
 })?;
-if preview.vault_preflight.passed {
-    apply_memory_space_migration(
-        &target_store,
-        MemorySpaceMigrateApplyRequest { plan: preview.plan },
-    )?;
-}
 ```
 
-公开恢复不接受自由拼装的 continuity snapshot。runtime、request 与 typed archive 必须在任何 store read 或 migration/import planning 前声明完全相同的 `(memory_space_id, mounted_subject_id)`。
+公开恢复不接受自由拼装的 continuity snapshot。source 与 target runtime、request 和 opaque archive root 必须在 replacement 前声明完全相同的 `MemoryArchiveScope` 与 private-material policy。
 
-替换宿主记忆实现或迁移一份已配置 SDK store 时，使用 memory-space export/preview/apply。bootstrap/full continuity mode 只属于内部 Soul-recovery bundle。
-expected private-material policy 属于迁移 authority；它与 archive manifest 不一致时，preview 与 apply 必须 fail closed。
-
-apply 之前必须检查 dry-run report。`loss_risk`、schema id、record count、state fingerprint、event fingerprint 和 privacy redaction count 都属于发布证据。替换自有记忆实现的宿主应在 readiness gate 中保留一个 generic fixture 和一个 host-derived legacy fixture。
-`preview.manifest` 还会报告精确的 memory-space/mounted-subject projection scope、
-private-material 模式、plane/privacy counts 和 identity-remap 状态。apply 只在 backend
-transaction fence 内原子替换该 typed scope；source/target scope identity 不同时，manifest 会标记
-`identity_remap.required=true` 且 `applied=false`，并在显式 typed remapper 产出新 archive 前拒绝重标。
+Archive root 是可携带的 integrity report。调用方应检查 schema id/version、精确 scope、private-material policy、JSON/event count 与 byte count，以及 canonical `closure_sha256`。Import 会在任何 backend mutation 之前重算该 root，并只原子替换声明的 scope。bootstrap/full continuity mode 只属于内部 Soul-recovery bundle。
 
 ## 11. Operator Inspect
 
@@ -302,7 +289,7 @@ transaction fence 内原子替换该 typed scope；source/target scope identity 
 use bm_sdk::{MemoryInspectionRequest, PressureLevel, RuntimeLifecycleModeInput};
 
 let inspect = runtime.inspect(MemoryInspectionRequest {
-    query: "migration readiness".to_string(),
+    query: "archive readiness".to_string(),
     system_max_len: 4096,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
@@ -348,5 +335,5 @@ if catalog.adapter.http.visible {
 5. 检查 `deferred_governance_report()` 和 `inspect.deferred_governance`。
 6. 从另一个 chat 召回或投影 candidate 写入的记忆，并检查 `MemoryProjectionReport.audit`。
 7. 调用 `run_retention_compaction()`，确认不授权宿主删除已接受记忆。
-8. 通过 public memory-space migrator 跑 migration dry-run 和 apply/import，并检查 `preview.manifest`。
-9. 对迁移后的 store 运行 operator inspect 和 replay。
+8. 导出 opaque archive，将其导入具有完全相同 typed scope 与 policy 的 runtime，并检查 governed archive root。
+9. 对替换后的 scope 运行 operator inspect 和 replay。

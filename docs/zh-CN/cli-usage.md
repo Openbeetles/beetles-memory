@@ -56,7 +56,7 @@ Commands：
 | `skill-show` | 查看单条运行时 Skill 记忆详情。 |
 | `skill-edit` | 编辑已有运行时 Skill 记忆。 |
 | `skill-enable` / `skill-disable` | 启用或停用运行时 Skill 记忆。 |
-| `skill-delete` | 删除运行时 Skill 记忆。 |
+| `skill-retire` | 追加 retired 修订，保留 owner lineage，不物理删除。 |
 | `close` | 关闭 runtime 并发出 lifecycle report。 |
 
 常用 options：
@@ -141,6 +141,10 @@ bm \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
+  --runtime-skill-subject agent:agent-main \
+  --replay-candidate-ref cli:release_guard \
+  --verification-receipt-digest sha256:<64-hex> \
+  --runtime-skill-privacy shared-with-subject \
   --name runtime_skill__release_guard \
   --title "Release guard" \
   --topic release \
@@ -150,27 +154,32 @@ bm \
 3. dry run publish"
 ```
 
-```bash
-bm \
-  memory skill-edit \
-  --profile "$BM_HOST_PROFILE" \
-  --store-file /tmp/beetle-memory-store \
-  --chat chat-1 \
-  --name runtime_skill__release_guard \
-  --title "Release guard" \
-  --topic release \
-  --summary "Verify release artifacts and changelog before publishing." \
-  --content "1. run gates
-2. inspect artifacts
-3. inspect changelog"
-```
+先用同一 owning scope（`--runtime-skill-subject <subject-id>` 或 `--runtime-skill-shared-program`）执行 `skill-list`，从结果读取 `ownerId` 和 `locator.owner_revision_ref.owner_revision`。后续每次 mutation 都必须继续使用上一次返回的 `currentLocator`；CLI 不接受名称到 owner 的兼容翻译。
 
 ```bash
 bm \
   memory skill-list \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
+  --runtime-skill-subject agent:agent-main \
   --query release
+```
+
+```bash
+bm \
+  memory skill-edit \
+  --profile "$BM_HOST_PROFILE" \
+  --store-file /tmp/beetle-memory-store \
+  --chat chat-1 \
+  --runtime-skill-subject agent:agent-main \
+  --runtime-skill-owner-id <owner-id> \
+  --runtime-skill-owner-revision <revision> \
+  --title "Release guard" \
+  --topic release \
+  --summary "Verify release artifacts and changelog before publishing." \
+  --content "1. run gates
+2. inspect artifacts
+3. inspect changelog"
 ```
 
 ## 用 File Store 写入并召回
@@ -181,6 +190,10 @@ bm \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
+  --runtime-skill-subject agent:agent-main \
+  --replay-candidate-ref cli:file_store_release_guard \
+  --verification-receipt-digest sha256:<64-hex> \
+  --runtime-skill-privacy shared-with-subject \
   --name release_guard \
   --topic release \
   --title "Release guard" \
@@ -210,9 +223,9 @@ bm \
   --max-len 4096
 ```
 
-## 迁移边界
+## 归档边界
 
-CLI 不提供通用的 memory `export` 或 `import` 命令。受治理的数据迁移必须使用 [Replay 与迁移](replay-and-migration.md) 中 SDK 的 typed memory-space scope 与 archive 合同；continuity snapshot 只保留为内部 Soul recovery 载荷。
+CLI 不提供通用的 memory `export` 或 `import` 命令。受治理的 scope replacement 必须使用 [Replay 与归档](replay-and-archive.md) 中 SDK 的 typed memory-space scope 与 archive 合同；continuity snapshot 只保留为内部 Soul recovery 载荷。
 
 ## Close Runtime
 

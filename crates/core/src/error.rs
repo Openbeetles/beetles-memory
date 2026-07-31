@@ -3,6 +3,13 @@
 
 use thiserror::Error;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorClass {
+    InvalidInput,
+    NotFound,
+    Conflict,
+}
+
 /// 项目统一错误类型。各层通过 `?` 与 `.map_err()` 收敛；stage 为编译期字面量，避免错误路径堆分配。
 /// Project-wide error. Use `?` and `.map_err()` with meaningful stage; no unwrap/expect in production paths.
 #[derive(Error, Debug)]
@@ -23,6 +30,24 @@ pub enum Error {
 
     #[error("config: {message} (stage: {stage})")]
     Config {
+        message: String,
+        stage: &'static str,
+    },
+
+    #[error("invalid input: {message} (stage: {stage})")]
+    InvalidInput {
+        message: String,
+        stage: &'static str,
+    },
+
+    #[error("not found: {message} (stage: {stage})")]
+    NotFound {
+        message: String,
+        stage: &'static str,
+    },
+
+    #[error("conflict: {message} (stage: {stage})")]
+    Conflict {
         message: String,
         stage: &'static str,
     },
@@ -108,6 +133,27 @@ impl Error {
         }
     }
 
+    pub fn invalid_input(stage: &'static str, message: impl Into<String>) -> Self {
+        Error::InvalidInput {
+            message: message.into(),
+            stage,
+        }
+    }
+
+    pub fn not_found(stage: &'static str, message: impl Into<String>) -> Self {
+        Error::NotFound {
+            message: message.into(),
+            stage,
+        }
+    }
+
+    pub fn conflict(stage: &'static str, message: impl Into<String>) -> Self {
+        Error::Conflict {
+            message: message.into(),
+            stage,
+        }
+    }
+
     pub fn io(stage: &'static str, source: std::io::Error) -> Self {
         Error::Io { source, stage }
     }
@@ -126,10 +172,22 @@ impl Error {
             Error::Nvs { stage, .. } => stage,
             Error::Storage { stage, .. } => stage,
             Error::Config { stage, .. } => stage,
+            Error::InvalidInput { stage, .. } => stage,
+            Error::NotFound { stage, .. } => stage,
+            Error::Conflict { stage, .. } => stage,
             Error::Io { stage, .. } => stage,
             Error::Esp { stage, .. } => stage,
             Error::Http { stage, .. } => stage,
             Error::Other { stage, .. } => stage,
+        }
+    }
+
+    pub fn class(&self) -> Option<ErrorClass> {
+        match self {
+            Error::InvalidInput { .. } => Some(ErrorClass::InvalidInput),
+            Error::NotFound { .. } => Some(ErrorClass::NotFound),
+            Error::Conflict { .. } => Some(ErrorClass::Conflict),
+            _ => self.nested_memory_error().and_then(Error::class),
         }
     }
 
@@ -194,6 +252,9 @@ impl Error {
             Error::Nvs { source, .. } => Error::Nvs { source, stage },
             Error::Storage { source, .. } => Error::Storage { source, stage },
             Error::Config { message, .. } => Error::Config { message, stage },
+            Error::InvalidInput { message, .. } => Error::InvalidInput { message, stage },
+            Error::NotFound { message, .. } => Error::NotFound { message, stage },
+            Error::Conflict { message, .. } => Error::Conflict { message, stage },
             Error::Io { source, .. } => Error::Io { source, stage },
             Error::Esp { code, .. } => Error::Esp { code, stage },
             Error::Http { status_code, .. } => Error::Http { status_code, stage },
@@ -207,7 +268,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
-    use super::Error;
+    use super::{Error, ErrorClass};
+
+    #[test]
+    fn domain_error_classes_do_not_impersonate_http_failures() {
+        let invalid = Error::invalid_input("owner_locator", "invalid");
+        let missing = Error::not_found("owner_locator", "missing");
+        let stale = Error::conflict("owner_locator", "stale");
+
+        assert_eq!(invalid.class(), Some(ErrorClass::InvalidInput));
+        assert_eq!(missing.class(), Some(ErrorClass::NotFound));
+        assert_eq!(stale.class(), Some(ErrorClass::Conflict));
+        assert_eq!(stale.http_status_code(), None);
+    }
 
     #[test]
     fn http_status_is_not_classified_as_connect_error() {

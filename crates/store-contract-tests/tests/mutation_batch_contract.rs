@@ -2,18 +2,21 @@ mod support;
 use bm_core::budget::StoreRuntimeBudget;
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
-    build_governed_evidence_document_facet_index_doc, build_memory_graph_persistence_plan,
+    bind_long_term_version_creation, build_governed_evidence_document_facet_index_doc,
+    build_long_term_memory_facet_index_doc, build_memory_graph_persistence_plan,
     canonical_recall_evidence_group, governed_evidence_document_content_digest,
-    governed_evidence_source_ref_from_document, memory_facet_manifest_key,
-    memory_graph_scope_manifest_key, scoped_governed_evidence_document_key,
-    scoped_long_term_control_storage_key, scoped_long_term_memory_storage_key,
+    governed_evidence_source_ref_from_document, long_term_version_head_key,
+    long_term_version_material_key, memory_facet_manifest_key, memory_graph_scope_manifest_key,
+    scoped_governed_evidence_document_key, scoped_long_term_control_storage_key,
     scoped_memory_facet_owner_storage_key, scoped_memory_graph_storage_key, ControlEffectRef,
     EvidenceBacklink, GovernedEvidenceDocument, GovernedEvidenceDocumentChunk,
     GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    GovernedOwnerRevisionRef, GovernedOwnerTermination, GovernedOwnerTransition,
     LongTermControlOperation, LongTermMemoryConfidence, LongTermMemoryControlAuditEvent,
     LongTermMemoryControlRevision, LongTermMemoryEntry, LongTermMemoryFreshness,
     LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryTombstone, MemoryEvidenceAuthority, MemoryFacetIndexDoc,
+    LongTermMemoryTombstone, LongTermMemoryVersionCreateIntent, LongTermMemoryVersionScopeManifest,
+    LongTermVersionRetentionLease, MemoryEvidenceAuthority, MemoryFacetIndexDoc,
     MemoryFacetIndexManifest, MemoryFacetOwnerVersion, MemoryFacetPostingDoc,
     MemoryFacetPostingRevision, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
     MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphOwnerBinding, MemoryLongTermGovernancePolicy,
@@ -22,11 +25,12 @@ use bm_core::memory::{
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MEMORY_FACET_INDEX_NAMESPACE,
     MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
     MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_BACKLINK_NAMESPACE,
-    MEMORY_GRAPH_INDEX_NAMESPACE, MEMORY_GRAPH_MANIFEST_NAMESPACE,
-    MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_NODE_NAMESPACE,
-    MEMORY_GRAPH_REVISION_NAMESPACE,
+    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_INDEX_NAMESPACE,
+    MEMORY_GRAPH_MANIFEST_NAMESPACE, MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+    MEMORY_GRAPH_NODE_NAMESPACE, MEMORY_GRAPH_REVISION_NAMESPACE,
 };
 use bm_core::platform::Platform as _;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -34,12 +38,14 @@ use bm_sdk::nonproduction_replay_harness::{
     GovernedEvidenceOwnerClaimBinding, GovernedEvidenceSourceClaimManifest, MemoryStoreEvent,
     MemoryStoreEventKind, StoreBackendConfig, StoreEventScope, StoreJsonPrecondition,
     StoreMutation, StoreMutationBatch, StorePlatform, StoreSnapshotJsonDoc,
-    GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
+    GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE, LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+    LONG_TERM_VERSION_MATERIAL_NAMESPACE, LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
 };
 use serde_json::json;
 
 fn transaction_budget(event_log_max_items: usize) -> StoreRuntimeBudget {
     StoreRuntimeBudget {
+        metric_source_max_items: 1,
         event_log_max_items,
         kv_max_entries: 256,
         blob_max_bytes: 1024,
@@ -50,6 +56,44 @@ fn transaction_budget(event_log_max_items: usize) -> StoreRuntimeBudget {
         export_max_bytes: 16_384,
         import_max_bytes: 16_384,
     }
+}
+
+fn typed_control_revision(
+    revision_id: &str,
+    record_id: &str,
+    mounted_subject_id: &str,
+) -> LongTermMemoryControlRevision {
+    let owner_ref =
+        GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, record_id.to_string());
+    let transition = GovernedOwnerTransition {
+        predecessor: GovernedOwnerRevisionRef::try_new(owner_ref.clone(), 1)
+            .expect("predecessor revision"),
+        terminated_at: 2,
+        termination: GovernedOwnerTermination::Corrected,
+        successor: Some(
+            GovernedOwnerRevisionRef::try_new(owner_ref, 2).expect("successor revision"),
+        ),
+    };
+    let mut revision = LongTermMemoryControlRevision {
+        schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+        revision_id: revision_id.to_string(),
+        memory_space_id: "system".to_string(),
+        mounted_subject_id: mounted_subject_id.to_string(),
+        operation: LongTermControlOperation::Correct,
+        invalidation_reason_code: None,
+        transition,
+        predecessor_material_digest: "a".repeat(64),
+        successor_material_digest: Some("b".repeat(64)),
+        governed_evidence_refs: Vec::new(),
+        reason: "test".to_string(),
+        actor_subject_id: None,
+        created_at: 1,
+        content_digest: String::new(),
+    };
+    revision.content_digest = revision
+        .canonical_content_digest()
+        .expect("control revision digest");
+    revision
 }
 
 fn put_blob(key: &str, value: &[u8]) -> StoreMutation {
@@ -107,6 +151,200 @@ fn graph_owner_for(owner_id: &str) -> LongTermMemoryEntry {
 
 fn graph_owner() -> LongTermMemoryEntry {
     graph_owner_for("owner:graph")
+}
+
+fn typed_long_term_scope_docs(
+    memory_space_id: &str,
+    mounted_subject_id: &str,
+    owners: Vec<LongTermMemoryEntry>,
+) -> Vec<StoreSnapshotJsonDoc> {
+    let lease = LongTermVersionRetentionLease::try_new(1).expect("retention lease");
+    let mut materials = Vec::with_capacity(owners.len());
+    let mut heads = Vec::with_capacity(owners.len());
+    let mut facets = Vec::with_capacity(owners.len());
+    let mut posting_owners = BTreeMap::<String, Vec<MemoryFacetOwnerVersion>>::new();
+    for owner in owners {
+        let facet = build_long_term_memory_facet_index_doc(
+            &owner,
+            memory_space_id,
+            vec![mounted_subject_id.to_string()],
+            owner.owner_revision,
+        )
+        .expect("build typed long-term facet owner");
+        let owner_version = MemoryFacetOwnerVersion {
+            owner_ref: facet.owner_ref.clone(),
+            owner_revision: facet.owner_revision,
+            facet_index_revision: facet.facet_index_revision,
+        };
+        for posting_key in facet
+            .posting_keys_for_subject(mounted_subject_id)
+            .expect("build typed long-term facet postings")
+        {
+            posting_owners
+                .entry(posting_key)
+                .or_default()
+                .push(owner_version.clone());
+        }
+        facets.push(facet);
+        let requested_at = owner.updated_at;
+        let creation = bind_long_term_version_creation(
+            LongTermMemoryVersionCreateIntent {
+                memory_space_id: memory_space_id.to_string(),
+                mounted_subject_id: mounted_subject_id.to_string(),
+                projection: owner,
+                governed_evidence_refs: Vec::new(),
+                requested_at,
+            },
+            lease,
+        )
+        .expect("bind typed long-term owner");
+        materials.push(creation.material);
+        heads.push(creation.head);
+    }
+    let root = LongTermMemoryVersionScopeManifest::build(
+        memory_space_id,
+        mounted_subject_id,
+        1,
+        &heads,
+        &materials,
+        &[],
+        &[],
+        lease.max_retained_revisions_per_owner(),
+    )
+    .expect("build typed long-term scope root");
+    let postings = posting_owners
+        .into_iter()
+        .map(|(posting_key, mut owner_versions)| {
+            owner_versions.sort();
+            MemoryFacetPostingDoc {
+                schema_version: MEMORY_FACET_SCHEMA_VERSION,
+                memory_space_id: memory_space_id.to_string(),
+                subject_id: mounted_subject_id.to_string(),
+                posting_key,
+                revision: 1,
+                owner_versions,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut owner_versions = facets
+        .iter()
+        .map(|facet| MemoryFacetOwnerVersion {
+            owner_ref: facet.owner_ref.clone(),
+            owner_revision: facet.owner_revision,
+            facet_index_revision: facet.facet_index_revision,
+        })
+        .collect::<Vec<_>>();
+    owner_versions.sort();
+    let facet_manifest = MemoryFacetIndexManifest {
+        schema_version: MEMORY_FACET_SCHEMA_VERSION,
+        memory_space_id: memory_space_id.to_string(),
+        subject_id: mounted_subject_id.to_string(),
+        owner_doc_count: facets.len(),
+        posting_doc_count: postings.len(),
+        revision: 1,
+        owner_versions,
+        posting_revisions: postings
+            .iter()
+            .map(|posting| MemoryFacetPostingRevision {
+                posting_key: posting.posting_key.clone(),
+                revision: posting.revision,
+            })
+            .collect(),
+    };
+
+    let mut docs =
+        Vec::with_capacity(materials.len() + heads.len() + facets.len() + postings.len() + 2);
+    docs.extend(materials.iter().map(|material| {
+        StoreSnapshotJsonDoc {
+            namespace: LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+            key: long_term_version_material_key(
+                memory_space_id,
+                mounted_subject_id,
+                &material.owner_ref,
+                material.owner_revision,
+            )
+            .expect("material key"),
+            value: serde_json::to_value(material).expect("serialize material"),
+        }
+    }));
+    docs.extend(heads.iter().map(|head| {
+        StoreSnapshotJsonDoc {
+            namespace: LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+            key: long_term_version_head_key(memory_space_id, mounted_subject_id, &head.owner_ref)
+                .expect("head key"),
+            value: serde_json::to_value(head).expect("serialize head"),
+        }
+    }));
+    docs.push(StoreSnapshotJsonDoc {
+        namespace: LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+        key: root.physical_key.clone(),
+        value: serde_json::to_value(root).expect("serialize scope root"),
+    });
+    docs.extend(facets.iter().map(|facet| {
+        StoreSnapshotJsonDoc {
+            namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
+            key: scoped_memory_facet_owner_storage_key(
+                memory_space_id,
+                mounted_subject_id,
+                &facet.owner_ref,
+            )
+            .expect("facet owner key"),
+            value: serde_json::to_value(facet).expect("serialize facet owner"),
+        }
+    }));
+    docs.extend(postings.iter().map(|posting| StoreSnapshotJsonDoc {
+        namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+        key: posting.posting_key.clone(),
+        value: serde_json::to_value(posting).expect("serialize facet posting"),
+    }));
+    docs.push(StoreSnapshotJsonDoc {
+        namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+        key: memory_facet_manifest_key(memory_space_id, mounted_subject_id)
+            .expect("facet manifest key"),
+        value: serde_json::to_value(facet_manifest).expect("serialize facet manifest"),
+    });
+    docs
+}
+
+fn typed_long_term_scope_docs_without_facets(
+    memory_space_id: &str,
+    mounted_subject_id: &str,
+    owners: Vec<LongTermMemoryEntry>,
+) -> Vec<StoreSnapshotJsonDoc> {
+    typed_long_term_scope_docs(memory_space_id, mounted_subject_id, owners)
+        .into_iter()
+        .filter(|doc| {
+            doc.namespace != MEMORY_FACET_INDEX_NAMESPACE
+                && doc.namespace != MEMORY_FACET_POSTING_NAMESPACE
+        })
+        .collect()
+}
+
+fn raw_graph_docs(platform: &StorePlatform) -> Vec<StoreSnapshotJsonDoc> {
+    let mut docs = [
+        MEMORY_GRAPH_MANIFEST_NAMESPACE,
+        MEMORY_GRAPH_REVISION_NAMESPACE,
+        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_INDEX_NAMESPACE,
+        MEMORY_GRAPH_NODE_NAMESPACE,
+        bm_core::memory::MEMORY_GRAPH_EDGE_NAMESPACE,
+        bm_core::memory::MEMORY_GRAPH_BACKLINK_NAMESPACE,
+    ]
+    .into_iter()
+    .flat_map(|namespace| {
+        platform
+            .read_json_namespace_unchecked_for_nonproduction_harness(namespace)
+            .unwrap_or_else(|error| panic!("read raw graph namespace {namespace}: {error}"))
+    })
+    .collect::<Vec<_>>();
+    docs.sort_by(|left, right| {
+        left.namespace
+            .cmp(&right.namespace)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    docs
 }
 
 fn typed_graph_closure_for(
@@ -524,21 +762,23 @@ fn evidence_lifecycle_mutation(
     operation: &str,
 ) -> StoreMutation {
     StoreMutation::AppendEvent {
-        event: MemoryStoreEvent::new(
-            event_id,
-            MemoryStoreEventKind::RuntimeLifecycle,
-            StoreEventScope::system("maintain"),
-            1,
-        )
-        .with_plane("runtime_lifecycle")
-        .with_record_key("maintain")
-        .with_content_hash("test-runtime-lifecycle-content-hash")
-        .with_payload("runtime_operation", "maintain")
-        .with_payload("operation", operation)
-        .with_payload("trigger", "sdk_call")
-        .with_payload("disposition", "execute_now")
-        .with_payload("effect", "run_maintenance")
-        .with_payload("transaction_id", transaction_id),
+        event: Box::new(
+            MemoryStoreEvent::new(
+                event_id,
+                MemoryStoreEventKind::RuntimeLifecycle,
+                StoreEventScope::system("maintain"),
+                1,
+            )
+            .with_plane("runtime_lifecycle")
+            .with_record_key("maintain")
+            .with_content_hash("test-runtime-lifecycle-content-hash")
+            .with_payload("runtime_operation", "maintain")
+            .with_payload("operation", operation)
+            .with_payload("trigger", "sdk_call")
+            .with_payload("disposition", "execute_now")
+            .with_payload("effect", "run_maintenance")
+            .with_payload("transaction_id", transaction_id),
+        ),
     }
 }
 
@@ -607,11 +847,9 @@ fn assert_graph_batch_rejected_without_partial_state(
     let platform = support::open_store(config).expect("platform");
     let owner = graph_owner();
     let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: "long_term".to_string(),
-        key: scoped_long_term_memory_storage_key("system", &owner.id).expect("owner key"),
-        value: serde_json::to_value(owner).expect("serialize owner"),
-    });
+    snapshot
+        .json_docs
+        .extend(typed_long_term_scope_docs("system", "system", vec![owner]));
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owner");
@@ -907,17 +1145,16 @@ fn typed_graph_transaction_rejects_a_cross_scope_document_delete_atomically() {
     .expect("config");
     let platform = support::open_store(config).expect("platform");
     let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    for (memory_space_id, owner) in [
-        ("system", graph_owner_for("owner:graph")),
-        ("space:b", graph_owner_for("owner:graph:b")),
-    ] {
-        snapshot.json_docs.push(StoreSnapshotJsonDoc {
-            namespace: "long_term".to_string(),
-            key: scoped_long_term_memory_storage_key(memory_space_id, &owner.id)
-                .expect("owner key"),
-            value: serde_json::to_value(owner).expect("serialize owner"),
-        });
-    }
+    snapshot.json_docs.extend(typed_long_term_scope_docs(
+        "system",
+        "system",
+        vec![graph_owner_for("owner:graph")],
+    ));
+    snapshot.json_docs.extend(typed_long_term_scope_docs(
+        "space:b",
+        "subject:b",
+        vec![graph_owner_for("owner:graph:b")],
+    ));
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owners");
@@ -1014,11 +1251,9 @@ fn typed_graph_transaction_rejects_a_same_scope_noop_document_delete_atomically(
     let platform = support::open_store(config).expect("platform");
     let owner = graph_owner();
     let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: "long_term".to_string(),
-        key: scoped_long_term_memory_storage_key("system", &owner.id).expect("owner key"),
-        value: serde_json::to_value(owner).expect("serialize owner"),
-    });
+    snapshot
+        .json_docs
+        .extend(typed_long_term_scope_docs("system", "system", vec![owner]));
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owner");
@@ -1052,11 +1287,9 @@ fn typed_graph_transaction_rejects_deleting_a_preexisting_orphan_as_an_extra_eff
     let platform = support::open_store(config).expect("platform");
     let owner = graph_owner();
     let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: "long_term".to_string(),
-        key: scoped_long_term_memory_storage_key("system", &owner.id).expect("owner key"),
-        value: serde_json::to_value(owner).expect("serialize owner"),
-    });
+    snapshot
+        .json_docs
+        .extend(typed_long_term_scope_docs("system", "system", vec![owner]));
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owner");
@@ -1083,18 +1316,14 @@ fn typed_graph_transaction_rejects_deleting_a_preexisting_orphan_as_an_extra_eff
     };
     let orphan_key =
         scoped_memory_graph_storage_key("system", "system", &format!("node:{}", orphan.node_id));
-    let mut corrupted = platform.export_store_snapshot().expect("graph snapshot");
-    corrupted.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: MEMORY_GRAPH_NODE_NAMESPACE.to_string(),
-        key: orphan_key.clone(),
-        value: serde_json::to_value(orphan).expect("serialize orphan"),
-    });
     platform
-        .import_store_snapshot(&corrupted)
+        .tamper_json_document_for_nonproduction_harness(
+            MEMORY_GRAPH_NODE_NAMESPACE,
+            &orphan_key,
+            serde_json::to_value(orphan).expect("serialize orphan"),
+        )
         .expect("inject scoped orphan");
-    let before = platform
-        .export_store_snapshot()
-        .expect("before replacement");
+    let before = raw_graph_docs(&platform);
 
     let mut replacement_mutations = seed_mutations;
     replacement_mutations.push(StoreMutation::DeleteJson {
@@ -1110,7 +1339,7 @@ fn typed_graph_transaction_rejects_deleting_a_preexisting_orphan_as_an_extra_eff
         scope: StoreEventScope::system("memory_graph.maintain"),
         mutations: replacement_mutations,
     };
-    let preconditions = exact_json_preconditions(&before.json_docs, &replacement_batch);
+    let preconditions = exact_json_preconditions(&before, &replacement_batch);
     let error = platform
         .commit_governed_memory_transaction_with_preconditions(replacement_batch, &preconditions)
         .expect_err("orphan delete is not part of the manifest exact effects");
@@ -1119,7 +1348,7 @@ fn typed_graph_transaction_rejects_deleting_a_preexisting_orphan_as_an_extra_eff
     assert!(error
         .to_string()
         .contains("memory_write_transaction_graph_post_image_invalid"));
-    assert_eq!(platform.export_store_snapshot().unwrap(), before);
+    assert_eq!(raw_graph_docs(&platform), before);
 }
 
 #[test]
@@ -1131,11 +1360,9 @@ fn typed_graph_delete_rejects_a_noncanonical_before_dependency_closure() {
     let platform = support::open_store(config).expect("platform");
     let owner = graph_owner();
     let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: "long_term".to_string(),
-        key: scoped_long_term_memory_storage_key("system", &owner.id).expect("owner key"),
-        value: serde_json::to_value(owner).expect("serialize owner"),
-    });
+    snapshot
+        .json_docs
+        .extend(typed_long_term_scope_docs("system", "system", vec![owner]));
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owner");
@@ -1155,27 +1382,54 @@ fn typed_graph_delete_rejects_a_noncanonical_before_dependency_closure() {
         .expect("seed exact graph closure");
 
     let forged_key = scoped_memory_graph_storage_key("system", "system", "node_membership:forged");
-    let mut corrupted = platform.export_store_snapshot().expect("graph snapshot");
+    let mut corrupted = raw_graph_docs(&platform);
     let membership = corrupted
-        .json_docs
         .iter_mut()
         .find(|doc| doc.namespace == MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE)
         .expect("node membership");
+    let old_membership_key = membership.key.clone();
     membership.key = forged_key.clone();
     membership.value["membership_key"] = json!(forged_key.clone());
     let manifest = corrupted
-        .json_docs
         .iter_mut()
         .find(|doc| doc.namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE)
         .expect("manifest");
     manifest.value["node_memberships"][0]["storage_key"] = json!(forged_key);
+    let forged_membership = corrupted
+        .iter()
+        .find(|doc| {
+            doc.namespace == MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE && doc.key != old_membership_key
+        })
+        .expect("forged membership")
+        .clone();
+    let forged_manifest = corrupted
+        .iter()
+        .find(|doc| doc.namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE)
+        .expect("forged manifest")
+        .clone();
     platform
-        .import_store_snapshot(&corrupted)
-        .expect("inject noncanonical dependency closure");
-    let before = platform.export_store_snapshot().expect("before delete");
+        .delete_json_document_for_nonproduction_harness(
+            MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+            &old_membership_key,
+        )
+        .expect("remove canonical membership");
+    platform
+        .tamper_json_document_for_nonproduction_harness(
+            &forged_membership.namespace,
+            &forged_membership.key,
+            forged_membership.value,
+        )
+        .expect("inject forged membership");
+    platform
+        .tamper_json_document_for_nonproduction_harness(
+            &forged_manifest.namespace,
+            &forged_manifest.key,
+            forged_manifest.value,
+        )
+        .expect("inject forged manifest");
+    let before = raw_graph_docs(&platform);
 
     let delete_mutations = before
-        .json_docs
         .iter()
         .filter(|doc| doc.namespace.starts_with("memory_graph_"))
         .map(|doc| StoreMutation::DeleteJson {
@@ -1192,7 +1446,7 @@ fn typed_graph_delete_rejects_a_noncanonical_before_dependency_closure() {
         scope: StoreEventScope::system("memory_graph.maintain"),
         mutations: delete_mutations,
     };
-    let preconditions = exact_json_preconditions(&before.json_docs, &delete_batch);
+    let preconditions = exact_json_preconditions(&before, &delete_batch);
     let error = platform
         .commit_governed_memory_transaction_with_preconditions(delete_batch, &preconditions)
         .expect_err("noncanonical before dependency closure must fail closed");
@@ -1201,7 +1455,7 @@ fn typed_graph_delete_rejects_a_noncanonical_before_dependency_closure() {
     assert!(error
         .to_string()
         .contains("memory_write_transaction_graph_post_image_invalid"));
-    assert_eq!(platform.export_store_snapshot().unwrap(), before);
+    assert_eq!(raw_graph_docs(&platform), before);
 }
 
 #[test]
@@ -1212,13 +1466,13 @@ fn raw_graph_batch_cannot_forge_integrity_repair_authority_with_operation_text()
     .expect("config");
     let platform = support::open_store(config).expect("platform");
     let owner = graph_owner();
-    let owner_key = scoped_long_term_memory_storage_key("system", &owner.id).expect("owner key");
+    let owner_docs = typed_long_term_scope_docs("system", "system", vec![owner]);
+    let owner_addresses = owner_docs
+        .iter()
+        .map(|doc| (doc.namespace.clone(), doc.key.clone()))
+        .collect::<Vec<_>>();
     let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: "long_term".to_string(),
-        key: owner_key.clone(),
-        value: serde_json::to_value(owner).expect("serialize owner"),
-    });
+    snapshot.json_docs.extend(owner_docs);
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owner");
@@ -1237,18 +1491,24 @@ fn raw_graph_batch_cannot_forge_integrity_repair_authority_with_operation_text()
         )
         .expect("seed exact graph closure");
 
-    let mut owner_missing = platform.export_store_snapshot().expect("graph snapshot");
-    owner_missing
-        .json_docs
-        .retain(|doc| !(doc.namespace == "long_term" && doc.key == owner_key));
+    for (namespace, key) in &owner_addresses {
+        platform
+            .delete_json_document_for_nonproduction_harness(namespace, key)
+            .expect("remove governed owner closure");
+    }
+    let empty_root =
+        LongTermMemoryVersionScopeManifest::build("system", "system", 2, &[], &[], &[], &[], 1)
+            .expect("build empty typed long-term scope root");
     platform
-        .import_store_snapshot(&owner_missing)
-        .expect("inject owner-missing graph");
-    let before = platform.export_store_snapshot().expect("before raw repair");
+        .tamper_json_document_for_nonproduction_harness(
+            LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            &empty_root.physical_key,
+            serde_json::to_value(&empty_root).expect("serialize empty scope root"),
+        )
+        .expect("inject empty typed long-term scope root");
+    let before = raw_graph_docs(&platform);
     let delete_mutations = before
-        .json_docs
         .iter()
-        .filter(|doc| doc.namespace.starts_with("memory_graph_"))
         .map(|doc| StoreMutation::DeleteJson {
             namespace: doc.namespace.clone(),
             key: doc.key.clone(),
@@ -1263,7 +1523,7 @@ fn raw_graph_batch_cannot_forge_integrity_repair_authority_with_operation_text()
         scope: StoreEventScope::system("memory_graph.integrity_maintenance"),
         mutations: delete_mutations,
     };
-    let preconditions = exact_json_preconditions(&before.json_docs, &forged_repair_batch);
+    let preconditions = exact_json_preconditions(&before, &forged_repair_batch);
     let error = platform
         .commit_governed_memory_transaction_with_preconditions(forged_repair_batch, &preconditions)
         .expect_err("operation text cannot grant graph repair authority");
@@ -1272,7 +1532,7 @@ fn raw_graph_batch_cannot_forge_integrity_repair_authority_with_operation_text()
     assert!(error
         .to_string()
         .contains("memory_graph_before_image_invalid"));
-    assert_eq!(platform.export_store_snapshot().unwrap(), before);
+    assert_eq!(raw_graph_docs(&platform), before);
 }
 
 #[test]
@@ -1319,11 +1579,9 @@ fn assert_scoped_graph_orphan_rejected(config: StoreBackendConfig, backend: &str
     let platform = support::open_store(config).expect("platform");
     let owner = graph_owner();
     let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: "long_term".to_string(),
-        key: scoped_long_term_memory_storage_key("system", &owner.id).expect("owner key"),
-        value: serde_json::to_value(owner).expect("serialize owner"),
-    });
+    snapshot
+        .json_docs
+        .extend(typed_long_term_scope_docs("system", "system", vec![owner]));
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owner");
@@ -1340,7 +1598,6 @@ fn assert_scoped_graph_orphan_rejected(config: StoreBackendConfig, backend: &str
         .commit_governed_memory_transaction_with_preconditions(seed_batch, &seed_preconditions)
         .expect("seed exact graph closure");
 
-    let mut corrupted = platform.export_store_snapshot().expect("graph snapshot");
     let orphan = MemoryGraphNode {
         node_id: "owner:orphan".to_string(),
         kind: MemoryGraphNodeKind::MemoryRecord,
@@ -1349,15 +1606,14 @@ fn assert_scoped_graph_orphan_rejected(config: StoreBackendConfig, backend: &str
     };
     let orphan_key =
         scoped_memory_graph_storage_key("system", "system", &format!("node:{}", orphan.node_id));
-    corrupted.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: MEMORY_GRAPH_NODE_NAMESPACE.to_string(),
-        key: orphan_key.clone(),
-        value: serde_json::to_value(orphan).expect("serialize orphan"),
-    });
     platform
-        .import_store_snapshot(&corrupted)
+        .tamper_json_document_for_nonproduction_harness(
+            MEMORY_GRAPH_NODE_NAMESPACE,
+            &orphan_key,
+            serde_json::to_value(orphan).expect("serialize orphan"),
+        )
         .expect("inject scoped orphan");
-    let before = platform.export_store_snapshot().expect("before deletion");
+    let before = raw_graph_docs(&platform);
 
     let delete_mutations = seed_mutations
         .into_iter()
@@ -1385,7 +1641,7 @@ fn assert_scoped_graph_orphan_rejected(config: StoreBackendConfig, backend: &str
         scope: StoreEventScope::system("memory_graph.maintain"),
         mutations: delete_mutations,
     };
-    let preconditions = exact_json_preconditions(&before.json_docs, &delete_batch);
+    let preconditions = exact_json_preconditions(&before, &delete_batch);
     let error = platform
         .commit_governed_memory_transaction_with_preconditions(delete_batch, &preconditions)
         .expect_err("scoped orphan must reject graph deletion");
@@ -1398,14 +1654,9 @@ fn assert_scoped_graph_orphan_rejected(config: StoreBackendConfig, backend: &str
     assert!(error
         .to_string()
         .contains("memory_write_transaction_graph_post_image_invalid"));
-    assert_eq!(
-        platform.export_store_snapshot().unwrap(),
-        before,
-        "backend={backend}"
-    );
+    assert_eq!(raw_graph_docs(&platform), before, "backend={backend}");
     assert!(
         before
-            .json_docs
             .iter()
             .any(|doc| doc.namespace == MEMORY_GRAPH_NODE_NAMESPACE && doc.key == orphan_key),
         "backend={backend}"
@@ -1457,11 +1708,7 @@ fn json_namespace_read_exposes_admitted_docs_without_store_graph_semantics() {
         transaction_id: "txn-read-namespace".to_string(),
         operation: "skill_meta.write".to_string(),
         scope: StoreEventScope::system("skill_meta.write"),
-        mutations: vec![put_json(
-            "skill_meta",
-            "summary:release",
-            json!({"summary": "release"}),
-        )],
+        mutations: vec![put_json("skill_meta", "order", json!(["release"]))],
     };
     let preconditions = absent_json_preconditions(&batch);
     platform
@@ -1473,8 +1720,8 @@ fn json_namespace_read_exposes_admitted_docs_without_store_graph_semantics() {
         .expect("read summary namespace");
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0].namespace, "skill_meta");
-    assert_eq!(docs[0].key, "summary:release");
-    assert_eq!(docs[0].value["summary"], "release");
+    assert_eq!(docs[0].key, "order");
+    assert_eq!(docs[0].value, json!(["release"]));
 
     let err = platform
         .read_json_namespace("memory_graph_unowned_semantics")
@@ -1526,37 +1773,34 @@ fn governed_transaction_rejects_owner_mutation_without_facet_closure() {
         .expect("config"),
     )
     .expect("store");
-    let key = "scoped-owner-key";
-    let batch = mutation_batch(
-        "txn-owner-without-facet",
-        StoreMutation::PutJson {
-            namespace: "long_term".to_string(),
-            key: key.to_string(),
-            value: json!({"id": "owner-1"}),
-            event_kind: MemoryStoreEventKind::MemoryWrite,
-            plane: "long_term".to_string(),
-            record_key: "owner-1".to_string(),
-        },
+    let owner_docs = typed_long_term_scope_docs_without_facets(
+        "system",
+        "system",
+        vec![graph_owner_for("owner-1")],
     );
+    let mut mutations = owner_docs
+        .into_iter()
+        .map(|doc| put_json(&doc.namespace, &doc.key, doc.value))
+        .collect::<Vec<_>>();
+    mutations.extend(typed_graph_closure_for("system", "system", "owner-1"));
+    let batch = StoreMutationBatch {
+        transaction_id: "txn-owner-without-facet".to_string(),
+        operation: "long_term.write".to_string(),
+        scope: StoreEventScope::system("long_term.write"),
+        mutations,
+    };
+    let preconditions = absent_json_preconditions(&batch);
+    let before = platform.export_store_snapshot().expect("snapshot before");
 
     let error = platform
-        .commit_governed_memory_transaction_with_preconditions(
-            batch,
-            &[StoreJsonPrecondition::Absent {
-                namespace: "long_term".to_string(),
-                key: key.to_string(),
-            }],
-        )
+        .commit_governed_memory_transaction_with_preconditions(batch, &preconditions)
         .expect_err("owner mutation without facet closure must fail");
 
     assert_eq!(
         error.stage(),
         "memory_write_transaction_owner_facet_closure_missing"
     );
-    assert!(platform
-        .read_json_namespace("long_term")
-        .expect("long-term namespace")
-        .is_empty());
+    assert_eq!(platform.export_store_snapshot().unwrap(), before);
 }
 
 #[test]
@@ -2216,12 +2460,11 @@ fn governed_transaction_rejects_unbound_evidence_owner_in_existing_graph() {
     .expect("store");
     let graph_owner = graph_owner();
     let mut seed_snapshot = platform.export_store_snapshot().expect("seed snapshot");
-    seed_snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: "long_term".to_string(),
-        key: scoped_long_term_memory_storage_key("system", &graph_owner.id)
-            .expect("graph owner key"),
-        value: serde_json::to_value(graph_owner).expect("serialize graph owner"),
-    });
+    seed_snapshot.json_docs.extend(typed_long_term_scope_docs(
+        "system",
+        "system",
+        vec![graph_owner],
+    ));
     platform
         .import_store_snapshot(&seed_snapshot)
         .expect("seed graph owner");
@@ -2334,82 +2577,68 @@ fn long_term_control_namespaces_require_read_set_preconditions() {
     .enumerate()
     {
         let logical_key = format!("control-{index}");
-        let value = match namespace {
-            LONG_TERM_CONTROL_REVISION_NAMESPACE => {
-                serde_json::to_value(LongTermMemoryControlRevision {
-                    schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-                    revision_id: logical_key.clone(),
-                    record_id: "owner-precondition".to_string(),
-                    successor_record_id: None,
-                    operation: "correct".to_string(),
-                    owner_revision: 2,
-                    source_revision: Some(1),
-                    previous_digest: "before".to_string(),
-                    new_digest: "after".to_string(),
-                    reason: "precondition contract".to_string(),
-                    owner_subject_id: "system".to_string(),
-                    actor_subject_id: None,
-                    memory_space_id: Some("system".to_string()),
-                    created_at: 1,
-                })
-                .expect("revision value")
-            }
-            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE => {
-                serde_json::to_value(LongTermMemoryTombstone {
-                    schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-                    tombstone_id: "tombstone-precondition".to_string(),
-                    record_id: logical_key.clone(),
-                    operation: "delete".to_string(),
-                    last_owner_revision: 1,
-                    last_source_revision: Some(1),
-                    previous_digest: "before".to_string(),
-                    reason: "precondition contract".to_string(),
-                    owner_subject_id: "system".to_string(),
-                    actor_subject_id: None,
-                    memory_space_id: Some("system".to_string()),
-                    created_at: 1,
-                })
-                .expect("tombstone value")
-            }
-            LONG_TERM_GOVERNANCE_POLICY_NAMESPACE => {
-                serde_json::to_value(MemoryLongTermGovernancePolicy {
-                    schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-                    policy_revision: 1,
-                    memory_space_id: "system".to_string(),
-                    policy_id: logical_key.clone(),
-                    kind: "suppress".to_string(),
-                    selector: MemoryGovernanceSelector {
-                        memory_space_id: Some("system".to_string()),
-                        subject_id: Some("system".to_string()),
-                        kind: None,
-                        topic_pattern: None,
-                        source_chat_id: None,
-                        source_scope: None,
-                    },
-                    duration: Some(MemoryGovernanceSuppressionDuration::UntilManualResume),
-                    expires_at: None,
-                    reason: "precondition contract".to_string(),
-                    created_at: 1,
-                    updated_at: 1,
-                })
-                .expect("policy value")
-            }
-            LONG_TERM_CONTROL_AUDIT_NAMESPACE => {
-                serde_json::to_value(LongTermMemoryControlAuditEvent::new(
-                    logical_key.clone(),
-                    "txn-audit-precondition",
-                    LongTermControlOperation::Correct,
-                    Vec::new(),
-                    "precondition contract",
-                    "system".to_string(),
-                    None,
-                    "system",
-                    1,
-                ))
-                .expect("audit value")
-            }
-            _ => unreachable!(),
-        };
+        let value =
+            match namespace {
+                LONG_TERM_CONTROL_REVISION_NAMESPACE => serde_json::to_value(
+                    typed_control_revision(&logical_key, "owner-precondition", "system"),
+                )
+                .expect("revision value"),
+                LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE => {
+                    serde_json::to_value(LongTermMemoryTombstone {
+                        schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+                        tombstone_id: "tombstone-precondition".to_string(),
+                        record_id: logical_key.clone(),
+                        operation: LongTermControlOperation::Delete,
+                        last_owner_revision: 1,
+                        last_source_revision: Some(1),
+                        previous_digest: "a".repeat(64),
+                        reason: "precondition contract".to_string(),
+                        owner_subject_id: "system".to_string(),
+                        actor_subject_id: None,
+                        memory_space_id: "system".to_string(),
+                        created_at: 1,
+                    })
+                    .expect("tombstone value")
+                }
+                LONG_TERM_GOVERNANCE_POLICY_NAMESPACE => {
+                    serde_json::to_value(MemoryLongTermGovernancePolicy {
+                        schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+                        policy_revision: 1,
+                        memory_space_id: "system".to_string(),
+                        policy_id: logical_key.clone(),
+                        kind: "suppress".to_string(),
+                        selector: MemoryGovernanceSelector {
+                            memory_space_id: Some("system".to_string()),
+                            subject_id: Some("system".to_string()),
+                            kind: None,
+                            topic_pattern: None,
+                            source_chat_id: None,
+                            source_scope: None,
+                        },
+                        duration: Some(MemoryGovernanceSuppressionDuration::UntilManualResume),
+                        expires_at: None,
+                        reason: "precondition contract".to_string(),
+                        created_at: 1,
+                        updated_at: 1,
+                    })
+                    .expect("policy value")
+                }
+                LONG_TERM_CONTROL_AUDIT_NAMESPACE => {
+                    serde_json::to_value(LongTermMemoryControlAuditEvent::new(
+                        logical_key.clone(),
+                        "txn-audit-precondition",
+                        LongTermControlOperation::Correct,
+                        Vec::new(),
+                        "precondition contract",
+                        "system".to_string(),
+                        None,
+                        "system",
+                        1,
+                    ))
+                    .expect("audit value")
+                }
+                _ => unreachable!(),
+            };
         let key = scoped_long_term_control_storage_key("system", namespace, &logical_key)
             .expect("canonical control key");
         let mutation = StoreMutation::PutJson {
@@ -2450,22 +2679,7 @@ fn governed_transaction_rejects_control_mutation_without_audit_closure() {
         revision_id,
     )
     .expect("canonical revision key");
-    let revision = LongTermMemoryControlRevision {
-        schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-        revision_id: revision_id.to_string(),
-        record_id: "owner-1".to_string(),
-        successor_record_id: None,
-        operation: "correct".to_string(),
-        owner_revision: 2,
-        source_revision: Some(1),
-        previous_digest: "before".to_string(),
-        new_digest: "after".to_string(),
-        reason: "test".to_string(),
-        owner_subject_id: "system".to_string(),
-        actor_subject_id: None,
-        memory_space_id: Some("system".to_string()),
-        created_at: 1,
-    };
+    let revision = typed_control_revision(revision_id, "owner-1", "system");
     let batch = StoreMutationBatch {
         transaction_id: "txn-control-without-audit".to_string(),
         operation: "test.control_audit_closure".to_string(),
@@ -2520,33 +2734,16 @@ fn governed_transaction_rejects_mismatched_control_audit_binding() {
     let audit_key =
         scoped_long_term_control_storage_key("system", LONG_TERM_CONTROL_AUDIT_NAMESPACE, audit_id)
             .expect("canonical audit key");
-    let revision = LongTermMemoryControlRevision {
-        schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-        revision_id: revision_id.to_string(),
-        record_id: "owner-1".to_string(),
-        successor_record_id: None,
-        operation: "correct".to_string(),
-        owner_revision: 2,
-        source_revision: Some(1),
-        previous_digest: "before".to_string(),
-        new_digest: "after".to_string(),
-        reason: "test".to_string(),
-        owner_subject_id: "system".to_string(),
-        actor_subject_id: None,
-        memory_space_id: Some("system".to_string()),
-        created_at: 1,
-    };
+    let revision = typed_control_revision(revision_id, "owner-1", "system");
+    let other_revision = typed_control_revision("other-revision", "owner-2", "system");
     let audit = LongTermMemoryControlAuditEvent::new(
         audit_id,
         "txn-control-mismatched-audit",
         LongTermControlOperation::Correct,
         vec![ControlEffectRef::Revision {
             revision_id: "other-revision".to_string(),
-            record_id: "owner-2".to_string(),
-            successor_record_id: None,
-            owner_subject_id: "system".to_string(),
-            owner_revision: 2,
-            source_revision: Some(1),
+            transition: other_revision.transition,
+            mounted_subject_id: "system".to_string(),
         }],
         "test",
         "system".to_string(),
@@ -2607,10 +2804,10 @@ fn conditional_batch_exact_precondition_serializes_competing_writers_without_los
     .expect("transaction budget must be a valid semantic contraction");
     let platform = support::open_store(config).expect("platform");
     let namespace = "skill_meta";
-    let key = "manifest:release";
-    let v1 = json!({ "generation": 1 });
-    let first_v2 = json!({ "generation": 2, "writer": "first" });
-    let second_v2 = json!({ "generation": 2, "writer": "second" });
+    let key = "order";
+    let v1 = json!(["alpha"]);
+    let first_v2 = json!(["beta-first"]);
+    let second_v2 = json!(["beta-second"]);
 
     let seed = mutation_batch("txn-manifest-v1", put_json(namespace, key, v1.clone()));
     platform
@@ -2676,8 +2873,7 @@ fn conditional_batch_exact_precondition_serializes_competing_writers_without_los
         .expect("read final manifest");
     assert_eq!(manifests.len(), 1);
     assert!(
-        manifests[0].value == json!({ "generation": 2, "writer": "first" })
-            || manifests[0].value == json!({ "generation": 2, "writer": "second" })
+        manifests[0].value == json!(["beta-first"]) || manifests[0].value == json!(["beta-second"])
     );
     assert_eq!(
         platform.read_events().unwrap().len(),
@@ -2695,7 +2891,7 @@ fn conditional_batch_absent_precondition_rejects_existing_json_without_changes()
     .expect("transaction budget must be a valid semantic contraction");
     let platform = support::open_store(config).expect("platform");
     let namespace = "skill_meta";
-    let key = "manifest:absent";
+    let key = "order";
     let preconditions = vec![StoreJsonPrecondition::Absent {
         namespace: namespace.to_string(),
         key: key.to_string(),
@@ -2705,7 +2901,7 @@ fn conditional_batch_absent_precondition_rejects_existing_json_without_changes()
         .commit_governed_memory_transaction_with_preconditions(
             mutation_batch(
                 "txn-absent-create",
-                put_json(namespace, key, json!({ "generation": 1 })),
+                put_json(namespace, key, json!(["alpha"])),
             ),
             &preconditions,
         )
@@ -2719,7 +2915,7 @@ fn conditional_batch_absent_precondition_rejects_existing_json_without_changes()
         .commit_governed_memory_transaction_with_preconditions(
             mutation_batch(
                 "txn-absent-replace",
-                put_json(namespace, key, json!({ "generation": 2 })),
+                put_json(namespace, key, json!(["beta"])),
             ),
             &preconditions,
         )

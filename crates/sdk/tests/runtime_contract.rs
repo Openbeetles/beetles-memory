@@ -69,6 +69,7 @@ fn recall_reports_the_single_immutable_session_read_view_it_consumed() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "snapshot receipt".to_string(),
             limit: 4,
             structured_query_facets: Vec::new(),

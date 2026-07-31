@@ -40,7 +40,9 @@ pub fn project_adapter_report(
 ) -> Result<AdapterProjectionReport> {
     let lease = runtime.acquire_runtime_budget_lease()?;
     runtime.execute_with_runtime_budget_lease(&lease, || {
-        runtime.project(request).map(AdapterProjectionReport::from)
+        runtime
+            .project_safe(request)
+            .map(AdapterProjectionReport::from)
     })
 }
 

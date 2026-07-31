@@ -1,5 +1,6 @@
 use bm_sdk::{
-    MemoryRuntime, MemoryWriteRequest, ProceduralMemoryPromotionInput, RuntimeSkillWriteSource,
+    GovernedRuntimeSkillWriteInput, MemoryRuntime, MemoryWriteRequest, RuntimeSkillCreationRef,
+    RuntimeSkillWriteSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,41 +55,25 @@ pub fn commit_evolution_proposal(
         });
     }
 
-    let promotions = proposal
+    let writes = proposal
         .candidates
         .iter()
         .enumerate()
         .filter_map(|(index, candidate)| match candidate {
             EvolutionCandidate::ProceduralMemory { write } => {
-                let evidence_refs = write
-                    .citations
-                    .iter()
-                    .cloned()
-                    .chain(proposal.evidence_refs.iter().cloned())
-                    .collect::<Vec<_>>();
-                Some(ProceduralMemoryPromotionInput {
-                    task_id: format!("{}:{index}", proposal.proposal_id),
-                    trigger: if !write.name.trim().is_empty() {
-                        write.name.clone()
-                    } else if write.topic.trim().is_empty() {
-                        write.title.clone()
-                    } else {
-                        write.topic.clone()
+                Some(GovernedRuntimeSkillWriteInput {
+                    write: write.clone(),
+                    creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                        candidate_ref: format!("{}:{index}", proposal.proposal_id),
+                        verification_receipt_digest: proposal.verification_receipt_digest.clone(),
                     },
-                    procedure: write.content.clone(),
-                    constraints: vec!["evolution_sandbox_submission_policy".to_string()],
-                    failure_modes: vec![proposal.rationale.clone()],
-                    counterfactual_fix: write.summary.clone(),
-                    repeated_evidence_count: evidence_refs.len(),
-                    evidence_refs,
-                    quality_score: 80,
-                    capability_affinity: vec![write.topic.clone()],
+                    privacy_class: proposal.privacy_class,
                 })
             }
             EvolutionCandidate::GovernanceNote { .. } => None,
         })
         .collect::<Vec<_>>();
-    if promotions.len() != proposal.candidates.len() {
+    if writes.len() != proposal.candidates.len() {
         return Ok(EvolutionProposalReport {
             proposal_id: proposal.proposal_id,
             profile: proposal.profile,
@@ -101,8 +86,9 @@ pub fn commit_evolution_proposal(
             reason: "governance_note_requires_future_sdk_operation".to_string(),
         });
     }
-    let write_report = runtime.write(MemoryWriteRequest::ProceduralPromotions {
-        promotions,
+    let write_report = runtime.write(MemoryWriteRequest::Procedural {
+        writes,
+        owning_scope: proposal.owning_scope,
         source: RuntimeSkillWriteSource::ProgrammableReasoning,
     })?;
     Ok(EvolutionProposalReport {

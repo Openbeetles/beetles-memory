@@ -6,8 +6,13 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+
+use crate::sealed_execution::SealedLaunchGuard;
 #[cfg(target_os = "linux")]
-use std::sync::Mutex;
+use crate::sealed_execution::{
+    ClaimedSealedExecution, RetainedExecutable as GenerationNeutralRetainedExecutable,
+    SealedClaimFailure, SealedExecutionDomain, SealedObservationFailure,
+};
 
 #[cfg(target_os = "linux")]
 const P7_RETAINED_EXECUTABLE_FD_ENV: &str = "BM_P7_RETAINED_EXECUTABLE_FD";
@@ -15,75 +20,21 @@ const P7_RETAINED_EXECUTABLE_FD_ENV: &str = "BM_P7_RETAINED_EXECUTABLE_FD";
 const P7_RETAINED_EXECUTABLE_PATH_ENV: &str = "BM_P7_RETAINED_EXECUTABLE_PATH";
 #[cfg(target_os = "linux")]
 const P7_RETAINED_EXECUTABLE_SHA256_ENV: &str = "BM_P7_RETAINED_EXECUTABLE_SHA256";
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 const P7_RETAINED_EXECUTABLE_AUTHORITY_ENV: [&str; 3] = [
     P7_RETAINED_EXECUTABLE_FD_ENV,
     P7_RETAINED_EXECUTABLE_PATH_ENV,
     P7_RETAINED_EXECUTABLE_SHA256_ENV,
 ];
 #[cfg(target_os = "linux")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum P7ExecutionAuthorityClaimState {
-    Available,
-    Consumed,
-}
-
-#[cfg(target_os = "linux")]
-static P7_EXECUTION_AUTHORITY_CLAIM_STATE: Mutex<P7ExecutionAuthorityClaimState> =
-    Mutex::new(P7ExecutionAuthorityClaimState::Available);
-
-#[cfg(target_os = "linux")]
-struct P7InheritedAuthorityClaim {
-    inherited_fd: Option<i32>,
-}
-
-#[cfg(target_os = "linux")]
-impl P7InheritedAuthorityClaim {
-    fn new() -> Self {
-        Self { inherited_fd: None }
-    }
-
-    fn retain_inherited_fd(&mut self, inherited_fd: i32) {
-        self.inherited_fd = Some(inherited_fd);
-    }
-
-    fn revoke(mut self) -> io::Result<()> {
-        let close_error = self.inherited_fd.take().and_then(|fd| {
-            // SAFETY: fd is the launcher-issued inherited descriptor and has no Rust owner.
-            (unsafe { libc::close(fd) } != 0).then(io::Error::last_os_error)
-        });
-        clear_p7_inherited_authority_environment();
-        close_error.map_or(Ok(()), Err)
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for P7InheritedAuthorityClaim {
-    fn drop(&mut self) {
-        if let Some(fd) = self.inherited_fd.take() {
-            // SAFETY: fd is the launcher-issued inherited descriptor and has no Rust owner.
-            unsafe {
-                libc::close(fd);
-            }
-        }
-        clear_p7_inherited_authority_environment();
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn clear_p7_inherited_authority_environment() {
-    for key in P7_RETAINED_EXECUTABLE_AUTHORITY_ENV {
-        std::env::remove_var(key);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn is_p7_retained_executable_authority_env(name: &std::ffi::OsStr) -> bool {
-    P7_RETAINED_EXECUTABLE_AUTHORITY_ENV
-        .iter()
-        .any(|key| name == std::ffi::OsStr::new(key))
-}
-
+const P7_SEALED_EXECUTION_DOMAIN: SealedExecutionDomain = SealedExecutionDomain::new(
+    "bm-p7-sealed-executable",
+    "beetle-memory-p7-sealed",
+    P7_RETAINED_EXECUTABLE_FD_ENV,
+    P7_RETAINED_EXECUTABLE_PATH_ENV,
+    P7_RETAINED_EXECUTABLE_SHA256_ENV,
+    &[],
+);
 fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -205,9 +156,8 @@ pub struct P7RetainedFile {
 }
 
 struct P7InheritedExecutionAuthority {
-    file: fs::File,
-    expected_sha256: String,
-    locator: PathBuf,
+    #[cfg(target_os = "linux")]
+    claimed: ClaimedSealedExecution,
 }
 
 pub struct P7ProcessExecutionAuthority {
@@ -221,49 +171,53 @@ pub(crate) trait P7ExternalWriteAuthority {
     fn process_execution_authority(&mut self) -> &mut P7ProcessExecutionAuthority;
 }
 
-#[cfg(target_os = "linux")]
-struct P7ExecPointerArray(Vec<*const libc::c_char>);
-
-#[cfg(target_os = "linux")]
-impl P7ExecPointerArray {
-    fn as_ptr(&self) -> *const *const libc::c_char {
-        self.0.as_ptr()
-    }
-}
-
-// SAFETY: the pointers refer only to immutable CString buffers captured by the same pre_exec
-// closure. Those buffers outlive the pointer arrays and never move or mutate before fexecve.
-#[cfg(target_os = "linux")]
-unsafe impl Send for P7ExecPointerArray {}
-// SAFETY: see the Send implementation; the closure only reads the pointer values.
-#[cfg(target_os = "linux")]
-unsafe impl Sync for P7ExecPointerArray {}
-
 impl P7InheritedExecutionAuthority {
     fn locator(&self) -> &Path {
-        &self.locator
+        #[cfg(target_os = "linux")]
+        {
+            self.claimed.locator()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            unreachable!("non-Linux cannot construct P7 inherited execution authority")
+        }
     }
 
     fn copy_and_verify(&mut self, destination: &mut dyn Write) -> io::Result<P7ContentIdentity> {
-        let admitted_len = self.file.metadata()?.len();
-        let limit = admitted_len
-            .checked_add(1)
-            .ok_or_else(|| invalid_data("P7 inherited executable read limit overflow"))?;
-        self.file.seek(SeekFrom::Start(0))?;
-        let mut reader = HashingReader::new((&mut self.file).take(limit));
-        io::copy(&mut reader, destination)?;
-        let identity = reader.finish();
-        self.file.seek(SeekFrom::Start(0))?;
-        if identity.byte_len != admitted_len || identity.sha256 != self.expected_sha256 {
-            return Err(invalid_data(
-                "P7 inherited executable differs from its sealed identity",
-            ));
+        #[cfg(target_os = "linux")]
+        {
+            let identity = self
+                .claimed
+                .copy_to_typed(destination)
+                .map_err(map_p7_observation_failure)?;
+            Ok(P7ContentIdentity {
+                byte_len: identity.byte_len(),
+                sha256: identity.sha256().to_string(),
+            })
         }
-        Ok(identity)
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = destination;
+            unreachable!("non-Linux cannot construct P7 inherited execution authority")
+        }
     }
 
     fn verify(&mut self) -> io::Result<P7ContentIdentity> {
-        self.copy_and_verify(&mut io::sink())
+        #[cfg(target_os = "linux")]
+        {
+            self.claimed
+                .verify_typed()
+                .map_err(map_p7_observation_failure)?;
+            let identity = self.claimed.identity();
+            Ok(P7ContentIdentity {
+                byte_len: identity.byte_len(),
+                sha256: identity.sha256().to_string(),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            unreachable!("non-Linux cannot construct P7 inherited execution authority")
+        }
     }
 }
 
@@ -374,19 +328,61 @@ impl P7ExternalWriteAuthority for P7ProcessExecutionAuthority {
 }
 
 #[cfg(target_os = "linux")]
-fn require_p7_execution_seals(actual_seals: libc::c_int) -> io::Result<()> {
-    let required_seals = p7_required_execution_seals();
-    if actual_seals & required_seals != required_seals {
-        return Err(invalid_data(
-            "P7 retained executable descriptor is missing required seals",
-        ));
+fn map_p7_claim_failure(failure: SealedClaimFailure) -> io::Error {
+    match failure {
+        SealedClaimFailure::AlreadyConsumed => {
+            invalid_data("P7 inherited execution authority was already consumed")
+        }
+        SealedClaimFailure::DescriptorMissing => {
+            invalid_data("P7 retained executable descriptor is missing")
+        }
+        SealedClaimFailure::DescriptorInvalid => {
+            invalid_data("P7 retained executable descriptor is invalid")
+        }
+        SealedClaimFailure::DescriptorReserved => {
+            invalid_data("P7 retained executable descriptor is reserved or invalid")
+        }
+        SealedClaimFailure::LocatorMissing => {
+            invalid_data("P7 retained executable locator is missing")
+        }
+        SealedClaimFailure::LocatorNotAbsolute => {
+            invalid_data("P7 retained executable locator must be absolute")
+        }
+        SealedClaimFailure::Sha256Missing => {
+            invalid_data("P7 retained executable SHA256 is missing")
+        }
+        SealedClaimFailure::Sha256Invalid => {
+            invalid_data("P7 retained executable SHA256 is invalid")
+        }
+        SealedClaimFailure::NotExecutable => {
+            invalid_data("P7 retained executable descriptor is not an executable regular file")
+        }
+        SealedClaimFailure::SealQueryFailed => {
+            invalid_data("P7 retained executable descriptor is not a sealed memfd")
+        }
+        SealedClaimFailure::MissingRequiredSeals => {
+            invalid_data("P7 retained executable descriptor is missing required seals")
+        }
+        SealedClaimFailure::NotCurrentExecutionObject => {
+            invalid_data("P7 retained executable descriptor is not the current execution object")
+        }
+        SealedClaimFailure::Io(error) => error,
     }
-    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn map_p7_observation_failure(failure: SealedObservationFailure) -> io::Error {
+    match failure {
+        SealedObservationFailure::IdentityMismatch => {
+            invalid_data("P7 inherited executable differs from its sealed identity")
+        }
+        SealedObservationFailure::Io(error) => error,
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn p7_required_execution_seals() -> libc::c_int {
-    libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL
+    crate::sealed_execution::required_linux_seals()
 }
 
 impl P7RetainedFile {
@@ -486,199 +482,31 @@ impl P7RetainedFile {
         args: &[String],
         seals: libc::c_int,
     ) -> io::Result<(Command, P7ExecutableLaunchGuard, P7ContentIdentity)> {
-        use std::ffi::CString;
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::process::CommandExt;
-
-        let name = CString::new("bm-p7-sealed-executable").expect("static memfd name");
-        // SAFETY: name is a valid C string and the returned descriptor is uniquely owned.
-        let raw = unsafe {
-            libc::syscall(
-                libc::SYS_memfd_create,
-                name.as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            ) as libc::c_int
+        self.verify_unchanged()?;
+        let mut executable = GenerationNeutralRetainedExecutable::from_retained_file(
+            &self.path,
+            self.file.try_clone()?,
+            self.admitted_len,
+        )?;
+        let prepared = executable.prepare_with_linux_seals_for_legacy_p7_contract(
+            P7_SEALED_EXECUTION_DOMAIN,
+            args,
+            seals,
+        )?;
+        let (command, guard, identity) = prepared.into_parts();
+        let identity = P7ContentIdentity {
+            byte_len: identity.byte_len(),
+            sha256: identity.sha256().to_string(),
         };
-        if raw < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: successful memfd_create returned a new owned descriptor.
-        let memfd = unsafe { OwnedFd::from_raw_fd(raw) };
-        let mut target = fs::File::from(memfd);
-        let mut source = self.file.try_clone()?;
-        source.seek(SeekFrom::Start(0))?;
-        let mut reader = HashingReader::new(source.take(self.admitted_len.saturating_add(1)));
-        io::copy(&mut reader, &mut target)?;
-        let launch_identity = reader.finish();
-        if launch_identity.byte_len != self.admitted_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "P7 executable changed while sealing Linux memfd",
-            ));
-        }
-        target.sync_all()?;
-        // SAFETY: target is a live anonymous regular file descriptor owned by this process.
-        if unsafe { libc::fchmod(target.as_raw_fd(), 0o500) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: F_ADD_SEALS applies the requested kernel-enforced restrictions to the live memfd.
-        if unsafe { libc::fcntl(target.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        self.verify_content(&launch_identity)?;
-
-        let exec_fd = target.as_raw_fd();
-        let mut argv_storage = Vec::with_capacity(args.len() + 1);
-        argv_storage.push(CString::new("beetle-memory-p7-sealed").expect("static argv0"));
-        for arg in args {
-            argv_storage.push(
-                CString::new(arg.as_bytes())
-                    .map_err(|_| invalid_input("P7 executable argument contains NUL"))?,
-            );
-        }
-        let mut environment = std::env::vars_os()
-            .filter(|(name, _)| !is_p7_retained_executable_authority_env(name))
-            .map(|(name, value)| {
-                let mut field = name.as_os_str().as_bytes().to_vec();
-                field.push(b'=');
-                field.extend_from_slice(value.as_os_str().as_bytes());
-                CString::new(field)
-                    .map_err(|_| invalid_input("P7 executable environment contains NUL"))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        environment.push(
-            CString::new(format!(
-                "{P7_RETAINED_EXECUTABLE_SHA256_ENV}={}",
-                launch_identity.sha256
-            ))
-            .expect("SHA256 environment has no NUL"),
-        );
-        environment.push(
-            CString::new(format!(
-                "{P7_RETAINED_EXECUTABLE_PATH_ENV}={}",
-                self.path.display()
-            ))
-            .map_err(|_| invalid_input("P7 executable path contains NUL"))?,
-        );
-        let inherited = duplicate_inheritable_file(&target)?;
-        environment.push(
-            CString::new(format!(
-                "{P7_RETAINED_EXECUTABLE_FD_ENV}={}",
-                inherited.as_raw_fd()
-            ))
-            .expect("inherited descriptor environment has no NUL"),
-        );
-        let mut argv = argv_storage
-            .iter()
-            .map(|value| value.as_ptr())
-            .collect::<Vec<_>>();
-        argv.push(std::ptr::null());
-        let mut envp = environment
-            .iter()
-            .map(|value| value.as_ptr())
-            .collect::<Vec<_>>();
-        envp.push(std::ptr::null());
-        let argv = P7ExecPointerArray(argv);
-        let envp = P7ExecPointerArray(envp);
-        let mut command = Command::new("/proc/self/exe");
-        // SAFETY: all C strings and pointer arrays are built before fork and retained by the closure.
-        unsafe {
-            command.pre_exec(move || {
-                let _retained_c_strings = (&argv_storage, &environment);
-                libc::fexecve(exec_fd, argv.as_ptr(), envp.as_ptr());
-                Err(io::Error::last_os_error())
-            });
-        }
-        Ok((
-            command,
-            P7ExecutableLaunchGuard {
-                files: vec![target, inherited],
-            },
-            launch_identity,
-        ))
+        self.verify_content(&identity)?;
+        Ok((command, P7ExecutableLaunchGuard { guard }, identity))
     }
 
     #[cfg(target_os = "linux")]
     fn inherited_execution_authority() -> io::Result<P7InheritedExecutionAuthority> {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-        use std::os::unix::fs::MetadataExt;
-
-        let mut claim_state = P7_EXECUTION_AUTHORITY_CLAIM_STATE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *claim_state == P7ExecutionAuthorityClaimState::Consumed {
-            clear_p7_inherited_authority_environment();
-            return Err(invalid_data(
-                "P7 inherited execution authority was already consumed",
-            ));
-        }
-        *claim_state = P7ExecutionAuthorityClaimState::Consumed;
-        let mut claim = P7InheritedAuthorityClaim::new();
-        let raw = std::env::var(P7_RETAINED_EXECUTABLE_FD_ENV)
-            .map_err(|_| invalid_data("P7 retained executable descriptor is missing"))?
-            .parse::<i32>()
-            .map_err(|_| invalid_data("P7 retained executable descriptor is invalid"))?;
-        if raw < 3 {
-            return Err(invalid_data(
-                "P7 retained executable descriptor is reserved or invalid",
-            ));
-        }
-        claim.retain_inherited_fd(raw);
-        let locator = std::env::var_os(P7_RETAINED_EXECUTABLE_PATH_ENV)
-            .map(PathBuf::from)
-            .ok_or_else(|| invalid_data("P7 retained executable locator is missing"))?;
-        if !locator.is_absolute() {
-            return Err(invalid_data(
-                "P7 retained executable locator must be absolute",
-            ));
-        }
-        let expected_sha256 = std::env::var(P7_RETAINED_EXECUTABLE_SHA256_ENV)
-            .map_err(|_| invalid_data("P7 retained executable SHA256 is missing"))?;
-        if expected_sha256.len() != 64
-            || !expected_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
-            return Err(invalid_data("P7 retained executable SHA256 is invalid"));
-        }
-        // SAFETY: F_DUPFD_CLOEXEC validates raw and returns a new owned descriptor on success.
-        let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
-        if duplicate < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: fcntl returned a new descriptor uniquely owned by this value.
-        let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
-        let file = fs::File::from(owned);
-        claim.revoke()?;
-        let inherited_metadata = file.metadata()?;
-        if !inherited_metadata.file_type().is_file() || inherited_metadata.mode() & 0o111 == 0 {
-            return Err(invalid_data(
-                "P7 retained executable descriptor is not an executable regular file",
-            ));
-        }
-        // SAFETY: F_GET_SEALS only queries the live descriptor.
-        let actual_seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
-        if actual_seals < 0 {
-            return Err(invalid_data(
-                "P7 retained executable descriptor is not a sealed memfd",
-            ));
-        }
-        require_p7_execution_seals(actual_seals)?;
-
-        let current = fs::File::open("/proc/self/exe")?;
-        let current_metadata = current.metadata()?;
-        if inherited_metadata.dev() != current_metadata.dev()
-            || inherited_metadata.ino() != current_metadata.ino()
-        {
-            return Err(invalid_data(
-                "P7 retained executable descriptor is not the current execution object",
-            ));
-        }
         Ok(P7InheritedExecutionAuthority {
-            file,
-            expected_sha256,
-            locator,
+            claimed: ClaimedSealedExecution::claim_typed(P7_SEALED_EXECUTION_DOMAIN)
+                .map_err(map_p7_claim_failure)?,
         })
     }
 
@@ -776,7 +604,7 @@ impl P7RetainedFile {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn duplicate_inheritable_file(file: &fs::File) -> io::Result<fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -791,13 +619,8 @@ fn duplicate_inheritable_file(file: &fs::File) -> io::Result<fs::File> {
 }
 
 pub(crate) struct P7ExecutableLaunchGuard {
-    files: Vec<fs::File>,
-}
-
-impl Drop for P7ExecutableLaunchGuard {
-    fn drop(&mut self) {
-        self.files.clear();
-    }
+    #[allow(dead_code)]
+    guard: SealedLaunchGuard,
 }
 
 struct HashingReader<R> {
@@ -1961,12 +1784,45 @@ fn open_or_create_p7_verifier_release_store_with_authority(
 mod platform {
     use super::{invalid_input, validate_canonical_root, P7DirectoryInstallError};
     use std::{
-        ffi::CString,
+        collections::BTreeSet,
+        ffi::{CStr, CString},
         fs::File,
         io,
-        os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
         path::{Component, Path},
     };
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn clear_readdir_errno() {
+        // SAFETY: the selected platform function returns this thread's live errno slot.
+        unsafe { *errno_location() = 0 };
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn clear_readdir_errno() {}
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn readdir_errno() -> libc::c_int {
+        // SAFETY: the selected platform function returns this thread's live errno slot.
+        unsafe { *errno_location() }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn readdir_errno() -> libc::c_int {
+        0
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        // SAFETY: caller treats the returned pointer as the current thread's errno slot.
+        unsafe { libc::__errno_location() }
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        // SAFETY: caller treats the returned pointer as the current thread's errno slot.
+        unsafe { libc::__error() }
+    }
 
     pub(super) struct DirectoryHandle(OwnedFd);
 
@@ -2083,6 +1939,57 @@ mod platform {
             let fd = owned_fd(fd)?;
             require_regular_fd(fd.as_raw_fd())?;
             Ok(File::from(fd))
+        }
+
+        #[allow(dead_code)]
+        pub(super) fn exact_regular_file_names(&self) -> io::Result<BTreeSet<String>> {
+            let duplicate = self.0.try_clone()?.into_raw_fd();
+            // SAFETY: duplicate is a new owned directory descriptor transferred to fdopendir.
+            let directory = unsafe { libc::fdopendir(duplicate) };
+            if directory.is_null() {
+                // SAFETY: fdopendir failed and therefore did not consume duplicate.
+                unsafe { libc::close(duplicate) };
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: directory is a live DIR pointer and rewinddir resets this enumeration pass.
+            unsafe { libc::rewinddir(directory) };
+            let result = (|| {
+                let mut names = BTreeSet::new();
+                loop {
+                    clear_readdir_errno();
+                    // SAFETY: directory remains live for the complete loop.
+                    let entry = unsafe { libc::readdir(directory) };
+                    if entry.is_null() {
+                        let errno = readdir_errno();
+                        if errno != 0 {
+                            return Err(io::Error::from_raw_os_error(errno));
+                        }
+                        break;
+                    }
+                    // SAFETY: d_name is NUL-terminated storage owned by the live DIR entry.
+                    let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
+                        .to_str()
+                        .map_err(|_| {
+                            invalid_input("retained directory entry name must be valid UTF-8")
+                        })?;
+                    if matches!(name, "." | "..") {
+                        continue;
+                    }
+                    let file = self.open_existing_file(name)?;
+                    self.verify_file(name, &file)?;
+                    if !names.insert(name.to_string()) {
+                        return Err(invalid_input(
+                            "retained directory enumeration produced a duplicate entry",
+                        ));
+                    }
+                }
+                Ok(names)
+            })();
+            // SAFETY: fdopendir consumed duplicate; closedir closes that descriptor exactly once.
+            if unsafe { libc::closedir(directory) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            result
         }
 
         pub(super) fn open_existing_deletable_file(&self, file_name: &str) -> io::Result<File> {
@@ -2375,12 +2282,13 @@ mod platform {
 mod platform {
     use super::{invalid_input, validate_canonical_root, P7DirectoryInstallError};
     use std::{
-        ffi::c_void,
+        collections::BTreeSet,
+        ffi::{c_void, OsString},
         fs::File,
         io,
         mem::{offset_of, size_of, zeroed, MaybeUninit},
         os::windows::{
-            ffi::OsStrExt,
+            ffi::{OsStrExt, OsStringExt},
             io::{AsRawHandle, FromRawHandle, OwnedHandle},
         },
         path::{Component, Path, PathBuf},
@@ -2396,17 +2304,18 @@ mod platform {
         },
         Win32::{
             Foundation::{
-                RtlNtStatusToDosError, HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE,
-                OBJ_DONT_REPARSE, UNICODE_STRING,
+                RtlNtStatusToDosError, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE,
+                OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, UNICODE_STRING,
             },
             Storage::FileSystem::{
-                CreateFileW, FileBasicInfo, FileDispositionInfo, FileRenameInfo,
-                GetFileInformationByHandleEx, SetFileInformationByHandle, DELETE,
-                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-                FILE_BASIC_INFO, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-                FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-                FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, OPEN_EXISTING, SYNCHRONIZE,
+                CreateFileW, FileBasicInfo, FileDispositionInfo, FileIdBothDirectoryInfo,
+                FileIdBothDirectoryRestartInfo, FileRenameInfo, GetFileInformationByHandleEx,
+                SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_DIRECTORY,
+                FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
+                FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
+                FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                FILE_SHARE_WRITE, FILE_TRAVERSE, OPEN_EXISTING, SYNCHRONIZE,
             },
             System::IO::IO_STATUS_BLOCK,
         },
@@ -2638,6 +2547,103 @@ mod platform {
             )?;
             require_regular_file(handle.as_raw_handle())?;
             Ok(File::from(handle))
+        }
+
+        #[allow(dead_code)]
+        pub(super) fn exact_regular_file_names(&self) -> io::Result<BTreeSet<String>> {
+            let byte_capacity: usize = 64 * 1024;
+            let mut storage = vec![0_usize; byte_capacity.div_ceil(std::mem::size_of::<usize>())];
+            let mut class = FileIdBothDirectoryRestartInfo;
+            let mut names = BTreeSet::new();
+            loop {
+                // SAFETY: the retained directory handle and aligned storage remain live.
+                let status = unsafe {
+                    GetFileInformationByHandleEx(
+                        self.0.as_raw_handle(),
+                        class,
+                        storage.as_mut_ptr().cast(),
+                        u32::try_from(storage.len() * std::mem::size_of::<usize>()).map_err(
+                            |_| invalid_input("directory enumeration buffer is too large"),
+                        )?,
+                    )
+                };
+                if status == 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                        break;
+                    }
+                    return Err(error);
+                }
+                class = FileIdBothDirectoryInfo;
+                let available = storage.len() * std::mem::size_of::<usize>();
+                let base = storage.as_ptr().cast::<u8>();
+                let mut offset = 0_usize;
+                loop {
+                    if offset
+                        .checked_add(std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>())
+                        .is_none_or(|end| end > available)
+                    {
+                        return Err(invalid_input(
+                            "retained directory enumeration returned a truncated record",
+                        ));
+                    }
+                    // SAFETY: offset was bounds-checked and storage has native alignment.
+                    let info = unsafe { &*base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>() };
+                    let name_bytes = usize::try_from(info.FileNameLength)
+                        .map_err(|_| invalid_input("directory entry name is too long"))?;
+                    if name_bytes % std::mem::size_of::<u16>() != 0 {
+                        return Err(invalid_input(
+                            "directory entry name has an invalid UTF-16 byte length",
+                        ));
+                    }
+                    let name_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+                    let name_end = offset
+                        .checked_add(name_offset)
+                        .and_then(|start| start.checked_add(name_bytes))
+                        .ok_or_else(|| invalid_input("directory entry name length overflow"))?;
+                    if name_end > available {
+                        return Err(invalid_input(
+                            "retained directory enumeration returned a truncated name",
+                        ));
+                    }
+                    // SAFETY: name range is within the aligned OS buffer and has even byte length.
+                    let name_units = unsafe {
+                        std::slice::from_raw_parts(
+                            base.add(offset + name_offset).cast::<u16>(),
+                            name_bytes / std::mem::size_of::<u16>(),
+                        )
+                    };
+                    let name = OsString::from_wide(name_units).into_string().map_err(|_| {
+                        invalid_input("retained directory entry name must be valid UTF-8")
+                    })?;
+                    if !matches!(name.as_str(), "." | "..") {
+                        if info.FileAttributes
+                            & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                            != 0
+                        {
+                            return Err(invalid_input(
+                                "retained artifact directory contains a non-regular entry",
+                            ));
+                        }
+                        let file = self.open_existing_file(&name)?;
+                        self.verify_file(&name, &file)?;
+                        if !names.insert(name) {
+                            return Err(invalid_input(
+                                "retained directory enumeration produced a duplicate entry",
+                            ));
+                        }
+                    }
+                    if info.NextEntryOffset == 0 {
+                        break;
+                    }
+                    offset = offset
+                        .checked_add(usize::try_from(info.NextEntryOffset).map_err(|_| {
+                            invalid_input("directory entry offset does not fit usize")
+                        })?)
+                        .ok_or_else(|| invalid_input("directory entry offset overflow"))?;
+                }
+            }
+            Ok(names)
         }
 
         pub(super) fn open_existing_deletable_file(&self, file_name: &str) -> io::Result<File> {
@@ -3058,15 +3064,10 @@ mod tests {
 
     #[test]
     fn p7_inherited_execution_authority_rejects_partial_seals_and_wrong_sha() {
-        let required = p7_required_execution_seals();
-        for missing in [
-            libc::F_SEAL_WRITE,
-            libc::F_SEAL_GROW,
-            libc::F_SEAL_SHRINK,
-            libc::F_SEAL_SEAL,
-        ] {
-            assert!(require_p7_execution_seals(required & !missing).is_err());
-        }
+        assert_eq!(
+            p7_required_execution_seals(),
+            crate::sealed_execution::required_linux_seals()
+        );
 
         let executable = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
             .expect("canonical test executable");

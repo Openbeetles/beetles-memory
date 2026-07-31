@@ -7,6 +7,7 @@ use crate::platform::{SkillMetaStore, SkillStorage};
 mod agent_skill;
 mod agent_tool;
 mod capability_atoms;
+mod governed_runtime_contract;
 mod prompt_cache;
 mod runtime;
 
@@ -47,21 +48,46 @@ pub use capability_atoms::{
 pub(crate) use capability_atoms::{
     capability_atom_lifecycle_event_at, list_capability_atom_records,
 };
+pub use governed_runtime_contract::{
+    build_runtime_skill_projection_material, build_runtime_skill_recall_plan,
+    canonical_runtime_skill_owner_id, canonical_runtime_skill_owner_key,
+    runtime_skill_projection_candidate_ref, runtime_skill_scope_manifest_key,
+    RuntimeSkillApplicability, RuntimeSkillApplicabilityContext, RuntimeSkillApplicabilityTarget,
+    RuntimeSkillAvailability, RuntimeSkillCapabilityAffinity, RuntimeSkillConstraint,
+    RuntimeSkillConstraintKind, RuntimeSkillCreationRef, RuntimeSkillDeliveryDropReason,
+    RuntimeSkillEvidenceBinding, RuntimeSkillEvidenceKind, RuntimeSkillFailureMode,
+    RuntimeSkillFeedbackKind, RuntimeSkillIntrinsicContract, RuntimeSkillLifecycle,
+    RuntimeSkillLifecycleContractFailure, RuntimeSkillLifecycleContractValidation,
+    RuntimeSkillLifecycleLineage, RuntimeSkillLifecycleState, RuntimeSkillOperationAuthorityRef,
+    RuntimeSkillOwnerBinding, RuntimeSkillOwnerContractFailure,
+    RuntimeSkillOwnerContractValidation, RuntimeSkillOwnerLocator, RuntimeSkillOwnerRecord,
+    RuntimeSkillOwningScope, RuntimeSkillPremise, RuntimeSkillPremiseObservation,
+    RuntimeSkillPremiseRequirement, RuntimeSkillProceduralContent, RuntimeSkillProjectionMaterial,
+    RuntimeSkillProjectionPolicy, RuntimeSkillProjectionRenderOutcome,
+    RuntimeSkillProjectionRenderReceipt, RuntimeSkillRecallAuthority,
+    RuntimeSkillRecallBudgetAuthority, RuntimeSkillRecallPlan, RuntimeSkillRecallPlanFailure,
+    RuntimeSkillRecallPlanValidation, RuntimeSkillRecallQuery, RuntimeSkillSafeEvidenceRef,
+    RuntimeSkillScopeManifest, RuntimeSkillTrigger, RuntimeSkillTriggerKind,
+    RuntimeSkillUsageOutcome, RuntimeSkillUsageOutcomeSummary, RuntimeSkillVersionConstraint,
+    RUNTIME_SKILL_GOVERNED_CONTRACT_SCHEMA_VERSION, RUNTIME_SKILL_OWNER_RECORD_SCHEMA_VERSION,
+    RUNTIME_SKILL_SCOPE_MANIFEST_SCHEMA_VERSION,
+};
 pub use prompt_cache::SkillPromptCache;
 pub use runtime::{
     build_runtime_skill_doctrine_snapshot, build_runtime_skill_genome_snapshot,
-    build_runtime_skill_operator_summary, build_runtime_skill_recall_block, govern_runtime_skills,
-    is_runtime_skill_name, list_runtime_skill_records, plan_governed_runtime_skills,
-    record_runtime_skill_outcomes, retrieve_runtime_skill_hits, runtime_skill_owner_updated_at,
-    touch_runtime_skill_hits, upsert_runtime_skill, write_governed_runtime_skills,
-    RuntimeSkillDoctrineClauseRecord, RuntimeSkillDoctrineSnapshot, RuntimeSkillGenomeDisposition,
-    RuntimeSkillGenomeLineageRecord, RuntimeSkillGenomeNode, RuntimeSkillGenomeSnapshot,
-    RuntimeSkillGovernanceOutcome, RuntimeSkillHit, RuntimeSkillOperatorRecord,
-    RuntimeSkillOperatorSummary, RuntimeSkillOrigin, RuntimeSkillRecallScoreBreakdown,
-    RuntimeSkillRecord, RuntimeSkillReuseOutcome, RuntimeSkillStatus, RuntimeSkillStorageMutation,
-    RuntimeSkillStrategyDiff, RuntimeSkillStrategyDiffKind, RuntimeSkillWriteAction,
-    RuntimeSkillWriteItemReport, RuntimeSkillWriteOutcome, RuntimeSkillWritePlan,
-    RuntimeSkillWriteReason, RuntimeSkillWriteSource,
+    build_runtime_skill_operator_summary, build_runtime_skill_recall_block,
+    govern_runtime_skill_write_shapes, govern_runtime_skills, is_runtime_skill_name,
+    list_runtime_skill_records, plan_governed_runtime_skills, record_runtime_skill_outcomes,
+    retrieve_runtime_skill_hits, runtime_skill_owner_updated_at, touch_runtime_skill_hits,
+    upsert_runtime_skill, write_governed_runtime_skills, RuntimeSkillDoctrineClauseRecord,
+    RuntimeSkillDoctrineSnapshot, RuntimeSkillGenomeDisposition, RuntimeSkillGenomeLineageRecord,
+    RuntimeSkillGenomeNode, RuntimeSkillGenomeSnapshot, RuntimeSkillGovernanceOutcome,
+    RuntimeSkillHit, RuntimeSkillOperatorRecord, RuntimeSkillOperatorSummary, RuntimeSkillOrigin,
+    RuntimeSkillRecallScoreBreakdown, RuntimeSkillRecord, RuntimeSkillReuseOutcome,
+    RuntimeSkillStatus, RuntimeSkillStorageMutation, RuntimeSkillStrategyDiff,
+    RuntimeSkillStrategyDiffKind, RuntimeSkillWriteAction, RuntimeSkillWriteItemReport,
+    RuntimeSkillWriteOutcome, RuntimeSkillWritePlan, RuntimeSkillWriteReason,
+    RuntimeSkillWriteSource,
 };
 pub(crate) use runtime::{
     retrieve_runtime_skill_hits_with_backend, runtime_skill_doctrine_event_at,

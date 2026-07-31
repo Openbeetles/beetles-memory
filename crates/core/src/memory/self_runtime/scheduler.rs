@@ -783,21 +783,10 @@ fn idle_self_runtime_block_reason() -> Option<&'static str> {
     }
     let pressure = crate::orchestrator::refresh_heap_if_stale();
     let snap = crate::orchestrator::snapshot();
-    let min_internal = if snap.heap_free_spiram > 0 {
-        TLS_ADMISSION_MIN_INTERNAL_BYTES as u32
-    } else {
-        TLS_ADMISSION_NO_PSRAM_MIN_BYTES as u32
-    };
-    let fragmented = snap.heap_free_spiram > 0
-        && snap.heap_largest_block_internal < TLS_ADMISSION_MIN_LARGEST_BLOCK_BYTES as u32;
     if pressure != PressureLevel::Normal {
         Some("resource_pressure")
     } else if snap.storage_contention_risk != crate::orchestrator::StorageContentionRisk::Healthy {
         Some("storage_contention")
-    } else if fragmented {
-        Some("internal_heap_fragmented")
-    } else if snap.heap_free_internal < min_internal {
-        Some("insufficient_internal_heap")
     } else {
         None
     }

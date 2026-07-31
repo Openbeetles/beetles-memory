@@ -15,9 +15,13 @@ use bm_llm_gateway::{
 use bm_sdk::{
     board_subject_scope_id, private_garden_scope_id, MemoryAuditSink, MemoryClock, MemoryIdentity,
     MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    NoopMemoryAuditSink, PressureLevel, PrivateDocEntry, PrivateDocWorkspace, ProfileId,
-    RuntimeLifecycleModeInput, StoreBackendConfig,
+    MemoryWriteRequest, NoopMemoryAuditSink, PressureLevel, PrivateDocEntry, PrivateDocWorkspace,
+    ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    StoreBackendConfig,
 };
+
+#[cfg(feature = "nonproduction-replay-harness")]
+mod support;
 
 #[test]
 fn gateway_audit_report_has_stages_without_raw_sensitive_payloads() {
@@ -107,6 +111,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .expect("runtime");
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "gateway private audit".to_string(),
             system_max_len: 4096,
@@ -117,7 +122,8 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         })
         .expect("projection");
     assert!(projection
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("RAW_PRIVATE_WORKSPACE_NOTE_DO_NOT_AUDIT"));
 
     let diagnostic_dir = unique_audit_dir();
@@ -142,7 +148,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
     );
 
     report
-        .record_projection(&config, &projection)
+        .record_projection(&config, projection.report())
         .expect("record projection audit");
 
     assert_eq!(
@@ -154,22 +160,17 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         "raw_projection_recorded_redacted"
     );
     assert!(report.projection_record.redacted);
-    for source_id in &projection.private_disclosure_integrity.redacted_source_ids {
-        assert!(
-            report
-                .projection_record
-                .redacted_source_ids
-                .contains(source_id),
-            "gateway redaction record lost SDK source id {source_id}"
-        );
-    }
+    assert_eq!(
+        report.projection_record.redacted_source_count,
+        projection.report().gateway_audit().redacted_source_count
+    );
     assert!(report.projection_record.projection_chars > 0);
     let block = report
         .projection_record
         .block
         .as_deref()
         .expect("redacted projection block");
-    assert_eq!(block, projection.projection_surfaces.gateway_raw_audit);
+    assert_eq!(block, projection.report().gateway_audit().block);
     assert!(block.contains("## Subject Mount"), "{block}");
     assert!(
         !block.contains("## Soul Private Runtime Context"),
@@ -232,7 +233,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         ),
     );
     disabled_report
-        .record_projection(&disabled_config, &projection)
+        .record_projection(&disabled_config, projection.report())
         .expect("record disabled projection audit");
     assert_eq!(
         disabled_report.projection_record.status,
@@ -243,6 +244,109 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         "raw_projection_recording_disabled"
     );
     assert!(disabled_report.projection_record.block.is_none());
+}
+
+#[test]
+#[cfg(feature = "nonproduction-replay-harness")]
+fn procedural_provider_payload_is_exact_zero_in_gateway_audit_and_local_diagnostic() {
+    let platform = MemoryStoreHandle::open_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("supported host-native dev-full profile"),
+        )
+        .expect("store config"),
+    )
+    .expect("store platform");
+    let runtime = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
+        .store(platform)
+        .clock(Arc::new(FixedClock))
+        .capability_policy(bm_sdk::MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(NoopMemoryAuditSink) as Arc<dyn MemoryAuditSink>)
+        .build()
+        .expect("runtime");
+    let procedural_sentinel = "GATEWAY_PROCEDURAL_AUDIT_EXACT_ZERO_SENTINEL";
+    let procedural_write = runtime
+        .write(MemoryWriteRequest::Procedural {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+                name: "gateway_procedural_audit_guard".to_string(),
+                topic: "gateway procedural audit".to_string(),
+                title: "Gateway procedural audit guard".to_string(),
+                summary: "Keep provider-only procedural content out of diagnostics.".to_string(),
+                content: format!(
+                    "1. {procedural_sentinel}\n2. Verify the redacted audit projection."
+                ),
+                citations: vec!["operator accepted".to_string()],
+                source_chat_id: Some("chat-a".to_string()),
+                observed_at: 1_800_000_000,
+            })],
+            owning_scope: support::runtime_skill_subject_scope("agent-main"),
+            source: RuntimeSkillWriteSource::Manual,
+        })
+        .expect("write governed procedure for audit");
+    assert!(procedural_write.accepted, "{procedural_write:#?}");
+
+    let projection = runtime
+        .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            structured_query_facets: Vec::new(),
+            user_query: "gateway procedural audit".to_string(),
+            system_max_len: 4096,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("projection");
+    assert!(
+        projection
+            .provider_payload()
+            .system_memory_block()
+            .contains(procedural_sentinel),
+        "{:#?}",
+        projection.report().procedural_delivery_reports()
+    );
+
+    let diagnostic_dir = unique_audit_dir();
+    let config = GatewayAuditConfig {
+        record_raw_projection: true,
+        raw_projection_diagnostic_path: Some(diagnostic_dir.clone()),
+        raw_projection_retention_limit: 1,
+        ..GatewayAuditConfig::default()
+    };
+    let mut report = GatewayAuditReport::new(
+        "audit-procedural",
+        "/v1/chat/completions",
+        "openai",
+        "local",
+        GatewayScopeResolution::audit_only(
+            "owner-default",
+            "agent-main",
+            "llm.gateway",
+            "chat-a",
+            "scope resolved without raw path",
+        ),
+    );
+    report
+        .record_projection(&config, projection.report())
+        .expect("record projection audit");
+
+    let block = report
+        .projection_record
+        .block
+        .as_deref()
+        .expect("safe gateway audit block");
+    assert!(!block.contains(procedural_sentinel));
+    let report_json = serde_json::to_string(&report).expect("serialized audit report");
+    assert!(!report_json.contains(procedural_sentinel));
+    let diagnostic_path = report
+        .projection_record
+        .local_diagnostic_path
+        .as_deref()
+        .expect("diagnostic path");
+    let diagnostic_json = std::fs::read_to_string(diagnostic_path).expect("diagnostic file");
+    assert!(!diagnostic_json.contains(procedural_sentinel));
 }
 
 #[cfg(feature = "nonproduction-replay-harness")]

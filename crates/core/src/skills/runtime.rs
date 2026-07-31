@@ -805,6 +805,39 @@ pub fn record_runtime_skill_outcomes(
     Ok(changed)
 }
 
+/// Classifies runtime skill write shapes without reading or mutating skill storage.
+pub fn govern_runtime_skill_write_shapes(
+    writes: &[RuntimeSkillWrite],
+    source: RuntimeSkillWriteSource,
+) -> RuntimeSkillWriteOutcome {
+    let mut outcome = RuntimeSkillWriteOutcome {
+        source,
+        submitted: writes.len(),
+        ..RuntimeSkillWriteOutcome::default()
+    };
+    for write in writes {
+        match inspect_runtime_skill_write_shape(write) {
+            Ok(()) => {
+                outcome.accepted = outcome.accepted.saturating_add(1);
+                outcome.reports.push(RuntimeSkillWriteItemReport {
+                    source,
+                    action: RuntimeSkillWriteAction::Accepted,
+                    reason: RuntimeSkillWriteReason::ProceduralMemory,
+                    topic: write.topic.trim().to_string(),
+                    detail: format!("accepted runtime skill write shape via {}", source.label()),
+                });
+            }
+            Err(report) => {
+                outcome.rejected = outcome.rejected.saturating_add(1);
+                outcome
+                    .reports
+                    .push(RuntimeSkillWriteItemReport { source, ..report });
+            }
+        }
+    }
+    outcome
+}
+
 pub fn write_governed_runtime_skills(
     storage: &dyn SkillStorage,
     writes: &[RuntimeSkillWrite],
@@ -3154,6 +3187,63 @@ mod tests {
             .unwrap()
             .iter()
             .any(|name| name == "runtime_skill__release_patch_flow"));
+    }
+
+    #[test]
+    fn governed_runtime_skill_write_shapes_classify_mixed_input_without_changes() {
+        let outcome = govern_runtime_skill_write_shapes(
+            &[
+                RuntimeSkillWrite {
+                    name: "caller_supplied_name".to_string(),
+                    topic: "  release_patch_flow  ".to_string(),
+                    title: "Release patch flow".to_string(),
+                    summary: "Patch the release and verify the result".to_string(),
+                    content: "1. inspect release diff\n2. patch rollback guards\n3. verify logs"
+                        .to_string(),
+                    citations: Vec::new(),
+                    source_chat_id: Some("chat-1".to_string()),
+                    observed_at: 100,
+                },
+                RuntimeSkillWrite {
+                    name: "another_caller_name".to_string(),
+                    topic: "owner_timezone".to_string(),
+                    title: "Owner timezone".to_string(),
+                    summary: "Timezone note".to_string(),
+                    content: "Owner timezone is Asia/Shanghai.".to_string(),
+                    citations: Vec::new(),
+                    source_chat_id: Some("chat-1".to_string()),
+                    observed_at: 100,
+                },
+            ],
+            RuntimeSkillWriteSource::Extraction,
+        );
+
+        assert_eq!(outcome.source, RuntimeSkillWriteSource::Extraction);
+        assert_eq!(outcome.submitted, 2);
+        assert_eq!(outcome.accepted, 1);
+        assert_eq!(outcome.rejected, 1);
+        assert_eq!(outcome.changed, 0);
+        assert_eq!(outcome.reports.len(), 2);
+        assert_eq!(
+            outcome.reports[0].source,
+            RuntimeSkillWriteSource::Extraction
+        );
+        assert_eq!(outcome.reports[0].action, RuntimeSkillWriteAction::Accepted);
+        assert_eq!(
+            outcome.reports[0].reason,
+            RuntimeSkillWriteReason::ProceduralMemory
+        );
+        assert_eq!(outcome.reports[0].topic, "release_patch_flow");
+        assert_eq!(
+            outcome.reports[1].source,
+            RuntimeSkillWriteSource::Extraction
+        );
+        assert_eq!(outcome.reports[1].action, RuntimeSkillWriteAction::Rejected);
+        assert_eq!(
+            outcome.reports[1].reason,
+            RuntimeSkillWriteReason::WeakProcedure
+        );
+        assert_eq!(outcome.reports[1].topic, "owner_timezone");
     }
 
     #[test]

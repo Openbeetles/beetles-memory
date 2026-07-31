@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use bm_core::Result;
 use serde::Serialize;
 use serde_json::Value;
@@ -6,6 +8,7 @@ use crate::store_internal::transaction::{
     ConditionalDeleteEventTemplate, StoreAdmissionAuthority, StoreBoundedKnownKeyReadResult,
     StoreImmutableReadSession, StoreTransactionAdmission,
 };
+use crate::StorePhysicalOwningScope;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::StoreSnapshotBlob;
 use crate::{MemoryStoreEvent, StoreEventLog, StoreSnapshotJsonDoc};
@@ -26,29 +29,65 @@ pub struct StoreSnapshotReplaceReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StoreScopedProjectionScope {
     pub memory_space_id: String,
-    pub mounted_subject_id: String,
+    pub physical_owning_scope: StorePhysicalOwningScope,
 }
 
 impl StoreScopedProjectionScope {
-    pub fn new(
+    pub fn subject(
         memory_space_id: impl Into<String>,
         mounted_subject_id: impl Into<String>,
     ) -> Result<Self> {
+        let mounted_subject_id = mounted_subject_id.into();
         let scope = Self {
             memory_space_id: memory_space_id.into(),
-            mounted_subject_id: mounted_subject_id.into(),
+            physical_owning_scope: StorePhysicalOwningScope::Subject { mounted_subject_id },
         };
-        if scope.memory_space_id.trim().is_empty()
-            || scope.mounted_subject_id.trim().is_empty()
-            || scope.memory_space_id != scope.memory_space_id.trim()
-            || scope.mounted_subject_id != scope.mounted_subject_id.trim()
-        {
+        scope.validate()?;
+        Ok(scope)
+    }
+
+    pub fn shared_program(memory_space_id: impl Into<String>) -> Result<Self> {
+        let scope = Self {
+            memory_space_id: memory_space_id.into(),
+            physical_owning_scope: StorePhysicalOwningScope::SharedProgram,
+        };
+        scope.validate()?;
+        Ok(scope)
+    }
+
+    pub fn mounted_subject_id(&self) -> Option<&str> {
+        match &self.physical_owning_scope {
+            StorePhysicalOwningScope::Subject { mounted_subject_id } => Some(mounted_subject_id),
+            StorePhysicalOwningScope::SharedProgram => None,
+        }
+    }
+
+    pub fn runtime_skill_owning_scope(&self) -> bm_core::skills::RuntimeSkillOwningScope {
+        match &self.physical_owning_scope {
+            StorePhysicalOwningScope::Subject { mounted_subject_id } => {
+                bm_core::skills::RuntimeSkillOwningScope::Subject {
+                    mounted_subject_id: mounted_subject_id.clone(),
+                }
+            }
+            StorePhysicalOwningScope::SharedProgram => {
+                bm_core::skills::RuntimeSkillOwningScope::SharedProgram
+            }
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        let canonical_memory_space = !self.memory_space_id.trim().is_empty()
+            && self.memory_space_id == self.memory_space_id.trim();
+        let canonical_physical_owner = self
+            .mounted_subject_id()
+            .is_none_or(|subject| !subject.trim().is_empty() && subject == subject.trim());
+        if !canonical_memory_space || !canonical_physical_owner {
             return Err(bm_core::Error::config(
                 "store_scoped_projection",
-                "memory_space_id and mounted_subject_id must be canonical non-empty values",
+                "memory_space_id and physical owning scope must be canonical",
             ));
         }
-        Ok(scope)
+        Ok(())
     }
 }
 
@@ -84,8 +123,74 @@ pub struct StoreScopedProjectionReplaceReport {
     pub inserted_events: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreMetricEventSourceRead {
+    pub events: Vec<MemoryStoreEvent>,
+    pub accounted_snapshot_bytes: usize,
+}
+
+struct MetricEventByteCounter {
+    total: usize,
+    limit: usize,
+}
+
+impl MetricEventByteCounter {
+    fn new(limit: usize) -> Self {
+        Self { total: 0, limit }
+    }
+}
+
+impl Write for MetricEventByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next = self.total.checked_add(bytes.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "runtime metric event byte count overflow",
+            )
+        })?;
+        if next > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "runtime metric event source exceeds the active byte budget",
+            ));
+        }
+        self.total = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn materialize_metric_event_source(
+    events: &[MemoryStoreEvent],
+    capacity: StoreCapacityBudget,
+) -> Result<StoreMetricEventSourceRead> {
+    if events.len() > capacity.event_log_max_items {
+        return Err(bm_core::Error::config(
+            "runtime_metrics_event_capacity",
+            "runtime metric event source exceeds the active item budget",
+        ));
+    }
+    let mut counter = MetricEventByteCounter::new(capacity.snapshot_max_bytes);
+    for event in events {
+        serde_json::to_writer(&mut counter, event).map_err(|error| {
+            bm_core::Error::config("runtime_metrics_event_bytes", error.to_string())
+        })?;
+    }
+    Ok(StoreMetricEventSourceRead {
+        events: events.to_vec(),
+        accounted_snapshot_bytes: counter.total,
+    })
+}
+
 pub trait StoreEngine: StoreEventLog {
     fn admission_authority(&self) -> &StoreAdmissionAuthority;
+    fn read_metric_events(
+        &self,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreMetricEventSourceRead>;
     #[cfg(feature = "nonproduction-replay-harness")]
     fn store_capacity(&self) -> StoreCapacityBudget;
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -257,4 +362,43 @@ pub trait StoreEngine: StoreEventLog {
         blobs: &[StoreSnapshotBlob],
         events: &[MemoryStoreEvent],
     ) -> Result<StoreSnapshotReplaceReport>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store_internal::{MemoryStoreEventKind, StoreEventScope};
+
+    fn metric_event() -> MemoryStoreEvent {
+        MemoryStoreEvent::new(
+            "metric-event",
+            MemoryStoreEventKind::RuntimeLifecycle,
+            StoreEventScope::system("metrics"),
+            10,
+        )
+        .with_payload("operation", "recall")
+        .with_payload("success", "true")
+        .with_payload("result", "ok")
+    }
+
+    #[test]
+    fn metric_event_materialization_admits_exact_bytes_and_rejects_n_plus_one() {
+        let event = metric_event();
+        let exact_bytes = serde_json::to_vec(&event).expect("event bytes").len();
+        let mut exact_capacity = StoreCapacityBudget::full();
+        exact_capacity.event_log_max_items = 1;
+        exact_capacity.snapshot_max_bytes = exact_bytes;
+
+        let admitted =
+            materialize_metric_event_source(std::slice::from_ref(&event), exact_capacity)
+                .expect("exact metric bytes");
+        assert_eq!(admitted.accounted_snapshot_bytes, exact_bytes);
+        assert_eq!(admitted.events, vec![event.clone()]);
+
+        let mut below_capacity = exact_capacity;
+        below_capacity.snapshot_max_bytes = exact_bytes - 1;
+        let error = materialize_metric_event_source(&[event], below_capacity)
+            .expect_err("N+1 bytes must fail before the event vector is cloned");
+        assert_eq!(error.stage(), "runtime_metrics_event_bytes");
+    }
 }

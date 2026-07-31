@@ -2,40 +2,45 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "nonproduction-replay-harness")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bm_core::{Error, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "nonproduction-replay-harness")]
 use crate::enforce_event_key_budget;
+use crate::store_internal::snapshot::StoreSnapshotBlob;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::store_internal::transaction::{
     read_consistent_from_state, validate_restore_post_image_blob_bytes,
 };
 use crate::{
     enforce_logical_key_budget, store_budget_error,
+    store_internal::platform::StoreOpenPreflight,
+    store_internal::schema::{
+        admit_store_json_address, admit_store_json_document, classify_store_blob_address,
+        StoreAddressAdmission,
+    },
     store_internal::transaction::{
         apply_transaction, read_bounded_known_keys_from_parts, read_scoped_projection_from_parts,
         scoped_projection_dependency_addresses, scoped_projection_root_addresses,
-        validate_scoped_projection_post_image, BackendTransactionState, StoreAdmissionAuthority,
-        StoreBackendUsage, StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead,
-        StoreBoundedKnownKeyReadResult, StoreImmutableReadSession, StoreReadReceipt,
-        StoreReadSessionState, StoreTransactionAdmission, StoreTransactionContext,
+        validate_immutable_read_session_capacity, validate_scoped_projection_post_image,
+        BackendTransactionState, StoreAdmissionAuthority, StoreBackendUsage,
+        StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead, StoreBoundedKnownKeyReadResult,
+        StoreImmutableReadSession, StoreReadReceipt, StoreReadSessionState,
+        StoreTransactionAdmission, StoreTransactionContext,
     },
     MemoryStoreEvent, StoreBackendConfig, StoreCapacityBudget, StoreEngine, StoreEngineMutation,
-    StoreEventLog, StorePathBudget, StoreRepairPolicy, StoreRepairReport, StoreSchemaManifest,
-    StoreTransactionReport, StoreTransactionRequest,
+    StoreEventLog, StoreMetricEventSourceRead, StorePathBudget, StoreRepairPolicy,
+    StoreRepairReport, StoreSchemaManifest, StoreSnapshot, StoreSnapshotJsonDoc,
+    StoreTransactionReport, StoreTransactionRequest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
-use crate::{
-    StoreConsistentReadRequest, StoreConsistentReadResult, StoreSnapshotBlob, StoreSnapshotJsonDoc,
-    StoreSnapshotReplaceReport,
-};
+use crate::{StoreConsistentReadRequest, StoreConsistentReadResult, StoreSnapshotReplaceReport};
 
 const FILE_ADDRESSING_VERSION: u64 = 2;
 const FILE_ADDRESSING_DATA_DIR: &str = "_v2";
@@ -47,7 +52,7 @@ const TRANSACTION_MARKER_FILE: &str = ".beetle-memory.transaction";
 const TRANSACTION_REPAIR_REQUIRED_STAGE: &str = "memory_write_transaction_repair_required";
 #[cfg(feature = "nonproduction-replay-harness")]
 static SNAPSHOT_IMPORT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-static DURABILITY_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static DURABILITY_TRACE_SEQUENCE: Mutex<u64> = Mutex::new(1);
 static CANONICAL_ROOT_GATES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 pub struct FileStoreEngine {
@@ -83,10 +88,14 @@ impl StoreImmutableReadSession for FileImmutableReadSession<'_> {
     ) -> Result<Vec<StoreBoundedKnownJsonRead>> {
         let mut reads = Vec::with_capacity(addresses.len());
         for (namespace, key) in addresses {
-            let value = self
-                .engine
-                .get_json_value_unlocked_bounded(namespace, key, self.read.remaining_json_bytes())?
-                .map(|(value, _)| value);
+            let value = match self.engine.get_json_value_unlocked_bounded(
+                namespace,
+                key,
+                self.read.remaining_json_bytes(),
+            ) {
+                Ok(value) => value.map(|(value, _)| value),
+                Err(error) => return self.read.fail(error),
+            };
             reads.push(self.read.record_json(namespace, key, value)?);
         }
         Ok(reads)
@@ -98,10 +107,14 @@ impl StoreImmutableReadSession for FileImmutableReadSession<'_> {
     ) -> Result<Vec<StoreBoundedKnownBlobRead>> {
         let mut reads = Vec::with_capacity(addresses.len());
         for (namespace, key) in addresses {
-            let value = self
-                .engine
-                .get_blob_unlocked_bounded(namespace, key, self.read.remaining_blob_bytes())?
-                .map(|(value, _)| value);
+            let value = match self.engine.get_blob_unlocked_bounded(
+                namespace,
+                key,
+                self.read.remaining_blob_bytes(),
+            ) {
+                Ok(value) => value.map(|(value, _)| value),
+                Err(error) => return self.read.fail(error),
+            };
             reads.push(self.read.record_blob(namespace, key, value)?);
         }
         Ok(reads)
@@ -113,13 +126,14 @@ impl StoreImmutableReadSession for FileImmutableReadSession<'_> {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
 enum FileTransactionJournalState {
     Prepared,
     Committed,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FileTransactionImage {
     json: Vec<FileTransactionJsonValue>,
     blobs: Vec<FileTransactionBlobValue>,
@@ -127,7 +141,7 @@ struct FileTransactionImage {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum FileTransactionEventsImage {
     Append {
         prefix_len: u64,
@@ -139,6 +153,7 @@ enum FileTransactionEventsImage {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FileTransactionJsonValue {
     namespace: String,
     key: String,
@@ -146,6 +161,7 @@ struct FileTransactionJsonValue {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FileTransactionBlobValue {
     namespace: String,
     key: String,
@@ -153,6 +169,7 @@ struct FileTransactionBlobValue {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FileTransactionJournal {
     schema_version: u64,
     transaction_id: String,
@@ -160,6 +177,13 @@ struct FileTransactionJournal {
     before: FileTransactionImage,
     after: FileTransactionImage,
     checksum: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FileKeyIndex {
+    addressing_version: u64,
+    key: String,
 }
 
 impl FileTransactionJournal {
@@ -195,6 +219,65 @@ impl FileTransactionJournal {
         Ok(())
     }
 
+    fn validate_image_address_contract(&self) -> Result<()> {
+        fn json_addresses(image: &FileTransactionImage) -> Result<BTreeSet<(&str, &str)>> {
+            let addresses = image
+                .json
+                .iter()
+                .map(|entry| (entry.namespace.as_str(), entry.key.as_str()))
+                .collect::<BTreeSet<_>>();
+            if addresses.len() != image.json.len() {
+                return Err(Error::config(
+                    TRANSACTION_REPAIR_REQUIRED_STAGE,
+                    "file transaction journal contains duplicate JSON addresses",
+                ));
+            }
+            Ok(addresses)
+        }
+        fn blob_addresses(image: &FileTransactionImage) -> Result<BTreeSet<(&str, &str)>> {
+            let addresses = image
+                .blobs
+                .iter()
+                .map(|entry| (entry.namespace.as_str(), entry.key.as_str()))
+                .collect::<BTreeSet<_>>();
+            if addresses.len() != image.blobs.len() {
+                return Err(Error::config(
+                    TRANSACTION_REPAIR_REQUIRED_STAGE,
+                    "file transaction journal contains duplicate blob addresses",
+                ));
+            }
+            Ok(addresses)
+        }
+
+        if self.transaction_id.trim().is_empty()
+            || json_addresses(&self.before)? != json_addresses(&self.after)?
+            || blob_addresses(&self.before)? != blob_addresses(&self.after)?
+        {
+            return Err(Error::config(
+                TRANSACTION_REPAIR_REQUIRED_STAGE,
+                "file transaction journal before/after address closure mismatch",
+            ));
+        }
+        match (&self.before.events, &self.after.events) {
+            (
+                FileTransactionEventsImage::Append {
+                    prefix_len: before, ..
+                },
+                FileTransactionEventsImage::Append {
+                    prefix_len: after, ..
+                },
+            ) if before == after => Ok(()),
+            (
+                FileTransactionEventsImage::Replace { .. },
+                FileTransactionEventsImage::Replace { .. },
+            ) => Ok(()),
+            _ => Err(Error::config(
+                TRANSACTION_REPAIR_REQUIRED_STAGE,
+                "file transaction journal event image contract mismatch",
+            )),
+        }
+    }
+
     fn expected_checksum(&self) -> Result<String> {
         let bytes = serde_json::to_vec(&(
             self.schema_version,
@@ -216,18 +299,34 @@ struct PhysicalKeyPaths {
 }
 
 impl FileStoreEngine {
-    #[cfg(feature = "nonproduction-replay-harness")]
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     pub fn open_with_capacity(
         config: &StoreBackendConfig,
         capacity: StoreCapacityBudget,
     ) -> Result<(Self, StoreRepairReport, StoreSchemaManifest)> {
-        Self::open_with_capacity_and_authority(config, capacity, StoreAdmissionAuthority::new())
+        let open_preflight = StoreOpenPreflight::for_nonproduction_harness(config, capacity)?;
+        Self::open_internal(
+            config,
+            capacity,
+            StoreAdmissionAuthority::new(),
+            Some(&open_preflight),
+        )
     }
 
     pub(crate) fn open_with_capacity_and_authority(
         config: &StoreBackendConfig,
         capacity: StoreCapacityBudget,
         admission_authority: StoreAdmissionAuthority,
+        open_preflight: &StoreOpenPreflight,
+    ) -> Result<(Self, StoreRepairReport, StoreSchemaManifest)> {
+        Self::open_internal(config, capacity, admission_authority, Some(open_preflight))
+    }
+
+    fn open_internal(
+        config: &StoreBackendConfig,
+        capacity: StoreCapacityBudget,
+        admission_authority: StoreAdmissionAuthority,
+        open_preflight: Option<&StoreOpenPreflight>,
     ) -> Result<(Self, StoreRepairReport, StoreSchemaManifest)> {
         let root = config
             .data_path
@@ -244,11 +343,25 @@ impl FileStoreEngine {
             lock_timeout: config.lock_timeout,
             admission_authority,
         };
+        let existing_manifest = engine.validate_existing_manifest_read_only(config)?;
+        if let Some(manifest) = existing_manifest.as_ref() {
+            engine.run_open_preflight(manifest, open_preflight)?;
+        }
         engine.ensure_missing_manifest_store_is_empty()?;
         let (repair, manifest) = {
-            let _lock = engine.acquire_backend_lock(true, "file_store_open")?;
+            let _lock = if existing_manifest.is_some() {
+                engine.acquire_existing_backend_lock(true, "file_store_open")?
+            } else {
+                engine.acquire_backend_lock(true, "file_store_open")?
+            };
             engine.ensure_missing_manifest_store_is_empty()?;
-            engine.recover_transaction_if_needed()?;
+            let recovery_plan =
+                if let Some(manifest) = engine.validate_existing_manifest_read_only(config)? {
+                    engine.run_open_preflight(&manifest, open_preflight)?
+                } else {
+                    None
+                };
+            engine.recover_validated_transaction(recovery_plan)?;
             fs::create_dir_all(engine.root.join("events"))
                 .map_err(|error| Error::io("file_store_open", error))?;
             fs::create_dir_all(engine.root.join("kv"))
@@ -270,6 +383,23 @@ impl FileStoreEngine {
         exclusive: bool,
         stage: &'static str,
     ) -> Result<FileBackendLock<'_>> {
+        self.acquire_backend_lock_internal(exclusive, stage, true)
+    }
+
+    fn acquire_existing_backend_lock(
+        &self,
+        exclusive: bool,
+        stage: &'static str,
+    ) -> Result<FileBackendLock<'_>> {
+        self.acquire_backend_lock_internal(exclusive, stage, false)
+    }
+
+    fn acquire_backend_lock_internal(
+        &self,
+        exclusive: bool,
+        stage: &'static str,
+        create_if_missing: bool,
+    ) -> Result<FileBackendLock<'_>> {
         let local_root_gate = self.local_root_gate.lock().map_err(|_| {
             Error::config(
                 "store_transaction_lock_failed",
@@ -277,7 +407,7 @@ impl FileStoreEngine {
             )
         })?;
         let lock = OpenOptions::new()
-            .create(true)
+            .create(create_if_missing)
             .truncate(false)
             .read(true)
             .write(true)
@@ -346,16 +476,713 @@ impl FileStoreEngine {
         Ok(())
     }
 
+    fn validate_existing_manifest_read_only(
+        &self,
+        config: &StoreBackendConfig,
+    ) -> Result<Option<StoreSchemaManifest>> {
+        let path = self.root.join("manifest.json");
+        let Some(bytes) = read_file_bounded(
+            &path,
+            self.capacity
+                .snapshot_max_bytes
+                .min(self.capacity.import_max_bytes),
+            "file_store_manifest",
+        )?
+        else {
+            return Ok(None);
+        };
+        let manifest: StoreSchemaManifest = serde_json::from_slice(&bytes)
+            .map_err(|error| Error::config("file_store_manifest", error.to_string()))?;
+        manifest.validate_against(
+            config.backend,
+            config.profile,
+            config.memory_system_kind,
+            "file_store_manifest",
+        )?;
+        Ok(Some(manifest))
+    }
+
+    fn run_open_preflight(
+        &self,
+        manifest: &StoreSchemaManifest,
+        open_preflight: Option<&StoreOpenPreflight>,
+    ) -> Result<Option<FileTransactionJournal>> {
+        let Some(open_preflight) = open_preflight else {
+            return self.read_transaction_journal_read_only();
+        };
+        let remap = |error: Error| Error::config("file_store_open_preflight", error.to_string());
+        let journal = self.read_transaction_journal_read_only()?;
+        let snapshot = self
+            .read_store_snapshot_for_open_preflight(manifest, journal.as_ref())
+            .map_err(remap)?;
+        let Some(journal) = journal else {
+            open_preflight.admit_snapshot(&snapshot, "file_store_open_preflight")?;
+            return Ok(None);
+        };
+        let before = self
+            .overlay_transaction_image_for_open_preflight(snapshot.clone(), &journal.before)
+            .map_err(remap)?;
+        open_preflight.admit_snapshot(&before, "file_store_open_preflight")?;
+        let after = self
+            .overlay_transaction_image_for_open_preflight(snapshot, &journal.after)
+            .map_err(remap)?;
+        open_preflight.admit_snapshot(&after, "file_store_open_preflight")?;
+        Ok(Some(journal))
+    }
+
+    fn read_store_snapshot_for_open_preflight(
+        &self,
+        manifest: &StoreSchemaManifest,
+        journal: Option<&FileTransactionJournal>,
+    ) -> Result<StoreSnapshot> {
+        self.validate_open_preflight_physical_footprint(journal)?;
+        let physical_entry_limit = self
+            .capacity
+            .kv_max_entries
+            .saturating_add(self.journal_address_count(journal, None, None))
+            .saturating_add(1);
+        let mut json_docs = Vec::new();
+        let mut json_bytes = 0_usize;
+        for namespace in list_child_directory_names_bounded(
+            &self.root.join("kv"),
+            physical_entry_limit,
+            "file_store_open_preflight",
+        )? {
+            for key in self.open_preflight_address_keys("kv", &namespace, "json", journal)? {
+                if json_docs.len().saturating_add(1) > physical_entry_limit {
+                    return Err(store_budget_error(format!(
+                        "file open preflight physical JSON entries exceed {physical_entry_limit}"
+                    )));
+                }
+                let remaining = self.capacity.snapshot_max_bytes.saturating_sub(json_bytes);
+                let paths = self.json_paths(&namespace, &key)?;
+                let Some(bytes) =
+                    read_file_bounded(&paths.data_path, remaining, "file_store_open_preflight")?
+                else {
+                    continue;
+                };
+                let value = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+                    Error::config("file_store_open_preflight", error.to_string())
+                })?;
+                admit_store_json_document(&namespace, &key, &value, "file_store_open_preflight")?;
+                json_bytes = json_bytes.checked_add(bytes.len()).ok_or_else(|| {
+                    store_budget_error("file open preflight JSON byte count overflow")
+                })?;
+                json_docs.push(StoreSnapshotJsonDoc {
+                    namespace: namespace.clone(),
+                    key,
+                    value,
+                });
+            }
+        }
+        let mut blobs = Vec::new();
+        let mut blob_bytes = 0_usize;
+        for namespace in list_child_directory_names_bounded(
+            &self.root.join("blob"),
+            physical_entry_limit,
+            "file_store_open_preflight",
+        )? {
+            for key in self.open_preflight_address_keys("blob", &namespace, "bin", journal)? {
+                if json_docs
+                    .len()
+                    .saturating_add(blobs.len())
+                    .saturating_add(1)
+                    > physical_entry_limit
+                {
+                    return Err(store_budget_error(format!(
+                        "file open preflight physical entries exceed {physical_entry_limit}"
+                    )));
+                }
+                let remaining = self.capacity.blob_max_bytes.saturating_sub(blob_bytes);
+                let paths = self.blob_paths(&namespace, &key)?;
+                let Some(value) =
+                    read_file_bounded(&paths.data_path, remaining, "file_store_open_preflight")?
+                else {
+                    continue;
+                };
+                classify_store_blob_address(&namespace, &key, Some(&value))?;
+                blob_bytes = blob_bytes.checked_add(value.len()).ok_or_else(|| {
+                    store_budget_error("file open preflight blob byte count overflow")
+                })?;
+                blobs.push(StoreSnapshotBlob {
+                    namespace: namespace.clone(),
+                    key,
+                    value,
+                });
+            }
+        }
+        let events = match journal.map(|journal| &journal.before.events) {
+            Some(FileTransactionEventsImage::Append { prefix_len, .. }) => {
+                read_events_jsonl_prefix_bounded(
+                    &self.events_path(),
+                    *prefix_len,
+                    self.capacity,
+                    self.capacity.snapshot_max_bytes.saturating_sub(json_bytes),
+                    "file_store_open_preflight",
+                )?
+            }
+            _ => self.read_events_unlocked_bounded(self.capacity, json_bytes)?,
+        };
+        Ok(StoreSnapshot::new(
+            manifest.clone(),
+            json_docs,
+            blobs,
+            events,
+        ))
+    }
+
+    fn validate_open_preflight_physical_footprint(
+        &self,
+        journal: Option<&FileTransactionJournal>,
+    ) -> Result<()> {
+        const ROOT_FILES: &[&str] = &[
+            "manifest.json",
+            TRANSACTION_LOCK_FILE,
+            TRANSACTION_MARKER_FILE,
+        ];
+        const ROOT_DIRECTORIES: &[&str] = &["events", "kv", "blob", "snapshots"];
+        for entry in read_directory_entries_strict_bounded(
+            &self.root,
+            self.capacity.kv_max_entries.saturating_add(16),
+            "file_store_open_preflight",
+        )? {
+            let name = entry_name_utf8(&entry, "file_store_open_preflight")?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| Error::io("file_store_open_preflight", error))?;
+            if file_type.is_symlink() {
+                return Err(Error::config(
+                    "file_store_open_preflight",
+                    format!("file store root contains symlink {name}"),
+                ));
+            }
+            if file_type.is_file()
+                && (ROOT_FILES.contains(&name.as_str()) || is_orphan_tmp_path(&entry.path()))
+            {
+                continue;
+            }
+            if file_type.is_dir() && ROOT_DIRECTORIES.contains(&name.as_str()) {
+                continue;
+            }
+            return Err(Error::config(
+                "file_store_open_preflight",
+                format!("unsupported file store root entry {name}"),
+            ));
+        }
+        if !self
+            .root
+            .join(TRANSACTION_LOCK_FILE)
+            .try_exists()
+            .map_err(|error| Error::io("file_store_open_preflight", error))?
+        {
+            return Err(Error::config(
+                "file_store_open_preflight",
+                "existing file store is missing its fixed lock owner",
+            ));
+        }
+        self.validate_single_file_lane("events", "events.jsonl")?;
+        self.validate_single_file_lane("snapshots", "")?;
+        self.validate_addressed_lane("kv", "json", true, journal)?;
+        self.validate_addressed_lane("blob", "bin", false, journal)
+    }
+
+    fn validate_single_file_lane(&self, lane: &str, allowed_file: &str) -> Result<()> {
+        let path = self.root.join(lane);
+        for entry in read_directory_entries_strict_bounded(
+            &path,
+            self.capacity.kv_max_entries,
+            "file_store_open_preflight",
+        )? {
+            let name = entry_name_utf8(&entry, "file_store_open_preflight")?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| Error::io("file_store_open_preflight", error))?;
+            if file_type.is_file() && (name == allowed_file || is_orphan_tmp_path(&entry.path())) {
+                continue;
+            }
+            return Err(Error::config(
+                "file_store_open_preflight",
+                format!("unsupported {lane} lane entry {name}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_addressed_lane(
+        &self,
+        lane: &str,
+        data_extension: &str,
+        json_lane: bool,
+        journal: Option<&FileTransactionJournal>,
+    ) -> Result<()> {
+        let lane_root = self.root.join(lane);
+        for namespace_entry in read_directory_entries_strict_bounded(
+            &lane_root,
+            self.capacity.kv_max_entries,
+            "file_store_open_preflight",
+        )? {
+            let namespace = entry_name_utf8(&namespace_entry, "file_store_open_preflight")?;
+            let file_type = namespace_entry
+                .file_type()
+                .map_err(|error| Error::io("file_store_open_preflight", error))?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                return Err(Error::config(
+                    "file_store_open_preflight",
+                    format!("{lane} lane contains non-directory namespace {namespace}"),
+                ));
+            }
+            if json_lane {
+                admit_store_json_address(
+                    &namespace,
+                    "__file_open_preflight_namespace__",
+                    "file_store_open_preflight",
+                )?;
+            } else {
+                match classify_store_blob_address(
+                    &namespace,
+                    "__file_open_preflight_namespace__",
+                    None,
+                )? {
+                    StoreAddressAdmission::Active(_) => {}
+                    StoreAddressAdmission::ForbiddenLegacy(kind) => {
+                        return Err(Error::config(
+                            "file_store_open_preflight",
+                            format!("forbidden legacy blob namespace {namespace} ({kind:?})"),
+                        ));
+                    }
+                    StoreAddressAdmission::Unknown => {
+                        return Err(Error::config(
+                            "file_store_open_preflight",
+                            format!("unsupported blob namespace {namespace}"),
+                        ));
+                    }
+                }
+            }
+            self.validate_addressed_namespace_footprint(
+                lane,
+                &namespace,
+                data_extension,
+                &namespace_entry.path(),
+                journal,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_addressed_namespace_footprint(
+        &self,
+        lane: &str,
+        namespace: &str,
+        data_extension: &str,
+        namespace_root: &Path,
+        journal: Option<&FileTransactionJournal>,
+    ) -> Result<()> {
+        let touched_count = self.journal_address_count(journal, Some(lane), Some(namespace));
+        let physical_key_limit = self.capacity.kv_max_entries.saturating_add(touched_count);
+        let physical_entry_limit = physical_key_limit.saturating_add(1);
+        for entry in read_directory_entries_strict_bounded(
+            namespace_root,
+            physical_entry_limit.saturating_add(2),
+            "file_store_open_preflight",
+        )? {
+            let name = entry_name_utf8(&entry, "file_store_open_preflight")?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| Error::io("file_store_open_preflight", error))?;
+            if file_type.is_file() && is_orphan_tmp_path(&entry.path()) {
+                continue;
+            }
+            if file_type.is_dir()
+                && matches!(
+                    name.as_str(),
+                    FILE_ADDRESSING_INDEX_DIR | FILE_ADDRESSING_DATA_DIR
+                )
+            {
+                continue;
+            }
+            return Err(Error::config(
+                "file_store_open_preflight",
+                format!("unsupported physical address entry {lane}/{namespace}/{name}"),
+            ));
+        }
+
+        let indexes = self.collect_addressed_files(
+            &namespace_root.join(FILE_ADDRESSING_INDEX_DIR),
+            "json",
+            physical_key_limit,
+            physical_entry_limit,
+        )?;
+        let data = self.collect_addressed_files(
+            &namespace_root.join(FILE_ADDRESSING_DATA_DIR),
+            data_extension,
+            physical_key_limit,
+            physical_entry_limit,
+        )?;
+        let mut touched_digests = BTreeSet::new();
+        if let Some(journal) = journal {
+            let entries = if lane == "kv" {
+                journal
+                    .before
+                    .json
+                    .iter()
+                    .chain(journal.after.json.iter())
+                    .map(|entry| (entry.namespace.as_str(), entry.key.as_str()))
+                    .collect::<Vec<_>>()
+            } else {
+                journal
+                    .before
+                    .blobs
+                    .iter()
+                    .chain(journal.after.blobs.iter())
+                    .map(|entry| (entry.namespace.as_str(), entry.key.as_str()))
+                    .collect::<Vec<_>>()
+            };
+            for (_, key) in entries
+                .into_iter()
+                .filter(|(entry_namespace, _)| *entry_namespace == namespace)
+            {
+                let paths = self.physical_key_paths_at_root(
+                    &self.root,
+                    lane,
+                    namespace,
+                    key,
+                    data_extension,
+                )?;
+                let digest = paths
+                    .data_path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| {
+                        Error::config(
+                            "file_store_open_preflight",
+                            format!(
+                                "physical address digest is invalid for {lane}/{namespace}/{key}"
+                            ),
+                        )
+                    })?;
+                touched_digests.insert(digest.to_string());
+            }
+        }
+        let index_digests = indexes.keys().cloned().collect::<BTreeSet<_>>();
+        let data_digests = data.keys().cloned().collect::<BTreeSet<_>>();
+        if !index_digests
+            .symmetric_difference(&data_digests)
+            .all(|digest| touched_digests.contains(digest))
+        {
+            return Err(Error::config(
+                "file_store_open_preflight",
+                format!("unpaired physical address in {lane}/{namespace}"),
+            ));
+        }
+        for (digest, index_path) in indexes {
+            let key = self
+                .read_key_index(&index_path, "file_store_open_preflight")?
+                .ok_or_else(|| {
+                    Error::config(
+                        "file_store_open_preflight",
+                        "physical key index disappeared during preflight",
+                    )
+                })?;
+            let expected =
+                self.physical_key_paths_at_root(&self.root, lane, namespace, &key, data_extension)?;
+            let data_path = data.get(&digest);
+            if expected.index_path != index_path
+                || data_path.is_some_and(|data_path| expected.data_path != *data_path)
+                || (data_path.is_none() && !touched_digests.contains(&digest))
+            {
+                return Err(Error::config(
+                    "file_store_open_preflight",
+                    format!("physical address does not match indexed key {lane}/{namespace}/{key}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_addressed_files(
+        &self,
+        root: &Path,
+        extension: &str,
+        max_keys: usize,
+        max_entries: usize,
+    ) -> Result<BTreeMap<String, PathBuf>> {
+        let mut files = BTreeMap::new();
+        for shard_entry in read_directory_entries_strict_bounded(
+            root,
+            max_entries.min(256),
+            "file_store_open_preflight",
+        )? {
+            let shard = entry_name_utf8(&shard_entry, "file_store_open_preflight")?;
+            let file_type = shard_entry
+                .file_type()
+                .map_err(|error| Error::io("file_store_open_preflight", error))?;
+            if !file_type.is_dir()
+                || file_type.is_symlink()
+                || shard.len() != 2
+                || !shard
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(Error::config(
+                    "file_store_open_preflight",
+                    format!("invalid physical address shard {shard}"),
+                ));
+            }
+            let file_entries = read_directory_entries_strict_bounded(
+                &shard_entry.path(),
+                max_entries,
+                "file_store_open_preflight",
+            )?;
+            if files.len().saturating_add(file_entries.len()) > max_entries {
+                return Err(store_budget_error(format!(
+                    "file_store_open_preflight physical address entries exceed {max_entries}"
+                )));
+            }
+            for file_entry in file_entries {
+                let path = file_entry.path();
+                let name = entry_name_utf8(&file_entry, "file_store_open_preflight")?;
+                let file_type = file_entry
+                    .file_type()
+                    .map_err(|error| Error::io("file_store_open_preflight", error))?;
+                if file_type.is_file() && is_orphan_tmp_path(&path) {
+                    continue;
+                }
+                let digest = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| {
+                        Error::config(
+                            "file_store_open_preflight",
+                            format!("invalid physical address file {name}"),
+                        )
+                    })?;
+                if !file_type.is_file()
+                    || file_type.is_symlink()
+                    || path.extension().and_then(|value| value.to_str()) != Some(extension)
+                    || digest.len() != self.path_budget.physical_key_digest_hex_chars
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !digest.starts_with(&shard)
+                    || files.insert(digest.to_string(), path).is_some()
+                    || files.len() > max_keys
+                {
+                    return Err(Error::config(
+                        "file_store_open_preflight",
+                        format!("invalid or duplicate physical address file {name}"),
+                    ));
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    fn open_preflight_address_keys(
+        &self,
+        lane: &str,
+        namespace: &str,
+        data_extension: &str,
+        journal: Option<&FileTransactionJournal>,
+    ) -> Result<BTreeSet<String>> {
+        let namespace_root = self.root.join(lane).join(namespace);
+        let touched_count = self.journal_address_count(journal, Some(lane), Some(namespace));
+        let physical_key_limit = self.capacity.kv_max_entries.saturating_add(touched_count);
+        let indexes = self.collect_addressed_files(
+            &namespace_root.join(FILE_ADDRESSING_INDEX_DIR),
+            "json",
+            physical_key_limit,
+            physical_key_limit.saturating_add(1),
+        )?;
+        let mut keys = indexes
+            .values()
+            .map(|path| {
+                self.read_key_index(path, "file_store_open_preflight")?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "file_store_open_preflight",
+                            "physical key index disappeared during snapshot admission",
+                        )
+                    })
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        if let Some(journal) = journal {
+            if lane == "kv" {
+                keys.extend(
+                    journal
+                        .before
+                        .json
+                        .iter()
+                        .chain(journal.after.json.iter())
+                        .filter(|entry| entry.namespace == namespace)
+                        .map(|entry| entry.key.clone()),
+                );
+            } else {
+                keys.extend(
+                    journal
+                        .before
+                        .blobs
+                        .iter()
+                        .chain(journal.after.blobs.iter())
+                        .filter(|entry| entry.namespace == namespace)
+                        .map(|entry| entry.key.clone()),
+                );
+            }
+        }
+        for key in &keys {
+            self.physical_key_paths_at_root(&self.root, lane, namespace, key, data_extension)?;
+        }
+        Ok(keys)
+    }
+
+    fn journal_address_count(
+        &self,
+        journal: Option<&FileTransactionJournal>,
+        lane: Option<&str>,
+        namespace: Option<&str>,
+    ) -> usize {
+        let Some(journal) = journal else {
+            return 0;
+        };
+        let mut addresses = BTreeSet::new();
+        if lane.is_none() || lane == Some("kv") {
+            addresses.extend(
+                journal
+                    .before
+                    .json
+                    .iter()
+                    .chain(journal.after.json.iter())
+                    .filter(|entry| namespace.is_none_or(|value| entry.namespace == value))
+                    .map(|entry| ("kv", entry.namespace.as_str(), entry.key.as_str())),
+            );
+        }
+        if lane.is_none() || lane == Some("blob") {
+            addresses.extend(
+                journal
+                    .before
+                    .blobs
+                    .iter()
+                    .chain(journal.after.blobs.iter())
+                    .filter(|entry| namespace.is_none_or(|value| entry.namespace == value))
+                    .map(|entry| ("blob", entry.namespace.as_str(), entry.key.as_str())),
+            );
+        }
+        addresses.len()
+    }
+
+    fn overlay_transaction_image_for_open_preflight(
+        &self,
+        snapshot: StoreSnapshot,
+        image: &FileTransactionImage,
+    ) -> Result<StoreSnapshot> {
+        let mut json = snapshot
+            .json_docs
+            .into_iter()
+            .map(|doc| ((doc.namespace, doc.key), doc.value))
+            .collect::<BTreeMap<_, _>>();
+        for entry in &image.json {
+            let address = (entry.namespace.clone(), entry.key.clone());
+            match &entry.value {
+                Some(value) => {
+                    json.insert(address, value.clone());
+                }
+                None => {
+                    json.remove(&address);
+                }
+            }
+        }
+
+        let mut blobs = snapshot
+            .blobs
+            .into_iter()
+            .map(|blob| ((blob.namespace, blob.key), blob.value))
+            .collect::<BTreeMap<_, _>>();
+        for entry in &image.blobs {
+            let address = (entry.namespace.clone(), entry.key.clone());
+            match &entry.value {
+                Some(value) => {
+                    blobs.insert(address, value.clone());
+                }
+                None => {
+                    blobs.remove(&address);
+                }
+            }
+        }
+
+        let events = match &image.events {
+            FileTransactionEventsImage::Append {
+                prefix_len: _,
+                events,
+            } => {
+                let mut prefix = snapshot.events.clone();
+                prefix.extend(events.iter().cloned());
+                prefix
+            }
+            FileTransactionEventsImage::Replace { events } => events.clone(),
+        };
+        if events.len() > self.capacity.event_log_max_items {
+            return Err(store_budget_error(format!(
+                "file open preflight event items {} exceed {}",
+                events.len(),
+                self.capacity.event_log_max_items
+            )));
+        }
+        for event in &events {
+            enforce_event_key_budget(self.capacity, event, "file_store_open_preflight")?;
+        }
+
+        Ok(StoreSnapshot::new(
+            snapshot.schema_manifest,
+            json.into_iter()
+                .map(|((namespace, key), value)| StoreSnapshotJsonDoc {
+                    namespace,
+                    key,
+                    value,
+                })
+                .collect(),
+            blobs
+                .into_iter()
+                .map(|((namespace, key), value)| StoreSnapshotBlob {
+                    namespace,
+                    key,
+                    value,
+                })
+                .collect(),
+            events,
+        ))
+    }
+
     fn transaction_marker_path(&self) -> PathBuf {
         self.root.join(TRANSACTION_MARKER_FILE)
     }
 
     fn recover_transaction_if_needed(&self) -> Result<()> {
+        let journal = self.read_transaction_journal_read_only()?;
+        self.recover_validated_transaction(journal)
+    }
+
+    fn recover_validated_transaction(&self, journal: Option<FileTransactionJournal>) -> Result<()> {
+        let Some(journal) = journal else {
+            return Ok(());
+        };
+        let image = match journal.state {
+            FileTransactionJournalState::Prepared => &journal.before,
+            FileTransactionJournalState::Committed => &journal.after,
+        };
+        self.restore_transaction_image(image)?;
+        self.remove_transaction_journal("file_store_transaction_recovery")
+    }
+
+    fn read_transaction_journal_read_only(&self) -> Result<Option<FileTransactionJournal>> {
         let path = self.transaction_marker_path();
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(Error::io("file_store_transaction_recovery", error)),
+        let Some(bytes) = read_file_bounded(
+            &path,
+            self.capacity
+                .import_max_bytes
+                .saturating_add(self.capacity.blob_max_bytes.saturating_mul(3)),
+            "file_store_transaction_recovery",
+        )?
+        else {
+            return Ok(None);
         };
         let journal: FileTransactionJournal = serde_json::from_slice(&bytes).map_err(|error| {
             let stage = if has_complete_journal_shape(&bytes) {
@@ -378,12 +1205,8 @@ impl FileStoreEngine {
             ));
         }
         journal.verify_checksum()?;
-        let image = match journal.state {
-            FileTransactionJournalState::Prepared => &journal.before,
-            FileTransactionJournalState::Committed => &journal.after,
-        };
-        self.restore_transaction_image(image)?;
-        self.remove_transaction_journal("file_store_transaction_recovery")
+        journal.validate_image_address_contract()?;
+        Ok(Some(journal))
     }
 
     fn transaction_image(
@@ -417,17 +1240,54 @@ impl FileStoreEngine {
     fn restore_transaction_image(&self, image: &FileTransactionImage) -> Result<()> {
         for entry in &image.json {
             match &entry.value {
-                Some(value) => self.put_json_value_unlocked(&entry.namespace, &entry.key, value)?,
+                Some(value) => {
+                    let paths = self.json_paths(&entry.namespace, &entry.key)?;
+                    self.write_key_index(
+                        &paths.index_path,
+                        &entry.key,
+                        "file_store_transaction_recovery",
+                    )?;
+                    self.maybe_crash_for_recovery_contract("after_json_index_before_data");
+                    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+                        Error::config("file_store_transaction_recovery", error.to_string())
+                    })?;
+                    atomic_write(
+                        &paths.data_path,
+                        &bytes,
+                        self.fsync,
+                        "file_store_transaction_recovery",
+                    )?;
+                }
                 None => {
-                    self.delete_json_value_unlocked(&entry.namespace, &entry.key)?;
+                    let paths = self.json_paths(&entry.namespace, &entry.key)?;
+                    remove_file_if_exists(&paths.data_path, "file_store_transaction_recovery")?;
+                    self.maybe_crash_for_recovery_contract("after_json_data_delete_before_index");
+                    remove_file_if_exists(&paths.index_path, "file_store_transaction_recovery")?;
+                    remove_file_if_exists(&paths.legacy_path, "file_store_transaction_recovery")?;
                 }
             }
         }
         for entry in &image.blobs {
             match &entry.value {
-                Some(value) => self.put_blob_unlocked(&entry.namespace, &entry.key, value)?,
+                Some(value) => {
+                    let paths = self.blob_paths(&entry.namespace, &entry.key)?;
+                    self.write_key_index(
+                        &paths.index_path,
+                        &entry.key,
+                        "file_store_transaction_recovery",
+                    )?;
+                    atomic_write(
+                        &paths.data_path,
+                        value,
+                        self.fsync,
+                        "file_store_transaction_recovery",
+                    )?;
+                }
                 None => {
-                    self.delete_blob_unlocked(&entry.namespace, &entry.key)?;
+                    let paths = self.blob_paths(&entry.namespace, &entry.key)?;
+                    remove_file_if_exists(&paths.data_path, "file_store_transaction_recovery")?;
+                    remove_file_if_exists(&paths.index_path, "file_store_transaction_recovery")?;
+                    remove_file_if_exists(&paths.legacy_path, "file_store_transaction_recovery")?;
                 }
             }
         }
@@ -544,22 +1404,13 @@ impl FileStoreEngine {
         let path = self.root.join("manifest.json");
         let now_secs = current_unix_secs();
         if path.exists() {
-            let bytes = fs::read(&path).map_err(|error| Error::io("file_store_manifest", error))?;
-            let mut manifest: StoreSchemaManifest = serde_json::from_slice(&bytes)
-                .map_err(|error| Error::config("file_store_manifest", error.to_string()))?;
-            manifest.validate_against(
-                config.backend,
-                config.profile,
-                config.memory_system_kind,
-                "file_store_manifest",
-            )?;
-            manifest.touch_opened(now_secs);
-            self.write_json_file(
-                &path,
-                &serde_json::to_vec_pretty(&manifest)
-                    .map_err(|error| Error::config("file_store_manifest", error.to_string()))?,
-            )?;
-            Ok(manifest)
+            self.validate_existing_manifest_read_only(config)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "file_store_manifest",
+                        "existing manifest disappeared before open completed",
+                    )
+                })
         } else {
             self.ensure_missing_manifest_store_is_empty()?;
             let manifest = StoreSchemaManifest::new(config.backend, config.profile, now_secs);
@@ -752,39 +1603,36 @@ impl FileStoreEngine {
     }
 
     fn write_key_index(&self, path: &Path, key: &str, stage: &'static str) -> Result<()> {
-        let value = json!({
-            "addressing_version": FILE_ADDRESSING_VERSION,
-            "key": key,
-        });
+        let value = FileKeyIndex {
+            addressing_version: FILE_ADDRESSING_VERSION,
+            key: key.to_string(),
+        };
         let bytes = serde_json::to_vec_pretty(&value)
             .map_err(|error| Error::config(stage, error.to_string()))?;
         atomic_write(path, &bytes, self.fsync, stage)
     }
 
     fn read_key_index(&self, path: &Path, stage: &'static str) -> Result<Option<String>> {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found_or_invalid_filename(&error) => return Ok(None),
-            Err(error) => return Err(Error::io(stage, error)),
+        let Some(bytes) = read_file_bounded(
+            path,
+            self.capacity.logical_key_max_bytes.saturating_add(1024),
+            stage,
+        )?
+        else {
+            return Ok(None);
         };
-        let value: Value = serde_json::from_slice(&bytes)
+        let value: FileKeyIndex = serde_json::from_slice(&bytes)
             .map_err(|error| Error::config(stage, error.to_string()))?;
-        let version = value
-            .get("addressing_version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| Error::config(stage, "file store key index missing version"))?;
-        if version != FILE_ADDRESSING_VERSION {
+        if value.addressing_version != FILE_ADDRESSING_VERSION {
             return Err(Error::config(
                 stage,
-                format!("unsupported file store key index version {version}"),
+                format!(
+                    "unsupported file store key index version {}",
+                    value.addressing_version
+                ),
             ));
         }
-        value
-            .get("key")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| Error::config(stage, "file store key index missing key"))
-            .map(Some)
+        Ok(Some(value.key))
     }
 
     fn require_key_index_matches(&self, path: &Path, key: &str, stage: &'static str) -> Result<()> {
@@ -803,6 +1651,7 @@ impl FileStoreEngine {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn ensure_key_index_available(
         &self,
         paths: &PhysicalKeyPaths,
@@ -827,6 +1676,7 @@ impl FileStoreEngine {
         Ok(())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn validate_v2_pair_for_delete(
         &self,
         paths: &PhysicalKeyPaths,
@@ -1173,6 +2023,7 @@ impl FileStoreEngine {
         ))
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn ensure_json_entry_budget(&self, namespace: &str, key: &str) -> Result<()> {
         if self.get_json_value_unlocked(namespace, key)?.is_some() {
             return Ok(());
@@ -1188,6 +2039,7 @@ impl FileStoreEngine {
         Ok(())
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn ensure_blob_total_budget(&self, namespace: &str, key: &str, value_len: usize) -> Result<()> {
         let previous = self
             .get_blob_unlocked(namespace, key)?
@@ -1288,8 +2140,22 @@ impl FileStoreEngine {
             .append(true)
             .open(&path)
             .map_err(|error| Error::io("store_event_log", error))?;
-        serde_json::to_writer(&mut file, event)
+        let event_bytes = serde_json::to_vec(event)
             .map_err(|error| Error::config("store_event_log", error.to_string()))?;
+        #[cfg(feature = "nonproduction-replay-harness")]
+        if std::env::var_os("BM_FILE_TRANSACTION_RECOVERY_WORKER").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && std::env::var_os("BM_FILE_TRANSACTION_CRASH_POINT").as_deref()
+                == Some(std::ffi::OsStr::new("mid_event_append"))
+        {
+            file.write_all(&event_bytes[..event_bytes.len().max(2) / 2])
+                .expect("write partial recovery-contract event");
+            file.sync_all()
+                .expect("sync partial recovery-contract event");
+            std::process::exit(86);
+        }
+        file.write_all(&event_bytes)
+            .map_err(|error| Error::io("store_event_log", error))?;
         file.write_all(b"\n")
             .map_err(|error| Error::io("store_event_log", error))?;
         if self.fsync {
@@ -1635,11 +2501,13 @@ impl FileStoreEngine {
         self.append_event_unchecked(event)
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn put_json_value_unlocked(&self, namespace: &str, key: &str, value: &Value) -> Result<()> {
         let paths = self.json_paths(namespace, key)?;
         self.ensure_json_entry_budget(namespace, key)?;
         self.ensure_key_index_available(&paths, key, "file_store_json_write")?;
         self.write_key_index(&paths.index_path, key, "file_store_json_write")?;
+        self.maybe_crash_for_recovery_contract("after_json_index_before_data");
         let bytes = serde_json::to_vec_pretty(value)
             .map_err(|error| Error::config("file_store_json_write", error.to_string()))?;
         atomic_write(
@@ -1650,16 +2518,19 @@ impl FileStoreEngine {
         )
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn delete_json_value_unlocked(&self, namespace: &str, key: &str) -> Result<bool> {
         let paths = self.json_paths(namespace, key)?;
         self.validate_v2_pair_for_delete(&paths, key, "file_store_json_delete")?;
         let mut deleted = false;
         deleted |= remove_file_if_exists(&paths.data_path, "file_store_json_delete")?;
+        self.maybe_crash_for_recovery_contract("after_json_data_delete_before_index");
         deleted |= remove_file_if_exists(&paths.index_path, "file_store_json_delete")?;
         deleted |= remove_file_if_exists(&paths.legacy_path, "file_store_json_delete")?;
         Ok(deleted)
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn put_blob_unlocked(&self, namespace: &str, key: &str, value: &[u8]) -> Result<()> {
         let paths = self.blob_paths(namespace, key)?;
         self.ensure_blob_total_budget(namespace, key, value.len())?;
@@ -1668,6 +2539,7 @@ impl FileStoreEngine {
         atomic_write(&paths.data_path, value, self.fsync, "file_store_blob_write")
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn delete_blob_unlocked(&self, namespace: &str, key: &str) -> Result<bool> {
         let paths = self.blob_paths(namespace, key)?;
         self.validate_v2_pair_for_delete(&paths, key, "file_store_blob_delete")?;
@@ -1738,21 +2610,115 @@ impl StoreEventLog for FileStoreEngine {
         self.with_exclusive_backend("store_event_log", || self.append_event_unlocked(&event))
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
         self.with_shared_backend("store_event_log", || self.read_events_unlocked())
     }
 }
 
-pub(crate) fn read_events_from_root(
+pub(crate) fn read_metric_events_from_root(
     root: &Path,
     capacity: StoreCapacityBudget,
-) -> Result<Vec<MemoryStoreEvent>> {
-    read_events_jsonl_bounded(
-        &root.join("events").join("events.jsonl"),
-        capacity,
+) -> Result<StoreMetricEventSourceRead> {
+    let manifest_path = root.join("manifest.json");
+    let event_path = root.join("events").join("events.jsonl");
+    let manifest_metadata_bytes =
+        required_metric_source_file_len(&manifest_path, "runtime_metrics_event_bytes")?;
+    let event_metadata_bytes =
+        optional_metric_source_file_len(&event_path, "runtime_metrics_event_bytes")?;
+    let metadata_total = manifest_metadata_bytes
+        .checked_add(event_metadata_bytes)
+        .ok_or_else(|| {
+            Error::config(
+                "runtime_metrics_event_bytes",
+                "runtime metric source metadata byte count overflow",
+            )
+        })?;
+    if metadata_total > capacity.snapshot_max_bytes {
+        return Err(Error::config(
+            "runtime_metrics_event_bytes",
+            "runtime metric source exceeds the active aggregate byte budget",
+        ));
+    }
+    let manifest_bytes = read_file_bounded(
+        &manifest_path,
         capacity.snapshot_max_bytes,
-        "store_event_log",
-    )
+        "runtime_metrics_event_bytes",
+    )?
+    .ok_or_else(|| Error::config("runtime_metrics_event_store", "store manifest is required"))?;
+    if manifest_bytes.len() != manifest_metadata_bytes {
+        return Err(Error::config(
+            "runtime_metrics_event_store",
+            "runtime metric manifest changed during its bounded read",
+        ));
+    }
+    let manifest: StoreSchemaManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| Error::config("runtime_metrics_event_store", error.to_string()))?;
+    if manifest.schema_id != STORE_SCHEMA_ID || manifest.schema_version != STORE_SCHEMA_VERSION {
+        return Err(Error::config(
+            "runtime_metrics_event_store",
+            format!(
+                "unsupported store schema {} version {}",
+                manifest.schema_id, manifest.schema_version
+            ),
+        ));
+    }
+    let remaining_bytes = capacity
+        .snapshot_max_bytes
+        .checked_sub(manifest_bytes.len())
+        .ok_or_else(|| {
+            Error::config(
+                "runtime_metrics_event_bytes",
+                "runtime metric manifest exceeds the active byte budget",
+            )
+        })?;
+    let (events, event_bytes) = read_events_jsonl_bounded_with_receipt(
+        &event_path,
+        capacity,
+        remaining_bytes,
+        "runtime_metrics_event_capacity",
+        "runtime_metrics_event_bytes",
+    )?;
+    if event_bytes != event_metadata_bytes {
+        return Err(Error::config(
+            "runtime_metrics_event_store",
+            "runtime metric event file changed during its bounded read",
+        ));
+    }
+    Ok(StoreMetricEventSourceRead {
+        events,
+        accounted_snapshot_bytes: manifest_bytes.len().checked_add(event_bytes).ok_or_else(
+            || {
+                Error::config(
+                    "runtime_metrics_event_bytes",
+                    "runtime metric source byte count overflow",
+                )
+            },
+        )?,
+    })
+}
+
+fn required_metric_source_file_len(path: &Path, stage: &'static str) -> Result<usize> {
+    let metadata = std::fs::metadata(path).map_err(|error| Error::io(stage, error))?;
+    usize::try_from(metadata.len()).map_err(|_| {
+        Error::config(
+            stage,
+            "runtime metric source file exceeds the platform address space",
+        )
+    })
+}
+
+fn optional_metric_source_file_len(path: &Path, stage: &'static str) -> Result<usize> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => usize::try_from(metadata.len()).map_err(|_| {
+            Error::config(
+                stage,
+                "runtime metric source file exceeds the platform address space",
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(Error::io(stage, error)),
+    }
 }
 
 fn read_file_bounded(
@@ -1798,29 +2764,112 @@ fn read_events_jsonl_bounded(
     max_bytes: usize,
     stage: &'static str,
 ) -> Result<Vec<MemoryStoreEvent>> {
+    read_events_jsonl_bounded_with_receipt(path, capacity, max_bytes, stage, stage)
+        .map(|(events, _)| events)
+}
+
+fn read_events_jsonl_bounded_with_receipt(
+    path: &Path,
+    capacity: StoreCapacityBudget,
+    max_bytes: usize,
+    item_stage: &'static str,
+    byte_stage: &'static str,
+) -> Result<(Vec<MemoryStoreEvent>, usize)> {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), 0));
+        }
+        Err(error) => return Err(Error::io(byte_stage, error)),
+    };
+    let metadata_len = file
+        .metadata()
+        .map_err(|error| Error::io(byte_stage, error))?
+        .len();
+    if metadata_len > max_bytes as u64 {
+        return Err(Error::config(
+            byte_stage,
+            "runtime metric event bytes exceed the active aggregate budget",
+        ));
+    }
+    read_events_from_reader_bounded(
+        BufReader::new(file),
+        capacity,
+        max_bytes,
+        item_stage,
+        byte_stage,
+    )
+}
+
+fn read_events_jsonl_prefix_bounded(
+    path: &Path,
+    prefix_len: u64,
+    capacity: StoreCapacityBudget,
+    max_bytes: usize,
+    stage: &'static str,
+) -> Result<Vec<MemoryStoreEvent>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && prefix_len == 0 => {
+            return Ok(Vec::new());
+        }
         Err(error) => return Err(Error::io(stage, error)),
     };
     let metadata_len = file
         .metadata()
         .map_err(|error| Error::io(stage, error))?
         .len();
-    if metadata_len > max_bytes as u64 {
-        return Err(store_budget_error(format!(
-            "{stage} event log bytes {metadata_len} exceed operation budget {max_bytes}"
-        )));
+    if prefix_len > metadata_len || prefix_len > max_bytes as u64 {
+        return Err(Error::config(
+            stage,
+            format!(
+                "event journal prefix {prefix_len} exceeds physical length {metadata_len} or budget {max_bytes}"
+            ),
+        ));
     }
-    let mut reader = BufReader::new(file);
+    if prefix_len > 0 {
+        file.seek(SeekFrom::Start(prefix_len - 1))
+            .map_err(|error| Error::io(stage, error))?;
+        let mut boundary = [0_u8; 1];
+        file.read_exact(&mut boundary)
+            .map_err(|error| Error::io(stage, error))?;
+        if boundary != [b'\n'] {
+            return Err(Error::config(
+                stage,
+                "event journal prefix must end on an exact JSONL record boundary",
+            ));
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| Error::io(stage, error))?;
+    }
+    read_events_from_reader_bounded(
+        BufReader::new(file.take(prefix_len)),
+        capacity,
+        usize::try_from(prefix_len)
+            .map_err(|_| store_budget_error("event prefix exceeds platform address space"))?,
+        stage,
+        stage,
+    )
+    .map(|(events, _)| events)
+}
+
+fn read_events_from_reader_bounded(
+    mut reader: impl BufRead,
+    capacity: StoreCapacityBudget,
+    max_bytes: usize,
+    item_stage: &'static str,
+    byte_stage: &'static str,
+) -> Result<(Vec<MemoryStoreEvent>, usize)> {
     let mut events = Vec::new();
     let mut line = Vec::new();
     let mut consumed = 0_usize;
     loop {
-        let buffer = reader.fill_buf().map_err(|error| Error::io(stage, error))?;
+        let buffer = reader
+            .fill_buf()
+            .map_err(|error| Error::io(byte_stage, error))?;
         if buffer.is_empty() {
             if !line.is_empty() {
-                push_bounded_event_line(&mut events, &line, capacity, stage)?;
+                push_bounded_event_line(&mut events, &line, capacity, item_stage, byte_stage)?;
             }
             break;
         }
@@ -1833,38 +2882,41 @@ fn read_events_jsonl_bounded(
             .ok_or_else(|| store_budget_error("event log aggregate byte count overflow"))?;
         let content_len = take.saturating_sub(usize::from(terminated));
         if consumed > max_bytes || line.len().saturating_add(content_len) > max_bytes {
-            return Err(store_budget_error(format!(
-                "{stage} event log line or aggregate bytes exceed operation budget"
-            )));
+            return Err(Error::config(
+                byte_stage,
+                "event log line or aggregate bytes exceed operation budget",
+            ));
         }
         line.extend_from_slice(&buffer[..content_len]);
         reader.consume(take);
         if terminated {
-            push_bounded_event_line(&mut events, &line, capacity, stage)?;
+            push_bounded_event_line(&mut events, &line, capacity, item_stage, byte_stage)?;
             line.clear();
         }
     }
-    Ok(events)
+    Ok((events, consumed))
 }
 
 fn push_bounded_event_line(
     events: &mut Vec<MemoryStoreEvent>,
     raw: &[u8],
     capacity: StoreCapacityBudget,
-    stage: &'static str,
+    item_stage: &'static str,
+    schema_stage: &'static str,
 ) -> Result<()> {
     if raw.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Ok(());
     }
     if events.len().saturating_add(1) > capacity.event_log_max_items {
-        return Err(store_budget_error(format!(
-            "{stage} event items exceed operation budget {}",
-            capacity.event_log_max_items
-        )));
+        return Err(Error::config(
+            item_stage,
+            "event items exceed the active aggregate budget",
+        ));
     }
-    events.push(
-        serde_json::from_slice(raw).map_err(|error| Error::config(stage, error.to_string()))?,
-    );
+    let event: MemoryStoreEvent = serde_json::from_slice(raw)
+        .map_err(|error| Error::config(schema_stage, error.to_string()))?;
+    event.validate_current_schema(schema_stage)?;
+    events.push(event);
     Ok(())
 }
 
@@ -1882,6 +2934,16 @@ impl StoreEngine for FileStoreEngine {
     fn admission_authority(&self) -> &StoreAdmissionAuthority {
         &self.admission_authority
     }
+
+    fn read_metric_events(
+        &self,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreMetricEventSourceRead> {
+        self.with_shared_backend("runtime_metrics_event_store", || {
+            read_metric_events_from_root(&self.root, capacity)
+        })
+    }
+
     #[cfg(feature = "nonproduction-replay-harness")]
     fn store_capacity(&self) -> StoreCapacityBudget {
         self.capacity
@@ -2052,6 +3114,7 @@ impl StoreEngine for FileStoreEngine {
         &'a self,
         capacity: StoreCapacityBudget,
     ) -> Result<Box<dyn StoreImmutableReadSession + 'a>> {
+        validate_immutable_read_session_capacity(self.capacity, capacity)?;
         Ok(Box::new(FileImmutableReadSession {
             engine: self,
             _lock: self.acquire_immutable_read_lock()?,
@@ -2206,9 +3269,15 @@ impl StoreEngine for FileStoreEngine {
                 events: next_events,
             },
         };
+        let physical_owner = match &request.scope.physical_owning_scope {
+            crate::StorePhysicalOwningScope::Subject { mounted_subject_id } => {
+                format!("subject_{mounted_subject_id}")
+            }
+            crate::StorePhysicalOwningScope::SharedProgram => "shared_program".to_string(),
+        };
         let transaction_id = format!(
             "scoped_projection_{}_{}",
-            request.scope.memory_space_id, request.scope.mounted_subject_id
+            request.scope.memory_space_id, physical_owner
         );
         let mut journal = FileTransactionJournal::new(transaction_id, before, after)?;
         self.write_transaction_journal(&journal)?;
@@ -2520,7 +3589,50 @@ fn contains_persistent_file(root: &Path) -> Result<bool> {
     Ok(false)
 }
 
+fn read_directory_entries_strict_bounded(
+    root: &Path,
+    max_entries: usize,
+    stage: &'static str,
+) -> Result<Vec<fs::DirEntry>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(Error::io(stage, error)),
+    };
+    let mut bounded = Vec::with_capacity(max_entries.min(256));
+    for entry in entries {
+        if bounded.len() >= max_entries {
+            return Err(store_budget_error(format!(
+                "{stage} directory entries exceed {max_entries}"
+            )));
+        }
+        bounded.push(entry.map_err(|error| Error::io(stage, error))?);
+    }
+    let mut entries = bounded;
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn entry_name_utf8(entry: &fs::DirEntry, stage: &'static str) -> Result<String> {
+    entry
+        .file_name()
+        .into_string()
+        .map_err(|_| Error::config(stage, "file store path is not valid UTF-8"))
+}
+
+fn is_orphan_tmp_path(path: &Path) -> bool {
+    path.extension().and_then(|value| value.to_str()) == Some("tmp")
+}
+
 fn list_child_directory_names(root: &Path, stage: &'static str) -> Result<Vec<String>> {
+    list_child_directory_names_bounded(root, usize::MAX, stage)
+}
+
+fn list_child_directory_names_bounded(
+    root: &Path,
+    max_entries: usize,
+    stage: &'static str,
+) -> Result<Vec<String>> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2528,6 +3640,11 @@ fn list_child_directory_names(root: &Path, stage: &'static str) -> Result<Vec<St
     };
     let mut names = Vec::new();
     for entry in entries {
+        if names.len() >= max_entries {
+            return Err(store_budget_error(format!(
+                "{stage} namespace entries exceed {max_entries}"
+            )));
+        }
         let entry = entry.map_err(|error| Error::io(stage, error))?;
         if !entry
             .file_type()
@@ -2659,7 +3776,12 @@ fn complete_rename_durability(
     fsync: bool,
     stage: &'static str,
 ) -> Result<()> {
-    let id = DURABILITY_TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut sequence = DURABILITY_TRACE_SEQUENCE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let id = *sequence;
+    *sequence = sequence.wrapping_add(1);
+    drop(sequence);
     let parents = [from.parent(), to.parent()]
         .into_iter()
         .flatten()
@@ -2781,9 +3903,22 @@ fn digest_parts(seed: u64, parts: &[&[u8]]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn file_test_profile() -> crate::ProfileId {
+        #[cfg(target_os = "macos")]
+        return crate::ProfileId::DesktopMacosEmbeddedSdk;
+        #[cfg(target_os = "windows")]
+        return crate::ProfileId::DesktopWindowsEmbeddedSdk;
+        #[cfg(target_os = "linux")]
+        return crate::ProfileId::ServerLinuxMemoryGateway;
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        compile_error!("file store tests require a supported production host target");
+    }
 
     fn event_budget(snapshot_max_bytes: usize, event_log_max_items: usize) -> StoreCapacityBudget {
         StoreCapacityBudget {
+            metric_source_max_items: 1,
             event_log_max_items,
             kv_max_entries: 8,
             blob_max_bytes: 1024,
@@ -2841,6 +3976,41 @@ mod tests {
     }
 
     #[test]
+    fn legacy_manifest_is_rejected_before_file_store_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "bm-file-v5-zero-mutation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create fixture root");
+        let profile = file_test_profile();
+        let config = StoreBackendConfig::file(&root, profile).expect("file store config");
+        let mut legacy = StoreSchemaManifest::new(config.backend, config.profile, 7);
+        legacy.schema_id = "beetle_memory_store_schema_v5".to_string();
+        legacy.schema_version = 5;
+        let manifest_path = root.join("manifest.json");
+        let before = serde_json::to_vec_pretty(&legacy).expect("legacy manifest");
+        fs::write(&manifest_path, &before).expect("write legacy manifest");
+
+        let error = match FileStoreEngine::open_with_capacity(&config, event_budget(4096, 8)) {
+            Ok(_) => panic!("v5 must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.stage(), "file_store_manifest");
+        assert_eq!(fs::read(&manifest_path).expect("manifest remains"), before);
+        assert!(!root.join(TRANSACTION_LOCK_FILE).exists());
+        assert!(!root.join("events").exists());
+        assert!(!root.join("kv").exists());
+        assert!(!root.join("blob").exists());
+        assert!(!root.join("snapshots").exists());
+
+        fs::remove_dir_all(root).expect("remove file fixture");
+    }
+
+    #[test]
     fn scoped_projection_uses_exact_subject_root_under_entry_and_byte_budgets() {
         let root = std::env::temp_dir().join(format!(
             "bm-file-scoped-exact-{}-{}",
@@ -2850,9 +4020,10 @@ mod tests {
                 .expect("system time")
                 .as_nanos()
         ));
-        let profile = crate::ProfileId::native_dev_full().expect("native test profile");
+        let profile = file_test_profile();
         let config = StoreBackendConfig::file(&root, profile).expect("file store config");
         let store_capacity = StoreCapacityBudget {
+            metric_source_max_items: 1,
             event_log_max_items: 128,
             kv_max_entries: 128,
             blob_max_bytes: 1024,
@@ -2863,12 +4034,8 @@ mod tests {
             export_max_bytes: 256 * 1024,
             import_max_bytes: 256 * 1024,
         };
-        let (engine, _, _) = FileStoreEngine::open_with_capacity_and_authority(
-            &config,
-            store_capacity,
-            StoreAdmissionAuthority::new(),
-        )
-        .expect("open file store");
+        let (engine, _, _) =
+            FileStoreEngine::open_with_capacity(&config, store_capacity).expect("open file store");
         let target = json!({"identity_anchor": "target Soul"});
         engine
             .put_json_value_unlocked("self_authored_core", "subject-target", &target)
@@ -2886,7 +4053,7 @@ mod tests {
                 .expect("write unrelated owner");
         }
         let request = crate::StoreScopedProjectionRequest {
-            scope: crate::StoreScopedProjectionScope::new("space-target", "subject-target")
+            scope: crate::StoreScopedProjectionScope::subject("space-target", "subject-target")
                 .expect("projection scope"),
             json_namespaces: vec!["self_authored_core".to_string()],
             include_events: false,

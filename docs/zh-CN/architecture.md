@@ -67,8 +67,8 @@ transport request
 | Project | `MemoryRuntime::project` | 组装模型上下文的 SDK host 或 CLI |
 | Maintain | `MemoryRuntime::maintain` | 显式注入 LLM client 的 SDK host |
 | Inspect | `MemoryRuntime::inspect` | 运维工具和健康检查 |
-| Replay | `MemoryRuntime::replay` | 迁移验证和调试 |
-| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Typed scope archive migration |
+| Replay | `MemoryRuntime::replay` | 归档验证和调试 |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | 精确 typed-scope archive replacement |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Runtime lifecycle control |
 
 `Maintain` 不由通用 adapter dispatch 执行，因为它需要显式 LLM/HTTP service injection。协议集成只有在自己拥有这个依赖注入边界后才应暴露 maintain。
@@ -80,7 +80,7 @@ transport request
 3. Write 操作通过 `bm-core` 更新受规则约束的记忆状态，并由私有 `bm-sdk` persistence kernel 持久化。
 4. Recall 和 projection 通过 runtime facade 读取 recent/session/procedural/long-term/continuity 数据。
 5. Lifecycle events 和 operator reports 以结构化 report 返回，不隐藏为不可见副作用。
-6. Export/import 和 replay 使用 snapshot 与 event-lineage 合同，让迁移可解释。
+6. Export/import 和 replay 使用 governed archive-root 与 event-lineage 合同，让 replacement 可解释。
 
 ## Profile And Store Boundaries
 

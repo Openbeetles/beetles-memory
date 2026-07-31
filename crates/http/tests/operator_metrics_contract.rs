@@ -84,12 +84,30 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
 #[test]
 fn operator_overview_exposes_stable_runtime_metrics_fields() {
     let runtime = runtime();
+    let write_body = serde_json::json!({
+        "name": "operator_metrics_contract",
+        "topic": "operator metrics",
+        "title": "Operator metrics contract",
+        "summary": "Operator API displays metrics from runtime reports.",
+        "content": "Write count and hit count are runtime metrics fields.",
+        "source": "manual",
+        "citations": ["operator-metrics-contract"],
+        "owning_scope": {
+            "kind": "subject",
+            "mounted_subject_id": default_agent_subject_id("operator-metrics-agent"),
+        },
+        "creation_ref": {
+            "kind": "replay_promotion",
+            "candidate_ref": "operator-metrics-contract:write",
+            "verification_receipt_digest":
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        },
+        "privacy_class": "shared_with_subject",
+    })
+    .to_string();
     let write = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json(
-            "/memory/write",
-            r#"{"name":"operator_metrics_contract","topic":"operator metrics","title":"Operator metrics contract","summary":"Operator API displays metrics from runtime reports.","content":"Write count and hit count are runtime metrics fields.","source":"manual"}"#,
-        ),
+        HttpRuntimeRequest::post_json("/memory/write", &write_body),
     )
     .expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);

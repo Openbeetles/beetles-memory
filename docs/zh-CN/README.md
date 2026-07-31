@@ -12,8 +12,8 @@ Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter �
 - [Profile 矩阵](profiles.md)
 - [存储后端](store-backends.md)
 - [Adapter 合同](adapters.md)
-- [回放与迁移](replay-and-migration.md)
+- [回放与归档](replay-and-archive.md)
 - [运维与检查](operator-guide.md)
 - [发布清单](release-checklist.md)
 
-Memory Evidence System 和 Conversation Transcript Substrate 发布面由 [API 表面](api.md) 与 [回放与迁移](replay-and-migration.md) 承载。Transcript commit、lifecycle、redacted replay 和 transcript export 是由 `MemoryRuntime` 拥有的 SDK surface。
+Memory Evidence System 和 Conversation Transcript Substrate 发布面由 [API 表面](api.md) 与 [回放与归档](replay-and-archive.md) 承载。Transcript commit、lifecycle、redacted replay 和 transcript export 是由 `MemoryRuntime` 拥有的 SDK surface。

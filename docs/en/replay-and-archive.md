@@ -1,27 +1,28 @@
-# Replay And Migration
+# Replay And Archive
 
-Replay and migration are validation and continuity tools. They do not replace the normal write, recall, project, or maintain path.
+Replay and governed archives are validation and continuity tools. They do not replace the normal write, recall, project, or maintain path.
 
 ## Governed Memory-Space Export And Import
 
 ```rust
 use bm_sdk::{
-    MemorySpaceExportRequest, MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy,
-    MemorySpaceScope,
+    MemoryArchiveScope, MemorySpaceExportRequest, MemorySpaceImportRequest,
+    MemorySpacePrivateMaterialPolicy,
 };
 
-let scope = MemorySpaceScope {
-    memory_space_id: runtime.memory_space_id().to_string(),
-    mounted_subject_id: runtime.subject_id().to_string(),
-};
+let scope = MemoryArchiveScope::subject(
+    runtime.memory_space_id(),
+    runtime.subject_id(),
+)?;
+let private_material_policy = MemorySpacePrivateMaterialPolicy::ExcludePrivate;
 let exported = runtime.export_memory_space(MemorySpaceExportRequest {
     scope: scope.clone(),
-    include_private: false,
+    private_material_policy,
 })?;
 
 let imported = runtime.import_memory_space(MemorySpaceImportRequest {
     scope,
-    expected_private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
+    expected_private_material_policy: private_material_policy,
     archive: exported.archive,
 })?;
 ```
@@ -39,7 +40,7 @@ let replay = runtime.replay(MemoryReplayRequest {
 })?;
 ```
 
-Replay explains historical continuity state. It should be used for inspection, migration validation, and release gates.
+Replay explains historical continuity state. It should be used for inspection, archive validation, and release gates.
 
 ## Redacted Transcript Replay
 
@@ -63,7 +64,7 @@ Release-surface replay views:
 | `ModelContext` | Model-facing projection | Budgeted and privacy-filtered; no backend trace, operator-only audit, or raw tool payload. |
 | `HostUi` | Host display surfaces | Redacted conversation evidence; no private garden, inner-life, or soul-private raw material. |
 | `OperatorAudit` | Diagnostics and compliance review | Structured reasons, refs, and audit markers by default, not full raw content. |
-| `Export` | Migration and portability | Controlled by `include_private`, profile, permission, and retention policy. |
+| `Export` | Governed archive and portability | Controlled by `MemorySpacePrivateMaterialPolicy`, profile, permission, and retention policy. |
 
 Deleting or masking raw transcript content must report downstream impact separately from accepted long-term, shared factual, procedural, private, or soul-related memory planes. Lifecycle reports expose host refs through the SDK's operator-audit view, so internal/model-only refs and raw labels are redacted before the report leaves the runtime. Redacted replay must fail closed: when a view cannot prove a field is visible, it returns a redaction marker and audit reason instead of raw content. SDK runtime consumers use transcript-backed evidence ahead of the legacy session shadow, so a masked transcript or untrusted legacy alias is not rehydrated from `SessionStore(chat_id)`.
 
@@ -75,55 +76,48 @@ Transcript attrs replay with their target turn/message. `TranscriptAttrEnvelope`
 
 `TranscriptLifecycleReport.derived_memory_refs` can be used as the target source for the next long-term memory control action. For example, after raw transcript content is masked or deleted, the report lists affected `DerivedMemoryRef` values; a host or operator that wants to revoke the corresponding accepted long-term memory should pass the ref through `MemoryLongTermTarget::TranscriptDerivedRef` and call `MemoryRuntime::mutate_long_term_memory`. Transcript lifecycle never automatically cascades deletion into accepted long-term memory, shared facts, procedural skills, private garden material, or soul handoffs.
 
-## Memory-Space Migration Dry-Run
+## Governed Archive Replacement
 
-Use memory-space migration when replacing a host memory implementation or moving a configured SDK store:
+Use direct same-scope import when replacing one exact typed memory-space projection:
 
 ```rust
 use bm_sdk::{
-    apply_memory_space_migration, preview_memory_space_migration,
-    MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest,
-    MemorySpaceMigratePreviewRequest, MemorySpacePrivateMaterialPolicy, MemorySpaceScope,
+    MemoryArchiveScope, MemorySpaceExportRequest, MemorySpaceImportRequest,
+    MemorySpacePrivateMaterialPolicy,
 };
 
-let scope = MemorySpaceScope {
-    memory_space_id: runtime.memory_space_id().to_string(),
-    mounted_subject_id: runtime.subject_id().to_string(),
-};
-let exported = runtime.export_memory_space(MemorySpaceExportRequest {
+let scope = MemoryArchiveScope::subject(
+    source_runtime.memory_space_id(),
+    source_runtime.subject_id(),
+)?;
+let private_material_policy = MemorySpacePrivateMaterialPolicy::ExcludePrivate;
+let exported = source_runtime.export_memory_space(MemorySpaceExportRequest {
     scope: scope.clone(),
-    include_private: false,
+    private_material_policy,
 })?;
-let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-    source_scope: scope.clone(),
-    target_scope: scope.clone(),
-    expected_private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
-    source_profile: profile,
-    target_profile: profile,
-    archive: exported.archive,
-})?;
-assert!(!preview.loss_risk);
-assert_eq!(preview.manifest.projection_scope.scope, scope);
-assert!(!preview.manifest.identity_remap.required);
 
-apply_memory_space_migration(&target_store, MemorySpaceMigrateApplyRequest {
-    plan: preview.plan,
+assert_eq!(&exported.archive.root().scope, &scope);
+assert_eq!(
+    exported.archive.root().private_material_policy,
+    private_material_policy,
+);
+
+target_runtime.import_memory_space(MemorySpaceImportRequest {
+    scope,
+    expected_private_material_policy: private_material_policy,
+    archive: exported.archive,
 })?;
 ```
 
-`include_private=false` must redact private snapshot entries. Preview, apply, and direct import remain bound to the caller's explicit `expected_private_material_policy`; a policy mismatch fails closed before any write. Beetle-derived replacement fixtures must use the same public migrator as generic fixtures.
-`preview.manifest` is the dry-run diagnostic source of truth. It lists the exact
-`(memory_space_id, mounted_subject_id)` projection scope, private-material mode,
-plane/privacy counts, schema id, conflict/loss risk, and identity-remap state.
-Apply does not relabel identity. If either the memory space or mounted subject
-differs, the manifest reports `identity_remap.required=true` and `applied=false`,
-and preflight fails closed until an explicit typed remapper produces a new archive.
+The source and target runtimes must expose the same exact `MemoryArchiveScope`. The requested scope, the archive root scope, and the private-material policy are validated before replacement. Import recomputes the canonical archive root before any backend mutation and atomically replaces only that scope.
 
-When transcript evidence is present in memory-space storage, `include_private=false` removes raw transcript documents, `conversation_transcript_attr`, and `conversation_transcript_derived_ref` manifests from export by default. Migration diagnostics must preserve the split between raw transcript, redacted transcript slices, accepted memory planes, derived refs, and opaque host refs. Host object payloads are not exported by Beetle Memory; only `HostOpaqueRef` metadata and relation are portable when the ref is visible for the requested view. `RedactedTranscriptSlice` reports message, attr, and host-ref redactions so callers can audit what was omitted without seeing the raw material. `TranscriptLifecycleReport.derived_memory_refs` is the review list for accepted Memory material that came from the affected transcript evidence.
+`ExcludePrivate` removes private material as a governed owner closure. A policy mismatch, incomplete dependency closure, root mismatch, or scope mismatch fails closed before any write. The opaque archive keeps its payload private; callers use `GovernedScopeArchiveRootV1` for schema, exact scope, policy, JSON/event counts and byte counts, and the canonical `closure_sha256`.
 
-Transcript replay and migration tooling can use `TranscriptTurnPage` for bounded paging. `MemoryTranscriptRepairRequest` exposes SDK-level transcript repair inspection, and `TranscriptRepairReport` checks Memory-owned derived refs against transcript source turns/messages. Missing source turns, `MissingSourceMessage`, orphan derived refs, corrupt transcript records, mismatched source keys, and duplicate sequence/cursor evidence are fail-closed repair issues instead of a clean report with hidden evidence loss.
+When transcript evidence is present in memory-space storage, `ExcludePrivate` removes private transcript material and dependent export-visible indexes such as `conversation_transcript_attr` and `conversation_transcript_derived_ref` as one validated closure. Archive diagnostics preserve the split between raw transcript, redacted transcript slices, accepted memory planes, derived refs, and opaque host refs. Host object payloads are not exported by Beetle Memory; only `HostOpaqueRef` metadata and relation are portable when the ref is visible for the requested view. `RedactedTranscriptSlice` reports message, attr, and host-ref redactions so callers can audit what was omitted without seeing the raw material. `TranscriptLifecycleReport.derived_memory_refs` is the review list for accepted Memory material that came from the affected transcript evidence.
 
-Transcript attr repair is part of the same fail-closed inspection surface. Missing attr target turns/messages, mismatched attr source keys, invalid attr keys, oversized attr values, invalid attr visibility, and corrupt transcript attr records must be reported instead of silently dropping metadata.
+Transcript replay and archive tooling can use `TranscriptTurnPage` for bounded paging. `MemoryTranscriptRepairRequest` exposes SDK-level transcript repair inspection, and `TranscriptRepairReport` checks Memory-owned derived refs against transcript source turns/messages. Missing source turns, `MissingSourceMessage`, orphan derived refs, corrupt transcript records, mismatched source keys, and duplicate sequence/cursor evidence are fail-closed repair issues instead of a clean report with hidden evidence loss.
+
+Transcript attr repair is part of the same fail-closed inspection surface. `MissingAttrTargetTurn`, `MissingAttrTargetMessage`, mismatched attr source keys, invalid attr keys, oversized attr values, invalid attr visibility, and corrupt transcript attr records must be reported instead of silently dropping metadata.
 
 Compact profiles may return fewer transcript turns, host refs, attrs, redaction report items, lifecycle derived refs, or repair issues according to `TranscriptGovernanceBudget`. Replay audit records `ProfileBudget` when replay redactions are budget-limited; lifecycle and repair reports set `profile_budget_applied=true` when their report lists are clipped. This is quantity clipping only: profile budget does not make private data visible, skip lifecycle audit, or authorize host business deletion.
 

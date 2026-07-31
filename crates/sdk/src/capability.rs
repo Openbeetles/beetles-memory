@@ -125,6 +125,39 @@ pub struct MemoryIndexedRecallVisibility {
     pub task_learning: MemoryOperationVisibility,
 }
 
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSkillRecallTransport {
+    IndexedSqlite,
+    CompactTypedDirect,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedStateMemoryCapability {
+    pub dynamic_state_recall: MemoryOperationVisibility,
+    pub historical_as_of_recall: MemoryOperationVisibility,
+    pub procedural_recall: MemoryOperationVisibility,
+    pub environment_premise_evaluation: MemoryOperationVisibility,
+    pub update_lineage_inspection: MemoryOperationVisibility,
+    pub runtime_skill_recall_transport: RuntimeSkillRecallTransport,
+}
+
+impl GovernedStateMemoryCapability {
+    pub const fn hidden() -> Self {
+        Self {
+            dynamic_state_recall: MemoryOperationVisibility::hidden(),
+            historical_as_of_recall: MemoryOperationVisibility::hidden(),
+            procedural_recall: MemoryOperationVisibility::hidden(),
+            environment_premise_evaluation: MemoryOperationVisibility::hidden(),
+            update_lineage_inspection: MemoryOperationVisibility::hidden(),
+            runtime_skill_recall_transport: RuntimeSkillRecallTransport::Unavailable,
+        }
+    }
+}
+
 impl MemoryIndexedRecallVisibility {
     pub const fn hidden() -> Self {
         Self {
@@ -286,6 +319,7 @@ pub struct MemoryCapabilityCatalog {
     pub adapter: MemoryAdapterCapabilityCatalog,
     pub entry: MemoryEntryRuntimeCapabilityCatalog,
     pub sqlite_index_recall: MemoryIndexedRecallVisibility,
+    pub governed_state: GovernedStateMemoryCapability,
     pub lifecycle: MemoryRuntimeLifecycleCapability,
     pub validation: MemoryValidationCapability,
 }
@@ -314,6 +348,7 @@ impl MemoryCapabilityCatalog {
             adapter: MemoryAdapterCapabilityCatalog::hidden(),
             entry: MemoryEntryRuntimeCapabilityCatalog::hidden(),
             sqlite_index_recall: MemoryIndexedRecallVisibility::hidden(),
+            governed_state: GovernedStateMemoryCapability::hidden(),
             lifecycle: MemoryRuntimeLifecycleCapability::hidden(),
             validation: MemoryValidationCapability::hidden(),
         }
@@ -324,8 +359,15 @@ impl MemoryCapabilityCatalog {
         compiled: CompiledFeatureReport,
         policy: &MemoryCapabilityPolicy,
         privacy: &MemoryPrivacyPolicy,
+        governed_state_runtime_compiled: bool,
+        runtime_skill_recall_transport: RuntimeSkillRecallTransport,
     ) -> Self {
         let profile_kind = profile_kind(entry.profile);
+        let indexed_runtime_skill = indexed_visible(
+            entry.indexed_runtime_skill_recall_allowed,
+            compiled,
+            policy.recall_enabled,
+        );
         Self {
             profile: entry.profile,
             target: entry.target,
@@ -589,6 +631,46 @@ impl MemoryCapabilityCatalog {
                     true,
                 ),
             },
+            governed_state: GovernedStateMemoryCapability {
+                dynamic_state_recall: visible(
+                    entry.dynamic_state_recall_allowed,
+                    governed_state_runtime_compiled,
+                    policy.recall_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                historical_as_of_recall: visible(
+                    entry.historical_as_of_recall_allowed,
+                    governed_state_runtime_compiled,
+                    policy.recall_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                procedural_recall: visible(
+                    entry.procedural_recall_allowed,
+                    governed_state_runtime_compiled
+                        && runtime_skill_recall_transport
+                            != RuntimeSkillRecallTransport::Unavailable,
+                    policy.recall_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                environment_premise_evaluation: visible(
+                    entry.environment_premise_evaluation_allowed,
+                    governed_state_runtime_compiled,
+                    policy.recall_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                update_lineage_inspection: visible(
+                    entry.update_lineage_inspection_allowed,
+                    governed_state_runtime_compiled,
+                    policy.inspection_enabled,
+                    true,
+                    privacy.operator_inspection_allowed,
+                ),
+                runtime_skill_recall_transport,
+            },
             sqlite_index_recall: MemoryIndexedRecallVisibility {
                 archive: indexed_visible(
                     entry.indexed_archive_recall_allowed,
@@ -600,11 +682,7 @@ impl MemoryCapabilityCatalog {
                     compiled,
                     policy.recall_enabled,
                 ),
-                runtime_skill: indexed_visible(
-                    entry.indexed_runtime_skill_recall_allowed,
-                    compiled,
-                    policy.recall_enabled,
-                ),
+                runtime_skill: indexed_runtime_skill,
                 task_learning: indexed_visible(
                     entry.indexed_task_learning_recall_allowed,
                     compiled,
@@ -631,6 +709,29 @@ pub fn resolve_memory_capabilities(
         compiled_feature_report(),
         policy,
         privacy,
+        false,
+        RuntimeSkillRecallTransport::Unavailable,
+    ))
+}
+
+pub(crate) fn resolve_memory_capabilities_for_runtime(
+    profile: ProfileId,
+    policy: &MemoryCapabilityPolicy,
+    privacy: &MemoryPrivacyPolicy,
+    runtime_skill_recall_transport: RuntimeSkillRecallTransport,
+) -> Result<MemoryCapabilityCatalog> {
+    let entry = profile_capability_catalog()
+        .iter()
+        .find(|entry| entry.profile == profile)
+        .copied()
+        .ok_or_else(|| Error::config("memory_capability_catalog", profile.as_str()))?;
+    Ok(MemoryCapabilityCatalog::from_entry(
+        entry,
+        compiled_feature_report(),
+        policy,
+        privacy,
+        true,
+        runtime_skill_recall_transport,
     ))
 }
 
@@ -783,7 +884,7 @@ fn profile_kind(profile: ProfileId) -> ProfileOperationDefaults {
             compact_replay_fixture_allowed: true,
             memory_harness_allowed: true,
             full_replay_suite_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
-            benchmark_gate_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
+            benchmark_gate_allowed: false,
             proposal_preview_allowed: true,
             compact_proposal_sandbox_allowed: true,
             full_proposal_sandbox_allowed: !matches!(profile, ProfileId::EspStandaloneMemory),
@@ -831,7 +932,7 @@ fn profile_kind(profile: ProfileId) -> ProfileOperationDefaults {
             compact_replay_fixture_allowed: true,
             memory_harness_allowed: true,
             full_replay_suite_allowed: true,
-            benchmark_gate_allowed: true,
+            benchmark_gate_allowed: false,
             proposal_preview_allowed: true,
             compact_proposal_sandbox_allowed: true,
             full_proposal_sandbox_allowed: true,

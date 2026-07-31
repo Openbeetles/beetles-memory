@@ -8,10 +8,9 @@ use bm_core::memory::{
     MemoryEvidenceAuthority, MemoryPrivacyClass, MemorySemanticJudgmentSource,
     MemoryWriteCandidate, MemoryWriteDomain, SoulCandidateDisposition,
 };
-use bm_core::platform::Platform as _;
-use bm_core::skills::list_runtime_skill_records;
 use bm_sdk::{
     MemoryProjectionRequest, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
+    RuntimeSkillListRequest,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -60,6 +59,7 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-release-routine".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -103,11 +103,19 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
     assert_eq!(plane.decision, GovernedWriteDecision::Accepted);
 
     assert_eq!(report.changed, 1);
-    let storage = platform.replay_harness().skill_storage();
-    let records = list_runtime_skill_records(storage.as_ref());
+    let records = runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: support::runtime_skill_subject_scope(),
+            query: None,
+            include_disabled: false,
+            include_retired: false,
+            limit: 10,
+        })
+        .expect("typed RuntimeSkill list");
     assert!(records
+        .skills
         .iter()
-        .any(|record| record.name == "runtime_skill__sdk_host_readiness_check"));
+        .any(|record| record.title == "SDK host readiness check"));
 }
 
 #[test]
@@ -118,6 +126,7 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![text_candidate(
                 "candidate-host-only",
                 MemoryCandidateTarget::LongTermMemory {
@@ -141,6 +150,7 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
     let runtime_b = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-b");
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
@@ -150,7 +160,10 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
             tool_registry_refs: Vec::new(),
         })
         .expect("projection");
-    assert!(!projection.system_memory_block.contains("Qingchuan"));
+    assert!(!projection
+        .provider_payload()
+        .system_memory_block()
+        .contains("Qingchuan"));
 }
 
 #[test]
@@ -161,6 +174,7 @@ fn sdk_candidate_write_reports_soul_handoff_without_long_term_or_procedural_muta
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-soul".to_string(),
                 authority: MemoryEvidenceAuthority::SoulGovernance,
@@ -207,6 +221,7 @@ fn sdk_candidate_write_keeps_private_garden_out_of_common_candidate_mutation() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-private".to_string(),
                 authority: MemoryEvidenceAuthority::PrivateGardenInternal,

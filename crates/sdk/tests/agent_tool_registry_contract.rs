@@ -5,7 +5,6 @@ use bm_sdk::{
     MemoryInspectionRequest, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime,
     MemoryScope, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
     RuntimeSkillReuseOutcome, StoreBackendConfig, AGENT_TOOL_NO_EXPERIENCE_REASON,
-    AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
 };
 
 fn registry() -> AgentToolRegistrySnapshot {
@@ -71,6 +70,7 @@ fn sdk_agent_tool_registry_never_cold_starts_from_tool_descriptions() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "extract text from this PDF".to_string(),
             limit: 5,
@@ -117,6 +117,7 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
 
     let no_hint = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "extract text from this PDF".to_string(),
             system_max_len: 4096,
@@ -126,8 +127,8 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
             tool_registry_refs: vec![registry.registry_ref()],
         })
         .expect("project without governed experience");
-    assert!(no_hint.runtime_projection.agent_tool_hints.is_empty());
-    assert!(no_hint.audit.agent_tools.selected.is_empty());
+    assert!(no_hint.provider_payload().agent_tool_hints().is_empty());
+    assert_eq!(no_hint.report().audit().agent_tool_selected_count, 0);
 
     let accepted = runtime
         .write(MemoryWriteRequest::AgentToolUsageFeedback {
@@ -144,6 +145,7 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
 
     let projected = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "extract text from this PDF".to_string(),
             system_max_len: 4096,
@@ -153,18 +155,27 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
             tool_registry_refs: vec![registry.registry_ref()],
         })
         .expect("project with governed experience");
-    assert_eq!(projected.runtime_projection.agent_tool_hints.len(), 1);
+    assert_eq!(projected.provider_payload().agent_tool_hints().len(), 1);
     assert_eq!(
-        projected.runtime_projection.agent_tool_hints[0].tool_id,
+        projected.provider_payload().agent_tool_hints()[0].tool_id,
         "pdf.extract"
     );
-    assert!(projected.runtime_projection.agent_tool_hints[0].host_execution_required);
-    assert_eq!(projected.audit.agent_tools.selected.len(), 1);
-    assert!(!projected.audit.agent_tools.cold_start_selection_used);
+    assert!(projected.provider_payload().agent_tool_hints()[0].host_execution_required);
+    assert_eq!(projected.report().audit().agent_tool_selected_count, 1);
+    assert!(
+        !projected
+            .report()
+            .audit()
+            .agent_tool_cold_start_selection_used
+    );
     assert!(projected
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("Agent Tool Experience Hints"));
-    assert!(!projected.system_memory_block.contains("Extract PDF text"));
+    assert!(!projected
+        .provider_payload()
+        .system_memory_block()
+        .contains("Extract PDF text"));
 }
 
 #[test]
@@ -181,6 +192,7 @@ fn sdk_agent_tool_projection_rejects_registry_fingerprint_drift() {
     stale_ref.fingerprint = "stale-fingerprint".to_string();
     let projected = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "extract text from this PDF".to_string(),
             system_max_len: 4096,
@@ -191,11 +203,7 @@ fn sdk_agent_tool_projection_rejects_registry_fingerprint_drift() {
         })
         .expect("project stale ref");
 
-    assert!(projected.runtime_projection.agent_tool_hints.is_empty());
-    assert!(projected
-        .audit
-        .agent_tools
-        .rejected
-        .iter()
-        .any(|rejection| rejection.reason == AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH));
+    assert!(projected.provider_payload().agent_tool_hints().is_empty());
+    assert_eq!(projected.report().audit().agent_tool_selected_count, 0);
+    assert_eq!(projected.report().audit().agent_tool_rejection_count, 1);
 }

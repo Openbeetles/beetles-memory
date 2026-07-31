@@ -13,16 +13,17 @@ use crate::store_internal::transaction::{
     read_consistent_from_state, validate_restore_post_image_blob_bytes,
 };
 use crate::{
-    enforce_logical_key_budget,
+    enforce_logical_key_budget, materialize_metric_event_source,
     store_internal::transaction::{
         apply_transaction, read_bounded_known_keys_from_parts, read_scoped_projection_from_parts,
-        validate_scoped_projection_post_image, BackendTransactionState, StoreAdmissionAuthority,
-        StoreBackendUsage, StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead,
-        StoreBoundedKnownKeyReadResult, StoreImmutableReadSession, StoreReadReceipt,
-        StoreReadSessionState, StoreTransactionAdmission, StoreTransactionContext,
+        validate_immutable_read_session_capacity, validate_scoped_projection_post_image,
+        BackendTransactionState, StoreAdmissionAuthority, StoreBackendUsage,
+        StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead, StoreBoundedKnownKeyReadResult,
+        StoreImmutableReadSession, StoreReadReceipt, StoreReadSessionState,
+        StoreTransactionAdmission, StoreTransactionContext,
     },
-    MemoryStoreEvent, StoreCapacityBudget, StoreEngine, StoreEventLog, StoreTransactionReport,
-    StoreTransactionRequest,
+    MemoryStoreEvent, StoreCapacityBudget, StoreEngine, StoreEventLog, StoreMetricEventSourceRead,
+    StoreTransactionReport, StoreTransactionRequest,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::{
@@ -178,6 +179,7 @@ impl StoreEventLog for EmbeddedStoreEngine {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
         Ok(self
             .state
@@ -192,6 +194,15 @@ impl StoreEngine for EmbeddedStoreEngine {
     fn admission_authority(&self) -> &StoreAdmissionAuthority {
         &self.admission_authority
     }
+
+    fn read_metric_events(
+        &self,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreMetricEventSourceRead> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        materialize_metric_event_source(&state.events, capacity)
+    }
+
     #[cfg(feature = "nonproduction-replay-harness")]
     fn store_capacity(&self) -> StoreCapacityBudget {
         self.capacity
@@ -305,6 +316,7 @@ impl StoreEngine for EmbeddedStoreEngine {
         &'a self,
         capacity: StoreCapacityBudget,
     ) -> Result<Box<dyn StoreImmutableReadSession + 'a>> {
+        validate_immutable_read_session_capacity(self.capacity, capacity)?;
         Ok(Box::new(EmbeddedImmutableReadSession {
             state: self.state.lock().unwrap_or_else(|error| error.into_inner()),
             read: StoreReadSessionState::new(capacity),

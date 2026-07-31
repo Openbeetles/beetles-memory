@@ -5,8 +5,10 @@ use bm_entry::{
     EntryTransportContext,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryWriteRequest,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRecallRequest,
+    MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteRequest, StoreBackendConfig,
 };
 
 mod support;
@@ -50,25 +52,37 @@ fn context(operation: AdapterOperation, idempotency_key: &str) -> EntryTransport
 }
 
 fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
-    AdapterCommand::Write(MemoryWriteRequest::Procedural {
-        writes: vec![RuntimeSkillWrite {
-            name: name.to_string(),
-            topic: "entry-runtime".to_string(),
-            title: format!("Entry runtime {name}"),
-            summary: format!(
-                "Entry runtime factory shares one MemoryStoreHandle across scoped runtimes. {marker}"
-            ),
-            content: format!(
-                "1. Open EntryRuntimeFactory once for the base store config.\n\
-                 2. Resolve an EntryRuntimeScope before handling a gateway request.\n\
-                 3. Build the scoped EntryRuntime from the shared MemoryStoreHandle.\n\
-                 4. Keep identity and chat scope on the scoped runtime. Marker: {marker}."
-            ),
-            citations: vec!["entry runtime factory contract".to_string()],
-            source_chat_id: Some(chat_id.to_string()),
-            observed_at: 1_800_000_000,
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "entry-runtime".to_string(),
+    };
+    AdapterCommand::Write(MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: name.to_string(),
+            authority: MemoryEvidenceAuthority::UserAsserted,
+            target: target.clone(),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "entry-runtime".to_string(),
+                body: format!(
+                    "Entry runtime factory shares one MemoryStoreHandle across scoped runtimes. Marker: {marker}."
+                ),
+                keywords: vec![
+                    "entry".to_string(),
+                    "runtime".to_string(),
+                    "factory".to_string(),
+                ],
+            },
+            evidence_refs: vec![format!("{chat_id}:entry-runtime-factory-contract")],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::LlmGovernance,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "entry runtime shared-store fixture".to_string(),
+            }),
         }],
-        source: RuntimeSkillWriteSource::Manual,
+        runtime_skill_owning_scope: None,
     })
 }
 
@@ -120,6 +134,7 @@ fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
         .handle(
             context(AdapterOperation::Recall, "idem-recall-1"),
             AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
@@ -152,6 +167,7 @@ fn entry_runtime_response_preserves_the_dispatch_budget_lease() {
         .handle_with_budget_lease(
             context(AdapterOperation::Recall, "idem-recall-budget-lease"),
             AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,
@@ -193,6 +209,18 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
 
     assert_eq!(runtime_a.runtime().scope().chat_id, "chat-a");
     assert_eq!(runtime_b.runtime().scope().chat_id, "chat-b");
+    assert_ne!(
+        runtime_a.runtime().scope().chat_id,
+        runtime_b.runtime().scope().chat_id
+    );
+    assert_eq!(
+        runtime_a.runtime().memory_space_id(),
+        runtime_b.runtime().memory_space_id()
+    );
+    assert_eq!(
+        runtime_a.runtime().subject_id(),
+        runtime_b.runtime().subject_id()
+    );
 
     let write = runtime_a
         .handle(
@@ -204,7 +232,13 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
         AdapterResponse::Accepted {
             report: AdapterSdkReport::Write(report),
             ..
-        } => assert!(report.accepted),
+        } => {
+            assert!(report.accepted);
+            assert_eq!(
+                report.changed, 1,
+                "shared-store seed must be a material write: {report:?}"
+            );
+        }
         other => panic!("unexpected write: {other:?}"),
     }
 
@@ -212,6 +246,7 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
         .handle(
             context(AdapterOperation::Recall, "idem-factory-recall"),
             AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: "entry runtime".to_string(),
                 limit: 4,
@@ -224,10 +259,20 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
         AdapterResponse::Accepted {
             report: AdapterSdkReport::Recall(report),
             ..
-        } => assert!(report
-            .procedural_hits
-            .iter()
-            .any(|hit| hit.record.name == "runtime_skill__factory_shared_store")),
+        } => {
+            assert!(report.procedural_delivery_reports.is_empty());
+            assert_eq!(report.delivery_report.selected_candidate_ids.len(), 1);
+            assert_eq!(report.delivery_report.rendered_capsules.len(), 1);
+            assert_eq!(
+                report
+                    .delivery_report
+                    .rendered_capsules
+                    .iter()
+                    .filter(|capsule| capsule.content.contains("FACTORY_SHARED_STORE"))
+                    .count(),
+                1
+            );
+        }
         other => panic!("unexpected response: {other:?}"),
     }
 }
@@ -351,6 +396,7 @@ fn entry_runtime_rejects_operation_mismatch_before_sdk_runtime_call() {
         .handle(
             context(AdapterOperation::Write, "idem-mismatch-1"),
             AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: "release".to_string(),
                 limit: 2,

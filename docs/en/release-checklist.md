@@ -42,7 +42,9 @@ bash scripts/check_production_hardening_contract.sh
 bash scripts/check_release_surface.sh
 ```
 
-Release environments with target toolchains should also run:
+An engineering handoff from a host that lacks a required target toolchain may record that row as
+`deferred_not_passed`. Every release candidate must provision all required target toolchains and
+obtain strict GREEN; a missing toolchain blocks release and is not a pass:
 
 ```bash
 bash scripts/check_cross_target_compile_gates.sh --strict

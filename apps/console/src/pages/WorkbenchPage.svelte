@@ -20,7 +20,11 @@
     KVRow,
     Lang,
   } from "../lib/types";
-  import { statusLabel } from "../lib/view-model";
+  import {
+    archivePolicyLabel,
+    archiveScopeLabel,
+    statusLabel,
+  } from "../lib/view-model";
 
   let {
     t,
@@ -45,7 +49,7 @@
   const facetStatus = $derived(report?.facetInspector.status ?? offlineStatus());
   const projectionStatus = $derived(report?.projectionInspector.status ?? offlineStatus());
   const proceduralStatus = $derived(report?.proceduralEvolution.status ?? offlineStatus());
-  const vaultStatus = $derived(report?.vaultMigration.status ?? offlineStatus());
+  const archiveStatus = $derived(report?.archiveRestore.status ?? offlineStatus());
   const soulStatus = $derived(report?.soulHealth.status ?? offlineStatus());
   const allPrivateRawClosed = $derived(report?.apiMap.surfaces.every((surface) => !surface.privateRawAllowed) ?? false);
   const missingApiCount = $derived(report?.apiMap.missingReportApis.length ?? 0);
@@ -115,7 +119,7 @@
       soul_health: "健康状态",
       procedural_evolution: "习惯与技能",
       replay_diff: "回放验收",
-      vault_migration: "搬家预检",
+      archive_restore: "归档恢复",
     };
     const en: Record<string, string> = {
       home: "Overview",
@@ -125,7 +129,7 @@
       soul_health: "Health status",
       procedural_evolution: "Habits and skills",
       replay_diff: "Replay check",
-      vault_migration: "Move precheck",
+      archive_restore: "Archive restore",
     };
     return (lang === "zh-CN" ? zh : en)[surfaceId] ?? plainToken(surfaceId);
   }
@@ -139,7 +143,7 @@
       soul_health: "检查治理队列和安全动作",
       procedural_evolution: "检查可复用的习惯与技能",
       replay_diff: "检查回放结果是否退化",
-      vault_migration: "检查导出、脱敏和迁移风险",
+      archive_restore: "检查类型化范围、隐私策略与归档闭包",
     };
     const en: Record<string, string> = {
       home: "Runtime status and key counts",
@@ -149,12 +153,12 @@
       soul_health: "Checks governance queues and safe actions",
       procedural_evolution: "Checks reusable habits and skills",
       replay_diff: "Checks whether replay results regressed",
-      vault_migration: "Checks export, redaction, and migration risk",
+      archive_restore: "Checks typed scope, privacy policy, and archive closure",
     };
     return (lang === "zh-CN" ? zh : en)[surfaceId] ?? plainToken(surfaceId);
   }
 
-  function shortFingerprint(value: string): string {
+  function shortSha256(value: string): string {
     if (!value) return "—";
     return value.length > 18 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value;
   }
@@ -220,17 +224,24 @@
     ];
   }
 
-  function vaultRows(): KVRow[] {
+  function archiveRows(): KVRow[] {
     if (!report) return [];
-    const vault = report.vaultMigration;
-    return [
-      { label: wb.dataItems, value: numberText(vault.jsonDocs) },
-      { label: wb.fileItems, value: numberText(vault.blobs) },
-      { label: wb.eventItems, value: numberText(vault.events) },
-      { label: wb.redactions, value: numberText(vault.privacyRedactions) },
-      { label: wb.lossRisk, value: boolText(vault.lossRisk) },
-      { label: wb.preflight, value: boolText(vault.preflightPassed) },
+    const archive = report.archiveRestore;
+    const rows: KVRow[] = [
+      { label: wb.archiveScope, value: archiveScopeLabel(archive.scope, lang) },
+      {
+        label: wb.archivePolicy,
+        value: archivePolicyLabel(archive.privateMaterialPolicy, lang),
+      },
     ];
+    if (!archive.archiveRoot) return rows;
+    rows.push(
+      { label: wb.jsonDocs, value: numberText(archive.archiveRoot.json_doc_count) },
+      { label: wb.events, value: numberText(archive.archiveRoot.event_count) },
+      { label: wb.jsonBytes, value: numberText(archive.archiveRoot.json_bytes) },
+      { label: wb.eventBytes, value: numberText(archive.archiveRoot.event_bytes) },
+    );
+    return rows;
   }
 
   function soulRows(): KVRow[] {
@@ -268,7 +279,7 @@
       <div><span>{wb.recall}</span><strong>{statusText(recallStatus)}</strong></div>
       <div><span>{localLabel("Facet", "Facet")}</span><strong>{statusText(facetStatus)}</strong></div>
       <div><span>{wb.projection}</span><strong>{statusText(projectionStatus)}</strong></div>
-      <div><span>{wb.vault}</span><strong>{statusText(vaultStatus)}</strong></div>
+      <div><span>{wb.archive}</span><strong>{statusText(archiveStatus)}</strong></div>
       <div><span>{wb.privateRawClosed}</span><strong>{boolText(allPrivateRawClosed)}</strong></div>
     </div>
   </section>
@@ -342,7 +353,7 @@
         <div class="workbench-metric-grid">
           <div><span>{wb.memoryPoints}</span><strong>{report.recallInspector.graphNodes}</strong></div>
           <div><span>{wb.memoryLinks}</span><strong>{report.recallInspector.graphEdges}</strong></div>
-          <div><span>{wb.skillHits}</span><strong>{report.recallInspector.proceduralHits}</strong></div>
+          <div><span>{wb.skillHits}</span><strong>{report.recallInspector.proceduralDeliveryReports}</strong></div>
         </div>
         <KvStack items={recallRows()} />
         {#if report.recallInspector.graphFailures.length > 0}
@@ -408,15 +419,15 @@
       </article>
 
       <article class="panel">
-        <PanelHeader label={wb.vault} title={wb.vaultTitle} icon={ShieldCheck} />
-        <KvStack items={vaultRows()} />
-        <div class="workbench-fingerprint">
-          <span>{wb.fingerprints}</span>
-          <code>{shortFingerprint(report.vaultMigration.snapshotFingerprint)}</code>
-          <code>{shortFingerprint(report.vaultMigration.eventFingerprint)}</code>
-        </div>
-        {#if report.vaultMigration.preflightFailures.length > 0}
-          <div class="chips">{#each report.vaultMigration.preflightFailures as failure}<span>{plainToken(failure)}</span>{/each}</div>
+        <PanelHeader label={wb.archive} title={wb.archiveTitle} icon={ShieldCheck} />
+        <KvStack items={archiveRows()} />
+        {#if report.archiveRestore.archiveRoot}
+          <div class="workbench-fingerprint">
+            <span>{wb.closureSha256}</span>
+            <code>{shortSha256(report.archiveRestore.archiveRoot.closure_sha256)}</code>
+          </div>
+        {:else}
+          <div class="skill-empty">{plainToken(report.archiveRestore.status.reason)}</div>
         {/if}
       </article>
 

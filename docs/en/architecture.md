@@ -67,8 +67,8 @@ transport request
 | Project | `MemoryRuntime::project` | SDK host or CLI when assembling model context |
 | Maintain | `MemoryRuntime::maintain` | SDK host with explicit LLM client injection |
 | Inspect | `MemoryRuntime::inspect` | Operator tooling and health checks |
-| Replay | `MemoryRuntime::replay` | Migration validation and debugging |
-| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Typed scope archive migration |
+| Replay | `MemoryRuntime::replay` | Archive validation and debugging |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Exact typed-scope archive replacement |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Runtime lifecycle control |
 
 `Maintain` is deliberately not executed by generic adapter dispatch because it needs explicit LLM/HTTP service injection. Protocol integrations should expose maintain only after they own that dependency injection boundary.
@@ -80,7 +80,7 @@ transport request
 3. Write operations update policy-checked memory state through `bm-core` and the private `bm-sdk` persistence kernel.
 4. Recall and projection read recent/session/procedural/long-term/continuity data through the runtime facade.
 5. Lifecycle events and operator reports are emitted as structured reports instead of hidden side effects.
-6. Export/import and replay use snapshot and event-lineage contracts so migrations remain explainable.
+6. Export/import and replay use governed archive-root and event-lineage contracts so replacements remain explainable.
 
 ## Profile And Store Boundaries
 

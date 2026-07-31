@@ -1,4 +1,153 @@
-use bm_sdk::{resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId};
+use bm_sdk::{
+    resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId,
+    RuntimeSkillRecallTransport,
+};
+
+#[test]
+fn governed_state_and_benchmark_profile_participation_totals_are_exact() {
+    let policy = MemoryCapabilityPolicy::strict_profile();
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+    let catalogs = [
+        ProfileId::EspStandaloneMemory,
+        ProfileId::EspEmbeddedSdk,
+        ProfileId::LinuxDeviceStandaloneMemory,
+        ProfileId::DesktopMacosStandaloneMemory,
+        ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopMacosDevFull,
+        ProfileId::DesktopWindowsEmbeddedSdk,
+        ProfileId::DesktopWindowsDevFull,
+        ProfileId::ServerLinuxMemoryGateway,
+        ProfileId::ServerLinuxDevFull,
+    ]
+    .into_iter()
+    .map(|profile| {
+        resolve_memory_capabilities(profile, &policy, &privacy).expect("profile catalog")
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(catalogs.len(), 10);
+    assert_eq!(
+        catalogs
+            .iter()
+            .filter(|catalog| catalog.governed_state.dynamic_state_recall.profile_allowed)
+            .count(),
+        10
+    );
+    assert_eq!(
+        catalogs
+            .iter()
+            .filter(|catalog| catalog
+                .governed_state
+                .historical_as_of_recall
+                .profile_allowed)
+            .count(),
+        7
+    );
+    assert_eq!(
+        catalogs
+            .iter()
+            .filter(|catalog| catalog.governed_state.procedural_recall.profile_allowed)
+            .count(),
+        10
+    );
+    assert_eq!(
+        catalogs
+            .iter()
+            .filter(|catalog| catalog
+                .governed_state
+                .environment_premise_evaluation
+                .profile_allowed)
+            .count(),
+        10
+    );
+    assert_eq!(
+        catalogs
+            .iter()
+            .filter(|catalog| catalog
+                .governed_state
+                .update_lineage_inspection
+                .profile_allowed)
+            .count(),
+        8
+    );
+    assert_eq!(
+        catalogs
+            .iter()
+            .filter(|catalog| catalog.validation.benchmark_gate.profile_allowed)
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn governed_state_profile_participation_matrix_is_typed_and_not_yet_advertised() {
+    let policy = MemoryCapabilityPolicy::strict_profile();
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+    let mut historical_allowed_count = 0;
+    let mut historical_blocked_count = 0;
+    let expectations = [
+        (ProfileId::EspStandaloneMemory, false, false, true),
+        (ProfileId::EspEmbeddedSdk, false, false, true),
+        (ProfileId::LinuxDeviceStandaloneMemory, false, true, true),
+        (ProfileId::DesktopMacosStandaloneMemory, true, true, true),
+        (ProfileId::DesktopMacosEmbeddedSdk, true, true, true),
+        (ProfileId::DesktopMacosDevFull, true, true, true),
+        (ProfileId::DesktopWindowsEmbeddedSdk, true, true, true),
+        (ProfileId::DesktopWindowsDevFull, true, true, true),
+        (ProfileId::ServerLinuxMemoryGateway, true, true, true),
+        (ProfileId::ServerLinuxDevFull, true, true, true),
+    ];
+
+    for (profile, historical_allowed, lineage_allowed, environment_premise_allowed) in expectations
+    {
+        let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+        assert!(catalog.governed_state.dynamic_state_recall.profile_allowed);
+        assert_eq!(
+            catalog
+                .governed_state
+                .historical_as_of_recall
+                .profile_allowed,
+            historical_allowed
+        );
+        if historical_allowed {
+            historical_allowed_count += 1;
+        } else {
+            historical_blocked_count += 1;
+        }
+        assert!(!catalog.governed_state.historical_as_of_recall.compiled);
+        assert!(!catalog.governed_state.historical_as_of_recall.visible);
+        assert!(catalog.governed_state.procedural_recall.profile_allowed);
+        assert_eq!(
+            catalog
+                .governed_state
+                .environment_premise_evaluation
+                .profile_allowed,
+            environment_premise_allowed
+        );
+        assert_eq!(
+            catalog
+                .governed_state
+                .update_lineage_inspection
+                .profile_allowed,
+            lineage_allowed
+        );
+        for operation in [
+            catalog.governed_state.dynamic_state_recall,
+            catalog.governed_state.historical_as_of_recall,
+            catalog.governed_state.procedural_recall,
+            catalog.governed_state.environment_premise_evaluation,
+            catalog.governed_state.update_lineage_inspection,
+        ] {
+            assert!(!operation.compiled);
+            assert!(!operation.visible);
+        }
+        assert_eq!(
+            catalog.governed_state.runtime_skill_recall_transport,
+            RuntimeSkillRecallTransport::Unavailable
+        );
+    }
+    assert_eq!(historical_allowed_count, 7);
+    assert_eq!(historical_blocked_count, 3);
+}
 
 #[test]
 fn esp_standalone_and_embedded_sdk_have_distinct_visible_catalogs() {

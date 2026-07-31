@@ -2,22 +2,23 @@ use bm_core::memory::{
     build_governed_evidence_document_facet_index_doc,
     build_long_term_memory_facet_index_doc as try_build_long_term_memory_facet_index_doc,
     build_memory_graph_persistence_plan, canonical_recall_evidence_group,
-    governed_evidence_document_content_digest, memory_facet_manifest_key,
-    memory_graph_backlink_key, scoped_governed_evidence_document_key,
-    scoped_long_term_control_storage_key, scoped_long_term_memory_storage_key,
-    scoped_memory_facet_owner_storage_key, validate_long_term_control_post_image,
-    validate_memory_facet_post_image, validate_memory_graph_post_image, ControlEffectRef,
-    EvidenceBacklink, GovernedDocumentImage, GovernedEvidenceDocument,
-    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane,
-    GovernedMemoryOwnerRef, LongTermControlOperation, LongTermControlPostImageClosure,
-    LongTermMemoryConfidence, LongTermMemoryControlAuditEvent, LongTermMemoryControlRevision,
-    LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-    LongTermMemorySourceType, MemoryEvidenceAuthority, MemoryFacetIndexDoc,
-    MemoryFacetIndexManifest, MemoryFacetOwnerVersion, MemoryFacetPostImageClosure,
-    MemoryFacetPostingDoc, MemoryFacetPostingRevision, MemoryGraphEdge, MemoryGraphNode,
-    MemoryGraphNodeKind, MemoryGraphOwnerBinding, MemoryGraphPostImageClosure, MemoryPrivacyClass,
-    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    MEMORY_FACET_SCHEMA_VERSION,
+    governed_evidence_document_content_digest, long_term_version_material_key,
+    memory_facet_manifest_key, memory_graph_backlink_key, scoped_governed_evidence_document_key,
+    scoped_long_term_control_storage_key, scoped_memory_facet_owner_storage_key,
+    validate_long_term_control_post_image, validate_memory_facet_post_image,
+    validate_memory_graph_post_image, ControlEffectRef, EvidenceBacklink, GovernedDocumentImage,
+    GovernedEvidenceDocument, GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentSourceKind,
+    GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef,
+    LongTermControlOperation, LongTermControlPostImageClosure, LongTermMemoryConfidence,
+    LongTermMemoryControlAuditEvent, LongTermMemoryControlRevision,
+    LongTermMemoryControlRevisionIntent, LongTermMemoryEntry, LongTermMemoryFreshness,
+    LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
+    LongTermMemoryVersionMaterial, LongTermMemoryVersionMaterialImage, MemoryEvidenceAuthority,
+    MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetOwnerVersion,
+    MemoryFacetPostImageClosure, MemoryFacetPostingDoc, MemoryFacetPostingRevision,
+    MemoryGraphEdge, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphOwnerBinding,
+    MemoryGraphPostImageClosure, MemoryPrivacyClass, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
 };
 
 const SPACE: &str = "space:main";
@@ -65,6 +66,49 @@ fn owner_entry(id: &str, owner_revision: u64) -> LongTermMemoryEntry {
     }
 }
 
+fn version_material(
+    entry: &LongTermMemoryEntry,
+    mounted_subject_id: &str,
+    valid_from: u64,
+    predecessor: Option<GovernedOwnerRevisionRef>,
+) -> LongTermMemoryVersionMaterial {
+    LongTermMemoryVersionMaterial::from_current_projection(
+        SPACE,
+        mounted_subject_id,
+        entry,
+        valid_from,
+        predecessor,
+        Vec::new(),
+    )
+    .expect("typed long-term material")
+}
+
+fn created_material_image(
+    entry: &LongTermMemoryEntry,
+    mounted_subject_id: &str,
+) -> LongTermMemoryVersionMaterialImage {
+    let material = version_material(entry, mounted_subject_id, entry.updated_at, None);
+    let key = long_term_version_material_key(
+        SPACE,
+        mounted_subject_id,
+        &material.owner_ref,
+        material.owner_revision,
+    )
+    .expect("material key");
+    LongTermMemoryVersionMaterialImage::created(key, material)
+}
+
+fn deleted_material_image(
+    image: LongTermMemoryVersionMaterialImage,
+) -> LongTermMemoryVersionMaterialImage {
+    LongTermMemoryVersionMaterialImage::deleted(
+        image
+            .after_physical_key
+            .expect("created fixture material key"),
+        image.after.expect("created fixture material"),
+    )
+}
+
 fn facet_closure() -> MemoryFacetPostImageClosure {
     let owner = owner_entry("ltm:p7", 1);
     let facet = build_long_term_memory_facet_index_doc(&owner, SPACE, vec![SUBJECT.to_string()], 1);
@@ -109,10 +153,7 @@ fn facet_closure() -> MemoryFacetPostImageClosure {
     MemoryFacetPostImageClosure {
         memory_space_id: SPACE.to_string(),
         mounted_subject_id: SUBJECT.to_string(),
-        long_term_owners: vec![GovernedDocumentImage::created(
-            scoped_long_term_memory_storage_key(SPACE, &owner.id).expect("owner key"),
-            owner,
-        )],
+        long_term_owners: vec![created_material_image(&owner, SUBJECT)],
         evidence_document_owners: Vec::new(),
         facet_owners: vec![GovernedDocumentImage::created(
             scoped_memory_facet_owner_storage_key(SPACE, SUBJECT, &facet.owner_ref)
@@ -134,7 +175,7 @@ fn facet_post_image_rejects_scoped_key_and_exact_posting_closure_drift() {
     assert!(valid.accepted, "{:?}", valid.failures);
 
     let mut wrong_key = closure.clone();
-    wrong_key.long_term_owners[0].physical_key = "owner:forged".to_string();
+    wrong_key.long_term_owners[0].after_physical_key = Some("owner:forged".to_string());
     let invalid = validate_memory_facet_post_image(&wrong_key);
     assert!(invalid
         .failures
@@ -176,7 +217,7 @@ fn facet_post_image_accepts_complete_last_owner_scope_deletion() {
         long_term_owners: created
             .long_term_owners
             .into_iter()
-            .map(deleted_image)
+            .map(deleted_material_image)
             .collect(),
         evidence_document_owners: created
             .evidence_document_owners
@@ -323,10 +364,7 @@ fn mixed_plane_facet_closure() -> MemoryFacetPostImageClosure {
     MemoryFacetPostImageClosure {
         memory_space_id: SPACE.to_string(),
         mounted_subject_id: SUBJECT.to_string(),
-        long_term_owners: vec![GovernedDocumentImage::created(
-            scoped_long_term_memory_storage_key(SPACE, shared_id).expect("long-term key"),
-            long_term_owner,
-        )],
+        long_term_owners: vec![created_material_image(&long_term_owner, SUBJECT)],
         evidence_document_owners: vec![GovernedDocumentImage::created(
             scoped_governed_evidence_document_key(SPACE, shared_id).expect("evidence key"),
             evidence_owner,
@@ -396,7 +434,7 @@ fn graph_closure_for_owner(
     node_id: &str,
     owner_ref: GovernedMemoryOwnerRef,
     owner_revision: u64,
-    long_term_owners: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    long_term_owners: Vec<LongTermMemoryVersionMaterialImage>,
     evidence_document_owners: Vec<GovernedDocumentImage<GovernedEvidenceDocument>>,
 ) -> MemoryGraphPostImageClosure {
     let evidence_ref = format!("evidence:{node_id}");
@@ -520,10 +558,7 @@ fn graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
         "ltm:p7",
         GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "ltm:p7"),
         1,
-        vec![GovernedDocumentImage::created(
-            scoped_long_term_memory_storage_key(SPACE, "ltm:p7").expect("owner key"),
-            owner_entry("ltm:p7", 1),
-        )],
+        vec![created_material_image(&owner_entry("ltm:p7", 1), SUBJECT)],
         Vec::new(),
     )
 }
@@ -696,7 +731,7 @@ fn graph_post_image_accepts_complete_scope_deletion() {
         long_term_owners: created
             .long_term_owners
             .into_iter()
-            .map(deleted_image)
+            .map(deleted_material_image)
             .collect(),
         evidence_document_owners: created
             .evidence_document_owners
@@ -745,17 +780,30 @@ fn control_closure() -> LongTermControlPostImageClosure {
     after_owner.owner_revision = 2;
     after_owner.source_revision = Some(2);
     after_owner.updated_at = 20;
-    let document = LongTermMemoryControlRevision::for_owner_change(
+    after_owner.observed_at = 20;
+    let before_material = version_material(&before_owner, "subject:p7", 10, None);
+    let after_material = version_material(
+        &after_owner,
+        "subject:p7",
+        20,
+        Some(before_material.owner_revision_ref()),
+    );
+    let intent = LongTermMemoryControlRevisionIntent::for_owner_change(
         "revision:p7",
         LongTermControlOperation::Correct,
         &before_owner,
-        &after_owner,
+        Some(&after_owner),
         "corrected",
         "subject:p7".to_string(),
         Some("governor:p7".to_string()),
         SPACE,
         20,
-    );
+        Vec::new(),
+    )
+    .expect("revision intent");
+    let document =
+        LongTermMemoryControlRevision::bind(intent, &before_material, Some(&after_material))
+            .expect("bound revision");
     let revision = GovernedDocumentImage::created(
         scoped_long_term_control_storage_key(
             SPACE,
@@ -776,11 +824,13 @@ fn control_closure() -> LongTermControlPostImageClosure {
                 .expect("revision")
                 .revision_id
                 .clone(),
-            record_id: revision.after.as_ref().expect("revision").record_id.clone(),
-            successor_record_id: None,
-            owner_subject_id: "subject:p7".to_string(),
-            owner_revision: revision.after.as_ref().expect("revision").owner_revision,
-            source_revision: revision.after.as_ref().expect("revision").source_revision,
+            transition: revision
+                .after
+                .as_ref()
+                .expect("revision")
+                .transition
+                .clone(),
+            mounted_subject_id: "subject:p7".to_string(),
         }],
         "corrected",
         "subject:p7".to_string(),
@@ -794,10 +844,23 @@ fn control_closure() -> LongTermControlPostImageClosure {
         memory_space_id: SPACE.to_string(),
         owner_subject_id: "subject:p7".to_string(),
         actor_subject_id: Some("governor:p7".to_string()),
-        owner_records: vec![GovernedDocumentImage::updated(
-            scoped_long_term_memory_storage_key(SPACE, &after_owner.id).expect("owner key"),
-            before_owner,
-            after_owner,
+        owner_records: vec![LongTermMemoryVersionMaterialImage::updated(
+            long_term_version_material_key(
+                SPACE,
+                "subject:p7",
+                &before_material.owner_ref,
+                before_material.owner_revision,
+            )
+            .expect("before material key"),
+            before_material,
+            long_term_version_material_key(
+                SPACE,
+                "subject:p7",
+                &after_material.owner_ref,
+                after_material.owner_revision,
+            )
+            .expect("after material key"),
+            after_material,
         )],
         revisions: vec![revision],
         tombstones: Vec::new(),
@@ -829,7 +892,7 @@ fn control_post_image_binds_typed_audit_effect_operation_version_and_physical_ke
     let invalid = validate_long_term_control_post_image(&wrong_operation);
     assert!(invalid
         .failures
-        .contains(&"long_term_control_audit_transaction_operation_scope_drift".to_string()));
+        .contains(&"long_term_control_audit_operation_drift".to_string()));
 
     let mut extra_effect = closure.clone();
     extra_effect.audits[0]
@@ -861,7 +924,7 @@ fn control_post_image_binds_typed_audit_effect_operation_version_and_physical_ke
         .after
         .as_mut()
         .expect("revision")
-        .new_digest = "forged".to_string();
+        .successor_material_digest = Some("0".repeat(64));
     let invalid = validate_long_term_control_post_image(&wrong_digest);
     assert!(invalid
         .failures
@@ -898,31 +961,34 @@ fn control_audit_is_append_only() {
 fn control_post_image_rejects_forged_owner_revision_jump() {
     let mut closure = control_closure();
     let owner_image = &mut closure.owner_records[0];
-    let before_owner = owner_image.before.as_ref().expect("before owner").clone();
     let mut after_owner = owner_image.after.as_ref().expect("after owner").clone();
     after_owner.owner_revision = 9;
-    after_owner.source_revision = Some(9);
+    after_owner.governed_content.source_revision = Some(9);
+    after_owner.content_digest = after_owner
+        .canonical_content_digest()
+        .expect("forged owner digest");
+    owner_image.after_physical_key = Some(
+        long_term_version_material_key(
+            SPACE,
+            "subject:p7",
+            &after_owner.owner_ref,
+            after_owner.owner_revision,
+        )
+        .expect("forged owner key"),
+    );
     owner_image.after = Some(after_owner.clone());
 
-    let revision = LongTermMemoryControlRevision::for_owner_change(
-        "revision:p7",
-        LongTermControlOperation::Correct,
-        &before_owner,
-        &after_owner,
-        "forged jump",
-        "subject:p7".to_string(),
-        Some("governor:p7".to_string()),
-        SPACE,
-        20,
-    );
-    closure.revisions[0].after = Some(revision.clone());
+    let revision = closure.revisions[0].after.as_mut().expect("revision");
+    revision.transition.successor = Some(after_owner.owner_revision_ref());
+    revision.successor_material_digest = Some(after_owner.content_digest.clone());
+    revision.content_digest = revision
+        .canonical_content_digest()
+        .expect("forged revision digest");
+    let revision = revision.clone();
     closure.audits[0].after.as_mut().expect("audit").effects = vec![ControlEffectRef::Revision {
         revision_id: revision.revision_id,
-        record_id: revision.record_id,
-        successor_record_id: None,
-        owner_subject_id: "subject:p7".to_string(),
-        owner_revision: revision.owner_revision,
-        source_revision: revision.source_revision,
+        transition: revision.transition,
+        mounted_subject_id: "subject:p7".to_string(),
     }];
 
     let validation = validate_long_term_control_post_image(&closure);

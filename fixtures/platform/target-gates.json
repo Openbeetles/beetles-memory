@@ -1,65 +1,165 @@
 {
-  "schema": "beetle-memory.platform.target-gates.v1",
+  "schema": "beetle-memory.platform.target-gates.v3",
   "gates": [
     {
       "profile": "profile-esp-standalone-memory",
       "target": "xtensa-esp32s3-espidf",
       "package": "bm-sdk",
-      "features": ["profile-esp-standalone-memory"]
+      "features": ["profile-esp-standalone-memory"],
+      "rust_toolchain": "esp",
+      "target_std_mode": "build_std",
+      "build_std": ["std", "panic_abort"],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "none",
+      "c_compiler": null,
+      "c_archiver": null,
+      "c_linker": null,
+      "gateway_check": false,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-esp-embedded-sdk",
       "target": "xtensa-esp32s3-espidf",
       "package": "bm-sdk",
-      "features": ["profile-esp-embedded-sdk"]
+      "features": ["profile-esp-embedded-sdk"],
+      "rust_toolchain": "esp",
+      "target_std_mode": "build_std",
+      "build_std": ["std", "panic_abort"],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "none",
+      "c_compiler": null,
+      "c_archiver": null,
+      "c_linker": null,
+      "gateway_check": false,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-linux-device-standalone-memory",
       "target": "aarch64-unknown-linux-gnu",
       "package": "bm-sdk",
-      "features": ["profile-linux-device-standalone-memory"]
+      "features": ["profile-linux-device-standalone-memory"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "gnu_glibc",
+      "c_compiler": "aarch64-linux-gnu-gcc",
+      "c_archiver": "aarch64-linux-gnu-ar",
+      "c_linker": "aarch64-linux-gnu-gcc",
+      "gateway_check": false,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-desktop-macos-standalone-memory",
       "target": "aarch64-apple-darwin",
       "package": "bm-sdk",
-      "features": ["profile-desktop-macos-standalone-memory"]
+      "features": ["profile-desktop-macos-standalone-memory"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "none",
+      "c_compiler": null,
+      "c_archiver": null,
+      "c_linker": null,
+      "gateway_check": true,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-desktop-macos-embedded-sdk",
       "target": "aarch64-apple-darwin",
       "package": "bm-sdk",
-      "features": ["profile-desktop-macos-embedded-sdk"]
+      "features": ["profile-desktop-macos-embedded-sdk"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "none",
+      "c_compiler": null,
+      "c_archiver": null,
+      "c_linker": null,
+      "gateway_check": false,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-desktop-macos-dev-full",
       "target": "aarch64-apple-darwin",
       "package": "bm-sdk",
-      "features": ["profile-desktop-macos-dev-full"]
+      "features": ["profile-desktop-macos-dev-full"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "none",
+      "c_compiler": null,
+      "c_archiver": null,
+      "c_linker": null,
+      "gateway_check": false,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-server-linux-memory-gateway",
       "target": "x86_64-unknown-linux-gnu",
       "package": "bm-sdk",
-      "features": ["profile-server-linux-memory-gateway"]
+      "features": ["profile-server-linux-memory-gateway"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "gnu_glibc",
+      "c_compiler": "x86_64-linux-gnu-gcc",
+      "c_archiver": "x86_64-linux-gnu-ar",
+      "c_linker": "x86_64-linux-gnu-gcc",
+      "gateway_check": true,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-desktop-windows-embedded-sdk",
       "target": "x86_64-pc-windows-msvc",
       "package": "bm-sdk",
-      "features": ["profile-desktop-windows-embedded-sdk"]
+      "features": ["profile-desktop-windows-embedded-sdk"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo_xwin",
+      "c_toolchain_kind": "xwin_msvc",
+      "c_compiler": "clang-cl",
+      "c_archiver": "llvm-lib",
+      "c_linker": "lld-link",
+      "gateway_check": false,
+      "replay_all_targets": false
     },
     {
       "profile": "profile-desktop-windows-dev-full",
       "target": "x86_64-pc-windows-msvc",
       "package": "bm-sdk",
-      "features": ["profile-desktop-windows-dev-full"]
+      "features": ["profile-desktop-windows-dev-full"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo_xwin",
+      "c_toolchain_kind": "xwin_msvc",
+      "c_compiler": "clang-cl",
+      "c_archiver": "llvm-lib",
+      "c_linker": "lld-link",
+      "gateway_check": false,
+      "replay_all_targets": true
     },
     {
       "profile": "profile-server-linux-dev-full",
       "target": "x86_64-unknown-linux-gnu",
       "package": "bm-sdk",
-      "features": ["profile-server-linux-dev-full"]
+      "features": ["profile-server-linux-dev-full"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "gnu_glibc",
+      "c_compiler": "x86_64-linux-gnu-gcc",
+      "c_archiver": "x86_64-linux-gnu-ar",
+      "c_linker": "x86_64-linux-gnu-gcc",
+      "gateway_check": true,
+      "replay_all_targets": true
     }
   ]
 }

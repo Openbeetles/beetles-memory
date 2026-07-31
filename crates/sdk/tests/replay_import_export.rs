@@ -2,11 +2,14 @@
 
 mod support;
 
-use bm_core::memory::{memory_facet_manifest_key, MEMORY_FACET_POSTING_NAMESPACE};
+use bm_core::memory::{
+    memory_facet_manifest_key, LongTermMemoryVersionMaterial, MEMORY_FACET_POSTING_NAMESPACE,
+};
 use bm_sdk::{
+    LongTermMemoryQuery, MemoryArchiveScope, MemoryLongTermControlView, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermTarget,
     MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemorySpaceExportRequest,
-    MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemorySpaceScope, PressureLevel,
+    MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, PressureLevel,
     RuntimeLifecycleModeInput,
 };
 
@@ -16,16 +19,22 @@ use support::{empty_store_platform, seeded_store_platform, test_runtime};
 fn typed_memory_space_archive_round_trips_only_with_the_runtime_scope() {
     let profile = support::host_test_profile();
     let source_runtime = test_runtime(seeded_store_platform(profile), profile);
-    let scope = MemorySpaceScope {
-        memory_space_id: source_runtime.memory_space_id().to_string(),
-        mounted_subject_id: source_runtime.subject_id().to_string(),
-    };
+    let scope = MemoryArchiveScope::subject(
+        source_runtime.memory_space_id(),
+        source_runtime.subject_id(),
+    )
+    .expect("source archive scope");
     let exported = source_runtime
         .export_memory_space(MemorySpaceExportRequest {
             scope: scope.clone(),
-            include_private: true,
+            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
         })
         .expect("typed export");
+    assert_eq!(exported.projection_scope.scope, scope);
+    assert_eq!(
+        exported.projection_scope.private_material_policy,
+        MemorySpacePrivateMaterialPolicy::IncludePrivate
+    );
 
     let target_platform = empty_store_platform(profile);
     let target_runtime = test_runtime(target_platform.clone(), profile);
@@ -39,12 +48,19 @@ fn typed_memory_space_archive_round_trips_only_with_the_runtime_scope() {
 
     assert_eq!(imported.imported_scope, scope);
     assert_eq!(
-        target_platform
-            .replay_harness()
-            .scoped_long_term_memory_read_store(target_runtime.memory_space_id())
-            .expect("target memory-space")
-            .count()
-            .expect("target owner count"),
+        target_runtime
+            .list_long_term_memory(MemoryLongTermListRequest {
+                query: LongTermMemoryQuery {
+                    limit: 20,
+                    ..LongTermMemoryQuery::default()
+                },
+                cursor: None,
+                limit: 20,
+                view: MemoryLongTermControlView::HostUi,
+            })
+            .expect("target owner list")
+            .records
+            .len(),
         1
     );
     let manifest_key = memory_facet_manifest_key(
@@ -72,15 +88,22 @@ fn continuity_import_preserves_soul_private_without_public_delivery_or_graph_mem
     let profile = support::host_test_profile();
     let source_platform = seeded_store_platform(profile);
     let source_runtime = test_runtime(source_platform.clone(), profile);
-    let owner_id = source_platform
-        .replay_harness()
-        .scoped_long_term_memory_read_store(source_runtime.memory_space_id())
-        .expect("source memory-space")
-        .list(20)
+    let owner_id = source_runtime
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery {
+                limit: 20,
+                ..LongTermMemoryQuery::default()
+            },
+            cursor: None,
+            limit: 20,
+            view: MemoryLongTermControlView::RawOwner,
+        })
         .expect("source owners")
+        .records
         .into_iter()
-        .find(|entry| entry.content == PRIVATE_SENTINEL)
+        .find(|entry| entry.record.content == PRIVATE_SENTINEL)
         .expect("seeded owner")
+        .record
         .id;
     let privacy_transition = source_runtime
         .mutate_long_term_memory(MemoryLongTermMutationRequest {
@@ -95,16 +118,22 @@ fn continuity_import_preserves_soul_private_without_public_delivery_or_graph_mem
         .expect("move source owner behind SoulPrivate boundary");
     assert!(privacy_transition.accepted);
 
-    let scope = MemorySpaceScope {
-        memory_space_id: source_runtime.memory_space_id().to_string(),
-        mounted_subject_id: source_runtime.subject_id().to_string(),
-    };
+    let scope = MemoryArchiveScope::subject(
+        source_runtime.memory_space_id(),
+        source_runtime.subject_id(),
+    )
+    .expect("source archive scope");
     let exported = source_runtime
         .export_memory_space(MemorySpaceExportRequest {
             scope: scope.clone(),
-            include_private: true,
+            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
         })
         .expect("private typed export");
+    assert_eq!(exported.projection_scope.scope, scope);
+    assert_eq!(
+        exported.projection_scope.private_material_policy,
+        MemorySpacePrivateMaterialPolicy::IncludePrivate
+    );
     let target_platform = empty_store_platform(profile);
     let target_runtime = test_runtime(target_platform.clone(), profile);
     target_runtime
@@ -117,12 +146,19 @@ fn continuity_import_preserves_soul_private_without_public_delivery_or_graph_mem
 
     let imported_owner = target_platform
         .replay_harness()
-        .scoped_long_term_memory_read_store(target_runtime.memory_space_id())
-        .expect("target memory-space")
-        .get(&owner_id)
-        .expect("target owner read")
+        .read_json_namespace("long_term_version_materials")
+        .expect("target immutable long-term materials")
+        .into_iter()
+        .map(|doc| {
+            serde_json::from_value::<LongTermMemoryVersionMaterial>(doc.value)
+                .expect("typed long-term material")
+        })
+        .find(|material| material.owner_ref.owner_id == owner_id && material.owner_revision == 2)
         .expect("private owner preserved");
-    assert_eq!(imported_owner.privacy, MemoryPrivacyClass::SoulPrivate);
+    assert_eq!(
+        imported_owner.privacy_class,
+        MemoryPrivacyClass::SoulPrivate
+    );
     let imported_facet = target_platform
         .replay_harness()
         .read_json_namespace("memory_facet_indexes")
@@ -155,6 +191,7 @@ fn continuity_import_preserves_soul_private_without_public_delivery_or_graph_mem
 
     let recall = target_runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release artifacts publishing".to_string(),
             limit: 8,
@@ -174,6 +211,7 @@ fn continuity_import_preserves_soul_private_without_public_delivery_or_graph_mem
     assert!(!delivered.contains(PRIVATE_SENTINEL));
     let projection = target_runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should release artifacts be published?".to_string(),
             system_max_len: 4096,
@@ -183,7 +221,10 @@ fn continuity_import_preserves_soul_private_without_public_delivery_or_graph_mem
             tool_registry_refs: Vec::new(),
         })
         .expect("target projection");
-    assert!(!projection.system_memory_block.contains(PRIVATE_SENTINEL));
+    assert!(!projection
+        .provider_payload()
+        .system_memory_block()
+        .contains(PRIVATE_SENTINEL));
 }
 
 #[test]

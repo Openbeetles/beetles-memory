@@ -17,7 +17,7 @@ use bm_sdk::nonproduction_replay_harness::{
 };
 use serde_json::{json, Value};
 
-const NAMESPACE: &str = "memory_graph_manifests";
+const NAMESPACE: &str = "session";
 const REVISION_KEY: &str = "multiprocess-cas-revision";
 const POST_IMAGE_KEY: &str = "multiprocess-cas-post-image";
 const SQLITE_PRE_CAS_FAILPOINT: &str = "after_begin_immediate_before_load_transaction_state";

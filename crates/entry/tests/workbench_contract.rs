@@ -2,7 +2,10 @@ use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryTransportConfig,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
+use bm_sdk::{
+    MemoryArchiveScope, MemoryCapabilityPolicy, MemoryPrivacyPolicy,
+    MemorySpacePrivateMaterialPolicy, StoreBackendConfig,
+};
 
 mod support;
 
@@ -51,7 +54,7 @@ fn workbench_api_map_is_entry_owned_and_private_raw_closed() {
             "soul_health",
             "procedural_evolution",
             "replay_diff",
-            "vault_migration",
+            "archive_restore",
         ]
     );
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -121,10 +124,36 @@ fn workbench_report_exposes_real_runtime_reports_without_private_raw_surfaces() 
     );
     assert!(!report.projection_inspector.foreground_disclosure_allowed);
     assert!(report.projection_inspector.disclosure_integrity_passed);
-    assert!(!report.vault_migration.preflight_passed);
-    assert_eq!(report.vault_migration.status.status, "limited");
-    assert!(report
-        .vault_migration
-        .preflight_failures
-        .contains(&"scoped_projection_does_not_rewrite_identity".to_string()));
+    let MemoryArchiveScope::Subject {
+        memory_space_id,
+        mounted_subject_id,
+    } = &report.archive_restore.scope
+    else {
+        panic!("entry workbench archive must use Subject scope");
+    };
+    assert!(!memory_space_id.is_empty());
+    assert!(!mounted_subject_id.is_empty());
+    assert_eq!(
+        report.archive_restore.private_material_policy,
+        MemorySpacePrivateMaterialPolicy::ExcludePrivate
+    );
+    assert_eq!(report.archive_restore.status.status, "ready");
+    let root = report
+        .archive_restore
+        .archive_root
+        .as_ref()
+        .expect("successful typed archive export must expose its governed root");
+    assert_eq!(root.scope, report.archive_restore.scope);
+    assert_eq!(
+        root.private_material_policy,
+        report.archive_restore.private_material_policy
+    );
+    assert_eq!(root.closure_sha256.len(), 64);
+    assert!(root
+        .closure_sha256
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit()));
+    let json = serde_json::to_value(&report).expect("serialize workbench report");
+    assert!(json.get("archiveRestore").is_some());
+    assert!(json.get("vaultMigration").is_none());
 }

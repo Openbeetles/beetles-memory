@@ -1,5 +1,5 @@
 {
-  "schema": "beetle-memory.platform.capability.v1",
+  "schema": "beetle-memory.platform.capability.v2",
   "profile": "profile-linux-device-standalone-memory",
   "target": "target-linux-device",
   "role": "role-standalone-memory",
@@ -132,5 +132,33 @@
     "continuity_capsule": true,
     "runtime_skill": true,
     "task_learning": true
+  },
+  "governed_state": {
+    "dynamic_state_recall": {
+      "profile_allowed": true,
+      "compiled": false,
+      "visible": false
+    },
+    "historical_as_of_recall": {
+      "profile_allowed": false,
+      "compiled": false,
+      "visible": false
+    },
+    "procedural_recall": {
+      "profile_allowed": true,
+      "compiled": false,
+      "visible": false
+    },
+    "environment_premise_evaluation": {
+      "profile_allowed": true,
+      "compiled": false,
+      "visible": false
+    },
+    "update_lineage_inspection": {
+      "profile_allowed": true,
+      "compiled": false,
+      "visible": false
+    },
+    "runtime_skill_recall_transport": "unavailable"
   }
 }

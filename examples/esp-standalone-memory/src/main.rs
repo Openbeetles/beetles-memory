@@ -4,8 +4,9 @@ use bm_entry::{
     EntryRuntimeConfig, EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryWriteRequest,
-    ProfileId, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    GovernedRuntimeSkillWriteInput, MemoryCapabilityPolicy, MemoryPrivacyClass, MemoryPrivacyPolicy,
+    MemoryRecallRequest, MemoryWriteRequest, ProfileId, RuntimeSkillCreationRef,
+    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 fn main() -> bm_sdk::Result<()> {
@@ -34,23 +35,35 @@ fn main() -> bm_sdk::Result<()> {
     runtime.handle(
         context(&runtime, AdapterOperation::Write, "idem-esp-write"),
         AdapterCommand::Write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "runtime_skill__compact_entry_guard".to_string(),
-                topic: "compact-entry".to_string(),
-                title: "Compact entry guard".to_string(),
-                summary: "ESP standalone memory can run compact EntryRuntime locally.".to_string(),
-                content: "1. Use embedded store.\n2. Keep sqlite disabled.\n3. Dispatch compact memory commands through EntryRuntime.\n4. Keep server listeners hidden."
-                    .to_string(),
-                citations: vec!["esp standalone entry example".to_string()],
-                source_chat_id: Some("chat-1".to_string()),
-                observed_at: 1_800_000_000,
+            writes: vec![GovernedRuntimeSkillWriteInput {
+                write: RuntimeSkillWrite {
+                    name: "compact_entry_guard".to_string(),
+                    topic: "compact-entry".to_string(),
+                    title: "Compact entry guard".to_string(),
+                    summary: "ESP standalone memory can run compact EntryRuntime locally."
+                        .to_string(),
+                    content: "1. Use embedded store.\n2. Keep sqlite disabled.\n3. Dispatch compact memory commands through EntryRuntime.\n4. Keep server listeners hidden."
+                        .to_string(),
+                    citations: vec!["esp standalone entry example".to_string()],
+                    source_chat_id: Some("chat-1".to_string()),
+                    observed_at: 1_700_000_000,
+                },
+                creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                    candidate_ref: "example:esp-standalone-entry-guard".to_string(),
+                    verification_receipt_digest:
+                        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                            .to_string(),
+                },
+                privacy_class: MemoryPrivacyClass::PublicRuntime,
             }],
+            owning_scope: RuntimeSkillOwningScope::SharedProgram,
             source: RuntimeSkillWriteSource::Manual,
         }),
     )?;
     let recall = runtime.handle(
         context(&runtime, AdapterOperation::Recall, "idem-esp-recall"),
         AdapterCommand::Recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "compact entry".to_string(),
             limit: 2,
             structured_query_facets: Vec::new(),

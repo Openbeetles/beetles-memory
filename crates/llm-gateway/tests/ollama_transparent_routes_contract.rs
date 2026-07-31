@@ -48,13 +48,14 @@ fn seed_runtime_skill(
     let resolved = GatewayScopeResolver::new(config.scope.clone())
         .resolve(scope)
         .expect("scope");
+    let agent_id = resolved.entry_scope.identity.agent_id.clone();
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("runtime");
     runtime
         .runtime()
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "transparent_ollama_style".to_string(),
                 topic: "llm_gateway".to_string(),
                 title: "Transparent Ollama style".to_string(),
@@ -64,7 +65,8 @@ fn seed_runtime_skill(
                 citations: Vec::new(),
                 source_chat_id: Some("thread-ollama-transparent".to_string()),
                 observed_at: 1,
-            }],
+            })],
+            owning_scope: support::runtime_skill_subject_scope(&agent_id),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("seed skill");

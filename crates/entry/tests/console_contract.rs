@@ -4,9 +4,11 @@ use bm_entry::{
     EntryRuntimeConfig, EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
-    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StoreBackendConfig,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRecallRequest, MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteRequest,
+    PressureLevel, RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 use std::fs;
 
@@ -40,7 +42,7 @@ fn config() -> EntryRuntimeConfig {
 fn console_surface_exposes_process_config_without_app_key_plaintext() {
     let runtime = EntryRuntime::open(config()).expect("runtime");
 
-    let overview = runtime.console_overview();
+    let overview = runtime.console_overview().expect("console overview");
     assert_eq!(overview.runtime_shape.store, "in-memory");
     assert_eq!(overview.runtime_shape.shell, "HTTP console");
     assert!(overview
@@ -62,28 +64,59 @@ fn console_surface_exposes_process_config_without_app_key_plaintext() {
 #[test]
 fn console_overview_aggregates_memory_runtime_events_from_the_store() {
     let runtime = EntryRuntime::open(config()).expect("runtime");
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "console metrics".to_string(),
+    };
 
-    runtime
+    let write = runtime
         .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "console_system_metrics".to_string(),
-                topic: "console metrics".to_string(),
-                title: "Console system metrics".to_string(),
-                summary: "Overview metrics must come from the unified runtime event stream."
-                    .to_string(),
-                content: "1. record MemoryRuntime write events\n2. aggregate projection lifecycle hits\n3. expose the shared counts in Console Overview"
-                    .to_string(),
-                citations: vec!["console overview contract".to_string()],
-                source_chat_id: Some("chat-1".to_string()),
-                observed_at: 1_800_000_000,
+        .write(MemoryWriteRequest::Candidates {
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: "console-system-metrics".to_string(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                content: MemoryCandidateContent::Text {
+                    topic: "console metrics".to_string(),
+                    body: "Console system metrics aggregate MemoryRuntime projection lifecycle hits from the unified event stream."
+                        .to_string(),
+                    keywords: vec![
+                        "console".to_string(),
+                        "system".to_string(),
+                        "metrics".to_string(),
+                    ],
+                },
+                evidence_refs: vec!["console overview contract".to_string()],
+                canonical_entities: Vec::new(),
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::LlmGovernance,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "console telemetry fixture".to_string(),
+                }),
             }],
-            source: RuntimeSkillWriteSource::Manual,
+            runtime_skill_owning_scope: None,
         })
         .expect("write");
+    assert_eq!(
+        write.changed, 1,
+        "console telemetry seed must be material: {write:?}"
+    );
+    runtime
+        .runtime()
+        .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            structured_query_facets: Vec::new(),
+            query: "How should console system metrics work?".to_string(),
+            limit: 4,
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("recall");
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should console system metrics work?".to_string(),
             system_max_len: 4096,
@@ -94,7 +127,7 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
         })
         .expect("project");
 
-    let overview = runtime.console_overview();
+    let overview = runtime.console_overview().expect("console overview");
 
     assert_eq!(overview.writes_today.value, "1");
     assert_eq!(overview.recall.value, "100.0%");
@@ -124,7 +157,7 @@ fn console_storage_metric_reports_memory_store_usage_over_host_total_storage() {
         .with_fsync(false);
 
     let runtime = EntryRuntime::open(config).expect("runtime");
-    let overview = runtime.console_overview();
+    let overview = runtime.console_overview().expect("console overview");
 
     assert!(
         overview.storage.value.starts_with("2.00 MB / "),

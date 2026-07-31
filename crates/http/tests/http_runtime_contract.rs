@@ -46,6 +46,17 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
+fn assert_exact_governed_result(body: &str) {
+    let value: Value = serde_json::from_str(body).expect("governed response JSON");
+    let result = value["result"].clone();
+    let dto: bm_adapter::AdapterGovernedSafeReportV1 =
+        serde_json::from_value(result.clone()).expect("strict adapter governed safe DTO");
+    assert_eq!(
+        serde_json::to_value(dto).expect("serialize adapter governed safe DTO"),
+        result
+    );
+}
+
 fn agent_tool_registry() -> AgentToolRegistrySnapshot {
     let mut tool = AgentToolDescriptor::compact("pdf.extract", "Extract PDF text", "schema-pdf-v1");
     tool.permission_tags = vec!["filesystem.read".to_string()];
@@ -69,11 +80,15 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
 
     let recall = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json("/memory/recall", r#"{"query":"release","limit":2}"#),
+        HttpRuntimeRequest::post_json(
+            "/memory/recall",
+            r#"{"temporal_operation":{"kind":"current"},"query":"release","limit":2}"#,
+        ),
     )
     .expect("recall");
     assert_eq!(recall.status_code, 200);
     assert!(recall.body.contains("\"status\""));
+    assert_exact_governed_result(&recall.body);
 
     let long_term = handle_http_in_process_request(
         &runtime,
@@ -178,7 +193,8 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
         HttpRuntimeRequest::post_json(
             "/memory/project",
             json!({
-                "query": "extract text from this PDF",
+                "temporal_operation": {"kind": "current"},
+                "user_query": "extract text from this PDF",
                 "system_max_len": 4096,
                 "recent_messages_limit": 8,
                 "tool_registry_refs": [registry.registry_ref()]
@@ -189,7 +205,7 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
     .expect("project without experience");
     let no_hint: Value =
         serde_json::from_str(&project_without_experience.body).expect("project json");
-    assert!(no_hint["agent_tool_hints"]
+    assert!(no_hint["result"]["report"]["agent_tool_hints"]
         .as_array()
         .expect("hints")
         .is_empty());
@@ -252,7 +268,8 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
         HttpRuntimeRequest::post_json(
             "/memory/project",
             json!({
-                "query": "extract text from this PDF",
+                "temporal_operation": {"kind": "current"},
+                "user_query": "extract text from this PDF",
                 "system_max_len": 4096,
                 "recent_messages_limit": 8,
                 "tool_registry_refs": [registry.registry_ref()]
@@ -263,21 +280,21 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
     .expect("project with experience");
     let projected_body: Value = serde_json::from_str(&projected.body).expect("project json");
     assert!(projected_body.get("system_memory_block").is_none());
-    assert_eq!(projected_body["projection_surface"], "ui_api");
+    assert_eq!(projected_body["result"]["operation"], "project");
     assert_eq!(
-        projected_body["chars"],
-        projected_body["projection_block"]
+        projected_body["result"]["report"]["chars"],
+        projected_body["result"]["report"]["projection_block"]
             .as_str()
             .expect("projection block")
             .chars()
             .count()
     );
     assert_eq!(
-        projected_body["agent_tool_hints"][0]["tool_id"],
+        projected_body["result"]["report"]["agent_tool_hints"][0]["tool_id"],
         "pdf.extract"
     );
     assert_eq!(
-        projected_body["agent_tool_hints"][0]["host_execution_required"],
+        projected_body["result"]["report"]["agent_tool_hints"][0]["host_execution_required"],
         true
     );
 }
@@ -289,7 +306,7 @@ fn http_runtime_decodes_declared_memory_routes_through_entry_runtime() {
     let routes = [
         (
             "/memory/project",
-            r#"{"query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
+            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
         ),
         (
             "/memory/inspect",

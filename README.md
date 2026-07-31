@@ -4,9 +4,9 @@ English | [中文](README.zh-CN.md)
 
 ![Beetle Memory poster](docs/assets/beetles-memory-poster-en.png)
 
-Beetle Memory is a Rust memory runtime for agent systems. It provides an SDK-first integration path, owned storage backends, profile-based platform trimming, replay and migration tools, and thin protocol adapters for standalone deployment.
+Beetle Memory is a Rust memory runtime for agent systems. It provides an SDK-first integration path, owned storage backends, profile-based platform trimming, replay and governed archive tools, and thin protocol adapters for standalone deployment.
 
-The project is not a vector database, a generic RAG framework, a chat-history dump, a workflow runner, or a tool execution runtime. Its job is to own memory state, memory operations, lifecycle reports, profile capability visibility, and migration/replay contracts.
+The project is not a vector database, a generic RAG framework, a chat-history dump, a workflow runner, or a tool execution runtime. Its job is to own memory state, memory operations, lifecycle reports, profile capability visibility, and archive/replay contracts.
 
 ## What Is In This Repository
 
@@ -97,7 +97,10 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
-    assert!(!recall.procedural_hits.is_empty());
+    assert!(recall
+        .procedural_delivery_reports
+        .iter()
+        .any(|delivery| delivery.selected));
 
     let projection = runtime.project(MemoryProjectionRequest {
         user_query: "How should this host release?".to_string(),
@@ -127,7 +130,7 @@ English documentation:
 - [Profiles](docs/en/profiles.md)
 - [Store Backends](docs/en/store-backends.md)
 - [Adapters](docs/en/adapters.md)
-- [Replay and Migration](docs/en/replay-and-migration.md)
+- [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
 
@@ -143,7 +146,7 @@ English documentation:
 - [Profile 矩阵](docs/zh-CN/profiles.md)
 - [存储后端](docs/zh-CN/store-backends.md)
 - [Adapter 合同](docs/zh-CN/adapters.md)
-- [回放与迁移](docs/zh-CN/replay-and-migration.md)
+- [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
 
@@ -190,7 +193,9 @@ bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_release_surface.sh
 ```
 
-Release environments with additional target toolchains should also run:
+An engineering handoff from a host that lacks a required target toolchain may record that row as
+`deferred_not_passed`. Every release candidate must provision the complete target-toolchain set and
+obtain a strict GREEN result; a missing toolchain blocks release and is never a pass:
 
 ```bash
 bash scripts/check_cross_target_compile_gates.sh --strict

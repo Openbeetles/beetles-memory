@@ -1,4 +1,7 @@
-use bm_sdk::{resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId};
+use bm_sdk::{
+    resolve_memory_capabilities, MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId,
+    RuntimeSkillCreationRef, RuntimeSkillOwningScope,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -59,6 +62,19 @@ pub fn validate_evolution_proposal(
         global_rejection = Some("proposal_profile_mismatch");
     } else if proposal.proposal_id.trim().is_empty() {
         global_rejection = Some("proposal_id_empty");
+    } else if matches!(
+        &proposal.owning_scope,
+        RuntimeSkillOwningScope::Subject { mounted_subject_id }
+            if mounted_subject_id.trim().is_empty()
+    ) {
+        global_rejection = Some("proposal_runtime_skill_scope_invalid");
+    } else if !(RuntimeSkillCreationRef::ReplayPromotion {
+        candidate_ref: proposal.proposal_id.clone(),
+        verification_receipt_digest: proposal.verification_receipt_digest.clone(),
+    })
+    .validate_contract()
+    {
+        global_rejection = Some("proposal_verification_receipt_invalid");
     } else if proposal.evidence_refs.is_empty() {
         global_rejection = Some("proposal_evidence_empty");
     } else if proposal.rationale.trim().is_empty() {

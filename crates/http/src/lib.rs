@@ -29,7 +29,7 @@ use bm_ollama_transparent::{
     DisableOllamaTransparentRequest, EnableOllamaTransparentRequest, OllamaTransparentController,
 };
 #[cfg(feature = "server-std")]
-use bm_sdk::{AgentToolRegistrySnapshot, RuntimeBudgetReport};
+use bm_sdk::{AgentToolRegistrySnapshot, RuntimeBudgetReport, RuntimeSkillOwnerLocator};
 #[cfg(feature = "server-std")]
 use serde_json::json;
 #[cfg(feature = "server-std")]
@@ -124,10 +124,10 @@ const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_get("/console/workbench/api-map"),
     console_get("/console/workbench/report"),
     console_get("/console/skills"),
-    console_get("/console/skills/{name}"),
-    console_patch("/console/skills/{name}"),
-    console_patch("/console/skills/{name}/enabled"),
-    console_delete("/console/skills/{name}"),
+    console_post("/console/skills/detail"),
+    console_patch("/console/skills"),
+    console_patch("/console/skills/enabled"),
+    console_post("/console/skills/retire"),
     console_get("/console/llm-gateway"),
     console_post("/console/llm-gateway/smoke-checks/{id}/run"),
     console_get("/console/ollama-transparent/status"),
@@ -186,14 +186,6 @@ const fn console_post(path: &'static str) -> ConsoleRouteSpec {
 const fn console_patch(path: &'static str) -> ConsoleRouteSpec {
     ConsoleRouteSpec {
         method: HttpMethod::Patch,
-        path,
-        auth: RouteAuth::TokenOrLoopback,
-    }
-}
-
-const fn console_delete(path: &'static str) -> ConsoleRouteSpec {
-    ConsoleRouteSpec {
-        method: HttpMethod::Delete,
         path,
         auth: RouteAuth::TokenOrLoopback,
     }
@@ -731,6 +723,7 @@ pub fn serve_http_accepted_stream(
     let request = http_runtime_request_from_ingress(ingress)?;
     let auth = request.1;
     let request = request.0;
+    let is_console_request = split_query_path(&request.path).0.starts_with("/console/");
     let response = runtime.execute_with_budget_lease(&lease, || {
         handle_http_in_process_request_with_budget_lease(
             runtime,
@@ -740,7 +733,12 @@ pub fn serve_http_accepted_stream(
             &lease,
             auth,
         )
-    })?;
+    });
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if is_console_request => console_typed_error_response(error)?,
+        Err(error) => return Err(error),
+    };
     let response = bind_http_response_budget(response, budget_report)?;
     write_http_response(stream, response)
 }
@@ -932,6 +930,7 @@ fn write_http_response(
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         422 => "Unprocessable Entity",
+        500 => "Internal Server Error",
         _ => "OK",
     };
     let body = response.body;
@@ -1064,7 +1063,7 @@ fn handle_console_request(
                 "status": "accepted",
                 "overview": runtime.console_overview_with_event_store_paths(
                     services.memory_event_store_paths,
-                ),
+                )?,
             }),
         )),
         (HttpMethod::Get, "/console/capabilities") => Ok(json_response(
@@ -1199,74 +1198,56 @@ fn handle_console_request(
                 }),
             ))
         }
-        (HttpMethod::Get, path) if path.starts_with("/console/skills/") => {
-            let name = trim_suffix_path(path, "/console/skills/");
-            if name.is_empty() {
-                return Ok(not_found("console skill not found"));
-            }
-            match runtime.console_skill_detail(name)? {
-                Some(skill) => Ok(json_response(
+        (HttpMethod::Post, "/console/skills/detail") => {
+            let locator: RuntimeSkillOwnerLocator = parse_console_json(&request.body)?;
+            match runtime.console_skill_detail(locator) {
+                Ok(skill) => Ok(json_response(
                     200,
                     json!({
                         "status": "accepted",
                         "skill": skill,
                     }),
                 )),
-                None => Ok(not_found("console skill not found")),
+                Err(error) => console_typed_error_response(error),
             }
         }
-        (HttpMethod::Patch, path)
-            if path.starts_with("/console/skills/") && path.ends_with("/enabled") =>
-        {
-            let name = path
-                .strip_prefix("/console/skills/")
-                .and_then(|value| value.strip_suffix("/enabled"))
-                .map(|value| value.trim_matches('/'))
-                .unwrap_or_default();
-            if name.is_empty() {
-                return Ok(not_found("console skill not found"));
-            }
+        (HttpMethod::Patch, "/console/skills/enabled") => {
             let payload: EntryConsoleSkillSetEnabled = parse_console_json(&request.body)?;
-            match runtime.console_set_skill_enabled(name, payload)? {
-                Some(mutation) => Ok(json_response(
+            match runtime.console_set_skill_enabled(payload) {
+                Ok(mutation) => Ok(json_response(
                     200,
                     json!({
                         "status": "accepted",
                         "mutation": mutation,
                     }),
                 )),
-                None => Ok(not_found("console skill not found")),
+                Err(error) => console_typed_error_response(error),
             }
         }
-        (HttpMethod::Patch, path) if path.starts_with("/console/skills/") => {
-            let name = trim_suffix_path(path, "/console/skills/");
-            if name.is_empty() {
-                return Ok(not_found("console skill not found"));
-            }
+        (HttpMethod::Patch, "/console/skills") => {
             let payload: EntryConsoleRuntimeSkillEdit = parse_console_json(&request.body)?;
-            let mutation = runtime.console_edit_runtime_skill(name, payload)?;
-            Ok(json_response(
-                200,
-                json!({
-                    "status": "accepted",
-                    "mutation": mutation,
-                }),
-            ))
-        }
-        (HttpMethod::Delete, path) if path.starts_with("/console/skills/") => {
-            let name = trim_suffix_path(path, "/console/skills/");
-            if name.is_empty() {
-                return Ok(not_found("console skill not found"));
-            }
-            match runtime.console_delete_skill(name)? {
-                Some(mutation) => Ok(json_response(
+            match runtime.console_edit_runtime_skill(payload) {
+                Ok(mutation) => Ok(json_response(
                     200,
                     json!({
                         "status": "accepted",
                         "mutation": mutation,
                     }),
                 )),
-                None => Ok(not_found("console skill not found")),
+                Err(error) => console_typed_error_response(error),
+            }
+        }
+        (HttpMethod::Post, "/console/skills/retire") => {
+            let locator: RuntimeSkillOwnerLocator = parse_console_json(&request.body)?;
+            match runtime.console_retire_skill(locator) {
+                Ok(mutation) => Ok(json_response(
+                    200,
+                    json!({
+                        "status": "accepted",
+                        "mutation": mutation,
+                    }),
+                )),
+                Err(error) => console_typed_error_response(error),
             }
         }
         (HttpMethod::Post, "/console/devices") => {
@@ -1489,6 +1470,40 @@ fn not_found(reason: &str) -> HttpRuntimeResponse {
 }
 
 #[cfg(feature = "server-std")]
+fn console_typed_error_response(error: bm_sdk::Error) -> bm_sdk::Result<HttpRuntimeResponse> {
+    match error.class() {
+        Some(bm_sdk::ErrorClass::InvalidInput) => Ok(json_response(
+            422,
+            json!({
+                "status": "rejected",
+                "errorKey": "RuntimeRejected",
+            }),
+        )),
+        Some(bm_sdk::ErrorClass::NotFound) => Ok(json_response(
+            404,
+            json!({
+                "status": "rejected",
+                "errorKey": "RuntimeRejected",
+            }),
+        )),
+        Some(bm_sdk::ErrorClass::Conflict) => Ok(json_response(
+            409,
+            json!({
+                "status": "rejected",
+                "errorKey": "RuntimeRejected",
+            }),
+        )),
+        _ => Ok(json_response(
+            500,
+            json!({
+                "status": "rejected",
+                "errorKey": "RuntimeRejected",
+            }),
+        )),
+    }
+}
+
+#[cfg(feature = "server-std")]
 fn json_response(status_code: u16, body: serde_json::Value) -> HttpRuntimeResponse {
     HttpRuntimeResponse {
         status_code,
@@ -1545,6 +1560,13 @@ fn render_http_response(
 
 #[cfg(feature = "server-std")]
 fn render_report(report: AdapterSdkReport) -> bm_sdk::Result<String> {
+    if let Some(governed) = report.governed_safe_report() {
+        return serde_json::to_string(&json!({
+            "status": "accepted",
+            "result": governed,
+        }))
+        .map_err(|error| bm_sdk::Error::config("http_safe_response", error.to_string()));
+    }
     Ok(match report {
         AdapterSdkReport::Capabilities(catalog) => json!({
             "status": "accepted",
@@ -1554,14 +1576,7 @@ fn render_report(report: AdapterSdkReport) -> bm_sdk::Result<String> {
             }
         })
         .to_string(),
-        AdapterSdkReport::Recall(report) => json!({
-            "status": "accepted",
-            "query": report.query,
-            "procedural_hits": report.procedural_hits.len(),
-            "agent_tool_hints": report.agent_tool_hints,
-            "tool_experience_status": report.tool_experience_status,
-        })
-        .to_string(),
+        AdapterSdkReport::Recall(_) => unreachable!("governed recall DTO handled above"),
         AdapterSdkReport::Write(report) => json!({
             "status": "accepted",
             "operation": report.operation,
@@ -1570,15 +1585,7 @@ fn render_report(report: AdapterSdkReport) -> bm_sdk::Result<String> {
             "agent_tool_experience": report.agent_tool_experience,
         })
         .to_string(),
-        AdapterSdkReport::Project(report) => json!({
-            "status": "accepted",
-            "projection_surface": "ui_api",
-            "projection_block": report.projection_block,
-            "chars": report.chars,
-            "agent_tool_hints": report.agent_tool_hints,
-            "audit": report.audit,
-        })
-        .to_string(),
+        AdapterSdkReport::Project(_) => unreachable!("governed project DTO handled above"),
         AdapterSdkReport::LongTermList(report) => json!({
             "status": "accepted",
             "records": report.records,

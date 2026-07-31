@@ -16,10 +16,11 @@ use super::governed_post_image::{
     revision_is_exact_successor, GovernedDocumentImage, GovernedPostImageValidation,
 };
 use super::long_term::{
-    canonical_evidence_ref_from_source, scoped_long_term_memory_storage_key, CanonicalEntityKey,
-    CanonicalEntityRef, CanonicalEvidenceRef, LongTermMemoryEntry, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
+    canonical_evidence_ref_from_source, CanonicalEntityKey, CanonicalEntityRef,
+    CanonicalEvidenceRef, LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind,
+    LongTermMemorySourceScope, LongTermMemorySourceType,
 };
+use super::long_term_version::LongTermMemoryVersionMaterialImage;
 use super::recall_anchor::{
     canonical_recall_evidence_group, recall_source_authority_score,
     CanonicalRecallEvidenceFamilyGroup, CanonicalRecallEvidenceGroup,
@@ -549,7 +550,7 @@ pub struct MemoryFacetIndexManifest {
 pub struct MemoryFacetPostImageClosure {
     pub memory_space_id: String,
     pub mounted_subject_id: String,
-    pub long_term_owners: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    pub long_term_owners: Vec<LongTermMemoryVersionMaterialImage>,
     pub evidence_document_owners: Vec<GovernedDocumentImage<GovernedEvidenceDocument>>,
     pub facet_owners: Vec<GovernedDocumentImage<MemoryFacetIndexDoc>>,
     pub postings: Vec<GovernedDocumentImage<MemoryFacetPostingDoc>>,
@@ -575,16 +576,7 @@ pub fn validate_memory_facet_post_image(
 
     let mut owners = BTreeMap::new();
     for image in &closure.long_term_owners {
-        let logical_id = image
-            .after
-            .as_ref()
-            .or(image.before.as_ref())
-            .map(|owner| owner.id.as_str())
-            .unwrap_or_default();
-        if scoped_long_term_memory_storage_key(memory_space_id, logical_id)
-            .map(|expected| image.physical_key != expected)
-            .unwrap_or(true)
-        {
+        if !image.has_exact_physical_closure(memory_space_id, subject_id) {
             failures.push("memory_facet_owner_physical_key_drift".to_string());
         }
         if image.before != image.after
@@ -596,14 +588,12 @@ pub fn validate_memory_facet_post_image(
             failures.push("memory_facet_owner_revision_successor_drift".to_string());
         }
         if let Some(owner) = image.after.as_ref() {
-            let owner_ref =
-                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone());
             if owners
                 .insert(
-                    owner_ref,
+                    owner.owner_ref.clone(),
                     FacetOwnerPostImageState {
                         owner_revision: owner.owner_revision,
-                        privacy: owner.privacy,
+                        privacy: owner.privacy_class,
                     },
                 )
                 .is_some()

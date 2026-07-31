@@ -7,7 +7,9 @@ use bm_entry::{
     EntryOperationCapability, EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
 };
 use bm_http::{handle_http_in_process_request, validate_http_bind_security, HttpRuntimeRequest};
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
+use bm_sdk::{
+    default_agent_subject_id, MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig,
+};
 
 fn remote_runtime() -> (EntryRuntime, EntryAuthConfig) {
     let auth = EntryAuthConfig::required_bearer_principal(
@@ -66,7 +68,7 @@ fn http_authenticated_principal_without_capability_is_forbidden() {
     let (runtime, _auth) = remote_runtime();
     let request = HttpRuntimeRequest::post_json(
         "/memory/project",
-        r#"{"query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
+        r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
     )
     .with_bearer_token("secret-token");
 
@@ -94,7 +96,7 @@ fn http_remote_write_without_explicit_source_scope_does_not_fall_back_to_chat_1(
 }
 
 #[test]
-fn http_local_profile_uses_explicit_local_default_scope_policy() {
+fn http_local_profile_requires_explicit_owner_scope_and_may_fill_local_source_chat() {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
     let runtime = EntryRuntime::open(EntryRuntimeConfig {
@@ -117,10 +119,28 @@ fn http_local_profile_uses_explicit_local_default_scope_policy() {
     })
     .expect("entry runtime");
 
-    let request = HttpRuntimeRequest::post_json(
-        "/memory/write",
-        r#"{"name":"runtime_skill__local_write","topic":"scope","title":"Local write","summary":"Local write","content":"local policy may fill scope"}"#,
-    );
+    let body = serde_json::json!({
+        "name": "runtime_skill__local_write",
+        "topic": "scope",
+        "title": "Local write",
+        "summary": "Local write",
+        "content": "local policy may fill source chat only",
+        "source": "manual",
+        "citations": ["http-auth-contract"],
+        "owning_scope": {
+            "kind": "subject",
+            "mounted_subject_id": default_agent_subject_id("http-agent"),
+        },
+        "creation_ref": {
+            "kind": "replay_promotion",
+            "candidate_ref": "http-auth-contract:local-write",
+            "verification_receipt_digest":
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        },
+        "privacy_class": "shared_with_subject",
+    })
+    .to_string();
+    let request = HttpRuntimeRequest::post_json("/memory/write", &body);
     let response = handle_http_in_process_request(&runtime, request).expect("http response");
 
     assert_eq!(response.status_code, 200);

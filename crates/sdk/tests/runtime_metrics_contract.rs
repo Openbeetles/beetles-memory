@@ -1,10 +1,13 @@
 mod support;
 
 use bm_sdk::{
-    default_agent_subject_id, CanonicalTurnDelta, ConversationScope, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
-    MemoryTurnSource, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, TranscriptInputMessage,
+    default_agent_subject_id, CanonicalTurnDelta, ConversationScope, LongTermMemoryKind,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryProjectionRequest,
+    MemoryRecallRequest, MemorySemanticJudgmentSource, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
+    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeMetricsSource,
+    TranscriptInputMessage,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -61,22 +64,38 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
     let runtime = test_runtime_with_scope(platform.clone(), profile, "sdk.direct", "chat-a");
 
     runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "runtime_metrics_contract".to_string(),
-                topic: "runtime metrics".to_string(),
-                title: "Runtime metrics contract".to_string(),
-                summary: "Runtime metrics must come from MemoryRuntime reports.".to_string(),
-                content: "Operator surfaces display the SDK/core metrics report.".to_string(),
-                citations: vec!["runtime metrics contract".to_string()],
-                source_chat_id: Some("chat-a".to_string()),
-                observed_at: 1_800_000_000,
+        .write(MemoryWriteRequest::Candidates {
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: "runtime-metrics-fact".to_string(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: MemoryCandidateTarget::LongTermMemory {
+                    kind: LongTermMemoryKind::Fact,
+                    topic: "runtime metrics".to_string(),
+                },
+                privacy: MemoryPrivacyClass::PublicRuntime,
+                content: MemoryCandidateContent::Text {
+                    topic: "runtime metrics".to_string(),
+                    body: "Runtime metrics must come from the SDK and Core report.".to_string(),
+                    keywords: vec!["runtime".to_string(), "metrics".to_string()],
+                },
+                evidence_refs: vec!["turn:runtime-metrics-fact".to_string()],
+                canonical_entities: Vec::new(),
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::LlmGovernance,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(MemoryCandidateTarget::LongTermMemory {
+                        kind: LongTermMemoryKind::Fact,
+                        topic: "runtime metrics".to_string(),
+                    }),
+                    reason: "runtime_metrics_contract".to_string(),
+                }),
             }],
-            source: RuntimeSkillWriteSource::Manual,
+            runtime_skill_owning_scope: None,
         })
         .expect("write");
     runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "runtime metrics".to_string(),
             limit: 4,
@@ -85,6 +104,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
         .expect("recall");
     runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should metrics be reported?".to_string(),
             system_max_len: 4096,
@@ -100,10 +120,10 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
 
     let report = runtime.runtime_metrics_report().expect("runtime metrics");
 
-    assert_eq!(report.source, "core.runtime_events");
+    assert_eq!(report.source, RuntimeMetricsSource::CoreRuntimeEvents);
     assert_eq!(report.counters.write_count, 1);
     assert_eq!(report.counters.recall_requests, 1);
-    assert_eq!(report.counters.recall_hits, 0);
+    assert_eq!(report.counters.recall_hits, 1);
     assert_eq!(report.counters.projection_requests, 1);
     assert_eq!(report.counters.projection_injections, 1);
     assert_eq!(report.counters.finalize_requests, 1);
@@ -127,5 +147,8 @@ fn operator_readiness_report_is_sdk_owned_not_ui_inferred() {
     assert!(readiness.migration_ready);
     assert!(readiness.adapter_semantics_clean);
     assert!(!readiness.host_direct_write_detected);
-    assert_eq!(readiness.metrics_source, "core.runtime_events");
+    assert_eq!(
+        readiness.metrics_source,
+        RuntimeMetricsSource::CoreRuntimeEvents
+    );
 }

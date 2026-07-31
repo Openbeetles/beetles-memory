@@ -4,9 +4,9 @@
 
 ![Beetle Memory 公众号宣传海报](docs/assets/beetles-memory-poster.png)
 
-Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-first 集成入口、自有存储后端、基于 profile 的平台裁剪、回放与迁移工具，以及用于独立部署的轻量协议 adapter。
+Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-first 集成入口、自有存储后端、基于 profile 的平台裁剪、回放与受治理归档工具，以及用于独立部署的轻量协议 adapter。
 
-它不是向量数据库、通用 RAG 框架、聊天历史归档、workflow runner 或工具执行运行时。它负责记忆状态、记忆操作、生命周期报告、profile 能力可见性，以及迁移和回放合同。
+它不是向量数据库、通用 RAG 框架、聊天历史归档、workflow runner 或工具执行运行时。它负责记忆状态、记忆操作、生命周期报告、profile 能力可见性，以及归档和回放合同。
 
 ## 仓库内容
 
@@ -97,7 +97,10 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
-    assert!(!recall.procedural_hits.is_empty());
+    assert!(recall
+        .procedural_delivery_reports
+        .iter()
+        .any(|delivery| delivery.selected));
 
     let projection = runtime.project(MemoryProjectionRequest {
         user_query: "How should this host release?".to_string(),
@@ -127,7 +130,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
 - [Profile 矩阵](docs/zh-CN/profiles.md)
 - [存储后端](docs/zh-CN/store-backends.md)
 - [Adapter 合同](docs/zh-CN/adapters.md)
-- [回放与迁移](docs/zh-CN/replay-and-migration.md)
+- [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
 
@@ -142,7 +145,7 @@ English documentation:
 - [Profiles](docs/en/profiles.md)
 - [Store Backends](docs/en/store-backends.md)
 - [Adapters](docs/en/adapters.md)
-- [Replay and Migration](docs/en/replay-and-migration.md)
+- [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
 
@@ -189,7 +192,8 @@ bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_release_surface.sh
 ```
 
-具备额外目标工具链的 release 环境还应运行：
+缺少必要目标工具链的开发机可以在工程交接中将对应行记录为 `deferred_not_passed`。
+任何发布候选都必须配置完整目标工具链并取得 strict GREEN；工具链缺失会阻断发布，绝不算通过：
 
 ```bash
 bash scripts/check_cross_target_compile_gates.sh --strict

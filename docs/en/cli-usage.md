@@ -56,7 +56,7 @@ Commands:
 | `skill-show` | Inspect one runtime Skill Memory record. |
 | `skill-edit` | Edit an existing runtime Skill Memory record. |
 | `skill-enable` / `skill-disable` | Enable or disable runtime Skill Memory. |
-| `skill-delete` | Delete runtime Skill Memory. |
+| `skill-retire` | Append a retired revision while preserving owner lineage; no physical deletion. |
 | `close` | Close the runtime and emit lifecycle report. |
 
 Common options:
@@ -141,6 +141,10 @@ bm \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
+  --runtime-skill-subject agent:agent-main \
+  --replay-candidate-ref cli:release_guard \
+  --verification-receipt-digest sha256:<64-hex> \
+  --runtime-skill-privacy shared-with-subject \
   --name runtime_skill__release_guard \
   --title "Release guard" \
   --topic release \
@@ -150,27 +154,32 @@ bm \
 3. dry run publish"
 ```
 
-```bash
-bm \
-  memory skill-edit \
-  --profile "$BM_HOST_PROFILE" \
-  --store-file /tmp/beetle-memory-store \
-  --chat chat-1 \
-  --name runtime_skill__release_guard \
-  --title "Release guard" \
-  --topic release \
-  --summary "Verify release artifacts and changelog before publishing." \
-  --content "1. run gates
-2. inspect artifacts
-3. inspect changelog"
-```
+Run `skill-list` with the same owning scope (`--runtime-skill-subject <subject-id>` or `--runtime-skill-shared-program`) first and read `ownerId` plus `locator.owner_revision_ref.owner_revision`. Every later mutation must continue from the previous response's `currentLocator`; the CLI does not translate a name into an owner.
 
 ```bash
 bm \
   memory skill-list \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
+  --runtime-skill-subject agent:agent-main \
   --query release
+```
+
+```bash
+bm \
+  memory skill-edit \
+  --profile "$BM_HOST_PROFILE" \
+  --store-file /tmp/beetle-memory-store \
+  --chat chat-1 \
+  --runtime-skill-subject agent:agent-main \
+  --runtime-skill-owner-id <owner-id> \
+  --runtime-skill-owner-revision <revision> \
+  --title "Release guard" \
+  --topic release \
+  --summary "Verify release artifacts and changelog before publishing." \
+  --content "1. run gates
+2. inspect artifacts
+3. inspect changelog"
 ```
 
 ## Write And Recall With A File Store
@@ -181,6 +190,10 @@ bm \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
   --chat chat-1 \
+  --runtime-skill-subject agent:agent-main \
+  --replay-candidate-ref cli:file_store_release_guard \
+  --verification-receipt-digest sha256:<64-hex> \
+  --runtime-skill-privacy shared-with-subject \
   --name release_guard \
   --topic release \
   --title "Release guard" \
@@ -210,9 +223,9 @@ bm \
   --max-len 4096
 ```
 
-## Migration Boundary
+## Archive Boundary
 
-The CLI does not expose generic memory `export` or `import` commands. Governed transfer uses the SDK's typed memory-space scope and archive contract described in [Replay And Migration](replay-and-migration.md); continuity snapshots remain internal Soul-recovery payloads.
+The CLI does not expose generic memory `export` or `import` commands. Governed replacement uses the SDK's typed memory-space scope and archive contract described in [Replay And Archive](replay-and-archive.md); continuity snapshots remain internal Soul-recovery payloads.
 
 ## Close Runtime
 

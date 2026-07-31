@@ -5,7 +5,7 @@ use bm_entry::{
     EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryWriteRequest, RuntimeSkillWrite,
+    ErrorClass, MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryWriteRequest, RuntimeSkillWrite,
     RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
@@ -36,71 +36,68 @@ fn config() -> EntryRuntimeConfig {
 }
 
 #[test]
-fn console_skill_facade_edits_disables_and_deletes_runtime_skills_only() {
+fn console_skill_facade_edits_disables_and_retires_runtime_skills_only() {
     let runtime = EntryRuntime::open(config()).expect("entry runtime");
     seed_runtime_skill(&runtime, "runtime_skill__release_guard");
-
-    assert!(runtime
-        .console_edit_runtime_skill(
-            "not_runtime_skill",
-            EntryConsoleRuntimeSkillEdit {
-                title: "Manual".to_string(),
-                topic: "manual".to_string(),
-                summary: "Should not create manual skills.".to_string(),
-                procedure: "forbidden".to_string(),
-                citations: vec!["entry-test".to_string()],
-                source_chat_id: None,
-                edit_reason: None,
-            },
-        )
-        .is_err());
 
     let listed = runtime
         .console_skills(Some("release".to_string()))
         .expect("list");
     assert_eq!(listed.skills.len(), 1);
     assert_eq!(listed.runtime_learned, 1);
+    let locator = listed.skills[0].locator.clone();
+
+    let stale_locator = bm_sdk::RuntimeSkillOwnerLocator::try_new(
+        locator.owning_scope().clone(),
+        locator.owner_id(),
+        locator.owner_revision() + 1,
+    )
+    .expect("stale locator shape");
+    let stale_error = runtime
+        .console_edit_runtime_skill(EntryConsoleRuntimeSkillEdit {
+            locator: stale_locator,
+            title: "Manual".to_string(),
+            topic: "manual".to_string(),
+            summary: "A stale locator must not create a skill.".to_string(),
+            procedure: "forbidden".to_string(),
+            edit_reason: None,
+        })
+        .expect_err("stale locator");
+    assert_eq!(stale_error.class(), Some(ErrorClass::Conflict));
 
     let detail = runtime
-        .console_skill_detail("runtime_skill__release_guard")
-        .expect("detail")
-        .expect("skill exists");
+        .console_skill_detail(locator.clone())
+        .expect("detail");
     assert!(detail.procedure_text.contains("run gates"));
 
     let edited = runtime
-        .console_edit_runtime_skill(
-            "runtime_skill__release_guard",
-            EntryConsoleRuntimeSkillEdit {
-                title: "Release guard".to_string(),
-                topic: "release".to_string(),
-                summary: "Check release artifacts and changelog before publishing.".to_string(),
-                procedure: "1. run gates\n2. inspect artifacts\n3. inspect changelog".to_string(),
-                citations: vec!["entry-test-edit".to_string()],
-                source_chat_id: None,
-                edit_reason: Some("entry_test_edit".to_string()),
-            },
-        )
+        .console_edit_runtime_skill(EntryConsoleRuntimeSkillEdit {
+            locator,
+            title: "Release guard".to_string(),
+            topic: "release".to_string(),
+            summary: "Check release artifacts and changelog before publishing.".to_string(),
+            procedure: "1. run gates\n2. inspect artifacts\n3. inspect changelog".to_string(),
+            edit_reason: Some("entry_test_edit".to_string()),
+        })
         .expect("edit");
     assert!(edited.accepted);
 
     let disabled = runtime
-        .console_set_skill_enabled(
-            "runtime_skill__release_guard",
-            EntryConsoleSkillSetEnabled { enabled: false },
-        )
-        .expect("disable")
-        .expect("skill exists");
+        .console_set_skill_enabled(EntryConsoleSkillSetEnabled {
+            locator: edited.current_locator,
+            enabled: false,
+        })
+        .expect("disable");
     assert!(disabled.accepted);
 
-    let deleted = runtime
-        .console_delete_skill("runtime_skill__release_guard")
-        .expect("delete")
-        .expect("skill exists");
-    assert!(deleted.accepted);
-    assert!(runtime
-        .console_skill_detail("runtime_skill__release_guard")
-        .expect("deleted detail")
-        .is_none());
+    let retired_mutation = runtime
+        .console_retire_skill(disabled.current_locator)
+        .expect("retire");
+    assert!(retired_mutation.accepted);
+    let retired = runtime
+        .console_skill_detail(retired_mutation.current_locator)
+        .expect("retired detail");
+    assert_eq!(retired.summary.status, "retired");
 }
 
 fn seed_runtime_skill(runtime: &EntryRuntime, name: &str) {
@@ -118,7 +115,7 @@ fn seed_runtime_skill(runtime: &EntryRuntime, name: &str) {
                 support::trusted_local_auth("operator"),
             ),
             AdapterCommand::Write(MemoryWriteRequest::Procedural {
-                writes: vec![RuntimeSkillWrite {
+                writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                     name: name.to_string(),
                     title: "Release guard".to_string(),
                     topic: "release".to_string(),
@@ -126,8 +123,9 @@ fn seed_runtime_skill(runtime: &EntryRuntime, name: &str) {
                     content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
                     citations: vec!["entry-test".to_string()],
                     source_chat_id: Some("chat-1".to_string()),
-                    observed_at: 1_800_000_000,
-                }],
+                    observed_at: 1_700_000_000,
+                })],
+                owning_scope: support::runtime_skill_subject_scope("console-skill-agent"),
                 source: RuntimeSkillWriteSource::Manual,
             }),
         )

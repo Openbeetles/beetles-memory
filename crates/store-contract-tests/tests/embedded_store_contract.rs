@@ -44,7 +44,7 @@ fn embedded_sdk_store_keeps_lightweight_runtime_paths_available() {
 
     assert_eq!(platform.session_store().message_count("chat-a").unwrap(), 1);
     assert_eq!(
-        platform.skill_storage().read("runtime-lite").unwrap(),
+        support::read_runtime_skill_owner(&platform, &skill.physical_key),
         skill
     );
 }

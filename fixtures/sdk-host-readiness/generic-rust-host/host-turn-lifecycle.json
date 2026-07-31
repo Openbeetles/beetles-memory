@@ -11,7 +11,7 @@
     "SDK host release migration dry-run"
   ],
   "expected_report_fragments": [
-    "procedural_hits=1",
+    "procedural_delivery_reports=1",
     "inspect query=public export preview apply import inspect replay",
     "replay chat_id=generic-turn-1"
   ],

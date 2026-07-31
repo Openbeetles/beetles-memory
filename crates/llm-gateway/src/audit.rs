@@ -42,7 +42,7 @@ pub struct GatewayProjectionAuditRecord {
     pub reason: String,
     pub projection_chars: usize,
     pub redacted: bool,
-    pub redacted_source_ids: Vec<String>,
+    pub redacted_source_count: usize,
     pub local_diagnostic_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block: Option<String>,
@@ -55,7 +55,7 @@ impl GatewayProjectionAuditRecord {
             reason: reason.into(),
             projection_chars,
             redacted: true,
-            redacted_source_ids: Vec::new(),
+            redacted_source_count: 0,
             local_diagnostic_path: None,
             block: None,
         }
@@ -113,7 +113,8 @@ impl GatewayAuditReport {
         config: &GatewayAuditConfig,
         projection: &MemoryProjectionReport,
     ) -> Result<()> {
-        let projection_chars = projection.system_memory_block.chars().count();
+        let gateway_view = projection.gateway_audit();
+        let projection_chars = gateway_view.provider_projection_chars;
         if !config.enabled {
             self.projection_record = GatewayProjectionAuditRecord::not_recorded(
                 "gateway_audit_disabled",
@@ -129,19 +130,18 @@ impl GatewayAuditReport {
             return Ok(());
         }
 
-        let redaction = redacted_projection_block(projection);
         let mut record = GatewayProjectionAuditRecord {
             status: GatewayProjectionAuditStatus::Recorded,
-            reason: if redaction.redacted {
+            reason: if gateway_view.redacted {
                 "raw_projection_recorded_redacted".to_string()
             } else {
                 "raw_projection_recorded".to_string()
             },
             projection_chars,
-            redacted: redaction.redacted,
-            redacted_source_ids: redaction.redacted_source_ids,
+            redacted: gateway_view.redacted,
+            redacted_source_count: gateway_view.redacted_source_count,
             local_diagnostic_path: None,
-            block: Some(redaction.block),
+            block: Some(gateway_view.block.clone()),
         };
 
         if let Some(dir) = &config.raw_projection_diagnostic_path {
@@ -150,7 +150,7 @@ impl GatewayAuditReport {
             let diagnostic_path = projection_diagnostic_path(
                 owner.path(),
                 &self.audit_id,
-                &projection.runtime_projection.projection_id,
+                &gateway_view.projection_id,
             );
             record.local_diagnostic_path = Some(diagnostic_path.display().to_string());
             write_projection_diagnostic(&transaction, &diagnostic_path, &record)?;
@@ -161,27 +161,6 @@ impl GatewayAuditReport {
         }
         self.projection_record = record;
         Ok(())
-    }
-}
-
-struct ProjectionRedaction {
-    block: String,
-    redacted: bool,
-    redacted_source_ids: Vec<String>,
-}
-
-fn redacted_projection_block(projection: &MemoryProjectionReport) -> ProjectionRedaction {
-    let mut redacted_source_ids = projection
-        .private_disclosure_integrity
-        .redacted_source_ids
-        .clone();
-    redacted_source_ids.sort();
-    redacted_source_ids.dedup();
-    let block = projection.projection_surfaces.gateway_raw_audit.clone();
-    ProjectionRedaction {
-        redacted: block != projection.system_memory_block || !redacted_source_ids.is_empty(),
-        block,
-        redacted_source_ids,
     }
 }
 

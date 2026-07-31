@@ -1,10 +1,13 @@
-use bm_sdk::{ProfileId, RuntimeSkillWrite};
+use bm_sdk::{MemoryPrivacyClass, ProfileId, RuntimeSkillOwningScope, RuntimeSkillWrite};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvolutionProposal {
     pub proposal_id: String,
     pub profile: ProfileId,
+    pub owning_scope: RuntimeSkillOwningScope,
+    pub verification_receipt_digest: String,
+    pub privacy_class: MemoryPrivacyClass,
     pub candidates: Vec<EvolutionCandidate>,
     pub evidence_refs: Vec<String>,
     pub rationale: String,

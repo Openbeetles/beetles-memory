@@ -14,9 +14,10 @@ use bm_sdk::nonproduction_replay_harness::{
 };
 use serde_json::json;
 
-const TRANSACTION_NAMESPACE: &str = "file_transaction_concurrency";
+const TRANSACTION_NAMESPACE: &str = "session";
 const TRANSACTION_KEY: &str = "transaction";
-const PRIMITIVE_NAMESPACE: &str = "file_primitive_concurrency";
+const PRIMITIVE_NAMESPACE: &str = "session";
+const PRIMITIVE_BLOB_NAMESPACE: &str = "state_fs";
 const JSON_KEY: &str = "json";
 const BLOB_KEY: &str = "blob";
 
@@ -109,9 +110,11 @@ fn wait_for_pause(child: &mut Child, ready: &Path) {
 #[test]
 fn primitive_json_blob_and_event_share_transaction_lock_and_survive_whole_state_apply() {
     let root = temp_root("whole-state");
+    let control_root = temp_root("whole-state-control");
+    fs::create_dir_all(&control_root).expect("create process-control root");
     let (primitive, _, _) = support::open_file_engine(&config(&root)).expect("primitive engine");
-    let ready = root.join("transaction.pause.ready");
-    let release = root.join("transaction.pause.release");
+    let ready = control_root.join("transaction.pause.ready");
+    let release = control_root.join("transaction.pause.release");
     let mut transaction = spawn_paused_transaction(&root, &ready, &release);
     wait_for_pause(&mut transaction, &ready);
 
@@ -119,7 +122,7 @@ fn primitive_json_blob_and_event_share_transaction_lock_and_survive_whole_state_
     let primitive_writer = thread::spawn(move || {
         let result = (|| {
             primitive.put_json_value(PRIMITIVE_NAMESPACE, JSON_KEY, json!({"primitive": true}))?;
-            primitive.put_blob(PRIMITIVE_NAMESPACE, BLOB_KEY, b"primitive-blob")?;
+            primitive.put_blob(PRIMITIVE_BLOB_NAMESPACE, BLOB_KEY, b"primitive-blob")?;
             primitive.append_event(event("primitive-event", PRIMITIVE_NAMESPACE, JSON_KEY))?;
             Ok::<(), bm_core::Error>(())
         })();
@@ -161,7 +164,7 @@ fn primitive_json_blob_and_event_share_transaction_lock_and_survive_whole_state_
                 StoreJsonAddress::new(PRIMITIVE_NAMESPACE, JSON_KEY),
             ],
             blobs: vec![bm_sdk::nonproduction_replay_harness::StoreBlobAddress::new(
-                PRIMITIVE_NAMESPACE,
+                PRIMITIVE_BLOB_NAMESPACE,
                 BLOB_KEY,
             )],
             include_events: true,
@@ -181,6 +184,9 @@ fn primitive_json_blob_and_event_share_transaction_lock_and_survive_whole_state_
         .events
         .iter()
         .any(|entry| entry.event_id == "primitive-event"));
+    drop(reader);
+    fs::remove_dir_all(&root).expect("remove file store");
+    fs::remove_dir_all(&control_root).expect("remove process-control root");
 }
 
 #[test]

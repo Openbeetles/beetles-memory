@@ -59,7 +59,7 @@ pub enum StoreMutation {
         record_key: String,
     },
     AppendEvent {
-        event: MemoryStoreEvent,
+        event: Box<MemoryStoreEvent>,
     },
 }
 

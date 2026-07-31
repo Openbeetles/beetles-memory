@@ -7,11 +7,6 @@ mod scheduler;
 mod state;
 
 use crate::bus::{IngressKind, PcMsg, SystemInboundTx};
-#[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
-use crate::constants::{
-    TLS_ADMISSION_MIN_INTERNAL_BYTES, TLS_ADMISSION_MIN_LARGEST_BLOCK_BYTES,
-    TLS_ADMISSION_NO_PSRAM_MIN_BYTES,
-};
 use crate::error::Result;
 use crate::llm::{LlmClient, LlmHttpClient, Message, ToolChoicePolicy};
 use crate::orchestrator::PressureLevel;

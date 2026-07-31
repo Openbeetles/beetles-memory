@@ -7,6 +7,7 @@ import type {
   ConsoleApiOllamaTransition,
   ConsoleApiOllamaTransparentStatus,
   ConsoleApiOverview,
+  ConsoleApiRuntimeSkillOwnerLocator,
   ConsoleApiSession,
   ConsoleApiSkillDetail,
   ConsoleApiSkillList,
@@ -36,7 +37,7 @@ export type SkillEditInput = {
   topic: string;
   summary: string;
   procedure: string;
-  citations: string[];
+  editReason?: string;
 };
 
 export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
@@ -79,33 +80,40 @@ export async function fetchWorkbenchReport(): Promise<ConsoleApiWorkbenchReport>
   return response.workbenchReport;
 }
 
-export async function fetchSkill(name: string): Promise<ConsoleApiSkillDetail> {
-  const response = await apiJson<{ skill: ConsoleApiSkillDetail }>(`/console/skills/${encodeURIComponent(name)}`);
+export async function fetchSkill(locator: ConsoleApiRuntimeSkillOwnerLocator): Promise<ConsoleApiSkillDetail> {
+  const response = await apiJson<{ skill: ConsoleApiSkillDetail }>("/console/skills/detail", {
+    method: "POST",
+    body: JSON.stringify(locator),
+  });
   return response.skill;
 }
 
-export async function editSkill(name: string, input: SkillEditInput): Promise<ConsoleApiSkillMutation> {
-  const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>(
-    `/console/skills/${encodeURIComponent(name)}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(input),
-    },
-  );
-  return response.mutation;
-}
-
-export async function setSkillEnabled(name: string, enabled: boolean): Promise<ConsoleApiSkillMutation> {
-  const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>(`/console/skills/${encodeURIComponent(name)}/enabled`, {
+export async function editSkill(
+  locator: ConsoleApiRuntimeSkillOwnerLocator,
+  input: SkillEditInput,
+): Promise<ConsoleApiSkillMutation> {
+  const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>("/console/skills", {
     method: "PATCH",
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify({ locator, ...input }),
   });
   return response.mutation;
 }
 
-export async function deleteSkill(name: string): Promise<ConsoleApiSkillMutation> {
-  const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>(`/console/skills/${encodeURIComponent(name)}`, {
-    method: "DELETE",
+export async function setSkillEnabled(
+  locator: ConsoleApiRuntimeSkillOwnerLocator,
+  enabled: boolean,
+): Promise<ConsoleApiSkillMutation> {
+  const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>("/console/skills/enabled", {
+    method: "PATCH",
+    body: JSON.stringify({ locator, enabled }),
+  });
+  return response.mutation;
+}
+
+export async function retireSkill(locator: ConsoleApiRuntimeSkillOwnerLocator): Promise<ConsoleApiSkillMutation> {
+  const response = await apiJson<{ mutation: ConsoleApiSkillMutation }>("/console/skills/retire", {
+    method: "POST",
+    body: JSON.stringify(locator),
   });
   return response.mutation;
 }

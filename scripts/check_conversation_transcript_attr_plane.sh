@@ -8,8 +8,8 @@ required_files=(
   "dev-docs/README.md"
   "docs/en/api.md"
   "docs/zh-CN/api.md"
-  "docs/en/replay-and-migration.md"
-  "docs/zh-CN/replay-and-migration.md"
+  "docs/en/replay-and-archive.md"
+  "docs/zh-CN/replay-and-archive.md"
   "docs/en/cli-usage.md"
   "docs/zh-CN/cli-usage.md"
   "docs/en/operator-guide.md"
@@ -52,8 +52,8 @@ require_fixed "TranscriptAttrGovernance" crates/core/src/memory/transcript.rs cr
 require_fixed "TranscriptAttrLink" crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs dev-docs/conversation-transcript-attribute-plane-plan.md
 require_fixed "TranscriptAttrWriteReport" crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "attrs: Vec<TranscriptAttrEnvelope>" crates/core/src/memory/transcript.rs
-require_fixed "attr_id" crates/core/src/memory/transcript.rs docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
-require_fixed "attr_key" crates/core/src/memory/transcript.rs docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
+require_fixed "attr_id" crates/core/src/memory/transcript.rs docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md
+require_fixed "attr_key" crates/core/src/memory/transcript.rs docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md
 require_fixed "AttrVisibility" crates/core/src/memory/transcript.rs
 require_fixed "AttrValueBudget" crates/core/src/memory/transcript.rs
 require_fixed "AttrLifecyclePolicy" crates/core/src/memory/transcript.rs
@@ -61,8 +61,8 @@ require_fixed "conversation_transcript_attr" crates/sdk/src/store_internal/platf
 require_fixed "upsert_transcript_attrs" crates/core/src/memory/transcript.rs crates/sdk/src/store_internal/platform.rs
 require_fixed "list_transcript_attrs" crates/core/src/memory/transcript.rs crates/sdk/src/store_internal/platform.rs
 require_fixed "inspect_repair_records" crates/core/src/memory/transcript.rs crates/sdk/src/store_internal/platform.rs
-require_fixed "MissingAttrTargetTurn" crates/core/src/memory/transcript.rs docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
-require_fixed "MissingAttrTargetMessage" crates/core/src/memory/transcript.rs docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
+require_fixed "MissingAttrTargetTurn" crates/core/src/memory/transcript.rs docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md
+require_fixed "MissingAttrTargetMessage" crates/core/src/memory/transcript.rs docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md
 require_fixed "MemoryTranscriptAttrWriteRequest" crates/sdk/src/ops.rs crates/sdk/src/lib.rs docs/en/api.md docs/zh-CN/api.md docs/en/cli-usage.md docs/zh-CN/cli-usage.md
 require_fixed "MemoryTranscriptAttrWriteReport" crates/sdk/src/ops.rs crates/sdk/src/lib.rs docs/en/api.md docs/zh-CN/api.md
 require_fixed "redactions_preview" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/cli/src/lib.rs crates/http/src/lib.rs crates/wss/src/lib.rs crates/mcp/src/lib.rs crates/a2a/src/lib.rs docs/en/api.md docs/zh-CN/api.md docs/en/cli-usage.md docs/zh-CN/cli-usage.md
@@ -95,7 +95,7 @@ require_fixed "provider secret" docs/zh-CN/api.md docs/zh-CN/cli-usage.md
 require_fixed "local file paths" docs/en/cli-usage.md
 require_fixed "本地真实文件路径" docs/zh-CN/api.md docs/zh-CN/cli-usage.md
 
-require_regex "HostUi.*attrs|attrs.*HostUi" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
+require_regex "HostUi.*attrs|attrs.*HostUi" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md
 require_regex "ModelContext.*attrs|attrs.*ModelContext" docs/en/api.md docs/zh-CN/api.md
 require_regex "Export.*export_allowed=true|export_allowed=true.*Export" docs/en/api.md docs/zh-CN/api.md
 require_regex "DeleteRaw.*attrs|attrs.*DeleteRaw" dev-docs/conversation-transcript-attribute-plane-plan.md docs/en/api.md docs/zh-CN/api.md

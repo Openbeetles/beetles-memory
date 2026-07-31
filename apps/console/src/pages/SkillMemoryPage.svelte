@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { BookOpen, LoaderCircle, Pencil, Search, Trash2 } from "lucide-svelte";
-  import SkillDeleteModal from "../components/SkillDeleteModal.svelte";
+  import { Archive, BookOpen, LoaderCircle, Pencil, Search } from "lucide-svelte";
+  import { ConsoleApiResponseError } from "../api";
+  import SkillRetireModal from "../components/SkillRetireModal.svelte";
   import SkillEditorModal from "../components/SkillEditorModal.svelte";
-  import { deleteSkill, editSkill, fetchSkill, setSkillEnabled } from "../lib/console-api";
+  import { editSkill, fetchSkill, retireSkill, setSkillEnabled } from "../lib/console-api";
   import type { ConsoleCopy } from "../lib/i18n";
   import type {
     ConsoleApiSkillDetail,
@@ -15,7 +16,6 @@
   import {
     citationsText,
     filterSkills,
-    parseCitations,
     skillQuality,
     statusLabel,
   } from "../lib/view-model";
@@ -38,27 +38,27 @@
     onBackendDisconnected: () => void;
   } = $props();
 
-  let selectedSkillName: string | null = $state(null);
+  let selectedSkillOwnerId: string | null = $state(null);
   let selectedSkill: ConsoleApiSkillDetail | null = $state(null);
   let skillModal: SkillModal = $state(null);
   let skillForm: SkillForm = $state({ title: "", topic: "", summary: "", procedure: "", citations: "" });
   let skillError = $state("");
   let skillSearch = $state("");
   let skillStatusFilter: "all" | "active" | "disabled" | "retired" = $state("all");
-  let selectingSkillName: string | null = $state(null);
+  let selectingSkillOwnerId: string | null = $state(null);
   let skillFormSubmitting = $state(false);
-  let skillToggleBusyName: string | null = $state(null);
-  let skillDeleting = $state(false);
+  let skillToggleBusyOwnerId: string | null = $state(null);
+  let skillRetiring = $state(false);
 
-  const selectedSkillSummary = $derived(skills.find((skill) => skill.name === selectedSkillName) ?? selectedSkill?.summary ?? null);
+  const selectedSkillSummary = $derived(skills.find((skill) => skill.ownerId === selectedSkillOwnerId) ?? selectedSkill?.summary ?? null);
   const filteredSkills = $derived(filterSkills(skills, skillSearch, skillStatusFilter));
   const skillOperationBusy = $derived(
-    selectingSkillName !== null || skillFormSubmitting || skillToggleBusyName !== null || skillDeleting,
+    selectingSkillOwnerId !== null || skillFormSubmitting || skillToggleBusyOwnerId !== null || skillRetiring,
   );
 
   $effect(() => {
-    if (selectedSkillName && !skills.some((skill) => skill.name === selectedSkillName)) {
-      selectedSkillName = null;
+    if (selectedSkillOwnerId && !skills.some((skill) => skill.ownerId === selectedSkillOwnerId)) {
+      selectedSkillOwnerId = null;
       selectedSkill = null;
     }
   });
@@ -85,14 +85,14 @@
     skillModal = "edit";
   }
 
-  function openSkillDelete() {
+  function openSkillRetire() {
     if (!selectedSkillSummary || skillOperationBusy) return;
     skillError = "";
-    skillModal = "delete";
+    skillModal = "retire";
   }
 
   function closeSkillModal() {
-    if (skillFormSubmitting || skillDeleting) return;
+    if (skillFormSubmitting || skillRetiring) return;
     resetSkillModal();
   }
 
@@ -101,19 +101,19 @@
     skillError = "";
   }
 
-  async function selectSkill(name: string) {
-    if (selectingSkillName !== null) return;
-    selectedSkillName = name;
+  async function selectSkill(skill: ConsoleApiSkillSummary) {
+    if (selectingSkillOwnerId !== null) return;
+    selectedSkillOwnerId = skill.ownerId;
     selectedSkill = null;
     if (!backendConnected) return;
-    selectingSkillName = name;
+    selectingSkillOwnerId = skill.ownerId;
     try {
-      selectedSkill = await fetchSkill(name);
-    } catch {
+      selectedSkill = await fetchSkill(skill.locator);
+    } catch (error) {
       selectedSkill = null;
-      onBackendDisconnected();
+      if (!(error instanceof ConsoleApiResponseError)) onBackendDisconnected();
     } finally {
-      if (selectingSkillName === name) selectingSkillName = null;
+      if (selectingSkillOwnerId === skill.ownerId) selectingSkillOwnerId = null;
     }
   }
 
@@ -132,62 +132,66 @@
       skillError = lang === "zh-CN" ? "标题、主题、摘要和过程都不能为空" : "Title, topic, summary, and procedure are required";
       return;
     }
-    const name = selectedSkill?.summary.name;
-    if (!name) {
+    const locator = selectedSkill?.summary.locator;
+    if (!locator) {
       skillError = lang === "zh-CN" ? "请选择一个运行时技能" : "Select a runtime skill first";
       return;
     }
     skillFormSubmitting = true;
     try {
-      const mutation = await editSkill(name, {
+      const mutation = await editSkill(locator, {
         title,
         topic,
         summary,
         procedure,
-        citations: parseCitations(skillForm.citations),
+        editReason: "console_runtime_skill_edit",
       });
       resetSkillModal();
       await onRefresh();
-      await selectSkill(mutation.name);
+      selectedSkillOwnerId = mutation.ownerId;
+      selectedSkill = await fetchSkill(mutation.currentLocator);
     } catch (error) {
       skillError = error instanceof Error ? error.message : String(error);
-      onBackendDisconnected();
+      if (!(error instanceof ConsoleApiResponseError)) onBackendDisconnected();
     } finally {
       skillFormSubmitting = false;
     }
   }
 
   async function toggleSkillEnabled(skill: ConsoleApiSkillSummary) {
-    if (!backendConnected || skillToggleBusyName !== null) return;
-    skillToggleBusyName = skill.name;
+    if (!backendConnected || skillToggleBusyOwnerId !== null) return;
+    skillToggleBusyOwnerId = skill.ownerId;
     try {
-      await setSkillEnabled(skill.name, !skill.enabled);
+      const mutation = await setSkillEnabled(skill.locator, !skill.enabled);
       await onRefresh();
-      if (selectedSkillName === skill.name) await selectSkill(skill.name);
-    } catch {
-      onBackendDisconnected();
+      if (selectedSkillOwnerId === skill.ownerId) {
+        selectedSkill = await fetchSkill(mutation.currentLocator);
+      }
+    } catch (error) {
+      skillError = error instanceof Error ? error.message : String(error);
+      if (!(error instanceof ConsoleApiResponseError)) onBackendDisconnected();
     } finally {
-      if (skillToggleBusyName === skill.name) skillToggleBusyName = null;
+      if (skillToggleBusyOwnerId === skill.ownerId) skillToggleBusyOwnerId = null;
     }
   }
 
-  async function runSkillDelete(skillName: string) {
-    if (skillDeleting) return;
+  async function runSkillRetire(skill: ConsoleApiSkillSummary) {
+    if (skillRetiring) return;
     if (!backendConnected) {
       skillError = t.labels.backendOffline;
       return;
     }
-    skillDeleting = true;
+    skillRetiring = true;
     try {
-      await deleteSkill(skillName);
-      selectedSkillName = null;
+      await retireSkill(skill.locator);
+      selectedSkillOwnerId = null;
       selectedSkill = null;
       await onRefresh();
     } catch (error) {
       skillError = error instanceof Error ? error.message : String(error);
-      onBackendDisconnected();
+      if (!(error instanceof ConsoleApiResponseError)) onBackendDisconnected();
     } finally {
-      skillDeleting = false;
+      skillRetiring = false;
     }
   }
 </script>
@@ -233,18 +237,18 @@
       {:else}
         {#each filteredSkills as skill}
           <button
-            class:active={selectedSkillName === skill.name}
+            class:active={selectedSkillOwnerId === skill.ownerId}
             class="skill-row"
             type="button"
-            disabled={selectingSkillName !== null}
-            onclick={() => void selectSkill(skill.name)}
+            disabled={selectingSkillOwnerId !== null}
+            onclick={() => void selectSkill(skill)}
           >
             <span class="skill-row-main">
               <strong>{skill.title}</strong>
-              <small>{skill.topic} · {skill.name}</small>
+              <small>{skill.topic} · {skill.ownerId}</small>
             </span>
             <span class="skill-row-meta">
-              {#if selectingSkillName === skill.name}<LoaderCircle class="spin-icon" size={12} />{/if}
+              {#if selectingSkillOwnerId === skill.ownerId}<LoaderCircle class="spin-icon" size={12} />{/if}
               <span class={`badge ${skill.enabled ? skill.status : "disabled"}`}>{skill.enabled ? statusLabel(t, skill.status) : statusLabel(t, "disabled")}</span>
               <span>{t.skillsPanel.quality}: {skillQuality(skill)}</span>
               <span>{t.skillsPanel.uses}: {skill.useCount}</span>
@@ -264,19 +268,19 @@
         </div>
         <div class="panel-title-actions">
           <button class="ghost-button" type="button" onclick={() => void toggleSkillEnabled(selectedSkillSummary)} disabled={!backendConnected || skillOperationBusy}>
-            {#if skillToggleBusyName === selectedSkillSummary.name}<LoaderCircle class="spin-icon" size={13} />{/if}
+            {#if skillToggleBusyOwnerId === selectedSkillSummary.ownerId}<LoaderCircle class="spin-icon" size={13} />{/if}
             {selectedSkillSummary.enabled ? t.actions.disable : t.actions.enable}
           </button>
           <button class="ghost-button" type="button" onclick={openSkillEdit} disabled={skillOperationBusy}><Pencil size={13} /> {t.actions.edit}</button>
-          <button class="ghost-button danger-button" type="button" onclick={openSkillDelete} disabled={skillOperationBusy}>
-            {#if skillDeleting}<LoaderCircle class="spin-icon" size={13} />{:else}<Trash2 size={13} />{/if}
-            {t.actions.delete}
+          <button class="ghost-button danger-button" type="button" onclick={openSkillRetire} disabled={skillOperationBusy}>
+            {#if skillRetiring}<LoaderCircle class="spin-icon" size={13} />{:else}<Archive size={13} />{/if}
+            {t.skillsPanel.retireTitle}
           </button>
         </div>
       </div>
 
       <div class="skill-meta-grid">
-        <div><span>{t.skillsPanel.name}</span><strong>{selectedSkillSummary.name}</strong></div>
+        <div><span>{t.skillsPanel.name}</span><strong>{selectedSkillSummary.ownerId}</strong></div>
         <div><span>{t.skillsPanel.topic}</span><strong>{selectedSkillSummary.topic}</strong></div>
         <div><span>{t.skillsPanel.quality}</span><strong>{skillQuality(selectedSkillSummary)}</strong></div>
         <div><span>{t.skillsPanel.uses}</span><strong>{selectedSkillSummary.useCount}</strong></div>
@@ -342,12 +346,11 @@
   />
 {/if}
 
-{#if skillModal === "delete" && selectedSkillSummary}
-  {@const skillNameToDelete = selectedSkillSummary.name}
-  <SkillDeleteModal
+{#if skillModal === "retire" && selectedSkillSummary}
+  <SkillRetireModal
     {t}
     skill={selectedSkillSummary}
     onClose={closeSkillModal}
-    onDelete={() => void runSkillDelete(skillNameToDelete)}
+    onRetire={() => void runSkillRetire(selectedSkillSummary)}
   />
 {/if}

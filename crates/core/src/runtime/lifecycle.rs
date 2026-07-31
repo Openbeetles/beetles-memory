@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::feature_gate::ProfileId;
 use crate::orchestrator::PressureLevel;
 use crate::runtime::{
     mode, ConfigActivityPhase, RuntimeForegroundOverlay, RuntimeMode, RuntimeModeSnapshot,
 };
 
-static LIFECYCLE_EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static LIFECYCLE_EVENT_SEQUENCE: Mutex<u64> = Mutex::new(1);
 
 const DEFAULT_DEFER_RETRY_AFTER_MS: u64 = 1_000;
 pub const POST_REPLY_LIGHTWEIGHT_AFTER_MS: u64 = 30_000;
@@ -354,11 +354,12 @@ pub struct RuntimeLifecycleEvent {
     pub mode: RuntimeMode,
     pub pressure: PressureLevel,
     pub reason: String,
-    pub result: String,
+    success: bool,
+    result_summary: String,
     pub error_stage: Option<String>,
     pub timestamp_unix_secs: u64,
     #[serde(default)]
-    pub payload: BTreeMap<String, String>,
+    payload: BTreeMap<String, String>,
 }
 
 impl RuntimeLifecycleEvent {
@@ -379,7 +380,8 @@ impl RuntimeLifecycleEvent {
             mode: report.admission.mode.current_mode,
             pressure: report.admission.pressure,
             reason: report.admission.reason.clone(),
-            result: if report.success { "ok" } else { "failed" }.to_string(),
+            success: report.success,
+            result_summary: report.result_summary.clone(),
             error_stage: report.error_stage.clone(),
             timestamp_unix_secs,
             payload: BTreeMap::new(),
@@ -389,6 +391,62 @@ impl RuntimeLifecycleEvent {
     pub fn with_payload(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.payload.insert(key.into(), value.into());
         self
+    }
+
+    pub fn success(&self) -> bool {
+        self.success
+    }
+
+    pub fn result(&self) -> &'static str {
+        if self.success {
+            "ok"
+        } else {
+            "failed"
+        }
+    }
+
+    pub fn result_summary(&self) -> &str {
+        &self.result_summary
+    }
+
+    pub fn payload(&self) -> &BTreeMap<String, String> {
+        &self.payload
+    }
+
+    pub fn validate_for_recording(&self) -> Result<()> {
+        if self.result_summary.trim().is_empty() {
+            return Err(Error::config(
+                "runtime_lifecycle_event_payload",
+                "runtime lifecycle result summary must be non-empty",
+            ));
+        }
+        const RESERVED_KEYS: &[&str] = &[
+            "operation",
+            "runtime_operation",
+            "trigger",
+            "disposition",
+            "effect",
+            "profile",
+            "mode",
+            "pressure",
+            "reason",
+            "success",
+            "result",
+            "result_summary",
+            "error_stage",
+            "transaction_id",
+        ];
+        if self
+            .payload
+            .keys()
+            .any(|key| RESERVED_KEYS.contains(&key.as_str()))
+        {
+            return Err(Error::config(
+                "runtime_lifecycle_event_payload",
+                "runtime lifecycle detail payload cannot override typed fields",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -536,7 +594,12 @@ fn is_embedded_profile(profile: ProfileId) -> bool {
 }
 
 pub fn next_lifecycle_event_id() -> String {
-    let seq = LIFECYCLE_EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut sequence = LIFECYCLE_EVENT_SEQUENCE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let seq = *sequence;
+    *sequence = sequence.wrapping_add(1);
+    drop(sequence);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

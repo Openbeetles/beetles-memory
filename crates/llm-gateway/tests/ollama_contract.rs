@@ -10,14 +10,31 @@ use bm_llm_gateway::{
 };
 use bm_sdk::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy,
-    MemoryProjectionRequest, MemoryWriteRequest, Message, PressureLevel, ResponseBody,
+    MemoryProjectionRequest, MemoryRuntime, MemoryTranscriptReplayReport,
+    MemoryTranscriptReplayRequest, MemoryWriteRequest, Message, PressureLevel, ResponseBody,
     RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StopReason,
-    ToolChoicePolicy, ToolSpec,
+    ToolChoicePolicy, ToolSpec, TranscriptReplayView,
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
 
 mod support;
+
+const FIXTURE_CONVERSATION_ID: &str = "thread-ollama";
+
+fn replay_model_context(runtime: &MemoryRuntime) -> MemoryTranscriptReplayReport {
+    let scope = runtime.scope();
+    runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: scope.channel.clone(),
+            conversation_id: FIXTURE_CONVERSATION_ID.to_string(),
+            limit: 32,
+            cursor: None,
+            view: TranscriptReplayView::ModelContext,
+        })
+        .expect("model-context transcript replay")
+}
 
 fn gateway_config() -> GatewayConfig {
     let mut config = GatewayConfig::default_for_local_dev();
@@ -40,7 +57,7 @@ fn gateway_config() -> GatewayConfig {
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
         workspace_root_digest: Some("workspace-digest".to_string()),
-        client_conversation_hint: Some("thread-ollama".to_string()),
+        client_conversation_hint: Some(FIXTURE_CONVERSATION_ID.to_string()),
         model_alias: Some("local".to_string()),
         ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
@@ -54,13 +71,14 @@ fn seed_runtime_skill(
     let resolved = GatewayScopeResolver::new(config.scope.clone())
         .resolve(scope)
         .expect("scope");
+    let agent_id = resolved.entry_scope.identity.agent_id.clone();
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("runtime");
     runtime
         .runtime()
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "ollama_gateway_style".to_string(),
                 topic: "llm_gateway".to_string(),
                 title: "Ollama gateway reply style".to_string(),
@@ -70,7 +88,8 @@ fn seed_runtime_skill(
                 citations: Vec::new(),
                 source_chat_id: Some("thread-ollama".to_string()),
                 observed_at: 1,
-            }],
+            })],
+            owning_scope: support::runtime_skill_subject_scope(&agent_id),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("seed skill");
@@ -425,41 +444,30 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("scoped runtime");
-    let projection = runtime
-        .runtime()
-        .project(MemoryProjectionRequest {
-            structured_query_facets: Vec::new(),
-            user_query: "what should you call me?".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("projection");
-
-    let user_message = projection
-        .context
-        .recent_messages
+    let replay = replay_model_context(runtime.runtime());
+    let user_message = replay
+        .slice
+        .turns
         .iter()
-        .find(|message| message.content == "call me Qingchuan")
+        .flat_map(|turn| turn.input_messages.iter())
+        .find(|message| message.content.as_deref() == Some("call me Qingchuan"))
         .expect("user message persisted");
     assert!(user_message.message_id.starts_with("msg_"));
     assert!(user_message.observed_at > 0);
-    assert!(user_message.created_at >= user_message.observed_at);
     assert_eq!(user_message.role, "user");
-    assert_eq!(user_message.speaker_id, "owner-human");
-    assert_eq!(user_message.speaker_kind, "human");
-    let assistant_message = projection
-        .context
-        .recent_messages
+    assert_eq!(user_message.actor.speaker_id, "owner-human");
+    assert_eq!(user_message.actor.speaker_kind, "human");
+    let assistant_message = replay
+        .slice
+        .turns
         .iter()
-        .find(|message| message.content == "ok")
+        .filter_map(|turn| turn.assistant_message.as_ref())
+        .find(|message| message.content.as_deref() == Some("ok"))
         .expect("assistant message persisted");
     assert!(assistant_message.message_id.starts_with("msg_"));
     assert_eq!(assistant_message.role, "assistant");
-    assert_eq!(assistant_message.speaker_id, "assistant");
-    assert_eq!(assistant_message.speaker_kind, "llm_agent");
+    assert_eq!(assistant_message.actor.speaker_id, "assistant");
+    assert_eq!(assistant_message.actor.speaker_kind, "llm_agent");
 }
 
 #[test]
@@ -520,24 +528,17 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("scoped runtime");
-    let projection = runtime
-        .runtime()
-        .project(MemoryProjectionRequest {
-            structured_query_facets: Vec::new(),
-            user_query: "what do you know?".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("projection");
-
-    let recent_contents = projection
-        .context
-        .recent_messages
+    let replay = replay_model_context(runtime.runtime());
+    let recent_contents = replay
+        .slice
+        .turns
         .iter()
-        .map(|message| message.content.as_str())
+        .flat_map(|turn| {
+            turn.input_messages
+                .iter()
+                .chain(turn.assistant_message.iter())
+        })
+        .filter_map(|message| message.content.as_deref())
         .collect::<Vec<_>>();
     assert_eq!(
         recent_contents,
@@ -588,6 +589,7 @@ fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() 
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
@@ -598,13 +600,11 @@ fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() 
         })
         .expect("projection");
 
-    assert!(projection.context.long_term_memory_text.is_none());
+    assert!(projection.report().recall_delivery().rendered_count > 0);
     assert!(projection
-        .recall_delivery_report
-        .rendered_capsules
-        .iter()
-        .any(|capsule| capsule.content.contains("Qingchuan")));
-    assert!(projection.system_memory_block.contains("Qingchuan"));
+        .provider_payload()
+        .system_memory_block()
+        .contains("Qingchuan"));
 }
 
 #[test]

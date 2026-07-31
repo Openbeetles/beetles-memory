@@ -33,8 +33,8 @@ required_files=(
   "docs/zh-CN/cli-usage.md"
   "docs/en/integration.md"
   "docs/zh-CN/integration.md"
-  "docs/en/replay-and-migration.md"
-  "docs/zh-CN/replay-and-migration.md"
+  "docs/en/replay-and-archive.md"
+  "docs/zh-CN/replay-and-archive.md"
   "docs/en/operator-guide.md"
   "docs/zh-CN/operator-guide.md"
   "docs/en/profiles.md"
@@ -62,7 +62,7 @@ require_fixed "tombstone" crates/core/src/memory/long_term_control.rs crates/sdk
 require_fixed "forget_by_query" crates/core/src/memory/long_term_control.rs crates/core/tests/long_term_memory_control_contract.rs crates/sdk/tests/long_term_memory_control_contract.rs docs/en/api.md docs/zh-CN/api.md
 require_fixed "suppression policy" docs/en/api.md docs/zh-CN/api.md dev-docs/long-term-memory-control-surface-plan.md
 require_fixed "TranscriptDerivedRef" crates/core/src/memory/long_term_control.rs crates/sdk/tests/long_term_memory_control_contract.rs
-require_fixed "DerivedMemoryRef" docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md crates/sdk/tests/long_term_memory_control_contract.rs
+require_fixed "DerivedMemoryRef" docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/tests/long_term_memory_control_contract.rs
 require_fixed "HostUi" docs/en/api.md docs/zh-CN/api.md docs/en/integration.md docs/zh-CN/integration.md
 require_fixed "/memory/long-term/list" docs/en/deployment.md docs/zh-CN/deployment.md crates/http/src/lib.rs
 require_fixed "memory_long_term_list" docs/en/deployment.md docs/zh-CN/deployment.md crates/mcp/src/lib.rs
@@ -70,7 +70,7 @@ require_fixed "command.long_term.list" docs/en/deployment.md docs/zh-CN/deployme
 require_fixed "memory_long_term_list_request" docs/en/deployment.md docs/zh-CN/deployment.md crates/a2a/src/lib.rs
 require_regex "shadow memory|shadow memory|shadow memory|shadow memory|shadow memory" docs/en/api.md docs/zh-CN/api.md docs/en/integration.md docs/zh-CN/integration.md
 require_regex "runtime skill.*not|运行时 Skill.*不是|Runtime Skill.*not" docs/en/api.md docs/zh-CN/api.md docs/en/integration.md docs/zh-CN/integration.md
-require_regex "Transcript lifecycle.*not automatically|Transcript lifecycle.*不会自动|transcript lifecycle.*does not automatically" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-migration.md docs/zh-CN/replay-and-migration.md
+require_regex "Transcript lifecycle.*not automatically|Transcript lifecycle.*不会自动|transcript lifecycle.*does not automatically" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md
 
 host_product_forbidden_pattern="RoleKey|TaskRoomProjection|ClarificationRequest|HumanGate|Task\\.status|TaskRecord|CEO|BOSS|财务总监|仓库管理员"
 

@@ -11,29 +11,36 @@ use bm_sdk::{
     AgentToolExperienceGovernanceReport, AgentToolHint, AgentToolObservationDigest,
     AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
     AgentToolRegistrySnapshot, AgentToolUsageFeedback, ConversationKey, DerivedMemoryPlane,
-    DerivedMemoryRef, GraphRecallExpansionBudget, GraphRecallExpansionBudgetReport, HostOpaqueRef,
-    HostRefRelation, HostRefVisibility, LLMRuntimeProjectionEnvelope, MemoryAutopilotInput,
-    MemoryCapabilityCatalog, MemoryCapabilityPolicy, MemoryGovernancePolicyMutation,
-    MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
+    DerivedMemoryRef, GovernedStateMemoryCapability, GraphRecallExpansionBudget,
+    GraphRecallExpansionBudgetReport, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    MemoryAutopilotInput, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
+    MemoryGovernancePolicyMutation, MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
     MemoryLongTermControlView, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryProfile,
+    MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryPrivacyClass,
+    MemoryProfile, MemoryProjectionOutput, MemoryProjectionReport, MemoryProjectionSafeAuditReport,
     MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
     MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
     MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest, MemoryWriteRequest,
-    PostReplyMemoryMaintenanceContext, PrivateDisclosureIntegrityReport,
-    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
-    PromptParticipationPlan, RedactedTranscriptSlice, SoulLifeProjectionReport, StoreBackendConfig,
-    SubjectKind, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
-    TranscriptEvidenceRef, TranscriptLifecycleTransition, TranscriptRedactionReason,
-    TranscriptRedactionReportItem, TranscriptRepairIssue, TranscriptRepairIssueKind,
-    TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage,
-    TranscriptTurnRecord, VaultManifest, WorkIntegrityReport, AGENT_TOOL_NO_EXPERIENCE_REASON,
+    PostReplyMemoryMaintenanceContext, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
+    ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
+    ProviderProjectionPayload, RedactedTranscriptSlice, RuntimeSkillRecallTransport,
+    StoreBackendConfig, SubjectKind, SubjectRegistry, SubjectRelationshipGraph,
+    SubjectScopedRuntime, TranscriptEvidenceRef, TranscriptLifecycleTransition,
+    TranscriptRedactionReason, TranscriptRedactionReportItem, TranscriptRepairIssue,
+    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
+    TranscriptTurnPage, TranscriptTurnRecord, VaultManifest, AGENT_TOOL_NO_EXPERIENCE_REASON,
     AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH, AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
+
+fn p8_contract_types_are_sdk_importable(
+    _capability: Option<GovernedStateMemoryCapability>,
+    _transport: RuntimeSkillRecallTransport,
+) {
+}
 
 fn prompt_context_contract_is_sdk_importable<'a>(
     params: PromptMemoryContextParams<'a>,
@@ -170,10 +177,10 @@ fn transcript_replay_export_page_requests_are_public() {
 }
 
 fn sdk_projection_report_set_types_are_importable(
-    _runtime_projection: Option<LLMRuntimeProjectionEnvelope>,
-    _life_projection: Option<SoulLifeProjectionReport>,
-    _disclosure_integrity: Option<PrivateDisclosureIntegrityReport>,
-    _work_integrity: Option<WorkIntegrityReport>,
+    _output: Option<MemoryProjectionOutput>,
+    _provider: Option<ProviderProjectionPayload>,
+    _report: Option<MemoryProjectionReport>,
+    _audit: Option<MemoryProjectionSafeAuditReport>,
 ) {
 }
 
@@ -279,6 +286,24 @@ fn sdk_runtime_uses_opaque_memory_store_handle_as_public_store_entry() {
 }
 
 #[test]
+fn runtime_skill_operation_authority_stays_out_of_the_sdk_public_surface() {
+    let sdk_root = include_str!("../src/lib.rs");
+    for private_type in [
+        "RuntimeSkillMaterializedViewRef",
+        "RuntimeSkillOperationAuthorityRef",
+        "RuntimeSkillRecallAuthority",
+        "RuntimeSkillRecallBudgetAuthority",
+        "RuntimeSkillRecallPlan",
+        "RuntimeSkillRecallQuery",
+    ] {
+        assert!(
+            !sdk_root.contains(private_type),
+            "{private_type} must remain core-private operational authority"
+        );
+    }
+}
+
+#[test]
 fn production_long_term_owner_mutation_is_not_exposed_by_host_store_surfaces() {
     let sdk_runtime = include_str!("../src/runtime.rs");
     let core_platform = include_str!("../../core/src/platform/mod.rs");
@@ -362,6 +387,10 @@ fn next_gen_builders_are_sdk_public_without_adapter_ownership() {
     let promotion = promote_task_experience_to_procedure(
         ProceduralMemoryPromotionInput {
             task_id: "task-1".to_string(),
+            learning_id: "learning:task-1".to_string(),
+            learning_digest:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_string(),
             trigger: "repeatable task".to_string(),
             procedure: "Use the proven path.".to_string(),
             constraints: vec!["stay in SDK".to_string()],
@@ -371,6 +400,7 @@ fn next_gen_builders_are_sdk_public_without_adapter_ownership() {
             quality_score: 80,
             repeated_evidence_count: 2,
             capability_affinity: vec!["sdk".to_string()],
+            privacy_class: MemoryPrivacyClass::SharedWithSubject,
         },
         ProceduralMemoryPromotionPolicy::default(),
     );

@@ -5,13 +5,13 @@ use bm_core::memory::{
     get_long_term_memory_control_detail, list_long_term_memory_control_page,
     plan_long_term_memory_control_mutation, plan_long_term_memory_governance_policy_mutation,
     plan_long_term_memory_owner_mutation, plan_long_term_memory_upsert, DerivedMemoryPlane,
-    DerivedMemoryRef, LongTermMemoryControlAuditEvent, LongTermMemoryControlDetailRequest,
-    LongTermMemoryControlListRequest, LongTermMemoryControlMutationRequest,
-    LongTermMemoryControlReadStore, LongTermMemoryControlWrite, LongTermMemoryDraft,
-    LongTermMemoryEntry, LongTermMemoryEntryPlan, LongTermMemoryKind, LongTermMemoryOwnerMutation,
-    LongTermMemoryOwnerWrite, LongTermMemoryQuery, LongTermMemorySlot, LongTermMemorySourceScope,
-    LongTermMemoryStaleHint, LongTermMemoryStore, MemoryGovernancePolicyMutation,
-    MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
+    DerivedMemoryRef, LongTermControlOperation, LongTermMemoryControlAuditEvent,
+    LongTermMemoryControlDetailRequest, LongTermMemoryControlListRequest,
+    LongTermMemoryControlMutationRequest, LongTermMemoryControlReadStore,
+    LongTermMemoryControlWrite, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryEntryPlan,
+    LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryOwnerWrite, LongTermMemoryQuery,
+    LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemoryStaleHint, LongTermMemoryStore,
+    MemoryGovernancePolicyMutation, MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermGovernancePolicy,
     MemoryLongTermMutation, MemoryLongTermSelector, MemoryLongTermTarget, MemoryPrivacyClass,
     MemorySubjectVisibilityPolicy, TranscriptEvidenceRef,
@@ -181,7 +181,7 @@ impl bm_core::memory::LongTermMemoryReadStore for ReadOnlyLongTermView<'_> {
 
 #[derive(Default)]
 struct InMemoryControlStore {
-    revisions: Mutex<Vec<bm_core::memory::LongTermMemoryControlRevision>>,
+    revision_intents: Mutex<Vec<bm_core::memory::LongTermMemoryControlRevisionIntent>>,
     tombstones: Mutex<BTreeMap<String, bm_core::memory::LongTermMemoryTombstone>>,
     policies: Mutex<BTreeMap<String, MemoryLongTermGovernancePolicy>>,
     audits: Mutex<Vec<LongTermMemoryControlAuditEvent>>,
@@ -193,17 +193,8 @@ impl LongTermMemoryControlReadStore for InMemoryControlStore {
         record_id: &str,
         limit: usize,
     ) -> Result<Vec<bm_core::memory::LongTermMemoryControlRevision>> {
-        let mut revisions = self
-            .revisions
-            .lock()
-            .expect("revisions lock")
-            .iter()
-            .filter(|revision| revision.record_id == record_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        revisions.sort_by(|left, right| right.owner_revision.cmp(&left.owner_revision));
-        revisions.truncate(limit);
-        Ok(revisions)
+        let _ = (record_id, limit);
+        Ok(Vec::new())
     }
 
     fn get_long_term_control_tombstone(
@@ -262,13 +253,13 @@ impl LongTermMemoryControlReadStore for InMemoryControlStore {
 }
 
 impl InMemoryControlStore {
-    fn put_long_term_control_revision(
+    fn put_long_term_control_revision_intent(
         &self,
-        revision: &bm_core::memory::LongTermMemoryControlRevision,
+        revision: &bm_core::memory::LongTermMemoryControlRevisionIntent,
     ) -> Result<()> {
-        self.revisions
+        self.revision_intents
             .lock()
-            .expect("revisions lock")
+            .expect("revision intents lock")
             .push(revision.clone());
         Ok(())
     }
@@ -364,8 +355,8 @@ fn apply_control_writes(
 ) -> Result<()> {
     for write in writes {
         match write {
-            LongTermMemoryControlWrite::PutRevision(revision) => {
-                control.put_long_term_control_revision(&revision)?;
+            LongTermMemoryControlWrite::PutRevisionIntent(revision) => {
+                control.put_long_term_control_revision_intent(&revision)?;
             }
             LongTermMemoryControlWrite::PutTombstone(tombstone) => {
                 control.put_long_term_control_tombstone(&tombstone)?;
@@ -520,7 +511,7 @@ fn control_planner_returns_write_intent_without_mutating_read_stores() {
     assert_eq!(plan.owner_writes.len(), 1);
     assert_eq!(plan.control_writes.len(), 2);
     assert_eq!(store.get(&record_id).unwrap(), Some(before));
-    assert!(control.revisions.lock().unwrap().is_empty());
+    assert!(control.revision_intents.lock().unwrap().is_empty());
     assert!(control.tombstones.lock().unwrap().is_empty());
     assert!(control.policies.lock().unwrap().is_empty());
     assert!(control.audits.lock().unwrap().is_empty());
@@ -669,13 +660,7 @@ fn correct_preserves_source_lineage_and_increments_owner_revision() {
     assert_eq!(corrected.source_revision, Some(1));
     assert_eq!(corrected.owner_revision, 2);
     assert!(corrected.content.contains("Neovim"));
-    assert_eq!(
-        control
-            .list_long_term_control_revisions(&record_id, 10)
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(control.revision_intents.lock().unwrap().len(), 1);
     assert!(report.audit_event_id.is_some());
 }
 
@@ -734,7 +719,7 @@ fn unchanged_correct_stale_privacy_and_scope_are_noop_without_control_writes() {
             "{operation_name}"
         );
         assert!(
-            control.revisions.lock().unwrap().is_empty(),
+            control.revision_intents.lock().unwrap().is_empty(),
             "{operation_name}"
         );
         assert!(
@@ -1094,16 +1079,26 @@ fn privacy_transition_requires_the_explicit_control_operation() {
         MemoryPrivacyClass::PublicRuntime
     );
     let revision = control
-        .revisions
+        .revision_intents
         .lock()
         .unwrap()
         .iter()
-        .find(|revision| revision.operation == "change_privacy")
+        .find(|revision| revision.operation == LongTermControlOperation::ChangePrivacy)
         .cloned()
         .expect("change privacy revision");
-    assert_ne!(revision.previous_digest, revision.new_digest);
-    assert_eq!(revision.owner_revision, 2);
-    assert_eq!(revision.source_revision, Some(1));
+    assert_eq!(
+        revision.transition.predecessor.owner_revision, 1,
+        "intent must bind the exact prior owner revision"
+    );
+    assert_eq!(
+        revision
+            .transition
+            .successor
+            .as_ref()
+            .expect("successor")
+            .owner_revision,
+        2
+    );
 }
 
 #[test]

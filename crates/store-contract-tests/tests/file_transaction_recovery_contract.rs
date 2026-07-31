@@ -16,7 +16,7 @@ use bm_sdk::nonproduction_replay_harness::{
 };
 use serde_json::{json, Value};
 
-const NAMESPACE: &str = "file_transaction_recovery";
+const NAMESPACE: &str = "session";
 const KEY: &str = "generation";
 
 fn temp_root(name: &str) -> PathBuf {
@@ -55,15 +55,24 @@ fn request(
     expected_generation: Option<u64>,
     generation: u64,
 ) -> StoreTransactionRequest {
+    request_for_key(transaction_id, KEY, expected_generation, generation)
+}
+
+fn request_for_key(
+    transaction_id: &str,
+    key: &str,
+    expected_generation: Option<u64>,
+    generation: u64,
+) -> StoreTransactionRequest {
     let preconditions = match expected_generation {
         Some(expected) => vec![StoreJsonPrecondition::Exact {
             namespace: NAMESPACE.to_string(),
-            key: KEY.to_string(),
+            key: key.to_string(),
             value: json!({"generation": expected}),
         }],
         None => vec![StoreJsonPrecondition::Absent {
             namespace: NAMESPACE.to_string(),
-            key: KEY.to_string(),
+            key: key.to_string(),
         }],
     };
     StoreTransactionRequest::new(
@@ -72,8 +81,29 @@ fn request(
         vec![
             StoreEngineMutation::PutJson {
                 namespace: NAMESPACE.to_string(),
-                key: KEY.to_string(),
+                key: key.to_string(),
                 value: json!({"generation": generation}),
+            },
+            StoreEngineMutation::AppendEvent {
+                event: Box::new(event(transaction_id)),
+            },
+        ],
+        None,
+    )
+}
+
+fn delete_request(transaction_id: &str) -> StoreTransactionRequest {
+    StoreTransactionRequest::new(
+        transaction_id,
+        vec![StoreJsonPrecondition::Exact {
+            namespace: NAMESPACE.to_string(),
+            key: KEY.to_string(),
+            value: json!({"generation": 1}),
+        }],
+        vec![
+            StoreEngineMutation::DeleteJson {
+                namespace: NAMESPACE.to_string(),
+                key: KEY.to_string(),
             },
             StoreEngineMutation::AppendEvent {
                 event: Box::new(event(transaction_id)),
@@ -231,6 +261,50 @@ fn prepared_journal_recovers_before_image_after_process_crash() {
         !root.join(".beetle-memory.transaction").exists(),
         "successful recovery must clean the durable journal"
     );
+}
+
+#[test]
+fn prepared_journal_recovers_a_mid_put_unpaired_index() {
+    let root = temp_root("mid-put");
+    seed(&root);
+    let status = crash_worker(&root, "after_json_index_before_data");
+    assert!(!status.success());
+    assert_journal_state(&root, "prepared");
+
+    let reopened = open(&root);
+    assert_eq!(read_generation(&reopened), json!({"generation": 1}));
+    assert!(reopened
+        .get_json_value(NAMESPACE, "new-generation")
+        .expect("read recovered new key")
+        .is_none());
+    assert!(!root.join(".beetle-memory.transaction").exists());
+}
+
+#[test]
+fn prepared_journal_recovers_a_mid_delete_unpaired_index() {
+    let root = temp_root("mid-delete");
+    seed(&root);
+    let status = crash_worker(&root, "after_json_data_delete_before_index");
+    assert!(!status.success());
+    assert_journal_state(&root, "prepared");
+
+    let reopened = open(&root);
+    assert_eq!(read_generation(&reopened), json!({"generation": 1}));
+    assert!(!root.join(".beetle-memory.transaction").exists());
+}
+
+#[test]
+fn prepared_journal_recovers_a_truncated_event_suffix() {
+    let root = temp_root("mid-event");
+    seed(&root);
+    let status = crash_worker(&root, "mid_event_append");
+    assert!(!status.success());
+    assert_journal_state(&root, "prepared");
+
+    let reopened = open(&root);
+    assert_eq!(read_generation(&reopened), json!({"generation": 1}));
+    assert_eq!(reopened.read_events().expect("recovered events").len(), 1);
+    assert!(!root.join(".beetle-memory.transaction").exists());
 }
 
 #[test]
@@ -564,8 +638,16 @@ fn file_transaction_recovery_crash_worker() {
         "worker must be explicitly enabled"
     );
 
+    let request = match crash_point.to_str() {
+        Some("after_json_index_before_data") => {
+            request_for_key("crash-mid-put", "new-generation", None, 2)
+        }
+        Some("after_json_data_delete_before_index") => delete_request("crash-mid-delete"),
+        Some("mid_event_append") => request("crash-mid-event", Some(1), 2),
+        _ => request("crash", Some(1), 2),
+    };
     open(Path::new(&root))
-        .commit_transaction(&request("crash", Some(1), 2))
+        .commit_transaction(&request)
         .unwrap_or_else(|error| panic!("transaction returned before {crash_point:?}: {error}"));
     panic!("transaction did not terminate at {crash_point:?}");
 }

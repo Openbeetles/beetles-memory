@@ -19,7 +19,7 @@ fn cli_renders_platform_capability_snapshot_for_requested_profile() {
     );
 
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("snapshot json");
-    assert_eq!(value["schema"], "beetle-memory.platform.capability.v1");
+    assert_eq!(value["schema"], "beetle-memory.platform.capability.v2");
     assert_eq!(value["profile"], "profile-esp-standalone-memory");
     assert_eq!(value["target"], "target-esp");
     assert_eq!(value["adapter"]["wss"]["client_allowed"], true);

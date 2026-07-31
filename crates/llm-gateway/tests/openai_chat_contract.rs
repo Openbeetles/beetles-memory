@@ -5,7 +5,11 @@ use bm_llm_gateway::{
     OpenAiGatewayBody, OpenAiGatewayRequest, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryRecallRequest,
+    MemoryRecallTemporalOperation, MemorySemanticJudgmentSource, MemoryWriteCandidate,
+    MemoryWriteRequest,
 };
 use serde_json::{json, Value};
 
@@ -31,7 +35,7 @@ fn scope_request() -> GatewayScopeRequest {
     }
 }
 
-fn seed_runtime_skill(
+fn seed_gateway_memory(
     gateway: &GatewayRuntime,
     config: &GatewayConfig,
     scope: &GatewayScopeRequest,
@@ -42,23 +46,62 @@ fn seed_runtime_skill(
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("runtime");
-    runtime
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "llm gateway".to_string(),
+    };
+    let write = runtime
         .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "gateway_style".to_string(),
-                topic: "llm_gateway".to_string(),
-                title: "Gateway reply style".to_string(),
-                summary: "Always mention the hardware gateway boundary.".to_string(),
-                content: "When answering gateway questions, keep the hardware boundary explicit."
-                    .to_string(),
-                citations: Vec::new(),
-                source_chat_id: Some("thread-7".to_string()),
-                observed_at: 1,
+        .write(MemoryWriteRequest::Candidates {
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: "gateway-boundary".to_string(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                content: MemoryCandidateContent::Text {
+                    topic: "llm gateway".to_string(),
+                    body: "Gateway answers keep the hardware boundary explicit.".to_string(),
+                    keywords: vec![
+                        "gateway".to_string(),
+                        "hardware".to_string(),
+                        "boundary".to_string(),
+                    ],
+                },
+                evidence_refs: vec!["thread-7:gateway-boundary".to_string()],
+                canonical_entities: Vec::new(),
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::LlmGovernance,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "OpenAI projection fixture".to_string(),
+                }),
             }],
-            source: RuntimeSkillWriteSource::Manual,
+            runtime_skill_owning_scope: None,
         })
-        .expect("seed skill");
+        .expect("seed gateway memory");
+    assert!(write.accepted, "{write:#?}");
+    assert_eq!(write.changed, 1, "{write:#?}");
+    let recall = runtime
+        .runtime()
+        .recall(MemoryRecallRequest {
+            temporal_operation: MemoryRecallTemporalOperation::Current,
+            query: "How should the gateway answer?".to_string(),
+            limit: 4,
+            structured_query_facets: Vec::new(),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("recall seeded gateway memory");
+    assert!(
+        recall
+            .delivery_report
+            .rendered_capsules
+            .iter()
+            .any(|capsule| capsule
+                .content
+                .contains("Gateway answers keep the hardware boundary explicit.")),
+        "{:#?}",
+        recall.delivery_report
+    );
 }
 
 #[derive(Default)]
@@ -135,10 +178,15 @@ fn models_endpoint_proxies_openai_provider_models_without_projection() {
 
 #[test]
 fn chat_non_streaming_injects_memory_and_preserves_openai_payload_shape() {
-    let config = gateway_config();
+    let mut config = gateway_config();
+    config
+        .providers
+        .get_mut(&config.default_provider)
+        .expect("default provider")
+        .max_prompt_chars = Some(16_384);
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let scope = scope_request();
-    seed_runtime_skill(&gateway, &config, &scope);
+    seed_gateway_memory(&gateway, &config, &scope);
     let mut upstream = MockOpenAiUpstream::default();
 
     let response = handle_openai_request(
@@ -183,6 +231,13 @@ fn chat_non_streaming_injects_memory_and_preserves_openai_payload_shape() {
         .as_str()
         .expect("memory system content")
         .contains("<beetle-memory-projection version=\"1\">"));
+    let provider_system = sent.body["messages"][0]["content"]
+        .as_str()
+        .expect("provider system projection");
+    assert!(
+        provider_system.contains("Gateway answers keep the hardware boundary explicit."),
+        "{provider_system}"
+    );
     assert_eq!(
         response.body.json()["choices"][0]["message"]["content"],
         "ok"
@@ -201,6 +256,8 @@ fn chat_non_streaming_injects_memory_and_preserves_openai_payload_shape() {
         .contains(&"gateway_host_tools_no_cold_route".to_string()));
     assert!(response.audit.projection_record.projection_chars > 0);
     assert!(response.audit.projection_record.block.is_none());
+    let audit_json = serde_json::to_string(&response.audit).expect("safe gateway audit");
+    assert!(!audit_json.contains("Gateway answers keep the hardware boundary explicit."));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
@@ -8,14 +9,19 @@ use crate::error::{Error, Result};
 use super::governed_post_image::{
     revision_is_exact_successor, GovernedDocumentImage, GovernedPostImageValidation,
 };
-use super::long_term::{scoped_long_term_control_storage_key, scoped_long_term_memory_storage_key};
+use super::long_term::scoped_long_term_control_storage_key;
+use super::long_term_version::{
+    LongTermMemoryHeadManifest, LongTermMemoryVersionMaterialImage, LongTermVersionRetentionLease,
+};
 use super::{
     long_term_memory_evidence_summary, plan_long_term_memory_owner_mutation,
     plan_long_term_memory_upsert, DerivedMemoryPlane, DerivedMemoryRef, FacetReportView,
-    GovernedMemoryOwnerRef, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryEntryPlan,
+    GovernedContractFailure, GovernedContractValidation, GovernedMemoryOwnerPlane,
+    GovernedMemoryOwnerRef, GovernedOwnerRevisionRef, GovernedOwnerTermination,
+    GovernedOwnerTransition, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryEntryPlan,
     LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryQuery, LongTermMemoryReadStore,
     LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemoryStaleHint, LongTermMemoryStore,
-    MemoryPrivacyClass, SubjectId, TranscriptEvidenceRef,
+    LongTermMemoryVersionMaterial, MemoryPrivacyClass, SubjectId, TranscriptEvidenceRef,
 };
 
 fn plan_or_apply_owner_mutation(
@@ -38,13 +44,15 @@ pub const LONG_TERM_CONTROL_REVISION_NAMESPACE: &str = "long_term_control_revisi
 pub const LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE: &str = "long_term_control_tombstone";
 pub const LONG_TERM_GOVERNANCE_POLICY_NAMESPACE: &str = "long_term_governance_policy";
 pub const LONG_TERM_CONTROL_AUDIT_NAMESPACE: &str = "long_term_control_audit";
-pub const LONG_TERM_CONTROL_SCHEMA_VERSION: u32 = 1;
+pub const LONG_TERM_CONTROL_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LongTermControlOperation {
+    Refresh,
     Correct,
     Supersede,
+    Invalidate,
     Delete,
     ForgetByQuery,
     MarkStale,
@@ -59,8 +67,10 @@ pub enum LongTermControlOperation {
 impl LongTermControlOperation {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Refresh => "refresh",
             Self::Correct => "correct",
             Self::Supersede => "supersede",
+            Self::Invalidate => "invalidate",
             Self::Delete => "delete",
             Self::ForgetByQuery => "forget_by_query",
             Self::MarkStale => "mark_stale",
@@ -75,8 +85,10 @@ impl LongTermControlOperation {
 
     pub fn from_label(value: &str) -> Option<Self> {
         match value.trim() {
+            "refresh" => Some(Self::Refresh),
             "correct" => Some(Self::Correct),
             "supersede" => Some(Self::Supersede),
+            "invalidate" => Some(Self::Invalidate),
             "delete" => Some(Self::Delete),
             "forget_by_query" => Some(Self::ForgetByQuery),
             "mark_stale" => Some(Self::MarkStale),
@@ -87,6 +99,53 @@ impl LongTermControlOperation {
             "policy.resume" => Some(Self::PolicyResume),
             "policy.remove_suppression" => Some(Self::PolicyRemoveSuppression),
             _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTermInvalidationReasonCode {
+    FactuallyIncorrect,
+    SourceAuthorityRevoked,
+    ContradictedByGovernedEvidence,
+    IntegrityViolation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermInvalidationContract {
+    pub target: MemoryLongTermTarget,
+    pub reason_code: LongTermInvalidationReasonCode,
+    pub governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
+    pub actor_subject_id: SubjectId,
+    pub audit_reason: String,
+}
+
+impl LongTermInvalidationContract {
+    pub fn validate_contract(&self) -> GovernedContractValidation {
+        let mut failures = Vec::new();
+        if self.actor_subject_id.trim().is_empty()
+            || self.actor_subject_id != self.actor_subject_id.trim()
+        {
+            failures.push(GovernedContractFailure::InvalidationActorMissing);
+        }
+        if self.audit_reason.trim().is_empty() || self.audit_reason != self.audit_reason.trim() {
+            failures.push(GovernedContractFailure::InvalidationAuditReasonMissing);
+        }
+        if self.governed_evidence_refs.is_empty() {
+            failures.push(GovernedContractFailure::InvalidationEvidenceMissing);
+        }
+        if self.governed_evidence_refs.iter().any(|evidence| {
+            !evidence.is_valid()
+                || evidence.owner_ref.owner_plane != GovernedMemoryOwnerPlane::EvidenceDocument
+        }) {
+            failures.push(GovernedContractFailure::InvalidationEvidenceOwnerInvalid);
+        }
+        failures.sort();
+        failures.dedup();
+        GovernedContractValidation {
+            accepted: failures.is_empty(),
+            failures,
         }
     }
 }
@@ -134,6 +193,9 @@ pub enum MemoryLongTermMutation {
     Supersede {
         target: MemoryLongTermTarget,
         replacement: LongTermMemoryDraft,
+    },
+    Invalidate {
+        contract: LongTermInvalidationContract,
     },
     Delete {
         target: MemoryLongTermTarget,
@@ -281,7 +343,7 @@ pub struct MemoryLongTermAffectedRecord {
 pub struct MemoryLongTermTombstoneRef {
     pub record_id: String,
     pub tombstone_id: String,
-    pub operation: String,
+    pub operation: LongTermControlOperation,
     pub last_owner_revision: u64,
     pub last_source_revision: Option<u64>,
 }
@@ -348,64 +410,340 @@ pub struct MemoryLongTermMutationReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LongTermMemoryControlRevision {
-    pub schema_version: u32,
+#[serde(deny_unknown_fields)]
+pub struct LongTermMemoryControlRevisionIntent {
     pub revision_id: String,
-    pub record_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub successor_record_id: Option<String>,
-    pub operation: String,
-    pub owner_revision: u64,
-    pub source_revision: Option<u64>,
-    pub previous_digest: String,
-    pub new_digest: String,
-    pub reason: String,
-    pub owner_subject_id: SubjectId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_space_id: String,
+    pub mounted_subject_id: SubjectId,
+    pub operation: LongTermControlOperation,
+    pub invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
+    pub transition: GovernedOwnerTransition,
+    pub governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
     pub actor_subject_id: Option<SubjectId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_space_id: Option<String>,
+    pub reason: String,
     pub created_at: u64,
 }
 
-impl LongTermMemoryControlRevision {
+impl LongTermMemoryControlRevisionIntent {
     #[allow(clippy::too_many_arguments)]
     pub fn for_owner_change(
         revision_id: impl Into<String>,
         operation: LongTermControlOperation,
         before: &LongTermMemoryEntry,
-        after: &LongTermMemoryEntry,
+        after: Option<&LongTermMemoryEntry>,
         reason: impl Into<String>,
-        owner_subject_id: SubjectId,
+        mounted_subject_id: SubjectId,
         actor_subject_id: Option<SubjectId>,
         memory_space_id: impl Into<String>,
         created_at: u64,
-    ) -> Self {
-        Self {
-            schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-            revision_id: revision_id.into(),
-            record_id: after.id.clone(),
-            successor_record_id: None,
-            operation: operation.as_str().to_string(),
-            owner_revision: after.owner_revision,
-            source_revision: after.source_revision,
-            previous_digest: digest_entry(before),
-            new_digest: digest_entry(after),
-            reason: reason.into(),
-            owner_subject_id,
+        governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
+    ) -> Result<Self> {
+        Self::for_owner_change_with_invalidation_reason(
+            revision_id,
+            operation,
+            before,
+            after,
+            reason,
+            mounted_subject_id,
             actor_subject_id,
-            memory_space_id: Some(memory_space_id.into()),
+            memory_space_id,
             created_at,
+            governed_evidence_refs,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_invalidation(
+        revision_id: impl Into<String>,
+        before: &LongTermMemoryEntry,
+        reason_code: LongTermInvalidationReasonCode,
+        reason: impl Into<String>,
+        mounted_subject_id: SubjectId,
+        actor_subject_id: SubjectId,
+        memory_space_id: impl Into<String>,
+        created_at: u64,
+        governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
+    ) -> Result<Self> {
+        Self::for_owner_change_with_invalidation_reason(
+            revision_id,
+            LongTermControlOperation::Invalidate,
+            before,
+            None,
+            reason,
+            mounted_subject_id,
+            Some(actor_subject_id),
+            memory_space_id,
+            created_at,
+            governed_evidence_refs,
+            Some(reason_code),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn for_owner_change_with_invalidation_reason(
+        revision_id: impl Into<String>,
+        operation: LongTermControlOperation,
+        before: &LongTermMemoryEntry,
+        after: Option<&LongTermMemoryEntry>,
+        reason: impl Into<String>,
+        mounted_subject_id: SubjectId,
+        actor_subject_id: Option<SubjectId>,
+        memory_space_id: impl Into<String>,
+        created_at: u64,
+        governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
+        invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
+    ) -> Result<Self> {
+        let termination = match operation {
+            LongTermControlOperation::Refresh => GovernedOwnerTermination::Revised,
+            LongTermControlOperation::Correct => GovernedOwnerTermination::Corrected,
+            LongTermControlOperation::Supersede => GovernedOwnerTermination::Superseded,
+            LongTermControlOperation::Invalidate => GovernedOwnerTermination::Invalidated,
+            LongTermControlOperation::Delete => GovernedOwnerTermination::Deleted,
+            LongTermControlOperation::ForgetByQuery => GovernedOwnerTermination::Forgotten,
+            LongTermControlOperation::MarkStale
+            | LongTermControlOperation::ChangeScope
+            | LongTermControlOperation::ChangePrivacy => GovernedOwnerTermination::Revised,
+            LongTermControlOperation::PolicySuppress
+            | LongTermControlOperation::PolicyPause
+            | LongTermControlOperation::PolicyResume
+            | LongTermControlOperation::PolicyRemoveSuppression => {
+                return Err(Error::config(
+                    "long_term_control_revision_intent",
+                    "policy operations do not create owner version transitions",
+                ));
+            }
+        };
+        let predecessor = GovernedOwnerRevisionRef::try_new(
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, before.id.clone()),
+            before.owner_revision,
+        )?;
+        let successor = after
+            .map(|entry| {
+                GovernedOwnerRevisionRef::try_new(
+                    GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        entry.id.clone(),
+                    ),
+                    entry.owner_revision,
+                )
+            })
+            .transpose()?;
+        let mut governed_evidence_refs = governed_evidence_refs;
+        governed_evidence_refs.sort();
+        governed_evidence_refs.dedup();
+        let intent = Self {
+            revision_id: revision_id.into(),
+            memory_space_id: memory_space_id.into(),
+            mounted_subject_id,
+            operation,
+            invalidation_reason_code,
+            transition: GovernedOwnerTransition {
+                predecessor,
+                terminated_at: created_at,
+                termination,
+                successor,
+            },
+            governed_evidence_refs,
+            actor_subject_id,
+            reason: reason.into(),
+            created_at,
+        };
+        intent.validate_contract()?;
+        Ok(intent)
+    }
+
+    pub fn validate_contract(&self) -> Result<()> {
+        if self.revision_id.trim().is_empty()
+            || self.revision_id != self.revision_id.trim()
+            || self.memory_space_id.trim().is_empty()
+            || self.memory_space_id != self.memory_space_id.trim()
+            || self.mounted_subject_id.trim().is_empty()
+            || self.mounted_subject_id != self.mounted_subject_id.trim()
+            || self.reason.trim().is_empty()
+            || self.reason != self.reason.trim()
+            || self.created_at == 0
+            || self.transition.terminated_at < self.created_at
+            || (self.operation == LongTermControlOperation::Invalidate)
+                != self.invalidation_reason_code.is_some()
+            || self
+                .governed_evidence_refs
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self.governed_evidence_refs.iter().any(|evidence| {
+                !evidence.is_valid()
+                    || evidence.owner_ref.owner_plane != GovernedMemoryOwnerPlane::EvidenceDocument
+            })
+        {
+            return Err(Error::config(
+                "long_term_control_revision_intent",
+                "revision intent identity, scope, transition, evidence, reason, or time is invalid",
+            ));
         }
+        Ok(())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LongTermMemoryControlRevision {
+    pub schema_version: u32,
+    pub revision_id: String,
+    pub memory_space_id: String,
+    pub mounted_subject_id: SubjectId,
+    pub operation: LongTermControlOperation,
+    pub invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
+    pub transition: GovernedOwnerTransition,
+    pub predecessor_material_digest: String,
+    pub successor_material_digest: Option<String>,
+    pub governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
+    pub reason: String,
+    pub actor_subject_id: Option<SubjectId>,
+    pub created_at: u64,
+    pub content_digest: String,
+}
+
+impl LongTermMemoryControlRevision {
+    pub fn bind(
+        mut intent: LongTermMemoryControlRevisionIntent,
+        predecessor: &LongTermMemoryVersionMaterial,
+        successor: Option<&LongTermMemoryVersionMaterial>,
+    ) -> Result<Self> {
+        intent.validate_contract()?;
+        let monotonic_successor_time =
+            predecessor
+                .origin
+                .valid_from
+                .checked_add(1)
+                .ok_or_else(|| {
+                    Error::config(
+                        "long_term_control_revision",
+                        "predecessor validity time cannot advance without overflow",
+                    )
+                })?;
+        intent.transition.terminated_at = intent.created_at.max(monotonic_successor_time);
+        let transition_validation = intent.transition.validate_contract(predecessor, successor);
+        if !transition_validation.accepted
+            || predecessor.memory_space_id != intent.memory_space_id
+            || predecessor.mounted_subject_id != intent.mounted_subject_id
+        {
+            return Err(Error::config(
+                "long_term_control_revision",
+                format!(
+                    "material transition binding rejected: {:?}",
+                    transition_validation.failures
+                ),
+            ));
+        }
+        let mut revision = Self {
+            schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+            revision_id: intent.revision_id,
+            memory_space_id: intent.memory_space_id,
+            mounted_subject_id: intent.mounted_subject_id,
+            operation: intent.operation,
+            invalidation_reason_code: intent.invalidation_reason_code,
+            transition: intent.transition,
+            predecessor_material_digest: predecessor.content_digest.clone(),
+            successor_material_digest: successor.map(|material| material.content_digest.clone()),
+            governed_evidence_refs: intent.governed_evidence_refs,
+            reason: intent.reason,
+            actor_subject_id: intent.actor_subject_id,
+            created_at: intent.created_at,
+            content_digest: String::new(),
+        };
+        revision.content_digest = revision.canonical_content_digest()?;
+        Ok(revision)
+    }
+
+    pub fn canonical_content_digest(&self) -> Result<String> {
+        #[derive(Serialize)]
+        struct DigestInput<'a> {
+            schema_version: u32,
+            revision_id: &'a str,
+            memory_space_id: &'a str,
+            mounted_subject_id: &'a str,
+            operation: LongTermControlOperation,
+            invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
+            transition: &'a GovernedOwnerTransition,
+            predecessor_material_digest: &'a str,
+            successor_material_digest: Option<&'a str>,
+            governed_evidence_refs: &'a [GovernedOwnerRevisionRef],
+            reason: &'a str,
+            actor_subject_id: Option<&'a str>,
+            created_at: u64,
+        }
+        let encoded = serde_json::to_vec(&DigestInput {
+            schema_version: self.schema_version,
+            revision_id: &self.revision_id,
+            memory_space_id: &self.memory_space_id,
+            mounted_subject_id: &self.mounted_subject_id,
+            operation: self.operation,
+            invalidation_reason_code: self.invalidation_reason_code,
+            transition: &self.transition,
+            predecessor_material_digest: &self.predecessor_material_digest,
+            successor_material_digest: self.successor_material_digest.as_deref(),
+            governed_evidence_refs: &self.governed_evidence_refs,
+            reason: &self.reason,
+            actor_subject_id: self.actor_subject_id.as_deref(),
+            created_at: self.created_at,
+        })
+        .map_err(|error| Error::config("long_term_control_revision", error.to_string()))?;
+        let mut hasher = Sha256::new();
+        hash_control_field(&mut hasher, b"long_term_control_revision_v2");
+        hash_control_field(&mut hasher, &encoded);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    pub fn validate_contract(&self) -> Result<()> {
+        if self.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
+            || self.revision_id.trim().is_empty()
+            || self.memory_space_id.trim().is_empty()
+            || self.mounted_subject_id.trim().is_empty()
+            || self.reason.trim().is_empty()
+            || self.created_at == 0
+            || self.transition.terminated_at < self.created_at
+            || (self.operation == LongTermControlOperation::Invalidate)
+                != self.invalidation_reason_code.is_some()
+            || !is_control_sha256(&self.predecessor_material_digest)
+            || self
+                .successor_material_digest
+                .as_ref()
+                .is_some_and(|digest| !is_control_sha256(digest))
+            || self.transition.successor.is_some() != self.successor_material_digest.is_some()
+            || self
+                .governed_evidence_refs
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self.canonical_content_digest().ok().as_deref() != Some(self.content_digest.as_str())
+        {
+            return Err(Error::config(
+                "long_term_control_revision",
+                "typed control revision contract is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn hash_control_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn is_control_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LongTermMemoryTombstone {
     pub schema_version: u32,
     pub tombstone_id: String,
     pub record_id: String,
-    pub operation: String,
+    pub operation: LongTermControlOperation,
     pub last_owner_revision: u64,
     pub last_source_revision: Option<u64>,
     pub previous_digest: String,
@@ -413,9 +751,40 @@ pub struct LongTermMemoryTombstone {
     pub owner_subject_id: SubjectId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_subject_id: Option<SubjectId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_space_id: Option<String>,
+    pub memory_space_id: String,
     pub created_at: u64,
+}
+
+impl LongTermMemoryTombstone {
+    pub fn validate_contract(&self) -> Result<()> {
+        if self.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
+            || self.tombstone_id.trim().is_empty()
+            || self.tombstone_id != self.tombstone_id.trim()
+            || self.record_id.trim().is_empty()
+            || self.record_id != self.record_id.trim()
+            || !matches!(
+                self.operation,
+                LongTermControlOperation::Supersede
+                    | LongTermControlOperation::Delete
+                    | LongTermControlOperation::ForgetByQuery
+            )
+            || self.last_owner_revision == 0
+            || !is_control_sha256(&self.previous_digest)
+            || self.reason.trim().is_empty()
+            || self.reason != self.reason.trim()
+            || self.owner_subject_id.trim().is_empty()
+            || self.owner_subject_id != self.owner_subject_id.trim()
+            || self.memory_space_id.trim().is_empty()
+            || self.memory_space_id != self.memory_space_id.trim()
+            || self.created_at == 0
+        {
+            return Err(Error::config(
+                "long_term_control_tombstone",
+                "typed tombstone identity, operation, digest, scope, reason, or time is invalid",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,6 +884,29 @@ impl LongTermMemoryControlAuditEvent {
             created_at,
         }
     }
+
+    pub fn bind_canonical_event_id(&mut self) -> Result<()> {
+        self.effects.sort();
+        self.effects.dedup();
+        let identity = serde_json::to_vec(&(
+            self.schema_version,
+            self.operation,
+            &self.effects,
+            &self.reason,
+            &self.owner_subject_id,
+            &self.actor_subject_id,
+            &self.memory_space_id,
+            self.created_at,
+        ))
+        .map_err(|error| {
+            Error::config(
+                "long_term_control_audit_identity",
+                format!("cannot canonicalize audit identity: {error}"),
+            )
+        })?;
+        self.event_id = format!("ltma-{:x}", Sha256::digest(identity));
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -522,11 +914,8 @@ impl LongTermMemoryControlAuditEvent {
 pub enum ControlEffectRef {
     Revision {
         revision_id: String,
-        record_id: String,
-        successor_record_id: Option<String>,
-        owner_subject_id: SubjectId,
-        owner_revision: u64,
-        source_revision: Option<u64>,
+        transition: GovernedOwnerTransition,
+        mounted_subject_id: SubjectId,
     },
     Tombstone {
         tombstone_id: String,
@@ -544,13 +933,400 @@ pub enum ControlEffectRef {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LongTermVersionOwnerSnapshot {
+    pub head: LongTermMemoryHeadManifest,
+    pub retained_materials: Vec<LongTermMemoryVersionMaterial>,
+    pub transitions: Vec<GovernedOwnerTransition>,
+}
+
+impl LongTermVersionOwnerSnapshot {
+    fn current_material(
+        &self,
+        lease: LongTermVersionRetentionLease,
+    ) -> Result<&LongTermMemoryVersionMaterial> {
+        let validation = super::long_term_version::validate_long_term_version_head_closure(
+            &self.head,
+            &self.retained_materials,
+            &self.transitions,
+            lease.max_retained_revisions_per_owner(),
+        );
+        if !validation.accepted || self.head.terminal_transition_ref.is_some() {
+            return Err(Error::config(
+                "long_term_version_snapshot",
+                format!(
+                    "exact active owner closure rejected: {:?}",
+                    validation.failures
+                ),
+            ));
+        }
+        self.retained_materials
+            .iter()
+            .find(|material| {
+                material.owner_ref == self.head.owner_ref
+                    && material.owner_revision == self.head.current_revision
+            })
+            .ok_or_else(|| {
+                Error::config(
+                    "long_term_version_snapshot",
+                    "current material is missing from the exact owner closure",
+                )
+            })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LongTermMemoryVersionMutationIntent {
+    pub control_revision_intent: LongTermMemoryControlRevisionIntent,
+    pub successor_projection: Option<LongTermMemoryEntry>,
+    pub audit_transaction_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundLongTermVersionRetention {
+    AppendSuccessor,
+    StartSuccessorOwner,
+    RetainOperatorOnly,
+    PurgeOwner,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundLongTermVersionReportIdentity {
+    pub operation: LongTermControlOperation,
+    pub predecessor: GovernedOwnerRevisionRef,
+    pub successor: Option<GovernedOwnerRevisionRef>,
+    pub predecessor_material_digest: String,
+    pub successor_material_digest: Option<String>,
+    pub control_revision_id: String,
+    pub tombstone_id: Option<String>,
+    pub audit_event_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundVersionMutation {
+    pub effective_at: u64,
+    pub predecessor_material: LongTermMemoryVersionMaterial,
+    pub successor_material: Option<LongTermMemoryVersionMaterial>,
+    pub control_revision: LongTermMemoryControlRevision,
+    pub tombstone: Option<LongTermMemoryTombstone>,
+    pub audit: LongTermMemoryControlAuditEvent,
+    pub retention: BoundLongTermVersionRetention,
+    pub report_identity: BoundLongTermVersionReportIdentity,
+}
+
+pub fn bind_long_term_version_mutation(
+    intent: LongTermMemoryVersionMutationIntent,
+    snapshot: &LongTermVersionOwnerSnapshot,
+    lease: LongTermVersionRetentionLease,
+) -> Result<BoundVersionMutation> {
+    intent.control_revision_intent.validate_contract()?;
+    if intent.audit_transaction_id.trim().is_empty()
+        || intent.audit_transaction_id != intent.audit_transaction_id.trim()
+    {
+        return Err(Error::config(
+            "long_term_version_mutation",
+            "audit transaction identity must be canonical and non-empty",
+        ));
+    }
+
+    let predecessor = snapshot.current_material(lease)?.clone();
+    let control_intent = intent.control_revision_intent;
+    if control_intent.memory_space_id != predecessor.memory_space_id
+        || control_intent.mounted_subject_id != predecessor.mounted_subject_id
+        || control_intent.transition.predecessor != predecessor.owner_revision_ref()
+    {
+        return Err(Error::config(
+            "long_term_version_mutation",
+            "control intent differs from the exact predecessor scope or revision",
+        ));
+    }
+
+    let operation = control_intent.operation;
+    let successor_required = matches!(
+        operation,
+        LongTermControlOperation::Refresh
+            | LongTermControlOperation::Correct
+            | LongTermControlOperation::Supersede
+            | LongTermControlOperation::MarkStale
+            | LongTermControlOperation::ChangeScope
+            | LongTermControlOperation::ChangePrivacy
+    );
+    let terminal_without_successor = matches!(
+        operation,
+        LongTermControlOperation::Invalidate
+            | LongTermControlOperation::Delete
+            | LongTermControlOperation::ForgetByQuery
+    );
+    if successor_required != intent.successor_projection.is_some()
+        || (!successor_required && !terminal_without_successor)
+    {
+        return Err(Error::config(
+            "long_term_version_mutation",
+            "operation and successor projection do not form a supported owner transition",
+        ));
+    }
+    if operation == LongTermControlOperation::Invalidate
+        && (control_intent.governed_evidence_refs.is_empty()
+            || control_intent.actor_subject_id.is_none()
+            || control_intent.invalidation_reason_code.is_none())
+    {
+        return Err(Error::config(
+            "long_term_version_invalidation",
+            "invalidation requires a typed reason, governed evidence and actor",
+        ));
+    }
+
+    let effective_at =
+        control_intent
+            .created_at
+            .max(
+                predecessor
+                    .origin
+                    .valid_from
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        Error::config(
+                            "long_term_version_mutation",
+                            "predecessor validity time cannot advance without overflow",
+                        )
+                    })?,
+            );
+    let mut governed_evidence_refs = predecessor.governed_evidence_refs.clone();
+    governed_evidence_refs.extend(control_intent.governed_evidence_refs.iter().cloned());
+    governed_evidence_refs.sort();
+    governed_evidence_refs.dedup();
+    let successor_material = intent
+        .successor_projection
+        .as_ref()
+        .map(|successor| {
+            LongTermMemoryVersionMaterial::from_current_projection(
+                &predecessor.memory_space_id,
+                &predecessor.mounted_subject_id,
+                successor,
+                effective_at,
+                Some(predecessor.owner_revision_ref()),
+                governed_evidence_refs.clone(),
+            )
+        })
+        .transpose()?;
+
+    let retention = match operation {
+        LongTermControlOperation::Supersede => {
+            if successor_material
+                .as_ref()
+                .is_none_or(|successor| successor.owner_revision != 1)
+            {
+                return Err(Error::config(
+                    "long_term_version_mutation",
+                    "supersede requires a revision-one successor owner",
+                ));
+            }
+            BoundLongTermVersionRetention::StartSuccessorOwner
+        }
+        LongTermControlOperation::Invalidate => BoundLongTermVersionRetention::RetainOperatorOnly,
+        LongTermControlOperation::Delete | LongTermControlOperation::ForgetByQuery => {
+            BoundLongTermVersionRetention::PurgeOwner
+        }
+        _ => {
+            if snapshot.retained_materials.len() >= lease.max_retained_revisions_per_owner() {
+                return Err(Error::config(
+                    "long_term_version_retention",
+                    "request-pinned retention limit is exhausted",
+                ));
+            }
+            BoundLongTermVersionRetention::AppendSuccessor
+        }
+    };
+
+    let control_revision = LongTermMemoryControlRevision::bind(
+        control_intent,
+        &predecessor,
+        successor_material.as_ref(),
+    )?;
+    if control_revision.transition.terminated_at != effective_at {
+        return Err(Error::config(
+            "long_term_version_mutation",
+            "control revision did not bind the exact monotonic effective time",
+        ));
+    }
+
+    let tombstone = if matches!(
+        operation,
+        LongTermControlOperation::Supersede
+            | LongTermControlOperation::Delete
+            | LongTermControlOperation::ForgetByQuery
+    ) {
+        let tombstone_id = canonical_long_term_tombstone_id(
+            operation,
+            &predecessor,
+            &control_revision.revision_id,
+            effective_at,
+        )?;
+        let tombstone = LongTermMemoryTombstone {
+            schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+            tombstone_id,
+            record_id: predecessor.owner_ref.owner_id.clone(),
+            operation,
+            last_owner_revision: predecessor.owner_revision,
+            last_source_revision: predecessor.governed_content.source_revision,
+            previous_digest: predecessor.content_digest.clone(),
+            reason: control_revision.reason.clone(),
+            owner_subject_id: predecessor.mounted_subject_id.clone(),
+            actor_subject_id: control_revision.actor_subject_id.clone(),
+            memory_space_id: predecessor.memory_space_id.clone(),
+            created_at: effective_at,
+        };
+        tombstone.validate_contract()?;
+        Some(tombstone)
+    } else {
+        None
+    };
+
+    let mut effects = vec![ControlEffectRef::Revision {
+        revision_id: control_revision.revision_id.clone(),
+        transition: control_revision.transition.clone(),
+        mounted_subject_id: control_revision.mounted_subject_id.clone(),
+    }];
+    if let Some(tombstone) = &tombstone {
+        effects.push(ControlEffectRef::Tombstone {
+            tombstone_id: tombstone.tombstone_id.clone(),
+            record_id: tombstone.record_id.clone(),
+            owner_subject_id: tombstone.owner_subject_id.clone(),
+            owner_revision: tombstone.last_owner_revision,
+            source_revision: tombstone.last_source_revision,
+        });
+    }
+    let mut audit = LongTermMemoryControlAuditEvent::new(
+        "pending",
+        intent.audit_transaction_id,
+        operation,
+        effects,
+        control_revision.reason.clone(),
+        predecessor.mounted_subject_id.clone(),
+        control_revision.actor_subject_id.clone(),
+        predecessor.memory_space_id.clone(),
+        control_revision.created_at,
+    );
+    audit.bind_canonical_event_id()?;
+
+    let report_identity = BoundLongTermVersionReportIdentity {
+        operation,
+        predecessor: control_revision.transition.predecessor.clone(),
+        successor: control_revision.transition.successor.clone(),
+        predecessor_material_digest: control_revision.predecessor_material_digest.clone(),
+        successor_material_digest: control_revision.successor_material_digest.clone(),
+        control_revision_id: control_revision.revision_id.clone(),
+        tombstone_id: tombstone
+            .as_ref()
+            .map(|tombstone| tombstone.tombstone_id.clone()),
+        audit_event_id: audit.event_id.clone(),
+    };
+    Ok(BoundVersionMutation {
+        effective_at,
+        predecessor_material: predecessor,
+        successor_material,
+        control_revision,
+        tombstone,
+        audit,
+        retention,
+        report_identity,
+    })
+}
+
+pub fn bind_long_term_control_audit_batch(
+    transaction_id: &str,
+    audits: &[LongTermMemoryControlAuditEvent],
+) -> Result<Vec<LongTermMemoryControlAuditEvent>> {
+    if transaction_id.trim().is_empty() || transaction_id != transaction_id.trim() {
+        return Err(Error::config(
+            "long_term_control_audit_batch",
+            "canonical transaction identity is required",
+        ));
+    }
+    type AuditGroupKey = (
+        LongTermControlOperation,
+        String,
+        SubjectId,
+        Option<SubjectId>,
+        String,
+        u64,
+    );
+    let mut groups = BTreeMap::<AuditGroupKey, Vec<ControlEffectRef>>::new();
+    for audit in audits {
+        let memory_space_id = audit.memory_space_id.clone().ok_or_else(|| {
+            Error::config(
+                "long_term_control_audit_batch",
+                "bound audit is missing its memory space",
+            )
+        })?;
+        let mut canonical = audit.clone();
+        canonical.bind_canonical_event_id()?;
+        if canonical.event_id != audit.event_id || audit.effects.is_empty() {
+            return Err(Error::config(
+                "long_term_control_audit_batch",
+                "input audit is not canonically bound to exact effects",
+            ));
+        }
+        groups
+            .entry((
+                audit.operation,
+                audit.reason.clone(),
+                audit.owner_subject_id.clone(),
+                audit.actor_subject_id.clone(),
+                memory_space_id,
+                audit.created_at,
+            ))
+            .or_default()
+            .extend(audit.effects.iter().cloned());
+    }
+
+    let mut bound = Vec::with_capacity(groups.len());
+    for ((operation, reason, owner, actor, memory_space_id, created_at), effects) in groups {
+        let mut audit = LongTermMemoryControlAuditEvent::new(
+            "pending",
+            transaction_id,
+            operation,
+            effects,
+            reason,
+            owner,
+            actor,
+            memory_space_id,
+            created_at,
+        );
+        audit.bind_canonical_event_id()?;
+        bound.push(audit);
+    }
+    bound.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+    Ok(bound)
+}
+
+fn canonical_long_term_tombstone_id(
+    operation: LongTermControlOperation,
+    predecessor: &LongTermMemoryVersionMaterial,
+    control_revision_id: &str,
+    effective_at: u64,
+) -> Result<String> {
+    let encoded = serde_json::to_vec(&(
+        operation,
+        predecessor.owner_revision_ref(),
+        &predecessor.content_digest,
+        control_revision_id,
+        effective_at,
+    ))
+    .map_err(|error| Error::config("long_term_control_tombstone", error.to_string()))?;
+    let mut hasher = Sha256::new();
+    hash_control_field(&mut hasher, b"long_term_control_tombstone_v2");
+    hash_control_field(&mut hasher, &encoded);
+    Ok(format!("ltmt-{:x}", hasher.finalize()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LongTermControlPostImageClosure {
     pub transaction_id: String,
     pub operation: LongTermControlOperation,
     pub memory_space_id: String,
     pub owner_subject_id: SubjectId,
     pub actor_subject_id: Option<SubjectId>,
-    pub owner_records: Vec<GovernedDocumentImage<LongTermMemoryEntry>>,
+    pub owner_records: Vec<LongTermMemoryVersionMaterialImage>,
     pub revisions: Vec<GovernedDocumentImage<LongTermMemoryControlRevision>>,
     pub tombstones: Vec<GovernedDocumentImage<LongTermMemoryTombstone>>,
     pub policies: Vec<GovernedDocumentImage<MemoryLongTermGovernancePolicy>>,
@@ -574,15 +1350,10 @@ pub fn validate_long_term_control_post_image(
     let mut owners = BTreeMap::new();
     for image in &closure.owner_records {
         let logical_id = image
-            .after
-            .as_ref()
-            .or(image.before.as_ref())
-            .map(|owner| owner.id.as_str())
+            .observed_owner_ref()
+            .map(|owner_ref| owner_ref.owner_id.as_str())
             .unwrap_or_default();
-        if scoped_long_term_memory_storage_key(memory_space_id, logical_id)
-            .map(|expected| image.physical_key != expected)
-            .unwrap_or(true)
-        {
+        if !image.has_exact_physical_closure(memory_space_id, owner_subject_id) {
             failures.push("long_term_control_owner_physical_key_drift".to_string());
         }
         if image.before != image.after
@@ -615,42 +1386,49 @@ pub fn validate_long_term_control_post_image(
             "long_term_control_revision_physical_key_drift",
             &mut failures,
         );
-        if revision.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION {
+        if revision.validate_contract().is_err() {
             failures.push("long_term_control_revision_schema_version_drift".to_string());
         }
-        if LongTermControlOperation::from_label(&revision.operation) != Some(closure.operation)
-            || revision.memory_space_id.as_deref() != Some(memory_space_id)
-            || revision.owner_subject_id != owner_subject_id
+        if revision.operation != closure.operation
+            || revision.memory_space_id != memory_space_id
+            || revision.mounted_subject_id != owner_subject_id
             || revision.actor_subject_id != closure.actor_subject_id
         {
             failures.push("long_term_control_revision_operation_scope_drift".to_string());
         }
         let before_owner = owners
-            .get(&revision.record_id)
+            .get(&revision.transition.predecessor.owner_ref.owner_id)
             .and_then(|owner| owner.before.as_ref());
-        let after_record_id = revision
-            .successor_record_id
-            .as_deref()
-            .unwrap_or(revision.record_id.as_str());
-        let after_owner = owners
-            .get(after_record_id)
-            .and_then(|owner| owner.after.as_ref());
-        if before_owner.is_none_or(|owner| digest_entry(owner) != revision.previous_digest)
-            || after_owner.is_none_or(|owner| {
-                digest_entry(owner) != revision.new_digest
-                    || owner.owner_revision != revision.owner_revision
-                    || owner.source_revision != revision.source_revision
-            })
-        {
+        let after_owner = revision
+            .transition
+            .successor
+            .as_ref()
+            .and_then(|successor| {
+                owners
+                    .get(&successor.owner_ref.owner_id)
+                    .and_then(|owner| owner.after.as_ref())
+            });
+        if before_owner.is_none_or(|owner| {
+            owner.owner_revision_ref() != revision.transition.predecessor
+                || owner.content_digest != revision.predecessor_material_digest
+        }) || match (
+            revision.transition.successor.as_ref(),
+            revision.successor_material_digest.as_ref(),
+            after_owner,
+        ) {
+            (Some(successor), Some(successor_digest), Some(owner)) => {
+                owner.owner_revision_ref() != *successor
+                    || owner.content_digest != *successor_digest
+            }
+            (None, None, None) => false,
+            _ => true,
+        } {
             failures.push("long_term_control_revision_owner_version_or_digest_drift".to_string());
         }
         expected_effects.push(ControlEffectRef::Revision {
             revision_id: revision.revision_id.clone(),
-            record_id: revision.record_id.clone(),
-            successor_record_id: revision.successor_record_id.clone(),
-            owner_subject_id: revision.owner_subject_id.clone(),
-            owner_revision: revision.owner_revision,
-            source_revision: revision.source_revision,
+            transition: revision.transition.clone(),
+            mounted_subject_id: revision.mounted_subject_id.clone(),
         });
     }
 
@@ -670,11 +1448,11 @@ pub fn validate_long_term_control_post_image(
             "long_term_control_tombstone_physical_key_drift",
             &mut failures,
         );
-        if tombstone.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION {
+        if tombstone.validate_contract().is_err() {
             failures.push("long_term_control_tombstone_schema_version_drift".to_string());
         }
-        if LongTermControlOperation::from_label(&tombstone.operation) != Some(closure.operation)
-            || tombstone.memory_space_id.as_deref() != Some(memory_space_id)
+        if tombstone.operation != closure.operation
+            || tombstone.memory_space_id != memory_space_id
             || tombstone.owner_subject_id != owner_subject_id
             || tombstone.actor_subject_id != closure.actor_subject_id
         {
@@ -686,8 +1464,8 @@ pub fn validate_long_term_control_post_image(
         {
             Some(owner)
                 if owner.owner_revision == tombstone.last_owner_revision
-                    && owner.source_revision == tombstone.last_source_revision
-                    && digest_entry(owner) == tombstone.previous_digest => {}
+                    && owner.governed_content.source_revision == tombstone.last_source_revision
+                    && owner.content_digest == tombstone.previous_digest => {}
             _ => failures
                 .push("long_term_control_tombstone_owner_version_or_digest_drift".to_string()),
         }
@@ -770,13 +1548,19 @@ pub fn validate_long_term_control_post_image(
         if audit.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION {
             failures.push("long_term_control_audit_schema_version_drift".to_string());
         }
-        if audit.transaction_id != closure.transaction_id
-            || audit.operation != closure.operation
-            || audit.memory_space_id.as_deref() != Some(memory_space_id)
+        if audit.transaction_id != closure.transaction_id {
+            failures.push("long_term_control_audit_transaction_drift".to_string());
+        }
+        if audit.operation != closure.operation {
+            failures.push("long_term_control_audit_operation_drift".to_string());
+        }
+        if audit.memory_space_id.as_deref() != Some(memory_space_id)
             || audit.owner_subject_id != owner_subject_id
-            || audit.actor_subject_id != closure.actor_subject_id
         {
-            failures.push("long_term_control_audit_transaction_operation_scope_drift".to_string());
+            failures.push("long_term_control_audit_scope_drift".to_string());
+        }
+        if audit.actor_subject_id != closure.actor_subject_id {
+            failures.push("long_term_control_audit_actor_drift".to_string());
         }
         let mut actual_effects = audit.effects.clone();
         actual_effects.sort();
@@ -806,13 +1590,6 @@ fn validate_control_physical_key<T>(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LongTermMemoryControlRecordVersion {
-    pub record_id: String,
-    pub owner_revision: u64,
-    pub source_revision: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LongTermMemoryOwnerWrite {
     Put(Box<LongTermMemoryEntry>),
@@ -822,7 +1599,7 @@ pub enum LongTermMemoryOwnerWrite {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LongTermMemoryControlWrite {
-    PutRevision(LongTermMemoryControlRevision),
+    PutRevisionIntent(LongTermMemoryControlRevisionIntent),
     PutTombstone(LongTermMemoryTombstone),
     PutGovernancePolicy(MemoryLongTermGovernancePolicy),
     DeleteGovernancePolicy {
@@ -840,14 +1617,11 @@ fn control_effects_from_writes(
         .iter()
         .map(|write| {
             Ok(match write {
-                LongTermMemoryControlWrite::PutRevision(revision) => {
+                LongTermMemoryControlWrite::PutRevisionIntent(revision) => {
                     Some(ControlEffectRef::Revision {
                         revision_id: revision.revision_id.clone(),
-                        record_id: revision.record_id.clone(),
-                        successor_record_id: revision.successor_record_id.clone(),
-                        owner_subject_id: revision.owner_subject_id.clone(),
-                        owner_revision: revision.owner_revision,
-                        source_revision: revision.source_revision,
+                        transition: revision.transition.clone(),
+                        mounted_subject_id: revision.mounted_subject_id.clone(),
                     })
                 }
                 LongTermMemoryControlWrite::PutTombstone(tombstone) => {
@@ -927,9 +1701,9 @@ pub trait LongTermMemoryControlReadStore: Send + Sync {
 }
 
 pub(crate) trait LongTermMemoryControlStore: LongTermMemoryControlReadStore {
-    fn put_long_term_control_revision(
+    fn put_long_term_control_revision_intent(
         &self,
-        revision: &LongTermMemoryControlRevision,
+        revision: &LongTermMemoryControlRevisionIntent,
     ) -> Result<()>;
     fn put_long_term_control_tombstone(&self, tombstone: &LongTermMemoryTombstone) -> Result<()>;
     fn put_long_term_governance_policy(
@@ -938,6 +1712,12 @@ pub(crate) trait LongTermMemoryControlStore: LongTermMemoryControlReadStore {
     ) -> Result<()>;
     fn delete_long_term_governance_policy(&self, policy_id: &str) -> Result<bool>;
     fn put_long_term_control_audit(&self, event: &LongTermMemoryControlAuditEvent) -> Result<()>;
+    fn pending_long_term_control_revision_intents(
+        &self,
+        _record_id: &str,
+    ) -> Vec<LongTermMemoryControlRevisionIntent> {
+        Vec::new()
+    }
 }
 
 struct PlanningLongTermMemoryStore<'a> {
@@ -1097,7 +1877,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
 
 struct PlanningLongTermMemoryControlStore<'a> {
     inner: &'a dyn LongTermMemoryControlReadStore,
-    revisions: Mutex<Vec<LongTermMemoryControlRevision>>,
+    revision_intents: Mutex<Vec<LongTermMemoryControlRevisionIntent>>,
     tombstones: Mutex<BTreeMap<String, LongTermMemoryTombstone>>,
     policies: Mutex<BTreeMap<String, Option<MemoryLongTermGovernancePolicy>>>,
     audits: Mutex<Vec<LongTermMemoryControlAuditEvent>>,
@@ -1108,7 +1888,7 @@ impl<'a> PlanningLongTermMemoryControlStore<'a> {
     fn new(inner: &'a dyn LongTermMemoryControlReadStore) -> Self {
         Self {
             inner,
-            revisions: Mutex::new(Vec::new()),
+            revision_intents: Mutex::new(Vec::new()),
             tombstones: Mutex::new(BTreeMap::new()),
             policies: Mutex::new(BTreeMap::new()),
             audits: Mutex::new(Vec::new()),
@@ -1130,15 +1910,7 @@ impl LongTermMemoryControlReadStore for PlanningLongTermMemoryControlStore<'_> {
         let mut revisions = self
             .inner
             .list_long_term_control_revisions(record_id, limit)?;
-        revisions.extend(
-            self.revisions
-                .lock()
-                .expect("control revisions lock")
-                .iter()
-                .filter(|revision| revision.record_id == record_id)
-                .cloned(),
-        );
-        revisions.sort_by(|left, right| right.owner_revision.cmp(&left.owner_revision));
+        revisions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         revisions.truncate(limit);
         Ok(revisions)
     }
@@ -1220,18 +1992,17 @@ impl LongTermMemoryControlReadStore for PlanningLongTermMemoryControlStore<'_> {
 }
 
 impl LongTermMemoryControlStore for PlanningLongTermMemoryControlStore<'_> {
-    fn put_long_term_control_revision(
+    fn put_long_term_control_revision_intent(
         &self,
-        revision: &LongTermMemoryControlRevision,
+        revision: &LongTermMemoryControlRevisionIntent,
     ) -> Result<()> {
-        self.revisions
+        self.revision_intents
             .lock()
-            .expect("control revisions lock")
+            .expect("control revision intents lock")
             .push(revision.clone());
-        self.writes
-            .lock()
-            .expect("control writes lock")
-            .push(LongTermMemoryControlWrite::PutRevision(revision.clone()));
+        self.writes.lock().expect("control writes lock").push(
+            LongTermMemoryControlWrite::PutRevisionIntent(revision.clone()),
+        );
         Ok(())
     }
 
@@ -1296,6 +2067,19 @@ impl LongTermMemoryControlStore for PlanningLongTermMemoryControlStore<'_> {
             .expect("control writes lock")
             .push(LongTermMemoryControlWrite::AppendAudit(event));
         Ok(())
+    }
+
+    fn pending_long_term_control_revision_intents(
+        &self,
+        record_id: &str,
+    ) -> Vec<LongTermMemoryControlRevisionIntent> {
+        self.revision_intents
+            .lock()
+            .expect("control revision intents lock")
+            .iter()
+            .filter(|intent| intent.transition.predecessor.owner_ref.owner_id == record_id)
+            .cloned()
+            .collect()
     }
 }
 
@@ -1404,6 +2188,9 @@ fn plan_long_term_memory_control_mutation_with_sinks(
             target,
             replacement,
         } => apply_supersede(store, control_store, &request, target, replacement),
+        MemoryLongTermMutation::Invalidate { contract } => {
+            apply_invalidate(store, control_store, &request, contract)
+        }
         MemoryLongTermMutation::Delete { target } => {
             apply_delete(store, control_store, &request, target, operation_label)
         }
@@ -1761,31 +2548,14 @@ fn apply_correct(
     };
     let new_digest = digest_entry(&updated);
     if !request.dry_run {
-        let revision = LongTermMemoryControlRevision {
-            schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-            revision_id: stable_id(
-                "ltmr",
-                &(
-                    "correct",
-                    &previous.id,
-                    updated.owner_revision,
-                    request.now_secs,
-                ),
-            ),
-            record_id: previous.id.clone(),
-            successor_record_id: None,
-            operation: "correct".to_string(),
-            owner_revision: updated.owner_revision,
-            source_revision: updated.source_revision,
-            previous_digest: previous_digest.clone(),
-            new_digest: new_digest.clone(),
-            reason: request.reason.clone(),
-            owner_subject_id: request.owner_subject_id.clone(),
-            actor_subject_id: request.actor_subject_id.clone(),
-            memory_space_id: request.memory_space_id.clone(),
-            created_at: request.now_secs,
-        };
-        control_store.put_long_term_control_revision(&revision)?;
+        let revision = control_revision_intent_for(
+            LongTermControlOperation::Correct,
+            &previous,
+            Some(&updated),
+            request,
+            Vec::new(),
+        )?;
+        control_store.put_long_term_control_revision_intent(&revision)?;
     }
     let audit_event_id = write_record_audit(
         control_store,
@@ -1875,32 +2645,21 @@ fn apply_supersede(
     };
     let previous_digest = digest_entry(&previous);
     let new_digest = digest_entry(&replacement_entry);
-    let tombstone = tombstone_for(&previous, "supersede", request);
+    let tombstone = tombstone_for(&previous, LongTermControlOperation::Supersede, request)?;
     if !request.dry_run {
         control_store.put_long_term_control_tombstone(&tombstone)?;
         store.delete(&previous.id)?;
         if !replacement_is_noop {
             store.upsert_many(std::slice::from_ref(replacement), request.now_secs)?;
         }
-        control_store.put_long_term_control_revision(&LongTermMemoryControlRevision {
-            schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-            revision_id: stable_id(
-                "ltmr",
-                &("supersede", &previous.id, &new_id, request.now_secs),
-            ),
-            record_id: previous.id.clone(),
-            successor_record_id: Some(new_id.clone()),
-            operation: "supersede".to_string(),
-            owner_revision: replacement_entry.owner_revision,
-            source_revision: replacement_entry.source_revision,
-            previous_digest: previous_digest.clone(),
-            new_digest: new_digest.clone(),
-            reason: request.reason.clone(),
-            owner_subject_id: request.owner_subject_id.clone(),
-            actor_subject_id: request.actor_subject_id.clone(),
-            memory_space_id: request.memory_space_id.clone(),
-            created_at: request.now_secs,
-        })?;
+        let revision = control_revision_intent_for(
+            LongTermControlOperation::Supersede,
+            &previous,
+            Some(&replacement_entry),
+            request,
+            Vec::new(),
+        )?;
+        control_store.put_long_term_control_revision_intent(&revision)?;
     }
     let audit_event_id = write_record_audit(
         control_store,
@@ -1927,7 +2686,7 @@ fn apply_supersede(
         vec![MemoryLongTermTombstoneRef {
             record_id: previous.id.clone(),
             tombstone_id: tombstone.tombstone_id,
-            operation: "supersede".to_string(),
+            operation: LongTermControlOperation::Supersede,
             last_owner_revision: previous.owner_revision,
             last_source_revision: previous.source_revision,
         }],
@@ -1937,6 +2696,99 @@ fn apply_supersede(
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             recall_projection_must_refresh: true,
             notes: Vec::new(),
+        },
+    ))
+}
+
+fn apply_invalidate(
+    store: &dyn LongTermMemoryStore,
+    control_store: &dyn LongTermMemoryControlStore,
+    request: &LongTermMemoryControlMutationRequest,
+    contract: &LongTermInvalidationContract,
+) -> Result<MemoryLongTermMutationReport> {
+    let validation = contract.validate_contract();
+    if !validation.accepted {
+        return Err(Error::config(
+            "long_term_control_invalidation",
+            format!("invalidation contract rejected: {:?}", validation.failures),
+        ));
+    }
+    if request.reason != contract.audit_reason
+        || request.actor_subject_id.as_deref() != Some(contract.actor_subject_id.as_str())
+    {
+        return Err(Error::config(
+            "long_term_control_invalidation",
+            "request reason and actor must exactly match the typed invalidation contract",
+        ));
+    }
+    let resolved = resolve_target(store, control_store, &contract.target, false)?;
+    let Some(previous) = resolved.records.first().cloned() else {
+        return Ok(rejected_report(
+            "invalidate",
+            request,
+            resolved.report,
+            "target_not_found",
+            None,
+        ));
+    };
+    let previous_digest = digest_entry(&previous);
+    if !request.dry_run {
+        let memory_space_id = request.memory_space_id.clone().ok_or_else(|| {
+            Error::config(
+                "long_term_control_memory_space_required",
+                "invalidation requires an explicit memory_space_id",
+            )
+        })?;
+        let revision = LongTermMemoryControlRevisionIntent::for_invalidation(
+            stable_id(
+                "ltmr",
+                &(
+                    LongTermControlOperation::Invalidate.as_str(),
+                    &previous.id,
+                    previous.owner_revision,
+                    request.now_secs,
+                ),
+            ),
+            &previous,
+            contract.reason_code,
+            contract.audit_reason.clone(),
+            request.owner_subject_id.clone(),
+            contract.actor_subject_id.clone(),
+            memory_space_id,
+            request.now_secs,
+            contract.governed_evidence_refs.clone(),
+        )?;
+        control_store.put_long_term_control_revision_intent(&revision)?;
+    }
+    let audit_event_id = write_record_audit(
+        control_store,
+        "invalidate",
+        std::slice::from_ref(&previous.id),
+        std::slice::from_ref(&previous),
+        request,
+        request.dry_run,
+    )?;
+    Ok(accepted_record_report(
+        "invalidate",
+        request,
+        resolved,
+        vec![MemoryLongTermAffectedRecord {
+            record_id: previous.id.clone(),
+            operation: "invalidate".to_string(),
+            previous_owner_revision: previous.owner_revision,
+            new_owner_revision: None,
+            previous_source_revision: previous.source_revision,
+            new_source_revision: None,
+            previous_digest,
+            new_digest: None,
+        }],
+        Vec::new(),
+        audit_event_id,
+        MemoryProjectionImpactReport {
+            affected_record_ids: vec![previous.id],
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            recall_projection_must_refresh: true,
+            notes: vec!["retained_operator_only".to_string()],
         },
     ))
 }
@@ -1959,8 +2811,17 @@ fn apply_delete(
         ));
     };
     let previous_digest = digest_entry(&previous);
-    let tombstone = tombstone_for(&previous, operation_label, request);
+    let operation = LongTermControlOperation::from_label(operation_label).ok_or_else(|| {
+        Error::config(
+            "long_term_control_revision_intent",
+            format!("unknown terminal operation {operation_label}"),
+        )
+    })?;
+    let tombstone = tombstone_for(&previous, operation, request)?;
     if !request.dry_run {
+        let revision =
+            control_revision_intent_for(operation, &previous, None, request, Vec::new())?;
+        control_store.put_long_term_control_revision_intent(&revision)?;
         control_store.put_long_term_control_tombstone(&tombstone)?;
         store.delete(&previous.id)?;
     }
@@ -1989,7 +2850,7 @@ fn apply_delete(
         vec![MemoryLongTermTombstoneRef {
             record_id: previous.id.clone(),
             tombstone_id: tombstone.tombstone_id,
-            operation: operation_label.to_string(),
+            operation,
             last_owner_revision: previous.owner_revision,
             last_source_revision: previous.source_revision,
         }],
@@ -2035,7 +2896,15 @@ fn apply_forget_by_query(
     let mut tombstones = Vec::new();
     for previous in &resolved.records {
         let previous_digest = digest_entry(previous);
-        let tombstone = tombstone_for(previous, "forget_by_query", request);
+        let tombstone = tombstone_for(previous, LongTermControlOperation::ForgetByQuery, request)?;
+        let revision = control_revision_intent_for(
+            LongTermControlOperation::ForgetByQuery,
+            previous,
+            None,
+            request,
+            Vec::new(),
+        )?;
+        control_store.put_long_term_control_revision_intent(&revision)?;
         control_store.put_long_term_control_tombstone(&tombstone)?;
         store.delete(&previous.id)?;
         affected.push(MemoryLongTermAffectedRecord {
@@ -2051,7 +2920,7 @@ fn apply_forget_by_query(
         tombstones.push(MemoryLongTermTombstoneRef {
             record_id: previous.id.clone(),
             tombstone_id: tombstone.tombstone_id,
-            operation: "forget_by_query".to_string(),
+            operation: LongTermControlOperation::ForgetByQuery,
             last_owner_revision: previous.owner_revision,
             last_source_revision: previous.source_revision,
         });
@@ -2235,30 +3104,20 @@ fn apply_owner_field_mutation(
     };
     let new_digest = digest_entry(&updated);
     if !request.dry_run {
-        control_store.put_long_term_control_revision(&LongTermMemoryControlRevision {
-            schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-            revision_id: stable_id(
-                "ltmr",
-                &(
-                    operation,
-                    &previous.id,
-                    updated.owner_revision,
-                    request.now_secs,
-                ),
-            ),
-            record_id: previous.id.clone(),
-            successor_record_id: None,
-            operation: operation.to_string(),
-            owner_revision: updated.owner_revision,
-            source_revision: updated.source_revision,
-            previous_digest: previous_digest.clone(),
-            new_digest: new_digest.clone(),
-            reason: request.reason.clone(),
-            owner_subject_id: request.owner_subject_id.clone(),
-            actor_subject_id: request.actor_subject_id.clone(),
-            memory_space_id: request.memory_space_id.clone(),
-            created_at: request.now_secs,
+        let typed_operation = LongTermControlOperation::from_label(operation).ok_or_else(|| {
+            Error::config(
+                "long_term_control_revision_intent",
+                format!("unknown owner mutation operation {operation}"),
+            )
         })?;
+        let revision = control_revision_intent_for(
+            typed_operation,
+            &previous,
+            Some(&updated),
+            request,
+            Vec::new(),
+        )?;
+        control_store.put_long_term_control_revision_intent(&revision)?;
     }
     let audit_event_id = write_record_audit(
         control_store,
@@ -2539,23 +3398,66 @@ fn rejected_report(
 
 fn tombstone_for(
     entry: &LongTermMemoryEntry,
-    operation: &str,
+    operation: LongTermControlOperation,
     request: &LongTermMemoryControlMutationRequest,
-) -> LongTermMemoryTombstone {
-    LongTermMemoryTombstone {
+) -> Result<LongTermMemoryTombstone> {
+    let memory_space_id = request.memory_space_id.clone().ok_or_else(|| {
+        Error::config(
+            "long_term_control_memory_space_required",
+            "control tombstones require an explicit memory_space_id",
+        )
+    })?;
+    let tombstone = LongTermMemoryTombstone {
         schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
-        tombstone_id: stable_id("ltmt", &(operation, &entry.id, request.now_secs)),
+        tombstone_id: stable_id("ltmt", &(operation.as_str(), &entry.id, request.now_secs)),
         record_id: entry.id.clone(),
-        operation: operation.to_string(),
+        operation,
         last_owner_revision: entry.owner_revision,
         last_source_revision: entry.source_revision,
         previous_digest: digest_entry(entry),
         reason: request.reason.clone(),
         owner_subject_id: request.owner_subject_id.clone(),
         actor_subject_id: request.actor_subject_id.clone(),
-        memory_space_id: request.memory_space_id.clone(),
+        memory_space_id,
         created_at: request.now_secs,
-    }
+    };
+    Ok(tombstone)
+}
+
+fn control_revision_intent_for(
+    operation: LongTermControlOperation,
+    before: &LongTermMemoryEntry,
+    after: Option<&LongTermMemoryEntry>,
+    request: &LongTermMemoryControlMutationRequest,
+    governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
+) -> Result<LongTermMemoryControlRevisionIntent> {
+    let memory_space_id = request.memory_space_id.clone().ok_or_else(|| {
+        Error::config(
+            "long_term_control_memory_space_required",
+            "control mutations require an explicit memory_space_id",
+        )
+    })?;
+    LongTermMemoryControlRevisionIntent::for_owner_change(
+        stable_id(
+            "ltmr",
+            &(
+                operation.as_str(),
+                &before.id,
+                after.map(|entry| entry.id.as_str()),
+                after.map(|entry| entry.owner_revision),
+                request.now_secs,
+            ),
+        ),
+        operation,
+        before,
+        after,
+        request.reason.clone(),
+        request.owner_subject_id.clone(),
+        request.actor_subject_id.clone(),
+        memory_space_id,
+        request.now_secs,
+        governed_evidence_refs,
+    )
 }
 
 fn write_record_audit(
@@ -2569,7 +3471,6 @@ fn write_record_audit(
     if dry_run {
         return Ok(None);
     }
-    let event_id = stable_id("ltma", &(operation, record_ids, request.now_secs));
     let typed_operation = LongTermControlOperation::from_label(operation).ok_or_else(|| {
         Error::config(
             "long_term_control_audit_operation",
@@ -2586,27 +3487,24 @@ fn write_record_audit(
     for record_id in record_ids {
         effects.extend(
             control_store
-                .list_long_term_control_revisions(record_id, usize::MAX)?
+                .pending_long_term_control_revision_intents(record_id)
                 .into_iter()
                 .filter(|revision| {
-                    revision.operation == operation
+                    revision.operation == typed_operation
                         && revision.created_at == request.now_secs
-                        && revision.memory_space_id.as_deref() == Some(memory_space_id)
-                        && revision.owner_subject_id == request.owner_subject_id
+                        && revision.memory_space_id == memory_space_id
+                        && revision.mounted_subject_id == request.owner_subject_id
                 })
                 .map(|revision| ControlEffectRef::Revision {
                     revision_id: revision.revision_id,
-                    record_id: revision.record_id,
-                    successor_record_id: revision.successor_record_id,
-                    owner_subject_id: revision.owner_subject_id,
-                    owner_revision: revision.owner_revision,
-                    source_revision: revision.source_revision,
+                    transition: revision.transition,
+                    mounted_subject_id: revision.mounted_subject_id,
                 }),
         );
         if let Some(tombstone) = control_store.get_long_term_control_tombstone(record_id)? {
-            if tombstone.operation == operation
+            if tombstone.operation == typed_operation
                 && tombstone.created_at == request.now_secs
-                && tombstone.memory_space_id.as_deref() == Some(memory_space_id)
+                && tombstone.memory_space_id == memory_space_id
                 && tombstone.owner_subject_id == request.owner_subject_id
             {
                 effects.push(ControlEffectRef::Tombstone {
@@ -2625,9 +3523,9 @@ fn write_record_audit(
             "accepted control mutation produced no auditable effects",
         ));
     }
-    control_store.put_long_term_control_audit(&LongTermMemoryControlAuditEvent::new(
-        event_id.clone(),
-        event_id.clone(),
+    let mut audit = LongTermMemoryControlAuditEvent::new(
+        "pending",
+        "pending",
         typed_operation,
         effects,
         request.reason.clone(),
@@ -2635,7 +3533,11 @@ fn write_record_audit(
         request.actor_subject_id.clone(),
         memory_space_id,
         request.now_secs,
-    ))?;
+    );
+    audit.bind_canonical_event_id()?;
+    audit.transaction_id = audit.event_id.clone();
+    let event_id = audit.event_id.clone();
+    control_store.put_long_term_control_audit(&audit)?;
     Ok(Some(event_id))
 }
 
@@ -2679,11 +3581,6 @@ fn write_policy_audit(
             ));
         }
     }
-    let policy_ids = policies
-        .iter()
-        .map(|policy| policy.policy_id.as_str())
-        .collect::<Vec<_>>();
-    let event_id = stable_id("ltma", &(operation, policy_ids, now_secs));
     let effects = policies
         .iter()
         .map(|policy| ControlEffectRef::Policy {
@@ -2693,9 +3590,9 @@ fn write_policy_audit(
             deleted,
         })
         .collect();
-    control_store.put_long_term_control_audit(&LongTermMemoryControlAuditEvent::new(
-        event_id.clone(),
-        event_id.clone(),
+    let mut audit = LongTermMemoryControlAuditEvent::new(
+        "pending",
+        "pending",
         typed_operation,
         effects,
         reason,
@@ -2703,7 +3600,11 @@ fn write_policy_audit(
         None,
         memory_space_id,
         now_secs,
-    ))?;
+    );
+    audit.bind_canonical_event_id()?;
+    audit.transaction_id = audit.event_id.clone();
+    let event_id = audit.event_id.clone();
+    control_store.put_long_term_control_audit(&audit)?;
     Ok(Some(event_id))
 }
 
@@ -2876,6 +3777,7 @@ fn mutation_label(operation: &MemoryLongTermMutation) -> &'static str {
     match operation {
         MemoryLongTermMutation::Correct { .. } => "correct",
         MemoryLongTermMutation::Supersede { .. } => "supersede",
+        MemoryLongTermMutation::Invalidate { .. } => "invalidate",
         MemoryLongTermMutation::Delete { .. } => "delete",
         MemoryLongTermMutation::ForgetByQuery { .. } => "forget_by_query",
         MemoryLongTermMutation::MarkStale { .. } => "mark_stale",

@@ -8,15 +8,12 @@ use bm_core::memory::{
     SelfContinuity,
 };
 use bm_core::platform::Platform as _;
-use bm_sdk::{
-    default_agent_subject_id, default_memory_space_id, MemoryProjectionRequest, PressureLevel,
-    ProjectionSourceAuthority, RuntimeLifecycleModeInput,
-};
+use bm_sdk::{MemoryProjectionRequest, PressureLevel, RuntimeLifecycleModeInput};
 
 use support::{empty_store_platform, seeded_store_platform, test_runtime_with_scope};
 
 #[test]
-fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
+fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
     let profile = support::host_test_profile();
     let platform = seeded_store_platform(profile);
     platform
@@ -75,6 +72,7 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should release safety work?".to_string(),
             system_max_len: 4096,
@@ -85,36 +83,20 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
         })
         .expect("project");
 
-    assert_eq!(report.audit.operation, "project");
-    assert_eq!(report.audit.profile, profile);
-    assert_eq!(report.audit.identity.agent_id, "agent-main");
-    assert_eq!(report.audit.identity.owner_id, "owner-default");
-    assert_eq!(report.audit.scope.channel, "sdk.direct");
-    assert_eq!(report.audit.scope.chat_id, "chat-a");
+    let safe = report.report();
+    let audit = safe.audit();
+    assert!(!audit.projection_id.is_empty());
+    assert!(audit.injected);
     assert_eq!(
-        report.audit.memory_space_id,
-        default_memory_space_id("owner-default")
+        safe.gateway_audit().provider_projection_chars,
+        report
+            .provider_payload()
+            .system_memory_block()
+            .chars()
+            .count()
     );
     assert_eq!(
-        report.audit.subject_id,
-        default_agent_subject_id("agent-main")
-    );
-    assert_eq!(
-        report.audit.scoped_runtime.mounted_subject_id,
-        default_agent_subject_id("agent-main")
-    );
-    assert_eq!(
-        report.audit.scoped_runtime.actor_subject_id,
-        default_agent_subject_id("agent-main")
-    );
-    assert_eq!(report.audit.conversation_id.as_deref(), Some("chat-a"));
-    assert!(report.audit.injected);
-    assert_eq!(
-        report.audit.system_memory_chars,
-        report.system_memory_block.chars().count()
-    );
-    assert_eq!(
-        report.audit.render_budget_chars,
+        audit.render_budget_chars,
         runtime
             .runtime_budget()
             .projection_render_budget
@@ -122,105 +104,32 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
             .min(4096)
     );
     assert_eq!(
-        report.audit.source_budget_chars,
+        audit.source_budget_chars,
         runtime
             .runtime_budget()
             .projection_source_budget
             .context_assembly_max_chars
     );
-    assert!(report
-        .audit
-        .sources
-        .iter()
-        .any(|source| source.plane == "shared_factual" && source.selected_count > 0));
-    assert!(report
-        .audit
-        .sections
-        .iter()
-        .any(|section| section.name == "governed_memory_evidence" && section.chars > 0));
-    for section in &report.audit.sections {
-        assert!(!section.name.contains("self_state"));
-        assert!(!section.name.contains("inner_life"));
-        assert!(!section.name.contains("private_garden"));
-    }
     assert!(
-        !report.audit.private_gate.runtime_private_context_allowed,
+        !audit.runtime_private_context_allowed,
         "standard SDK projection policy must not load private runtime depth by default"
     );
     assert!(
-        !report.audit.private_gate.foreground_disclosure_allowed,
+        !audit.foreground_disclosure_allowed,
         "foreground disclosure must be separate from runtime-private access"
     );
-    assert!(report.audit.private_gate.reason.contains("privacy_policy"));
-    let long_term_authority = report
-        .audit
-        .source_authority
-        .iter()
-        .find(|source| source.source_id == "long_term_memory")
-        .expect("long term source authority");
-    assert!(long_term_authority.loaded);
-    assert!(long_term_authority
-        .authorities
-        .contains(&ProjectionSourceAuthority::UserProvidedEvidence));
-    assert!(long_term_authority.foreground_disclosure_allowed);
-    let private_garden_authority = report
-        .audit
-        .source_authority
-        .iter()
-        .find(|source| source.source_id == "private_garden")
-        .expect("private garden source authority");
-    assert!(!private_garden_authority.foreground_disclosure_allowed);
-    assert!(!private_garden_authority.raw_audit_plaintext_allowed);
-    assert!(private_garden_authority
-        .authorities
-        .contains(&ProjectionSourceAuthority::PrivateInternal));
-    assert_eq!(report.subject_projection.profile, profile);
+    assert!(audit.private_gate_reason.contains("privacy_policy"));
+    assert!(audit.evidence_ref_count > 0);
+    assert!(audit.budget_decision_count > 0);
+    assert!(audit.privacy_decision_count > 0);
+    assert!(audit.faithfulness_passed);
+    assert!(audit.disclosure_integrity_passed);
+    assert_eq!(audit.raw_private_violation_count, 0);
+    assert!(safe.ui_api_chars() > 0);
     assert_eq!(
-        report.subject_projection.projection_id,
-        report.audit.projection_id
+        safe.ui_api_chars(),
+        safe.ui_api_projection().chars().count()
     );
-    assert!(report
-        .subject_projection
-        .identity_mount
-        .contains("agent-main"));
-    assert!(report
-        .subject_projection
-        .identity_mount
-        .contains("subject:agent:agent-main"));
-    assert!(!report
-        .subject_projection
-        .identity_mount
-        .to_ascii_lowercase()
-        .contains("pretend"));
-    assert!(report
-        .subject_projection
-        .relationship_position
-        .contains("sdk.direct"));
-    assert!(report
-        .subject_projection
-        .evidence_refs
-        .iter()
-        .any(|evidence| evidence.contains("shared_factual")
-            || evidence.starts_with("opaque:evidence:")));
-    assert!(report
-        .subject_projection
-        .budget_decisions
-        .iter()
-        .any(|decision| decision.surface == "prompt"));
-    assert!(report
-        .subject_projection
-        .privacy_decisions
-        .iter()
-        .any(|decision| !decision.allowed && decision.reason.contains("privacy_policy")));
-    assert!(report.subject_projection.validate_contract().accepted);
-    assert!(report.projection_faithfulness.passed);
-    assert_eq!(
-        report
-            .private_disclosure_integrity
-            .raw_private_violation_count,
-        0
-    );
-    assert!(report.private_disclosure_integrity.passed);
     for forbidden_marker in [
         "private_raw:",
         "private-garden-raw:",
@@ -229,11 +138,17 @@ fn projection_report_exposes_sdk_owned_source_scope_budget_and_privacy_audit() {
     ] {
         assert!(
             !report
-                .system_memory_block
+                .provider_payload()
+                .system_memory_block()
                 .to_ascii_lowercase()
                 .contains(forbidden_marker),
             "projection leaked {forbidden_marker}"
         );
+        assert!(!safe
+            .gateway_audit()
+            .block
+            .to_ascii_lowercase()
+            .contains(forbidden_marker));
     }
 }
 
@@ -245,6 +160,7 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Prepare the release checklist without drifting into roleplay.".to_string(),
             system_max_len: 4096,
@@ -264,9 +180,12 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
         "## Work Integrity Covenant",
     ] {
         assert!(
-            report.system_memory_block.contains(required_heading),
+            report
+                .provider_payload()
+                .system_memory_block()
+                .contains(required_heading),
             "{}",
-            report.system_memory_block
+            report.provider_payload().system_memory_block()
         );
     }
     for forbidden_heading in [
@@ -279,62 +198,25 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
         "## Mental Privacy Boundary",
     ] {
         assert!(
-            !report.system_memory_block.contains(forbidden_heading),
+            !report
+                .provider_payload()
+                .system_memory_block()
+                .contains(forbidden_heading),
             "{} must not appear in runtime envelope:\n{}",
             forbidden_heading,
-            report.system_memory_block
+            report.provider_payload().system_memory_block()
         );
     }
     assert_eq!(
-        report.runtime_projection.rendered_block,
-        report.system_memory_block
+        report.report().gateway_audit().projection_id,
+        report.report().audit().projection_id
     );
-    assert_eq!(
-        report.runtime_projection.projection_id,
-        report.audit.projection_id
-    );
-    assert!(report
-        .runtime_projection
-        .section_names
-        .contains(&"governed_memory_evidence".to_string()));
-    assert!(report
-        .runtime_projection
-        .section_names
-        .contains(&"protected_private_runtime_context".to_string()));
+    assert!(report.report().audit().faithfulness_passed);
+    assert!(report.report().audit().disclosure_integrity_passed);
     assert!(!report
-        .runtime_projection
-        .section_names
-        .contains(&"private_garden".to_string()));
-    assert!(
-        report
-            .subject_projection
-            .identity_mount
-            .contains("Subject Mount"),
-        "{:?}",
-        report.subject_projection
-    );
-    assert!(
-        report
-            .subject_projection
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence == "subject_mount:degraded"),
-        "{:?}",
-        report.subject_projection
-    );
-    assert_eq!(
-        report.life_projection.identity_mount,
-        report.subject_projection.subject_mount.identity_mount
-    );
-    assert_eq!(
-        report.work_integrity.task_goal,
-        report.subject_projection.work_integrity.task_goal
-    );
-    assert!(
-        report.subject_projection.validate_contract().accepted,
-        "{:?}",
-        report.subject_projection.validate_contract()
-    );
+        .report()
+        .ui_api_projection()
+        .contains("## Soul Private Runtime Context"));
 }
 
 #[test]
@@ -345,6 +227,7 @@ fn projection_report_exposes_disclosure_integrity_for_runtime_surfaces() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Prepare the release checklist.".to_string(),
             system_max_len: 4096,
@@ -355,38 +238,11 @@ fn projection_report_exposes_disclosure_integrity_for_runtime_surfaces() {
         })
         .expect("project");
 
-    for surface in [
-        "prompt",
-        "ui_api",
-        "operator_raw",
-        "gateway_raw_audit",
-        "shared_fact_surface",
-    ] {
-        assert!(
-            report
-                .private_disclosure_integrity
-                .checked_surfaces
-                .contains(&surface.to_string()),
-            "{:?}",
-            report.private_disclosure_integrity
-        );
-    }
-    assert!(report
-        .private_disclosure_integrity
-        .blocked_source_ids
-        .contains(&"private_depth".to_string()));
-    assert_eq!(
-        report
-            .private_disclosure_integrity
-            .raw_private_violation_count,
-        0
-    );
-    assert!(report.private_disclosure_integrity.passed);
-    assert!(report
-        .projection_faithfulness
-        .checked_claims
-        .contains(&"subject_mount.identity_mount".to_string()));
-    assert!(report.projection_faithfulness.unsupported_claims.is_empty());
+    assert_eq!(report.report().audit().raw_private_violation_count, 0);
+    assert!(report.report().audit().disclosure_integrity_passed);
+    assert!(report.report().audit().faithfulness_passed);
+    assert_eq!(report.report().audit().unsupported_claim_count, 0);
+    assert!(report.report().gateway_audit().redacted);
 }
 
 #[test]
@@ -397,6 +253,7 @@ fn empty_store_projection_degrades_subject_mount_without_inventing_personality()
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Summarize what you know before answering.".to_string(),
             system_max_len: 2048,
@@ -408,40 +265,27 @@ fn empty_store_projection_degrades_subject_mount_without_inventing_personality()
         .expect("project");
 
     assert!(
-        report.system_memory_block.contains("## Subject Mount"),
+        report
+            .provider_payload()
+            .system_memory_block()
+            .contains("## Subject Mount"),
         "{}",
-        report.system_memory_block
+        report.provider_payload().system_memory_block()
     );
     assert!(
         report
-            .system_memory_block
+            .provider_payload()
+            .system_memory_block()
             .contains("subject_mount_degraded"),
         "{}",
-        report.system_memory_block
+        report.provider_payload().system_memory_block()
     );
-    assert!(
-        report
-            .subject_projection
-            .identity_mount
-            .contains("subject_mount_degraded"),
-        "{:?}",
-        report.subject_projection
-    );
-    assert!(report
-        .subject_projection
-        .dropped_candidates
-        .iter()
-        .any(|candidate| candidate.reason == "subject_mount_degraded"));
     assert!(!report
-        .subject_projection
-        .identity_mount
+        .provider_payload()
+        .system_memory_block()
         .to_ascii_lowercase()
         .contains("pretend"));
-    assert!(
-        report.subject_projection.validate_contract().accepted,
-        "{:?}",
-        report.subject_projection.validate_contract()
-    );
+    assert!(report.report().audit().faithfulness_passed);
 }
 
 #[test]
@@ -452,6 +296,7 @@ fn empty_store_greeting_projection_does_not_leak_identity_meta_terms() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "你好".to_string(),
             system_max_len: 2048,
@@ -462,7 +307,10 @@ fn empty_store_greeting_projection_does_not_leak_identity_meta_terms() {
         })
         .expect("project");
 
-    let lower = report.system_memory_block.to_ascii_lowercase();
+    let lower = report
+        .provider_payload()
+        .system_memory_block()
+        .to_ascii_lowercase();
     for forbidden in [
         "roleplay",
         "personality",
@@ -483,7 +331,7 @@ fn empty_store_greeting_projection_does_not_leak_identity_meta_terms() {
         assert!(
             !lower.contains(forbidden),
             "{forbidden} leaked into clean greeting projection:\n{}",
-            report.system_memory_block
+            report.provider_payload().system_memory_block()
         );
     }
 }

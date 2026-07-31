@@ -13,6 +13,10 @@ use bm_sdk::{
 
 use support::{empty_store_platform, test_runtime_with_scope};
 
+fn procedural_test_profile() -> bm_sdk::ProfileId {
+    bm_sdk::ProfileId::EspStandaloneMemory
+}
+
 fn llm_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment {
     MemoryCandidateSemanticJudgment {
         source: MemorySemanticJudgmentSource::LlmGovernance,
@@ -30,6 +34,7 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
 
     let report = runtime_a
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-preferred-name".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -64,6 +69,7 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
     let runtime_b = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-b");
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
             system_max_len: 4096,
@@ -75,20 +81,24 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
         .expect("project");
 
     assert!(
-        projection.system_memory_block.contains("Qingchuan"),
+        projection
+            .provider_payload()
+            .system_memory_block()
+            .contains("Qingchuan"),
         "projection should include candidate-backed subject memory: {}",
-        projection.system_memory_block
+        projection.provider_payload().system_memory_block()
     );
 }
 
 #[test]
 fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry() {
-    let profile = support::host_test_profile();
+    let profile = procedural_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-release-checklist".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -119,22 +129,26 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
     assert_eq!(report.changed, 1);
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release checklist evidence".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
         })
         .expect("recall");
-    assert_eq!(recall.procedural_hits.len(), 1);
     assert_eq!(
-        recall.procedural_hits[0].record.name,
-        "runtime_skill__release_checklist"
+        recall
+            .procedural_delivery_reports
+            .iter()
+            .filter(|delivery| delivery.selected)
+            .count(),
+        1
     );
 }
 
 #[test]
 fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write() {
-    let profile = support::host_test_profile();
+    let profile = procedural_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 
@@ -142,6 +156,10 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
         .write(MemoryWriteRequest::ProceduralPromotions {
             promotions: vec![ProceduralMemoryPromotionInput {
                 task_id: "task-single".to_string(),
+                learning_id: "learning:task-single".to_string(),
+                learning_digest:
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_string(),
                 trigger: "release checklist".to_string(),
                 procedure: "Run gates before release.".to_string(),
                 constraints: vec!["stay inside SDK reports".to_string()],
@@ -151,7 +169,9 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
                 quality_score: 90,
                 repeated_evidence_count: 1,
                 capability_affinity: vec!["sdk".to_string()],
+                privacy_class: MemoryPrivacyClass::SharedWithSubject,
             }],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::TaskLearning,
         })
         .expect("blocked promotion");
@@ -165,6 +185,10 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
             promotions: vec![
                 ProceduralMemoryPromotionInput {
                     task_id: "task-mixed-single".to_string(),
+                    learning_id: "learning:task-mixed-single".to_string(),
+                    learning_digest:
+                        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                            .to_string(),
                     trigger: "deployment warmup checklist".to_string(),
                     procedure: "Do not promote from one observation.".to_string(),
                     constraints: vec!["stay inside SDK reports".to_string()],
@@ -174,9 +198,14 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
                     quality_score: 90,
                     repeated_evidence_count: 1,
                     capability_affinity: vec!["sdk".to_string()],
+                    privacy_class: MemoryPrivacyClass::SharedWithSubject,
                 },
                 ProceduralMemoryPromotionInput {
                     task_id: "task-mixed-repeated".to_string(),
+                    learning_id: "learning:task-mixed-repeated".to_string(),
+                    learning_digest:
+                        "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                            .to_string(),
                     trigger: "deployment warmup checklist".to_string(),
                     procedure: "Promote only the repeated evidence item.".to_string(),
                     constraints: vec!["stay inside SDK reports".to_string()],
@@ -189,8 +218,10 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
                     quality_score: 90,
                     repeated_evidence_count: 2,
                     capability_affinity: vec!["sdk".to_string()],
+                    privacy_class: MemoryPrivacyClass::SharedWithSubject,
                 },
             ],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::TaskLearning,
         })
         .expect("mixed promotion");
@@ -209,6 +240,10 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
         .write(MemoryWriteRequest::ProceduralPromotions {
             promotions: vec![ProceduralMemoryPromotionInput {
                 task_id: "task-repeated".to_string(),
+                learning_id: "learning:task-repeated".to_string(),
+                learning_digest:
+                    "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+                        .to_string(),
                 trigger: "release checklist".to_string(),
                 procedure: "Run gates before release.".to_string(),
                 constraints: vec!["stay inside SDK reports".to_string()],
@@ -218,7 +253,9 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
                 quality_score: 90,
                 repeated_evidence_count: 2,
                 capability_affinity: vec!["sdk".to_string()],
+                privacy_class: MemoryPrivacyClass::SharedWithSubject,
             }],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::TaskLearning,
         })
         .expect("accepted promotion");
@@ -235,6 +272,7 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release checklist".to_string(),
             limit: 4,
@@ -242,20 +280,20 @@ fn runtime_learned_procedural_promotion_requires_repeated_evidence_before_write(
         })
         .expect("recall");
     assert!(recall
-        .procedural_hits
+        .procedural_delivery_reports
         .iter()
-        .any(|hit| hit.record.name == "runtime_skill__release_checklist"));
+        .any(|delivery| delivery.selected));
 }
 
 #[test]
 fn direct_runtime_learned_procedural_write_is_rejected_without_promotion_gate() {
-    let profile = support::host_test_profile();
+    let profile = procedural_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-a");
 
     let report = runtime
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "runtime_skill__unsafe_runtime_learned".to_string(),
                 topic: "release".to_string(),
                 title: "Unsafe runtime learned write".to_string(),
@@ -264,7 +302,8 @@ fn direct_runtime_learned_procedural_write_is_rejected_without_promotion_gate() 
                 citations: vec!["single-observation".to_string()],
                 source_chat_id: Some("chat-a".to_string()),
                 observed_at: 1_800_000_000,
-            }],
+            })],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::TaskLearning,
         })
         .expect("write report");
@@ -276,11 +315,12 @@ fn direct_runtime_learned_procedural_write_is_rejected_without_promotion_gate() 
         .contains("runtime_learned_procedural_write_requires_promotion"));
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "unsafe runtime learned".to_string(),
             limit: 4,
             tool_registry_refs: Vec::new(),
         })
         .expect("recall");
-    assert!(recall.procedural_hits.is_empty());
+    assert!(recall.procedural_delivery_reports.is_empty());
 }

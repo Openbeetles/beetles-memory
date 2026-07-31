@@ -10,8 +10,9 @@ use bm_evolve::{
     EvolutionSandboxPolicy,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemoryStoreHandle, ProfileId, RuntimeSkillWrite,
+    default_agent_subject_id, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity,
+    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    ProfileId, RuntimeSkillListRequest, RuntimeSkillOwningScope, RuntimeSkillWrite,
     StoreBackendConfig,
 };
 
@@ -20,28 +21,27 @@ fn proposal_commit_uses_sdk_write_governance() {
     let profile = ProfileId::native_dev_full().expect("supported host-native dev-full profile");
     let runtime = test_runtime(profile);
     let proposal = procedural_proposal(profile);
+    let owning_scope = proposal.owning_scope.clone();
 
     let report = commit_evolution_proposal(&runtime, proposal).expect("proposal commit");
 
     assert!(report.accepted, "{report:?}");
-    assert_eq!(
-        report.write_operation.as_deref(),
-        Some("write.procedural_promotions")
-    );
+    assert_eq!(report.committed_writes, 1, "{report:?}");
+    assert_eq!(report.write_operation.as_deref(), Some("write.procedural"));
     assert_eq!(report.lifecycle_operations, vec!["maintain".to_string()]);
 
-    let recall = runtime
-        .recall(MemoryRecallRequest {
-            structured_query_facets: Vec::new(),
-            query: "release artifact".to_string(),
+    let stored = runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope,
+            query: Some("release".to_string()),
+            include_disabled: true,
+            include_retired: true,
             limit: 4,
-            tool_registry_refs: Vec::new(),
         })
-        .expect("recall");
-    assert!(recall
-        .procedural_hits
-        .iter()
-        .any(|hit| hit.record.name == "runtime_skill__release_guard"));
+        .expect("list committed proposal");
+    assert_eq!(stored.total, 1, "{stored:?}");
+    assert_eq!(stored.active, 1, "{stored:?}");
+    assert_eq!(stored.skills[0].title, "Release artifact guard");
 }
 
 #[test]
@@ -51,6 +51,12 @@ fn governance_note_only_proposal_is_report_only_until_sdk_operation_exists() {
     let proposal = EvolutionProposal {
         proposal_id: "governance-note".to_string(),
         profile,
+        owning_scope: RuntimeSkillOwningScope::Subject {
+            mounted_subject_id: default_agent_subject_id("evolve-agent"),
+        },
+        verification_receipt_digest:
+            "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_string(),
+        privacy_class: MemoryPrivacyClass::SharedWithSubject,
         candidates: vec![EvolutionCandidate::GovernanceNote {
             target: "self-authored-core".to_string(),
             summary: "Candidate evidence only, not direct write authority.".to_string(),
@@ -91,6 +97,12 @@ fn procedural_proposal(profile: ProfileId) -> EvolutionProposal {
     EvolutionProposal {
         proposal_id: "release-skill-proposal".to_string(),
         profile,
+        owning_scope: RuntimeSkillOwningScope::Subject {
+            mounted_subject_id: default_agent_subject_id("evolve-agent"),
+        },
+        verification_receipt_digest:
+            "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_string(),
+        privacy_class: MemoryPrivacyClass::SharedWithSubject,
         candidates: vec![EvolutionCandidate::ProceduralMemory {
             write: RuntimeSkillWrite {
                 name: "release_guard".to_string(),

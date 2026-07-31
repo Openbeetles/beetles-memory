@@ -5,12 +5,29 @@ use bm_llm_gateway::{
     OpenAiGatewayServices, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryProjectionRequest, Message,
-    PressureLevel, ResponseBody, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
+    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryRuntime,
+    MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, Message, ResponseBody, StopReason,
+    ToolChoicePolicy, ToolSpec, TranscriptReplayView,
 };
 use serde_json::json;
 
 mod support;
+
+const FIXTURE_CONVERSATION_ID: &str = "thread-7";
+
+fn replay_model_context(runtime: &MemoryRuntime) -> MemoryTranscriptReplayReport {
+    let scope = runtime.scope();
+    runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: scope.channel.clone(),
+            conversation_id: FIXTURE_CONVERSATION_ID.to_string(),
+            limit: 32,
+            cursor: None,
+            view: TranscriptReplayView::ModelContext,
+        })
+        .expect("model-context transcript replay")
+}
 
 fn gateway_config() -> GatewayConfig {
     GatewayConfig::default_for_local_dev()
@@ -19,7 +36,7 @@ fn gateway_config() -> GatewayConfig {
 fn scope_request() -> GatewayScopeRequest {
     GatewayScopeRequest {
         workspace_root_digest: Some("workspace-digest".to_string()),
-        client_conversation_hint: Some("thread-7".to_string()),
+        client_conversation_hint: Some(FIXTURE_CONVERSATION_ID.to_string()),
         model_alias: Some("local".to_string()),
         ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
@@ -188,48 +205,37 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("scoped runtime");
-    let projection = runtime
-        .runtime()
-        .project(MemoryProjectionRequest {
-            structured_query_facets: Vec::new(),
-            user_query: "what did I ask?".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("projection");
-
-    let user_message = projection
-        .context
-        .recent_messages
+    let replay = replay_model_context(runtime.runtime());
+    let user_message = replay
+        .slice
+        .turns
         .iter()
-        .find(|message| message.content == "remember release guard with speaker metadata")
+        .flat_map(|turn| turn.input_messages.iter())
+        .find(|message| {
+            message.content.as_deref() == Some("remember release guard with speaker metadata")
+        })
         .unwrap_or_else(|| {
             panic!(
-                "user message persisted; recent={:?}",
-                projection
-                    .context
-                    .recent_messages
+                "user message persisted; turns={:?}",
+                replay
+                    .slice
+                    .turns
                     .iter()
-                    .map(|message| (
-                        message.role.as_str(),
-                        message.speaker_id.as_str(),
-                        message.content.as_str()
-                    ))
+                    .flat_map(|turn| turn.input_messages.iter())
+                    .map(|message| (&message.role, &message.actor, &message.content))
                     .collect::<Vec<_>>()
             )
         });
     assert!(user_message.message_id.starts_with("msg_"));
     assert_eq!(user_message.role, "user");
-    assert_eq!(user_message.speaker_id, "reviewer-agent");
-    assert_eq!(user_message.speaker_kind, "human");
-    assert!(projection
-        .context
-        .recent_messages
+    assert_eq!(user_message.actor.speaker_id, "reviewer-agent");
+    assert_eq!(user_message.actor.speaker_kind, "human");
+    assert!(replay
+        .slice
+        .turns
         .iter()
-        .any(|message| message.content == "I will verify artifacts first."));
+        .filter_map(|turn| turn.assistant_message.as_ref())
+        .any(|message| message.content.as_deref() == Some("I will verify artifacts first.")));
 }
 
 #[test]
@@ -270,28 +276,19 @@ fn missing_maintenance_services_skip_without_polluting_successful_response() {
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("scoped runtime");
-    let projection = runtime
-        .runtime()
-        .project(MemoryProjectionRequest {
-            structured_query_facets: Vec::new(),
-            user_query: "what did I ask?".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("projection");
-    assert!(projection
-        .context
-        .recent_messages
+    let replay = replay_model_context(runtime.runtime());
+    assert!(replay
+        .slice
+        .turns
         .iter()
-        .any(|message| message.content == "remember release guard"));
-    assert!(projection
-        .context
-        .recent_messages
+        .flat_map(|turn| turn.input_messages.iter())
+        .any(|message| message.content.as_deref() == Some("remember release guard")));
+    assert!(replay
+        .slice
+        .turns
         .iter()
-        .any(|message| message.content == "I will verify artifacts first."));
+        .filter_map(|turn| turn.assistant_message.as_ref())
+        .any(|message| message.content.as_deref() == Some("I will verify artifacts first.")));
 }
 
 #[test]
@@ -335,23 +332,13 @@ fn maintenance_hidden_records_skipped_without_blocking_turn_commit() {
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("scoped runtime");
-    let projection = runtime
-        .runtime()
-        .project(MemoryProjectionRequest {
-            structured_query_facets: Vec::new(),
-            user_query: "what did I ask?".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("projection");
-    assert!(projection
-        .context
-        .recent_messages
+    let replay = replay_model_context(runtime.runtime());
+    assert!(replay
+        .slice
+        .turns
         .iter()
-        .any(|message| message.content == "remember release guard"));
+        .flat_map(|turn| turn.input_messages.iter())
+        .any(|message| message.content.as_deref() == Some("remember release guard")));
 }
 
 #[test]
@@ -448,19 +435,8 @@ fn streaming_response_without_done_does_not_commit_partial_assistant() {
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("scoped runtime");
-    let projection = runtime
-        .runtime()
-        .project(MemoryProjectionRequest {
-            structured_query_facets: Vec::new(),
-            user_query: "what was streamed?".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("projection");
-    assert!(projection.context.recent_messages.is_empty());
+    let replay = replay_model_context(runtime.runtime());
+    assert!(replay.slice.turns.is_empty());
 }
 
 #[test]

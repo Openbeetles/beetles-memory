@@ -105,8 +105,7 @@ fn send_request_with_bridge(
 }
 
 fn recall_request(authorization: Option<&str>) -> String {
-    let body =
-        r#"{"name":"memory_recall_request","payload":{"query":"deployment runtime","limit":2}}"#;
+    let body = r#"{"name":"memory_recall_request","payload":{"temporal_operation":{"kind":"current"},"query":"deployment runtime","limit":2}}"#;
     let authorization = authorization
         .map(|value| format!("Authorization: {value}\r\n"))
         .unwrap_or_default();

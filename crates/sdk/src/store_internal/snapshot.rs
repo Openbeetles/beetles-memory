@@ -116,6 +116,7 @@ pub struct StoreSnapshotExportReport {
     pub event_fingerprint: String,
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoreSnapshotImportReport {
     pub schema_id: String,

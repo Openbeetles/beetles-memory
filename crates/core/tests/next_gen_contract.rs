@@ -1190,6 +1190,10 @@ fn procedural_promotion_requires_repeated_evidence_before_active_record() {
     let single_failure = promote_task_experience_to_procedure(
         ProceduralMemoryPromotionInput {
             task_id: "release-1".to_string(),
+            learning_id: "learning:release-1".to_string(),
+            learning_digest:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_string(),
             trigger: "release verification".to_string(),
             procedure: "Check checksums before publishing.".to_string(),
             constraints: vec!["no publish without checksum".to_string()],
@@ -1199,6 +1203,7 @@ fn procedural_promotion_requires_repeated_evidence_before_active_record() {
             quality_score: 82,
             repeated_evidence_count: 1,
             capability_affinity: vec!["release".to_string()],
+            privacy_class: bm_core::memory::MemoryPrivacyClass::SharedWithSubject,
         },
         policy.clone(),
     );
@@ -1212,6 +1217,10 @@ fn procedural_promotion_requires_repeated_evidence_before_active_record() {
     let promoted = promote_task_experience_to_procedure(
         ProceduralMemoryPromotionInput {
             task_id: "release-2".to_string(),
+            learning_id: "learning:release-2".to_string(),
+            learning_digest:
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                    .to_string(),
             trigger: "release verification".to_string(),
             procedure: "Check checksums before publishing.".to_string(),
             constraints: vec!["no publish without checksum".to_string()],
@@ -1221,6 +1230,7 @@ fn procedural_promotion_requires_repeated_evidence_before_active_record() {
             quality_score: 82,
             repeated_evidence_count: 2,
             capability_affinity: vec!["release".to_string()],
+            privacy_class: bm_core::memory::MemoryPrivacyClass::SharedWithSubject,
         },
         policy,
     );

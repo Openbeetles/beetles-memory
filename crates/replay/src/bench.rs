@@ -19,6 +19,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[cfg(test)]
+use crate::build_support::{P7_OPERATOR_BUILD_FINGERPRINT_CONTRACT, P7_OPERATOR_BUILD_INPUTS};
+use crate::build_support::{P7_SDK_BUILD_FINGERPRINT_CONTRACT, P7_SDK_BUILD_INPUTS};
 use crate::p7_process::{
     run_p7_bounded_command, run_p7_bounded_retained_executable, P7ProcessLimits,
     P7ProcessTermination,
@@ -60,15 +63,6 @@ const P7_RUNNER_PROJECTION_DIGEST_OBSERVATION_SCHEMA_VERSION: &str =
     "p7_runner_projection_digest_observation_v2";
 const P7_PROJECTION_OWNER_IDENTITY_TOKEN_PREFIX: &str = "projection-owner-token:";
 const P7_TRUSTED_SDK_BUILD_FINGERPRINT: &str = env!("BM_P7_TRUSTED_SDK_BUILD_FINGERPRINT");
-const P7_SDK_BUILD_FINGERPRINT_CONTRACT: &str = "p7_sdk_build_inputs_sha256_v2";
-const P7_SDK_BUILD_INPUTS: [&str; 6] = [
-    "Cargo.toml",
-    "Cargo.lock",
-    "crates/core/Cargo.toml",
-    "crates/core/src",
-    "crates/sdk/Cargo.toml",
-    "crates/sdk/src",
-];
 const P7_EMBEDDED_OPERATOR_BUILD_FINGERPRINT: &str = env!("BM_P7_OPERATOR_BUILD_FINGERPRINT");
 const P7_BUILD_SOURCE_ATTESTATION: &str = env!("BM_P7_BUILD_SOURCE_ATTESTATION");
 const P7_WORKSPACE_BUILD_SOURCE_ATTESTATION: &str = "workspace_source";
@@ -77,24 +71,6 @@ const P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256: &str =
     env!("BM_P7_FROZEN_ANCHOR_GENERATOR_RECEIPT_SHA256");
 const P7_OPERATOR_BUILD_PROFILE: &str = env!("BM_P7_OPERATOR_BUILD_PROFILE");
 const P7_OPERATOR_BUILD_FEATURES: &str = env!("BM_P7_OPERATOR_BUILD_FEATURES");
-#[cfg(test)]
-const P7_OPERATOR_BUILD_FINGERPRINT_CONTRACT: &str = "p7_operator_build_inputs_sha256_v1";
-#[cfg(test)]
-const P7_OPERATOR_BUILD_INPUTS: [&str; 13] = [
-    "Cargo.toml",
-    "Cargo.lock",
-    "crates/replay/Cargo.toml",
-    "crates/replay/build.rs",
-    "crates/replay/src/bench.rs",
-    "crates/replay/src/fixture.rs",
-    "crates/replay/src/harness.rs",
-    "crates/replay/src/lib.rs",
-    "crates/replay/src/p7_process.rs",
-    "crates/replay/src/p7_secure_fs.rs",
-    "crates/replay/src/runner.rs",
-    "crates/replay/src/bin/bm-p7-retained-launch.rs",
-    "crates/replay/src/bin/bm-w4-external-noisy-wall.rs",
-];
 const P7_RUNNER_RELEASES_DIR: &str = "releases";
 const P7_RUNNER_RELEASE_FILE_NAME: &str = "beetle-memory-external-bench-runner";
 pub const P7_RELEASE_GATE_ATTESTATION_FILE_NAME: &str = "release-gate-attestation.json";
@@ -135,7 +111,7 @@ pub const P7_REQUIRED_RELEASE_GATE_IDS: [&str; 14] = [
     "runner-full-wall-fake",
     "runner-max-rss-fake",
 ];
-const P7_PRODUCER_SEMANTIC_AGENT_MEMORY_INPUTS: [&str; 12] = [
+const P7_PRODUCER_SEMANTIC_AGENT_MEMORY_INPUTS: [&str; 14] = [
     "Cargo.toml",
     "Cargo.lock",
     "crates/core/Cargo.toml",
@@ -148,6 +124,8 @@ const P7_PRODUCER_SEMANTIC_AGENT_MEMORY_INPUTS: [&str; 12] = [
     "crates/replay/src/bench.rs",
     "crates/replay/src/p7_process.rs",
     "crates/replay/src/p7_secure_fs.rs",
+    "crates/replay/src/retained_artifact_fs.rs",
+    "crates/replay/src/sealed_execution.rs",
 ];
 const P7_PRODUCER_SEMANTIC_RUNNER_INPUTS: [&str; 5] = [
     "Cargo.toml",
@@ -13566,6 +13544,28 @@ mod p7_operator_unit_tests {
     }
 
     #[test]
+    fn p7_build_fingerprint_input_order_remains_path_component_order() {
+        let root =
+            std::env::temp_dir().join(format!("bm-p7-component-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("nested")).expect("nested source root");
+        fs::write(root.join("nested.rs"), b"module").expect("module source");
+        fs::write(root.join("nested/a.rs"), b"nested").expect("nested source");
+
+        let inputs = p7_fingerprint_inputs(&root, &["nested.rs", "nested"])
+            .expect("P7 component-ordered inputs");
+
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|path| path.strip_prefix(&root).expect("relative input"))
+                .collect::<Vec<_>>(),
+            vec![Path::new("nested/a.rs"), Path::new("nested.rs"),]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn compiled_sdk_fingerprint_matches_independent_disk_recomputation() {
         let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -13729,8 +13729,16 @@ mod p7_operator_unit_tests {
                 b"pub fn secure_fs() {}\n".as_slice(),
             ),
             (
+                sdk_root.join("crates/replay/src/retained_artifact_fs.rs"),
+                b"pub fn retained_artifact_fs() {}\n".as_slice(),
+            ),
+            (
                 sdk_root.join("crates/replay/src/runner.rs"),
                 b"pub fn runner() {}\n".as_slice(),
+            ),
+            (
+                sdk_root.join("crates/replay/src/sealed_execution.rs"),
+                b"pub fn sealed_execution() {}\n".as_slice(),
             ),
             (
                 sdk_root.join(P7_FROZEN_RUNNER_IDENTITY_RELATIVE_PATH),
@@ -13941,6 +13949,50 @@ mod p7_operator_unit_tests {
             "broad gate manifest must bind the test it executes"
         );
         assert_eq!(semantic(), contract_semantic);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn p7_source_identities_bind_generation_neutral_execution_owners() {
+        let (root, sdk_root, runner_root) = p7_gate_source_fixture("neutral-owners");
+        let fingerprints = || {
+            (
+                p7_release_gate_source_manifest(&sdk_root, &runner_root)
+                    .expect("broad gate source manifest")
+                    .source_fingerprint,
+                p7_producer_semantic_source_manifest(&sdk_root, &runner_root)
+                    .expect("producer semantic source manifest")
+                    .source_fingerprint,
+            )
+        };
+        let baseline = fingerprints();
+
+        for (relative, replacement) in [
+            (
+                "crates/replay/src/retained_artifact_fs.rs",
+                b"pub fn retained_artifact_fs_v2() {}\n".as_slice(),
+            ),
+            (
+                "crates/replay/src/sealed_execution.rs",
+                b"pub fn sealed_execution_v2() {}\n".as_slice(),
+            ),
+        ] {
+            let path = sdk_root.join(relative);
+            let original = fs::read(&path).expect("read neutral owner fixture");
+            fs::write(&path, replacement).expect("mutate neutral owner fixture");
+            let mutated = fingerprints();
+            assert_ne!(
+                mutated.0, baseline.0,
+                "{relative} must change the broad release source identity"
+            );
+            assert_ne!(
+                mutated.1, baseline.1,
+                "{relative} must change the producer semantic source identity"
+            );
+            fs::write(path, original).expect("restore neutral owner fixture");
+            assert_eq!(fingerprints(), baseline);
+        }
 
         let _ = fs::remove_dir_all(root);
     }

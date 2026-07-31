@@ -55,6 +55,7 @@ fn projection_composer_does_not_mutate_soul_or_private_surfaces() {
     let runtime = test_runtime_with_scope(platform.clone(), profile, "sdk.direct", "chat-a");
     runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Summarize the current work context.".to_string(),
             system_max_len: 4096,

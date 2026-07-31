@@ -27,7 +27,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Maintain | `MemoryRuntime::maintain` | 在显式配置 LLM client 后执行 post-reply memory maintenance。 |
 | Inspect | `MemoryRuntime::inspect` | 返回 recall/operator/lifecycle inspection 数据。 |
 | Runtime Skill List / Detail | `MemoryRuntime::list_runtime_skills` / `MemoryRuntime::get_runtime_skill` | 列出和查看运行时沉淀的 procedural memory record，不执行 skill。 |
-| Runtime Skill Mutation | `MemoryRuntime::edit_runtime_skill` / `MemoryRuntime::set_runtime_skill_enabled` / `MemoryRuntime::delete_runtime_skill` | 只允许编辑、启停、删除已存在的运行时 Skill；不提供新建、导入或托管标准 Agent Skill。 |
+| Runtime Skill Mutation | `MemoryRuntime::edit_runtime_skill` / `MemoryRuntime::set_runtime_skill_enabled` / `MemoryRuntime::retire_runtime_skill` | 只允许编辑、启停或退役已存在的运行时 Skill；不提供新建、导入或托管标准 Agent Skill。 |
 | Long-Term Memory List / Detail | `MemoryRuntime::list_long_term_memory` / `MemoryRuntime::get_long_term_memory` | 列出、搜索、查看已接受的长期记忆，返回脱敏 view、evidence summary、revision/tombstone 信息。 |
 | Long-Term Memory Mutation | `MemoryRuntime::mutate_long_term_memory` | 对已接受长期记忆执行 correct、supersede、delete、forget_by_query、mark_stale、change_scope，并返回 affected records、tombstone、projection impact 和 lifecycle report。 |
 | Long-Term Governance Policy | `MemoryRuntime::mutate_memory_governance_policy` | 暂停、恢复或 suppress 后续长期记忆更新；影响未来写入治理，不静默删除已接受记忆。 |
@@ -35,12 +35,12 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Agent Tool Registry | `MemoryRuntimeBuilder::agent_tool_registry` / `MemoryRuntime::upsert_agent_tool_registry` | 宿主注册工具索引和 fingerprint；SDK 只基于已治理工具经验返回 `agent_tool_hints`，无经验返回空，不做工具路由。 |
 | Replay | `MemoryRuntime::replay` | 检查某个 chat 的 turn ledger 历史。 |
 | Transcript Attr Write | `MemoryRuntime::record_transcript_attrs` | 给 transcript evidence 追加受治理的 turn/message metadata，用于 replay、export、redaction、repair 和 profile budget。 |
-| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | 在显式 private-material policy 下迁移 typed `(memory_space_id, mounted_subject_id)` archive。 |
+| Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | 在显式 private-material policy 下导出 opaque archive，并原子替换完全相同的 `MemoryArchiveScope`。 |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | 控制 runtime lifecycle 并产生 lifecycle report。 |
 
 ## Memory Evidence System
 
-Conversation Transcript Substrate 发布面是当前已落地的基础证据合同，用于 governed transcript commit、redacted replay、lifecycle review 和可迁移 evidence handling。它不是宿主任务系统，也不替代 Soul Governance、Subject Projection、Program Memory、procedural memory 或已接受的长期记忆平面。
+Conversation Transcript Substrate 发布面是当前已落地的基础证据合同，用于 governed transcript commit、redacted replay、lifecycle review 和 archive-ready evidence handling。它不是宿主任务系统，也不替代 Soul Governance、Subject Projection、Program Memory、procedural memory 或已接受的长期记忆平面。
 
 owner 仍然是 `MemoryRuntime`：宿主和 adapter 只提供 delivered turn delta、actor attribution 和 opaque host refs；Beetle Memory 负责提交 evidence、执行治理并返回 report。外部代码不能另写一套 transcript store，也不能从 raw conversation history 自行推断 memory facts。
 
@@ -55,7 +55,7 @@ SDK transcript 操作：
 | Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport`，通过 `MemoryRuntime::request_transcript_lifecycle` 调用 | 执行 archive、mask、delete raw content 或 lifecycle review，并产出 audit。 |
 | Transcript Repair | `MemoryTranscriptRepairRequest` / `MemoryTranscriptRepairReport`，通过 `MemoryRuntime::repair_transcript` 调用 | 检查 Memory-owned evidence link 断裂，不扫描宿主业务数据库。 |
 | Transcript Attr Write | `MemoryTranscriptAttrWriteRequest` / `MemoryTranscriptAttrWriteReport`，通过 `MemoryRuntime::record_transcript_attrs` 调用 | 在 transcript target 已存在后写入 turn/message `TranscriptAttrEnvelope`。适用于每条消息的模型用量、运行延迟/状态、附件摘要、provenance 标签等轻量 metadata。 |
-| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport`，通过 `MemoryRuntime::export_transcript` 调用；`MemorySpaceExportRequest { include_private: false }` 默认 redacts raw transcript、`conversation_transcript_alias`、`conversation_transcript_attr` 和 `conversation_transcript_derived_ref` manifest | 导出 redacted transcript slice；除非调用方明确请求 private material，否则 raw transcript 及其 owner/attr/derived metadata 不进入公开 memory-space export。 |
+| Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport`，通过 `MemoryRuntime::export_transcript` 调用；`MemorySpaceExportRequest { private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate, .. }` 会把 private transcript material 及其依赖的 export-visible index 作为一个受治理 closure 排除 | 导出 redacted transcript slice；除非调用方明确选择 `IncludePrivate`，否则 private transcript material 不进入公开 memory-space archive。 |
 
 `MemoryTranscriptReplayRequest` 和 `MemoryTranscriptExportRequest` 接收 `limit` 与可选 `cursor`；对应 report 返回 `next_cursor` 和 `has_more`。SDK 调用方应通过 `MemoryRuntime` 分页 replay/export transcript，不应下沉到 core/store trait。Runtime profile budget 可以裁剪 page size、每 turn 可见 host refs、每 turn/message 可见 attrs、redaction items、lifecycle derived refs 和 repair issues 数量，但不能放宽 redaction、lifecycle 或 privacy policy。Lifecycle 和 repair report 的列表被裁剪时会设置 `profile_budget_applied=true`。
 
@@ -71,7 +71,7 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 
 | 概念 | 合同 |
 | --- | --- |
-| `ConversationKey` | 由 `memory_space_id`、`channel_id` 和 `conversation_id` 组成；`chat_id` 只作为 legacy alias 或 migration source。 |
+| `ConversationKey` | 由 `memory_space_id`、`channel_id` 和 `conversation_id` 组成；`chat_id` 继续作为 `MemoryReplayRequest` 的 turn-ledger inspection key。 |
 | `ActorAttribution` | 保留 speaker、subject、actor subject、mounted subject、agent id 和 trigger source，不把它们压成一个身份。 |
 | `HostOpaqueRef` | 携带 task、project、ticket、document、order 等宿主对象引用，但 Memory 不解析宿主业务状态机；`HostRefVisibility` 会按 replay/export view 执行，`label` 会在非 owner 允许视图外做字段级脱敏，并在 redaction report 中记录 `HostRefLabel`。 |
 | `TranscriptAttrEnvelope` | 承载受治理的 turn/message metadata。`TranscriptAttrScope` 是 `turn` 或 `message`；key 必须在 `host.*` 或 `memory.*` 命名空间下；value 由 `TranscriptAttrValueKind` 声明类型；visibility、export policy、redaction policy、source、links 和 value-size budget 由 Memory 执行。 |
@@ -98,7 +98,7 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 
 | Request type | 必填字段 | 说明 |
 | --- | --- | --- |
-| `MemoryWriteRequest::Procedural` | `writes`, `source` | 每个 `RuntimeSkillWrite` 包含 `name`、`topic`、`title`、`summary`、`content`、`citations`、`source_chat_id`、`observed_at`。 |
+| `MemoryWriteRequest::Procedural` | `writes`, `owning_scope`, `source` | 每项写入必须同时携带 `RuntimeSkillWrite`、typed creation ref 和 privacy class；`name` 仅是展示输入，不参与 owner identity。 |
 | `MemoryWriteRequest::AgentToolUsageFeedback` | `feedback` | 宿主执行工具后回传 `registry_ref` 和 observation 摘要；SDK 治理后才可能沉淀工具经验。 |
 | `MemoryWriteRequest::LongTermExtraction` | `extraction` | 用于 extraction pipeline 已经产出 validated long-term memory extraction 的场景。 |
 | `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | 在同一事务中创建、修订或删除 governed evidence owner、source claim 和派生索引。`Upsert` 携带有界 `GovernedEvidenceDocumentDraft`；`Delete` 必须携带 expected owner revision。 |
@@ -106,19 +106,19 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 | `MemoryProjectionRequest` | `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | 返回受 `system_max_len` 限制的 `system_memory_block`；structured facets 与 recall 共用受治理 query 合同，标准 Agent Skill 只以只读提示摘要进入上下文，Agent Tool 只以经验 hint 进入，不包含完整 schema。 |
 | `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | 通过 `MemoryRuntime::read_governed_evidence_documents(request)` 精确、有界地读取 governed evidence documents。runtime 会拒绝 memory-space 不一致、空/重复 document id 和超过当前 profile read budget 的请求；结果经过 privacy filter，并携带 typed owner identity、revision、canonical evidence binding、安全 source metadata 与有界 body/chunks。 |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | 返回 capability、lifecycle、operator inspection 数据、Agent Skill 目录扫描报告和 Agent Tool registry 报告。 |
-| `RuntimeSkillListRequest` | `query`, `include_disabled`, `include_retired`, `limit` | 返回 `RuntimeSkillListReport`，含 total、active、disabled、runtime_skills 和运行时 Skill 摘要。 |
-| `RuntimeSkillDetailRequest` | `name` | 返回 `RuntimeSkillDetailReport`，含 summary/procedure/citations/lineage/strategy diffs/raw content。 |
-| `RuntimeSkillEditRequest` | `name`, `title`, `topic`, `summary`, `procedure`, `edit_reason` | 只能编辑已存在且名称以 `runtime_skill__` 开头的运行时 Skill。 |
-| `RuntimeSkillSetEnabledRequest` | `name`, `enabled` | 只改变运行时 Skill 启用状态，不改内容。 |
-| `RuntimeSkillDeleteRequest` | `name` | 从 skill storage 删除该运行时 procedural memory，不建立配置台墓碑。 |
+| `RuntimeSkillListRequest` | `owning_scope`, `query`, `include_disabled`, `include_retired`, `limit` | 只列出显式 Subject 或 SharedProgram scope manifest 中的 exact typed owners。 |
+| `RuntimeSkillDetailRequest` | `locator` | locator 同时绑定 owning scope、owner ref 和 expected revision；名称不能翻译成 identity。 |
+| `RuntimeSkillEditRequest` | `locator`, `title`, `topic`, `summary`, `procedure`, `edit_reason`, `observed_at` | 以 locator revision 为并发前提，成功后追加 immutable owner revision，并返回 `current_locator`。 |
+| `RuntimeSkillSetEnabledRequest` | `locator`, `enabled`, `observed_at` | 追加 lifecycle revision，不写 `skill_meta`。 |
+| `RuntimeSkillRetireRequest` | `locator`, `observed_at` | 追加 disabled + retired revision并保留 lineage；不物理删除 owner。 |
 | `MemoryLongTermListRequest` | `query`, `limit`, `view` | 通过 `MemoryRuntime::list_long_term_memory` 读取 accepted long-term memory 列表；支持 `cursor` 分页，默认面向 `HostUi` 脱敏 embedded record 的 source metadata。 |
 | `MemoryLongTermDetailRequest` | `target`, `view` | 通过 record id、slot 或 transcript derived ref 查看一条长期记忆及 revision/tombstone/evidence refs。 |
 | `MemoryLongTermMutationRequest` | `operation`, `reason`, `dry_run`, `mode_input` | 执行 correct、supersede、delete、forget_by_query、mark_stale 或 change_scope；批量 forget 必须先 dry-run preview 并带 confirmation token。 |
 | `MemoryLongTermPolicyRequest` | `operation`, `reason`, `dry_run`, `mode_input` | 执行 pause、resume、suppress 或 remove_suppression；被 policy 拦截的后续写入会进入 SDK governance report。 |
 | `MemoryTranscriptAttrWriteRequest` | `memory_space_id`, `channel_id`, `conversation_id`, `attrs`, `dry_run` | 把受治理的 `TranscriptAttrEnvelope` metadata 写到已存在的 transcript turn/message。`idempotency_key` 用于宿主/adapter 关联；dry-run 只校验 target 存在和 attr envelope 规则，不落库，并返回 rejected attrs 与 `redactions_preview`。 |
 | `MemoryReplayRequest` | `chat_id`, `limit` | 只做 inspection 的 replay surface。 |
-| `MemorySpaceExportRequest` | `scope`, `include_private` | 只导出与 runtime 精确一致的 typed memory-space 与 mounted-subject projection。 |
-| `MemorySpaceImportRequest` | `scope`, `expected_private_material_policy`, `archive` | 仅当 runtime、request、archive scope 与 private-material policy 在 store access 前全部一致时导入。 |
+| `MemorySpaceExportRequest` | `scope`, `private_material_policy` | 使用 `MemoryArchiveScope::subject(...)` 或 `MemoryArchiveScope::shared_program(...)`，返回带 canonical governed root 的 opaque archive。 |
+| `MemorySpaceImportRequest` | `scope`, `expected_private_material_policy`, `archive` | 在 store mutation 前重算 archive root；仅当 runtime、request 与 archive 的精确 scope 和 private-material policy 全部一致时原子替换。 |
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | 执行可恢复 lifecycle recovery。 |
 | `MemoryCloseRequest` | `reason` | 发出 close lifecycle report。 |
 
@@ -136,7 +136,7 @@ Beetle Memory 已接受的长期记忆真源在 `MemoryRuntime`。宿主可以�
 - `MemoryLongTermMutationRequest` 负责用户或 operator 对已接受长期记忆做 correction、supersede、delete、forget、scope change。
 - `MemoryLongTermPolicyRequest` 负责“以后不要记这类事情”或“暂停这个范围的长期记忆更新”。
 - Transcript lifecycle 的 `DeleteRaw` / `Mask` 只处理 conversation evidence；它会报告 `DerivedMemoryRef` impact，但不会自动删除 accepted long-term memory。要撤销派生长期记忆，必须再调用长期记忆控制面。
-- Runtime Skill 管理面只管理 procedural memory 中的 runtime skill，不等同普通长期记忆的 edit/delete。
+- Runtime Skill 管理面只管理 procedural memory 中的 runtime skill，不等同普通长期记忆的 edit/retire。
 
 所有 mutation report 都必须可用于审计：affected records、tombstones、transcript refs、projection impact、deferred governance impact、policy decision 和 lifecycle report 由 SDK 返回。Profile 不允许某项操作时，SDK 返回结构化拒绝；宿主不得 fallback 到本地 DB 直接改 store。
 
@@ -203,10 +203,10 @@ Console API 只服务独立部署形态的配置台，不属于 SDK 集成方必
 | --- | --- | --- |
 | `/console/overview` | `GET` | 返回系统信息、运行形态、观测指标、内核摘要、session 概览和当前记忆上下文。 |
 | `/console/skills` | `GET` | 返回运行时 Skill 列表和统计。 |
-| `/console/skills/{name}` | `GET` | 返回单条运行时 Skill 详情。 |
-| `/console/skills/{name}` | `PATCH` | 编辑已存在的运行时 Skill。 |
-| `/console/skills/{name}/enabled` | `PATCH` | 启用或停用运行时 Skill。 |
-| `/console/skills/{name}` | `DELETE` | 删除运行时 Skill 记忆。 |
+| `/console/skills/detail` | `POST` | 按 typed owner locator 返回单条运行时 Skill 详情。 |
+| `/console/skills` | `PATCH` | 按 typed owner locator 创建不可变的新修订。 |
+| `/console/skills/enabled` | `PATCH` | 按 typed owner locator 启用或停用运行时 Skill。 |
+| `/console/skills/retire` | `POST` | 按 typed owner locator 将运行时 Skill 追加为 retired 修订。 |
 | `/console/llm-gateway` | `GET` | 返回 LLM Gateway 操作面：OpenAI/Ollama/MCP 端点、规则导出命令和 smoke checks。 |
 | `/console/llm-gateway/smoke-checks/{id}/run` | `POST` | 运行后端白名单中的 LLM Gateway 验收项，并返回退出码、耗时和受限 stdout/stderr。 |
 | `/console/transports` | `GET` | 返回可配置通信入口。 |

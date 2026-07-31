@@ -30,6 +30,12 @@ case "$mode" in
     ;;
 esac
 
+node --test scripts/tests/validate_target_gate_fixture.test.mjs
+bash scripts/tests/check_cross_target_compile_gate_dispatch.sh
+if [[ "$target_mode" == "--strict" ]]; then
+  bash scripts/check_cross_target_compile_gates.sh --preflight
+fi
+
 cargo fmt --all -- --check
 cargo test --workspace --exclude bm-desktop
 cargo clippy --workspace --exclude bm-desktop --all-targets -- -D warnings

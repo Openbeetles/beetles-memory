@@ -41,7 +41,8 @@ bash scripts/check_production_hardening_contract.sh
 bash scripts/check_release_surface.sh
 ```
 
-具备目标工具链的 release 环境还应运行：
+缺少必要目标工具链的开发机可以在工程交接中将对应行记录为 `deferred_not_passed`。
+任何发布候选都必须配置全部目标工具链并取得 strict GREEN；工具链缺失会阻断发布，不能算通过：
 
 ```bash
 bash scripts/check_cross_target_compile_gates.sh --strict

@@ -13,15 +13,16 @@ use bm_entry::{
 };
 use bm_sdk::{
     platform_capability_snapshot, platform_capability_snapshot_file_name,
-    resolve_memory_capabilities, LongTermMemoryKind, LongTermMemoryQuery, MemoryCapabilityCatalog,
-    MemoryCapabilityPolicy, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
-    MemoryGovernanceSuppressionDuration, MemoryInspectionRequest, MemoryLongTermControlView,
-    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
-    MemoryTranscriptAttrWriteRequest, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
-    StoreBackendKind, TranscriptAttrEnvelope,
+    resolve_memory_capabilities, GovernedRuntimeSkillWriteInput, LongTermMemoryKind,
+    LongTermMemoryQuery, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
+    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
+    MemoryInspectionRequest, MemoryLongTermControlView, MemoryLongTermListRequest,
+    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
+    MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryReplayRequest, MemoryTranscriptAttrWriteRequest, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
+    RuntimeSkillOwnerLocator, RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    StoreBackendConfig, StoreBackendKind, TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -61,7 +62,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "write-procedural",
-        usage: "bm memory write-procedural --name <name> --content <content>",
+        usage: "bm memory write-procedural --name <name> --content <content> --runtime-skill-subject <subject-id>|--runtime-skill-shared-program --replay-candidate-ref <safe-ref> --verification-receipt-digest <sha256> --runtime-skill-privacy <public-runtime|shared-with-subject>",
         operation: AdapterOperation::Write,
     },
     CommandSpec {
@@ -91,33 +92,32 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "skill-list",
-        usage: "bm memory skill-list --query <query>",
+        usage: "bm memory skill-list (--runtime-skill-subject <subject-id>|--runtime-skill-shared-program) --query <query>",
         operation: AdapterOperation::Inspect,
     },
     CommandSpec {
         name: "skill-show",
-        usage: "bm memory skill-show --name <name>",
+        usage: "bm memory skill-show (--runtime-skill-subject <subject-id>|--runtime-skill-shared-program) --runtime-skill-owner-id <owner-id> --runtime-skill-owner-revision <n>",
         operation: AdapterOperation::Inspect,
     },
     CommandSpec {
         name: "skill-edit",
-        usage:
-            "bm memory skill-edit --name <name> --title <title> --topic <topic> --content <content>",
+        usage: "bm memory skill-edit (--runtime-skill-subject <subject-id>|--runtime-skill-shared-program) --runtime-skill-owner-id <owner-id> --runtime-skill-owner-revision <n> --title <title> --topic <topic> --content <content>",
         operation: AdapterOperation::Write,
     },
     CommandSpec {
         name: "skill-enable",
-        usage: "bm memory skill-enable --name <name>",
+        usage: "bm memory skill-enable (--runtime-skill-subject <subject-id>|--runtime-skill-shared-program) --runtime-skill-owner-id <owner-id> --runtime-skill-owner-revision <n>",
         operation: AdapterOperation::Write,
     },
     CommandSpec {
         name: "skill-disable",
-        usage: "bm memory skill-disable --name <name>",
+        usage: "bm memory skill-disable (--runtime-skill-subject <subject-id>|--runtime-skill-shared-program) --runtime-skill-owner-id <owner-id> --runtime-skill-owner-revision <n>",
         operation: AdapterOperation::Write,
     },
     CommandSpec {
-        name: "skill-delete",
-        usage: "bm memory skill-delete --name <name>",
+        name: "skill-retire",
+        usage: "bm memory skill-retire (--runtime-skill-subject <subject-id>|--runtime-skill-shared-program) --runtime-skill-owner-id <owner-id> --runtime-skill-owner-revision <n>",
         operation: AdapterOperation::Write,
     },
     CommandSpec {
@@ -241,6 +241,12 @@ fn run_memory_cli(args: &[String]) -> Result<String, String> {
         .ok_or_else(|| "usage: bm memory <command> [options]".to_string())?;
     let operation = command_operation(command)?;
     let options = CliOptions::parse(rest)?;
+    if is_skill_command(command) && !options.name.trim().is_empty() {
+        return Err(
+            "--name is not accepted by runtime skill management; use the typed owner locator"
+                .to_string(),
+        );
+    }
     let entry = EntryRuntime::open(options.entry_config()).map_err(|err| err.to_string())?;
     if is_skill_command(command) {
         return run_skill_cli(&entry, command, &options);
@@ -320,7 +326,7 @@ fn is_skill_command(command: &str) -> bool {
             | "skill-edit"
             | "skill-enable"
             | "skill-disable"
-            | "skill-delete"
+            | "skill-retire"
     )
 }
 
@@ -332,7 +338,10 @@ fn run_skill_cli(
     let value = match command {
         "skill-list" => {
             let report = entry
-                .console_skills(non_empty_string(&options.query))
+                .console_skills_in_scope(
+                    options.runtime_skill_scope()?,
+                    non_empty_string(&options.query),
+                )
                 .map_err(|err| err.to_string())?;
             json!({
                 "status": "accepted",
@@ -340,32 +349,27 @@ fn run_skill_cli(
             })
         }
         "skill-show" => {
-            let name = required_value(&options.name, "--name")?;
-            let Some(skill) = entry
-                .console_skill_detail(name)
-                .map_err(|err| err.to_string())?
-            else {
-                return Err(format!("skill not found: {name}"));
-            };
+            let locator = options.runtime_skill_locator()?;
+            let skill = entry
+                .console_skill_detail(locator)
+                .map_err(|err| err.to_string())?;
             json!({
                 "status": "accepted",
                 "skill": skill,
             })
         }
         "skill-edit" => {
-            let name = required_value(&options.name, "--name")?;
             let content = options.skill_content()?;
             let payload = EntryConsoleRuntimeSkillEdit {
+                locator: options.runtime_skill_locator()?,
                 title: required_value(&options.title, "--title")?.to_string(),
                 topic: required_value(&options.topic, "--topic")?.to_string(),
                 summary: required_value(&options.summary, "--summary")?.to_string(),
                 procedure: content,
-                citations: vec!["bm-cli".to_string()],
-                source_chat_id: Some(options.chat.clone()),
                 edit_reason: Some("cli_runtime_skill_edit".to_string()),
             };
             let mutation = entry
-                .console_edit_runtime_skill(name, payload)
+                .console_edit_runtime_skill(payload)
                 .map_err(|err| err.to_string())?;
             json!({
                 "status": "accepted",
@@ -373,31 +377,21 @@ fn run_skill_cli(
             })
         }
         "skill-enable" | "skill-disable" => {
-            let name = required_value(&options.name, "--name")?;
-            let Some(mutation) = entry
-                .console_set_skill_enabled(
-                    name,
-                    EntryConsoleSkillSetEnabled {
-                        enabled: command == "skill-enable",
-                    },
-                )
-                .map_err(|err| err.to_string())?
-            else {
-                return Err(format!("skill not found: {name}"));
-            };
+            let mutation = entry
+                .console_set_skill_enabled(EntryConsoleSkillSetEnabled {
+                    locator: options.runtime_skill_locator()?,
+                    enabled: command == "skill-enable",
+                })
+                .map_err(|err| err.to_string())?;
             json!({
                 "status": "accepted",
                 "mutation": mutation,
             })
         }
-        "skill-delete" => {
-            let name = required_value(&options.name, "--name")?;
-            let Some(mutation) = entry
-                .console_delete_skill(name)
-                .map_err(|err| err.to_string())?
-            else {
-                return Err(format!("skill not found: {name}"));
-            };
+        "skill-retire" => {
+            let mutation = entry
+                .console_retire_skill(options.runtime_skill_locator()?)
+                .map_err(|err| err.to_string())?;
             json!({
                 "status": "accepted",
                 "mutation": mutation,
@@ -436,6 +430,12 @@ struct CliOptions {
     input_path: Option<PathBuf>,
     reason: String,
     reason_provided: bool,
+    runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
+    runtime_skill_owner_id: String,
+    runtime_skill_owner_revision: Option<u64>,
+    replay_candidate_ref: String,
+    verification_receipt_digest: String,
+    runtime_skill_privacy: Option<MemoryPrivacyClass>,
 }
 
 #[derive(Deserialize)]
@@ -472,6 +472,12 @@ impl CliOptions {
         let mut input_path = None;
         let mut reason = "cli close".to_string();
         let mut reason_provided = false;
+        let mut runtime_skill_owning_scope = None;
+        let mut runtime_skill_owner_id = String::new();
+        let mut runtime_skill_owner_revision = None;
+        let mut replay_candidate_ref = String::new();
+        let mut verification_receipt_digest = String::new();
+        let mut runtime_skill_privacy = None;
         let mut index = 0;
         while index < args.len() {
             let key = args[index].as_str();
@@ -515,6 +521,44 @@ impl CliOptions {
                 "--title" => title = next_value(args, &mut index, key)?.to_string(),
                 "--summary" => summary = next_value(args, &mut index, key)?.to_string(),
                 "--content" => content = next_value(args, &mut index, key)?.to_string(),
+                "--runtime-skill-subject" => {
+                    if runtime_skill_owning_scope.is_some() {
+                        return Err("runtime skill owning scope may be specified once".to_string());
+                    }
+                    runtime_skill_owning_scope = Some(RuntimeSkillOwningScope::Subject {
+                        mounted_subject_id: next_value(args, &mut index, key)?.to_string(),
+                    });
+                }
+                "--runtime-skill-shared-program" => {
+                    if runtime_skill_owning_scope.is_some() {
+                        return Err("runtime skill owning scope may be specified once".to_string());
+                    }
+                    runtime_skill_owning_scope = Some(RuntimeSkillOwningScope::SharedProgram);
+                }
+                "--runtime-skill-owner-id" => {
+                    runtime_skill_owner_id = next_value(args, &mut index, key)?.to_string()
+                }
+                "--runtime-skill-owner-revision" => {
+                    runtime_skill_owner_revision =
+                        Some(next_value(args, &mut index, key)?.parse().map_err(|_| {
+                            "runtime skill owner revision must be a positive integer".to_string()
+                        })?)
+                }
+                "--replay-candidate-ref" => {
+                    replay_candidate_ref = next_value(args, &mut index, key)?.to_string()
+                }
+                "--verification-receipt-digest" => {
+                    verification_receipt_digest = next_value(args, &mut index, key)?.to_string()
+                }
+                "--runtime-skill-privacy" => {
+                    runtime_skill_privacy = Some(match next_value(args, &mut index, key)? {
+                        "public-runtime" => MemoryPrivacyClass::PublicRuntime,
+                        "shared-with-subject" => MemoryPrivacyClass::SharedWithSubject,
+                        other => {
+                            return Err(format!("unsupported runtime skill privacy class: {other}"))
+                        }
+                    });
+                }
                 "--record-id" => record_id = next_value(args, &mut index, key)?.to_string(),
                 "--input" => input_path = Some(PathBuf::from(next_value(args, &mut index, key)?)),
                 "--reason" => {
@@ -547,6 +591,12 @@ impl CliOptions {
             input_path,
             reason,
             reason_provided,
+            runtime_skill_owning_scope,
+            runtime_skill_owner_id,
+            runtime_skill_owner_revision,
+            replay_candidate_ref,
+            verification_receipt_digest,
+            runtime_skill_privacy,
         })
     }
 
@@ -576,6 +626,22 @@ impl CliOptions {
         }
     }
 
+    fn runtime_skill_scope(&self) -> Result<RuntimeSkillOwningScope, String> {
+        self.runtime_skill_owning_scope
+            .clone()
+            .ok_or_else(|| "runtime skill command requires an explicit owning scope".to_string())
+    }
+
+    fn runtime_skill_locator(&self) -> Result<RuntimeSkillOwnerLocator, String> {
+        let owner_id =
+            required_value(&self.runtime_skill_owner_id, "--runtime-skill-owner-id")?.to_string();
+        let owner_revision = self.runtime_skill_owner_revision.ok_or_else(|| {
+            "--runtime-skill-owner-revision is required for this command".to_string()
+        })?;
+        RuntimeSkillOwnerLocator::try_new(self.runtime_skill_scope()?, owner_id, owner_revision)
+            .map_err(|error| error.to_string())
+    }
+
     fn transport_context(
         &self,
         runtime: &EntryRuntime,
@@ -598,16 +664,36 @@ impl CliOptions {
         match command {
             "capabilities" => Ok(AdapterCommand::Capabilities),
             "write-procedural" => Ok(AdapterCommand::Write(MemoryWriteRequest::Procedural {
-                writes: vec![RuntimeSkillWrite {
-                    name: self.name.clone(),
-                    topic: self.topic.clone(),
-                    title: self.title.clone(),
-                    summary: self.summary.clone(),
-                    content: self.content.clone(),
-                    citations: vec!["bm-cli".to_string()],
-                    source_chat_id: Some(self.chat.clone()),
-                    observed_at: 1_800_000_000,
+                writes: vec![GovernedRuntimeSkillWriteInput {
+                    write: RuntimeSkillWrite {
+                        name: self.name.clone(),
+                        topic: self.topic.clone(),
+                        title: self.title.clone(),
+                        summary: self.summary.clone(),
+                        content: self.content.clone(),
+                        citations: vec!["bm-cli".to_string()],
+                        source_chat_id: Some(self.chat.clone()),
+                        observed_at: 1_800_000_000,
+                    },
+                    creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                        candidate_ref: required_value(
+                            &self.replay_candidate_ref,
+                            "--replay-candidate-ref",
+                        )?
+                        .to_string(),
+                        verification_receipt_digest: required_value(
+                            &self.verification_receipt_digest,
+                            "--verification-receipt-digest",
+                        )?
+                        .to_string(),
+                    },
+                    privacy_class: self.runtime_skill_privacy.ok_or_else(|| {
+                        "write-procedural requires --runtime-skill-privacy".to_string()
+                    })?,
                 }],
+                owning_scope: self.runtime_skill_owning_scope.clone().ok_or_else(|| {
+                    "write-procedural requires an explicit runtime skill owning scope".to_string()
+                })?,
                 source: RuntimeSkillWriteSource::Manual,
             })),
             "long-term-list" => Ok(AdapterCommand::LongTermList(MemoryLongTermListRequest {
@@ -681,12 +767,14 @@ impl CliOptions {
                 ))
             }
             "recall" => Ok(AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: self.query.clone(),
                 limit: self.limit,
                 tool_registry_refs: Vec::new(),
             })),
             "project" => Ok(AdapterCommand::Project(MemoryProjectionRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: self.query.clone(),
                 system_max_len: self.max_len,
@@ -778,6 +866,13 @@ fn render_entry_response(response: AdapterResponse<AdapterSdkReport>) -> Result<
 }
 
 fn render_sdk_report(report: AdapterSdkReport) -> Result<String, String> {
+    if let Some(governed) = report.governed_safe_report() {
+        return serde_json::to_string_pretty(&json!({
+            "status": "accepted",
+            "result": governed,
+        }))
+        .map_err(|error| error.to_string());
+    }
     let value = match report {
         AdapterSdkReport::Write(report) => json!({
             "status": "accepted",
@@ -786,24 +881,9 @@ fn render_sdk_report(report: AdapterSdkReport) -> Result<String, String> {
             "changed": report.changed,
             "reason": report.reason,
         }),
-        AdapterSdkReport::Recall(report) => json!({
-            "status": "accepted",
-            "query": report.query,
-            "procedural_hits": report.procedural_hits.iter().map(|hit| json!({
-                "name": hit.record.name,
-                "title": hit.record.title,
-                "score": hit.score,
-            })).collect::<Vec<_>>(),
-            "lifecycle": report.lifecycle_report.result_summary,
-        }),
-        AdapterSdkReport::Project(report) => json!({
-            "status": "accepted",
-            "projection_surface": "ui_api",
-            "projection_block": report.projection_block,
-            "chars": report.chars,
-            "agent_tool_hints": report.agent_tool_hints,
-            "audit": report.audit,
-        }),
+        AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
+            unreachable!("governed DTO handled above")
+        }
         AdapterSdkReport::Maintain(report) => json!({
             "status": "accepted",
             "long_term_refresh_enqueued": report.long_term_refresh_enqueued,

@@ -59,10 +59,19 @@ bash -n scripts/check_w4_external_noisy_wall_operator.sh
 cargo test -p bm-sdk --features nonproduction-replay-harness --test projection_audit_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test sdk_runtime_flow runtime_write_recall_project_uses_sdk_entry_only
 cargo test -p bm-sdk --features nonproduction-replay-harness --test write_candidate_contract
-cargo test -p bm-sdk --features nonproduction-replay-harness --test memory_space_migration_contract
+cargo test -p bm-sdk --features nonproduction-replay-harness --test archive_restore_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness,sqlite-store \
-  --test memory_space_migration_contract \
-  same_scope_facet_closure_migrates_across_all_store_backends
+  --test archive_restore_contract \
+  same_scope_archive_restore_roundtrips_across_all_store_backends
+cargo test -p bm-core --test long_term_version_material_contract
+cargo test -p bm-store-contract-tests --features sqlite-store --test p8_immutable_read_contract
+cargo test -p bm-store-contract-tests --test governed_recall_immutable_session_contract
+cargo test -p bm-sdk --features nonproduction-replay-harness \
+  store_internal::recall_read::tests::long_term_owner_closure_reads_retained_materials_and_control_in_one_session \
+  --lib
+cargo test -p bm-sdk --features nonproduction-replay-harness \
+  store_internal::recall_read::tests::runtime_skill_scope_materialization_is_manifest_first_exact_and_scope_bound \
+  --lib
 cargo test -p bm-sdk --features nonproduction-replay-harness --test public_surface
 cargo test -p bm-sdk --features nonproduction-replay-harness --test runtime_budget_contract graph_expansion_budget_is_profile_owned_and_not_provider_render_owned
 cargo test -p bm-sdk --features nonproduction-replay-harness --test runtime_budget_contract facet_recall_budget_is_profile_owned_and_not_graph_or_render_owned
@@ -268,7 +277,8 @@ rg -Fq "W9 Workbench API map + runtime report + Console 页面已由 EntryRuntim
 # P7 production delivery hardening: owner, privacy, exact index, final projection and operator truth.
 require_in_all "GovernedLongTermMemoryReadView" dev-docs/long-term-memory-control-surface-plan.md dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/runtime.rs
 require_in_all "ChangePrivacy" dev-docs/long-term-memory-control-surface-plan.md dev-docs/governed-memory-facet-index-plan.md crates/core/src/memory/long_term_control.rs
-require_in_all "memory_facet_postings" dev-docs/governed-memory-facet-index-plan.md crates/core/src/memory/memory_facet.rs crates/sdk/src/store_internal/platform.rs
+require_in_all "memory_facet_postings" dev-docs/governed-memory-facet-index-plan.md crates/core/src/memory/memory_facet.rs
+require_in_all "MEMORY_FACET_POSTING_NAMESPACE" crates/core/src/memory/memory_facet.rs crates/sdk/src/store_internal/schema.rs crates/sdk/src/store_internal/transaction.rs crates/sdk/src/store_internal/platform.rs
 require_in_all "QueryFacet" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md crates/core/src/memory/memory_facet.rs crates/sdk/src/runtime.rs
 require_in_all "RecallDeliveryOrderingPolicy" dev-docs/governed-memory-facet-index-plan.md crates/core/src/memory/recall_delivery.rs crates/sdk/src/runtime.rs
 require_in_all "scoped_memory_graph_storage_key" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md crates/core/src/memory/next_gen_contract.rs
@@ -280,19 +290,25 @@ require_in_all "selected_hit_final_rendered_miss" dev-docs/governed-memory-facet
 require_in_all "final_projection_integrity" dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 require_in_all "delivery_drop_reason_counts" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 require_in_all "p7_runner_build_inputs_sha256_v2" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
-require_in_all "p7_sdk_build_inputs_sha256_v2" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/build.rs crates/replay/src/bench.rs
+require_in_all "p7_sdk_build_inputs_sha256_v2" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/build_support.rs
+require_in_all "P7_SDK_BUILD_FINGERPRINT_CONTRACT" crates/replay/build.rs crates/replay/src/bench.rs
 require_in_file "P7_FROZEN_RUNNER_IDENTITY" crates/replay/src/bench.rs
 require_in_file "frozen_runner_identity_contract_is_structurally_valid" crates/replay/src/bench.rs
 require_in_all "QueryFacetInput" dev-docs/governed-memory-facet-index-plan.md crates/core/src/memory/memory_facet.rs crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/adapter/src/payload.rs
 require_in_all "structured_query_facets" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/adapter/src/payload.rs crates/adapter/tests/contract.rs
 require_in_all "MemoryFacetIndexManifest" dev-docs/governed-memory-facet-index-plan.md dev-docs/long-term-memory-control-surface-plan.md crates/core/src/memory/memory_facet.rs crates/sdk/src/runtime.rs
-require_in_all "same_scope_facet_closure_migrates_across_all_store_backends" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/memory_space_migration_contract.rs
+require_in_all "same_scope_archive_restore_roundtrips_across_all_store_backends" dev-docs/governed-memory-facet-index-plan.md crates/sdk/tests/archive_restore_contract.rs
+require_in_all "immutable_session_open_pins_generation_before_first_known_key_read_sqlite" dev-docs/governed-memory-facet-index-plan.md crates/store-contract-tests/tests/p8_immutable_read_contract.rs
+require_in_all "long_term_owner_closure_reads_retained_materials_and_control_in_one_session" dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/store_internal/recall_read.rs
+require_in_all "runtime_skill_scope_materialization_is_manifest_first_exact_and_scope_bound" dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/store_internal/recall_read.rs
+require_in_all "production_p8_read_has_one_session_zero_scan_zero_live_fallback" dev-docs/governed-memory-facet-index-plan.md crates/store-contract-tests/tests/governed_recall_immutable_session_contract.rs
 require_in_all "manifest_integrity_verified" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
 require_in_all "candidate_receipts" dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
 require_in_all "exact_render_match" crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
 require_in_all "AdapterProjectionReport" dev-docs/governed-memory-facet-index-plan.md crates/adapter/src/contract.rs crates/adapter/src/dispatch.rs
 require_in_file "project_command_returns_only_the_adapter_projection_contract" crates/adapter/tests/contract.rs
-require_in_all "ui_api" dev-docs/governed-memory-facet-index-plan.md dev-docs/inhabited-subject-projection-refactor-plan.md crates/adapter/src/contract.rs crates/http/src/lib.rs crates/mcp/src/lib.rs
+require_in_all "ui_api" dev-docs/governed-memory-facet-index-plan.md dev-docs/inhabited-subject-projection-refactor-plan.md crates/adapter/src/contract.rs
+require_in_all "AdapterSdkReport::Project" crates/adapter/src/dispatch.rs crates/http/src/lib.rs crates/mcp/src/lib.rs
 require_in_all "evidence_family_rotation_off" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 require_in_all "baseline_selected_candidate_ids" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
 require_in_all "off_run_selected_candidate_ids" dev-docs/governed-memory-facet-index-plan.md dev-docs/replay-sandbox-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/replay/src/bench.rs
@@ -316,7 +332,8 @@ require_in_all "p7_inherited_execution_authority_rejects_partial_seals_and_wrong
 require_in_all "check_p7_linux_execution_authority.sh" dev-docs/governed-memory-facet-index-plan.md scripts/check_p7_linux_execution_authority.sh
 require_in_all "p7_inherited_execution_authority_rejects_direct_path_and_foreign_fd" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/p7_secure_fs.rs
 require_in_all "p7_direct_publisher_fails_before_external_write_without_execution_broker" dev-docs/governed-memory-facet-index-plan.md crates/replay/tests/memory_benchmark_wall.rs
-require_in_all "F_GET_SEALS" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/p7_secure_fs.rs
+require_in_all "F_GET_SEALS" dev-docs/governed-memory-facet-index-plan.md crates/replay/src/sealed_execution.rs
+require_in_file "ClaimedSealedExecution::claim_typed(P7_SEALED_EXECUTION_DOMAIN)" crates/replay/src/p7_secure_fs.rs
 require_in_all "bm-replay" dev-docs/governed-memory-facet-index-plan.md scripts/check_cross_target_compile_gates.sh
 ! rg -n 'rg .*preflight-report|rg .*operator-report|"p7_provenance_valid": true' scripts/check_w4_external_noisy_wall_preflight.sh scripts/check_w4_external_noisy_wall_operator.sh
 ! rg -n 'contains\([^)]*capsule\.content' crates/sdk/src

@@ -122,7 +122,7 @@ fn stdio_json_rpc_initialize_uses_mcp_lifecycle_shape() {
 }
 
 #[test]
-fn project_and_inspect_schema_share_the_required_typed_decoder_contract() {
+fn project_schema_comes_from_governed_adapter_owner_and_inspect_remains_strict() {
     let runtime = runtime();
     let server = McpToolServer::new("mcp-stdio-schema", "mcp-stdio-client");
     let input = br#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}
@@ -132,16 +132,35 @@ fn project_and_inspect_schema_share_the_required_typed_decoder_contract() {
 
     serve_mcp_stdio_once(&server, &runtime, &mut reader, &mut writer).expect("tools/list");
     let body: Value = serde_json::from_slice(&writer).expect("tools/list response");
-    for name in ["memory_project", "memory_inspect"] {
-        let tool = body
-            .pointer("/result/tools")
-            .and_then(Value::as_array)
-            .and_then(|tools| tools.iter().find(|tool| tool["name"] == name))
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(
-            tool.pointer("/inputSchema/required"),
-            Some(&serde_json::json!(["query", "system_max_len"]))
-        );
+    let tools = body
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .expect("tools");
+    let project = tools
+        .iter()
+        .find(|tool| tool["name"] == "memory_project")
+        .expect("memory_project");
+    assert_eq!(
+        project.pointer("/inputSchema/required"),
+        Some(&serde_json::json!([
+            "temporal_operation",
+            "user_query",
+            "system_max_len"
+        ]))
+    );
+    assert!(project
+        .pointer("/inputSchema/properties/temporal_operation")
+        .is_some());
+    assert!(project.pointer("/inputSchema/properties/query").is_none());
+    let inspect = tools
+        .iter()
+        .find(|tool| tool["name"] == "memory_inspect")
+        .expect("memory_inspect");
+    assert_eq!(
+        inspect.pointer("/inputSchema/required"),
+        Some(&serde_json::json!(["query", "system_max_len"]))
+    );
+    for tool in [project, inspect] {
         assert_eq!(
             tool.pointer("/inputSchema/additionalProperties")
                 .and_then(Value::as_bool),

@@ -42,6 +42,32 @@ pub struct GovernedMemoryOwnerRef {
     pub owner_id: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GovernedOwnerRevisionRef {
+    pub owner_ref: GovernedMemoryOwnerRef,
+    pub owner_revision: u64,
+}
+
+impl GovernedOwnerRevisionRef {
+    pub fn try_new(owner_ref: GovernedMemoryOwnerRef, owner_revision: u64) -> Result<Self> {
+        let revision_ref = Self {
+            owner_ref,
+            owner_revision,
+        };
+        if !revision_ref.is_valid() {
+            return Err(Error::config(
+                "governed_owner_revision_ref",
+                "owner identity must be canonical and owner_revision must be positive",
+            ));
+        }
+        Ok(revision_ref)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.owner_ref.is_valid() && self.owner_revision > 0
+    }
+}
+
 /// Immutable evidence identity closed by the governed owner loader.
 ///
 /// Consumers receive opaque safe refs and canonical identities only. Raw locators are never

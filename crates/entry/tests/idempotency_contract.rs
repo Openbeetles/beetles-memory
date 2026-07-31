@@ -94,7 +94,7 @@ fn write_command() -> AdapterCommand {
 
 fn write_command_with_summary(summary: &str) -> AdapterCommand {
     AdapterCommand::Write(MemoryWriteRequest::Procedural {
-        writes: vec![RuntimeSkillWrite {
+        writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
             name: "runtime_skill__entry_runtime".to_string(),
             topic: "entry-runtime".to_string(),
             title: "Entry runtime writes".to_string(),
@@ -104,7 +104,8 @@ fn write_command_with_summary(summary: &str) -> AdapterCommand {
             citations: vec![],
             source_chat_id: Some("chat-1".to_string()),
             observed_at: 1_800_000_000,
-        }],
+        })],
+        owning_scope: support::runtime_skill_subject_scope("agent-main"),
         source: RuntimeSkillWriteSource::Manual,
     })
 }

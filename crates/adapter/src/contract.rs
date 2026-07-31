@@ -1,13 +1,13 @@
 use bm_sdk::{
-    AgentToolHint, MemoryCapabilityCatalog, MemoryCloseReport, MemoryCloseRequest,
-    MemoryGovernancePolicyMutationReport, MemoryInspectionReport, MemoryInspectionRequest,
-    MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
-    MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
-    MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
-    MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport, MemoryReplayRequest,
-    MemoryTranscriptAttrWriteReport, MemoryTranscriptAttrWriteRequest, MemoryWriteReport,
-    MemoryWriteRequest,
+    AgentToolHint, GovernedRecallPublicReportV1, MemoryCapabilityCatalog, MemoryCloseReport,
+    MemoryCloseRequest, MemoryGovernancePolicyMutationReport, MemoryInspectionReport,
+    MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
+    MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
+    MemoryMaintenanceRequest, MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport,
+    MemoryRecallRequest, MemoryRecallTemporalOperation, MemoryRecoverReport, MemoryRecoverRequest,
+    MemoryReplayReport, MemoryReplayRequest, MemoryTranscriptAttrWriteReport,
+    MemoryTranscriptAttrWriteRequest, MemoryWriteReport, MemoryWriteRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -355,42 +355,70 @@ pub struct AdapterProjectionReport {
     pub chars: usize,
     pub agent_tool_hints: Vec<AgentToolHint>,
     pub audit: AdapterProjectionAuditSummary,
+    pub governed_recall: GovernedRecallPublicReportV1,
 }
 
 impl From<MemoryProjectionReport> for AdapterProjectionReport {
     fn from(report: MemoryProjectionReport) -> Self {
+        let safe_audit = report.audit();
         let audit = AdapterProjectionAuditSummary {
-            projection_id: report.audit.projection_id.clone(),
-            source_budget_chars: report.audit.source_budget_chars,
-            render_budget_chars: report.audit.render_budget_chars,
-            injected: report.audit.injected,
-            truncated: report.audit.truncated,
-            runtime_private_context_allowed: report
-                .audit
-                .private_gate
-                .runtime_private_context_allowed,
-            foreground_disclosure_allowed: report.audit.private_gate.foreground_disclosure_allowed,
-            private_gate_reason: report.audit.private_gate.reason.clone(),
-            evidence_ref_count: report.subject_projection.evidence_refs.len(),
-            budget_decision_count: report.subject_projection.budget_decisions.len(),
-            privacy_decision_count: report.subject_projection.privacy_decisions.len(),
-            dropped_candidate_count: report.subject_projection.dropped_candidates.len(),
-            faithfulness_passed: report.projection_faithfulness.passed,
-            unsupported_claim_count: report.projection_faithfulness.unsupported_claims.len(),
-            disclosure_integrity_passed: report.private_disclosure_integrity.passed,
-            raw_private_violation_count: report
-                .private_disclosure_integrity
-                .raw_private_violation_count,
-            agent_tool_rejection_count: report.audit.agent_tools.rejected.len(),
+            projection_id: safe_audit.projection_id.clone(),
+            source_budget_chars: safe_audit.source_budget_chars,
+            render_budget_chars: safe_audit.render_budget_chars,
+            injected: safe_audit.injected,
+            truncated: safe_audit.truncated,
+            runtime_private_context_allowed: safe_audit.runtime_private_context_allowed,
+            foreground_disclosure_allowed: safe_audit.foreground_disclosure_allowed,
+            private_gate_reason: safe_audit.private_gate_reason.clone(),
+            evidence_ref_count: safe_audit.evidence_ref_count,
+            budget_decision_count: safe_audit.budget_decision_count,
+            privacy_decision_count: safe_audit.privacy_decision_count,
+            dropped_candidate_count: safe_audit.dropped_candidate_count,
+            faithfulness_passed: safe_audit.faithfulness_passed,
+            unsupported_claim_count: safe_audit.unsupported_claim_count,
+            disclosure_integrity_passed: safe_audit.disclosure_integrity_passed,
+            raw_private_violation_count: safe_audit.raw_private_violation_count,
+            agent_tool_rejection_count: safe_audit.agent_tool_rejection_count,
         };
-        let projection_block = report.projection_surfaces.ui_api;
         Self {
-            chars: projection_block.chars().count(),
-            projection_block,
-            agent_tool_hints: report.runtime_projection.agent_tool_hints,
+            chars: report.ui_api_chars(),
+            projection_block: report.ui_api_projection().to_string(),
+            agent_tool_hints: report.agent_tool_hints().to_vec(),
             audit,
+            governed_recall: report.governed_public_report().clone(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterGovernedRecallSafeReportV1 {
+    pub query: String,
+    pub temporal_operation: MemoryRecallTemporalOperation,
+    pub governed_recall: GovernedRecallPublicReportV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterGovernedProjectSafeReportV1 {
+    pub temporal_operation: MemoryRecallTemporalOperation,
+    pub projection_block: String,
+    pub chars: usize,
+    pub agent_tool_hints: Vec<AgentToolHint>,
+    pub audit: AdapterProjectionAuditSummary,
+    pub governed_recall: GovernedRecallPublicReportV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "operation",
+    content = "report",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum AdapterGovernedSafeReportV1 {
+    Recall(AdapterGovernedRecallSafeReportV1),
+    Project(AdapterGovernedProjectSafeReportV1),
 }
 
 impl std::fmt::Debug for AdapterCommand {
@@ -424,7 +452,7 @@ impl AdapterCommand {
     pub fn pin_accepted_at(&mut self, accepted_at: u64) {
         if let Self::Write(MemoryWriteRequest::Procedural { writes, .. }) = self {
             for write in writes {
-                write.observed_at = accepted_at;
+                write.write.observed_at = accepted_at;
             }
         }
     }
@@ -436,7 +464,7 @@ impl AdapterCommand {
                 let mut request = request.clone();
                 if let MemoryWriteRequest::Procedural { writes, .. } = &mut request {
                     for write in writes {
-                        write.observed_at = 0;
+                        write.write.observed_at = 0;
                     }
                 }
                 serde_json::to_vec(&request)?
@@ -500,6 +528,29 @@ impl AdapterSdkReport {
             Self::TranscriptAttrWrite(_) => "transcript_attr_write",
             Self::Capabilities(_) => "capabilities",
             Self::Close(_) => "close",
+        }
+    }
+
+    pub fn governed_safe_report(&self) -> Option<AdapterGovernedSafeReportV1> {
+        match self {
+            Self::Recall(report) => Some(AdapterGovernedSafeReportV1::Recall(
+                AdapterGovernedRecallSafeReportV1 {
+                    query: report.query.clone(),
+                    temporal_operation: report.temporal_operation,
+                    governed_recall: report.governed_public_report().clone(),
+                },
+            )),
+            Self::Project(report) => Some(AdapterGovernedSafeReportV1::Project(
+                AdapterGovernedProjectSafeReportV1 {
+                    temporal_operation: report.governed_recall.authority().temporal_operation(),
+                    projection_block: report.projection_block.clone(),
+                    chars: report.chars,
+                    agent_tool_hints: report.agent_tool_hints.clone(),
+                    audit: report.audit.clone(),
+                    governed_recall: report.governed_recall.clone(),
+                },
+            )),
+            _ => None,
         }
     }
 }

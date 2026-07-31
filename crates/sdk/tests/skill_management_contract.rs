@@ -1,8 +1,9 @@
 mod support;
 use bm_sdk::{
-    MemoryIdentity, MemoryRuntime, MemoryScope, MemoryWriteRequest, RuntimeSkillDeleteRequest,
+    ErrorClass, MemoryIdentity, MemoryRuntime, MemoryScope, MemoryWriteRequest,
     RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListRequest,
-    RuntimeSkillSetEnabledRequest, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    RuntimeSkillOwnerLocator, RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest,
+    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 fn test_runtime() -> MemoryRuntime {
@@ -11,17 +12,17 @@ fn test_runtime() -> MemoryRuntime {
         support::open_memory_store(StoreBackendConfig::in_memory(profile).expect("store config"))
             .expect("store");
     MemoryRuntime::builder()
-        .identity(MemoryIdentity::new("skill-test-agent", "owner-default").expect("identity"))
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("console", "chat-1").expect("scope"))
         .store(store)
         .build()
         .expect("runtime")
 }
 
-fn seed_release_skill(runtime: &MemoryRuntime) {
+fn seed_release_skill(runtime: &MemoryRuntime) -> RuntimeSkillOwnerLocator {
     let report = runtime
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "runtime_skill__release_guard".to_string(),
                 title: "Release guard".to_string(),
                 topic: "release".to_string(),
@@ -30,22 +31,52 @@ fn seed_release_skill(runtime: &MemoryRuntime) {
                 citations: vec!["test".to_string()],
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
-            }],
+            })],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("seed procedural skill");
     assert!(report.changed > 0);
+    runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: support::runtime_skill_subject_scope(),
+            query: Some("release".to_string()),
+            include_disabled: true,
+            include_retired: true,
+            limit: 1,
+        })
+        .expect("seeded skill list")
+        .skills
+        .into_iter()
+        .next()
+        .expect("seeded skill")
+        .locator
 }
 
-fn release_skill_edit_request() -> RuntimeSkillEditRequest {
+fn release_skill_write(summary: &str) -> MemoryWriteRequest {
+    MemoryWriteRequest::Procedural {
+        writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+            name: "runtime_skill__release_guard".to_string(),
+            title: "Release guard".to_string(),
+            topic: "release".to_string(),
+            summary: summary.to_string(),
+            content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
+            citations: vec!["test".to_string()],
+            source_chat_id: Some("chat-1".to_string()),
+            observed_at: 1_800_000_000,
+        })],
+        owning_scope: support::runtime_skill_subject_scope(),
+        source: RuntimeSkillWriteSource::Manual,
+    }
+}
+
+fn release_skill_edit_request(locator: RuntimeSkillOwnerLocator) -> RuntimeSkillEditRequest {
     RuntimeSkillEditRequest {
-        name: "runtime_skill__release_guard".to_string(),
+        locator,
         title: "Release guard".to_string(),
         topic: "release".to_string(),
         summary: "Check release artifacts and changelog before publishing.".to_string(),
         procedure: "1. run gates\n2. inspect artifacts\n3. inspect changelog".to_string(),
-        citations: vec!["test-edit".to_string()],
-        source_chat_id: Some("chat-1".to_string()),
         edit_reason: "sdk_contract_edit".to_string(),
         observed_at: 1_800_000_001,
     }
@@ -58,6 +89,7 @@ fn runtime_lists_runtime_skills_with_summary_counts() {
 
     let report = runtime
         .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: support::runtime_skill_subject_scope(),
             query: Some("release".to_string()),
             include_disabled: true,
             include_retired: true,
@@ -67,67 +99,121 @@ fn runtime_lists_runtime_skills_with_summary_counts() {
 
     assert_eq!(report.total, 1);
     assert_eq!(report.runtime_skills, 1);
-    assert_eq!(report.skills[0].name, "runtime_skill__release_guard");
     assert_eq!(report.skills[0].title, "Release guard");
+    assert_eq!(report.skills[0].locator.owner_revision(), 1);
 }
 
 #[test]
 fn runtime_gets_runtime_skill_detail_without_executing_it() {
     let runtime = test_runtime();
-    seed_release_skill(&runtime);
+    let locator = seed_release_skill(&runtime);
 
     let detail = runtime
-        .get_runtime_skill(RuntimeSkillDetailRequest {
-            name: "runtime_skill__release_guard".to_string(),
-        })
+        .get_runtime_skill(RuntimeSkillDetailRequest { locator })
         .expect("detail");
 
-    assert_eq!(detail.summary.name, "runtime_skill__release_guard");
+    assert_eq!(detail.summary.locator.owner_revision(), 1);
     assert!(detail.procedure_text.contains("run gates"));
-    assert!(detail.raw_content.contains("procedural_runtime_skill"));
+    assert!(detail.raw_content.contains("\"schema_version\": 1"));
 }
 
 #[test]
 fn runtime_skill_management_mutations_require_existing_runtime_skill() {
     let runtime = test_runtime();
-    assert!(runtime
-        .edit_runtime_skill(release_skill_edit_request())
-        .is_err());
-
-    seed_release_skill(&runtime);
+    let locator = seed_release_skill(&runtime);
+    let stale_locator =
+        RuntimeSkillOwnerLocator::try_new(locator.owning_scope().clone(), locator.owner_id(), 2)
+            .expect("stale locator shape");
+    let stale_error = runtime
+        .edit_runtime_skill(release_skill_edit_request(stale_locator))
+        .expect_err("stale locator");
+    assert_eq!(stale_error.class(), Some(ErrorClass::Conflict));
+    let unchanged = runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: support::runtime_skill_subject_scope(),
+            query: None,
+            include_disabled: true,
+            include_retired: true,
+            limit: 10,
+        })
+        .expect("unchanged list");
+    assert_eq!(unchanged.skills[0].locator.owner_revision(), 1);
 
     let edited = runtime
-        .edit_runtime_skill(release_skill_edit_request())
+        .edit_runtime_skill(release_skill_edit_request(locator))
         .expect("edit");
     assert!(edited.accepted);
     assert!(edited.changed);
 
     let disabled = runtime
         .set_runtime_skill_enabled(RuntimeSkillSetEnabledRequest {
-            name: edited.name.clone(),
+            locator: edited.current_locator.clone(),
             enabled: false,
+            observed_at: 1_800_000_002,
         })
         .expect("disable");
     assert!(disabled.accepted);
 
     let list = runtime
         .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: support::runtime_skill_subject_scope(),
             query: None,
             include_disabled: false,
             include_retired: true,
             limit: 10,
         })
         .expect("list");
-    assert!(list.skills.iter().all(|skill| skill.name != edited.name));
+    assert!(list.skills.is_empty());
 
-    let deleted = runtime
-        .delete_runtime_skill(RuntimeSkillDeleteRequest {
-            name: edited.name.clone(),
+    let retired_mutation = runtime
+        .retire_runtime_skill(RuntimeSkillRetireRequest {
+            locator: disabled.current_locator.clone(),
+            observed_at: 1_800_000_003,
         })
-        .expect("delete");
-    assert!(deleted.accepted);
+        .expect("retire");
+    assert!(retired_mutation.accepted);
 
-    assert!(runtime
-        .get_runtime_skill(RuntimeSkillDetailRequest { name: edited.name })
-        .is_err());
+    let retired = runtime
+        .get_runtime_skill(RuntimeSkillDetailRequest {
+            locator: retired_mutation.current_locator,
+        })
+        .expect("retired detail");
+    assert_eq!(retired.summary.status, "retired");
+}
+
+#[test]
+fn repeated_creation_authority_is_idempotent_or_advances_one_exact_revision() {
+    let runtime = test_runtime();
+    let first = runtime
+        .write(release_skill_write(
+            "Check release artifacts before publishing.",
+        ))
+        .expect("first write");
+    assert_eq!(first.changed, 1);
+
+    let duplicate = runtime
+        .write(release_skill_write(
+            "Check release artifacts before publishing.",
+        ))
+        .expect("idempotent duplicate");
+    assert_eq!(duplicate.changed, 0);
+
+    let revised = runtime
+        .write(release_skill_write(
+            "Check release artifacts and receipts before publishing.",
+        ))
+        .expect("revised write");
+    assert_eq!(revised.changed, 1);
+
+    let listed = runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: support::runtime_skill_subject_scope(),
+            query: Some("release".to_string()),
+            include_disabled: true,
+            include_retired: true,
+            limit: 10,
+        })
+        .expect("list");
+    assert_eq!(listed.skills.len(), 1);
+    assert_eq!(listed.skills[0].locator.owner_revision(), 2);
 }

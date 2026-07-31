@@ -3,29 +3,39 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use bm_core::memory::{
-    governed_evidence_source_ref_from_document, memory_facet_manifest_key,
-    memory_graph_scope_manifest_key, scoped_long_term_memory_storage_key,
-    scoped_memory_facet_owner_storage_key, validate_governed_evidence_document,
-    validate_governed_evidence_source_ref, GovernedEvidenceDocument, GovernedEvidenceSourceRef,
-    GovernedMemoryOwnerPlane, MemoryFacetIndexDoc, MemoryFacetIndexManifest,
-    MemoryGraphScopeManifest, RelationshipPortfolio, RelationshipTopology,
+    governed_evidence_source_ref_from_document, long_term_version_head_key,
+    long_term_version_material_key, long_term_version_scope_manifest_key,
+    memory_facet_manifest_key, memory_graph_scope_manifest_key,
+    scoped_long_term_memory_storage_key, scoped_memory_facet_owner_storage_key,
+    validate_governed_evidence_document, validate_governed_evidence_source_ref,
+    GovernedEvidenceDocument, GovernedEvidenceSourceRef, GovernedMemoryOwnerPlane,
+    LongTermMemoryHeadManifest, LongTermMemoryVersionMaterial, LongTermMemoryVersionScopeManifest,
+    MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryGraphScopeManifest, RelationshipPortfolio,
+    RelationshipTopology, MEMORY_FACET_POSTING_NAMESPACE,
+};
+use bm_core::skills::{
+    canonical_runtime_skill_owner_key, runtime_skill_scope_manifest_key, RuntimeSkillOwnerRecord,
+    RuntimeSkillScopeManifest,
 };
 use bm_core::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::store_internal::recall_index::{
-    ArchiveRecallManifest, ConversationRecallManifest, TypedRecallIndex,
-    ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE, ARCHIVE_RECALL_MANIFEST_NAMESPACE,
-    CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE, CONVERSATION_RECALL_MANIFEST_NAMESPACE,
-    RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE, TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
+    ArchiveRecallManifest, ConversationRecallManifest, ConversationTranscriptAuxManifest,
+    ConversationTranscriptPageIndex, TypedRecallIndex, ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE,
+    ARCHIVE_RECALL_MANIFEST_NAMESPACE, CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE,
+    CONVERSATION_RECALL_MANIFEST_NAMESPACE, CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE,
+    CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE, TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 use crate::store_internal::schema::{
     control_plane_scope_manifest_key, governed_evidence_source_claim_manifest_key,
     recall_owner_scope_binding_key, ControlPlaneScopeManifest, GovernedEvidenceOwnerClaimBinding,
     GovernedEvidenceSourceClaimManifest, RecallOwnerScopeBinding,
     CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
-    RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
+    LONG_TERM_HEAD_MANIFEST_NAMESPACE, LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+    LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE, RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
+    RUNTIME_SKILL_RECORD_NAMESPACE, RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
 };
 use crate::store_internal::{
     GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
@@ -381,6 +391,8 @@ pub struct StoreTransactionRequest {
     pub mutations: Vec<StoreEngineMutation>,
     pub governed_batch: Option<Box<StoreMutationBatch>>,
     graph_repair_authority: Option<GraphRepairAuthority>,
+    governed_long_term_retention_limit: Option<usize>,
+    governed_runtime_skill_owner_limit: Option<usize>,
     read_set: StoreTransactionReadSet,
 }
 
@@ -398,6 +410,8 @@ impl StoreTransactionRequest {
             mutations,
             governed_batch,
             graph_repair_authority: None,
+            governed_long_term_retention_limit: None,
+            governed_runtime_skill_owner_limit: None,
             read_set,
         }
     }
@@ -425,6 +439,24 @@ impl StoreTransactionRequest {
 
     fn graph_repair_authorized(&self) -> bool {
         self.graph_repair_authority.is_some()
+    }
+
+    pub(crate) fn with_governed_long_term_retention_limit(mut self, limit: usize) -> Self {
+        self.governed_long_term_retention_limit = Some(limit);
+        self
+    }
+
+    fn governed_long_term_retention_limit(&self) -> Option<usize> {
+        self.governed_long_term_retention_limit
+    }
+
+    pub(crate) fn with_governed_runtime_skill_owner_limit(mut self, limit: usize) -> Self {
+        self.governed_runtime_skill_owner_limit = Some(limit);
+        self
+    }
+
+    fn governed_runtime_skill_owner_limit(&self) -> Option<usize> {
+        self.governed_runtime_skill_owner_limit
     }
 
     pub(crate) fn read_set(&self) -> &StoreTransactionReadSet {
@@ -516,6 +548,7 @@ pub trait StoreImmutableReadSession {
 
 pub(crate) struct StoreReadSessionState {
     capacity: StoreCapacityBudget,
+    poisoned: bool,
     json_reads: Vec<StoreBoundedKnownJsonRead>,
     blob_reads: Vec<StoreBoundedKnownBlobRead>,
     seen_json: BTreeSet<(String, String)>,
@@ -528,6 +561,7 @@ impl StoreReadSessionState {
     pub(crate) fn new(capacity: StoreCapacityBudget) -> Self {
         Self {
             capacity,
+            poisoned: false,
             json_reads: Vec::new(),
             blob_reads: Vec::new(),
             seen_json: BTreeSet::new(),
@@ -543,46 +577,53 @@ impl StoreReadSessionState {
         key: &str,
         value: Option<Value>,
     ) -> Result<StoreBoundedKnownJsonRead> {
-        enforce_logical_key_budget(
-            self.capacity,
-            namespace,
-            key,
-            "store_immutable_read_session",
-        )?;
-        if !self
-            .seen_json
-            .insert((namespace.to_string(), key.to_string()))
-        {
-            return Err(Error::config(
-                "store_immutable_read_session",
-                format!("duplicate JSON address {namespace}/{key} across one read session"),
-            ));
+        if self.poisoned {
+            return Err(immutable_read_session_poisoned_error());
         }
-        self.enforce_entry_ceiling()?;
-        if let Some(value) = value.as_ref() {
-            self.json_bytes = self
-                .json_bytes
-                .checked_add(serialized_json_len(value)?)
-                .ok_or_else(|| {
-                    Error::config("store_immutable_read_session", "JSON byte count overflow")
+        let result = (|| {
+            enforce_logical_key_budget(
+                self.capacity,
+                namespace,
+                key,
+                "store_immutable_read_session",
+            )?;
+            let address = (namespace.to_string(), key.to_string());
+            if self.seen_json.contains(&address) {
+                return Err(Error::config(
+                    "store_immutable_read_session",
+                    format!("duplicate JSON address {namespace}/{key} across one read session"),
+                ));
+            }
+            self.enforce_entry_ceiling_with_one_more()?;
+            let next_json_bytes = value
+                .as_ref()
+                .map(serialized_json_len)
+                .transpose()?
+                .map_or(Ok(self.json_bytes), |value_bytes| {
+                    self.json_bytes.checked_add(value_bytes).ok_or_else(|| {
+                        Error::config("store_immutable_read_session", "JSON byte count overflow")
+                    })
                 })?;
-            if self.json_bytes > self.capacity.snapshot_max_bytes {
+            if next_json_bytes > self.capacity.snapshot_max_bytes {
                 return Err(Error::config(
                     "store_consistent_read_budget_exceeded",
                     format!(
-                        "JSON bytes {} exceed {}",
-                        self.json_bytes, self.capacity.snapshot_max_bytes
+                        "JSON bytes {next_json_bytes} exceed {}",
+                        self.capacity.snapshot_max_bytes
                     ),
                 ));
             }
-        }
-        let read = StoreBoundedKnownJsonRead {
-            namespace: namespace.to_string(),
-            key: key.to_string(),
-            value,
-        };
-        self.json_reads.push(read.clone());
-        Ok(read)
+            let read = StoreBoundedKnownJsonRead {
+                namespace: namespace.to_string(),
+                key: key.to_string(),
+                value,
+            };
+            self.seen_json.insert(address);
+            self.json_bytes = next_json_bytes;
+            self.json_reads.push(read.clone());
+            Ok(read)
+        })();
+        self.finish(result)
     }
 
     pub(crate) fn record_blob(
@@ -591,46 +632,55 @@ impl StoreReadSessionState {
         key: &str,
         value: Option<Vec<u8>>,
     ) -> Result<StoreBoundedKnownBlobRead> {
-        enforce_logical_key_budget(
-            self.capacity,
-            namespace,
-            key,
-            "store_immutable_read_session",
-        )?;
-        if !self
-            .seen_blobs
-            .insert((namespace.to_string(), key.to_string()))
-        {
-            return Err(Error::config(
-                "store_immutable_read_session",
-                format!("duplicate blob address {namespace}/{key} across one read session"),
-            ));
+        if self.poisoned {
+            return Err(immutable_read_session_poisoned_error());
         }
-        self.enforce_entry_ceiling()?;
-        if let Some(value) = value.as_ref() {
-            self.blob_bytes = self.blob_bytes.checked_add(value.len()).ok_or_else(|| {
-                Error::config("store_immutable_read_session", "blob byte count overflow")
+        let result = (|| {
+            enforce_logical_key_budget(
+                self.capacity,
+                namespace,
+                key,
+                "store_immutable_read_session",
+            )?;
+            let address = (namespace.to_string(), key.to_string());
+            if self.seen_blobs.contains(&address) {
+                return Err(Error::config(
+                    "store_immutable_read_session",
+                    format!("duplicate blob address {namespace}/{key} across one read session"),
+                ));
+            }
+            self.enforce_entry_ceiling_with_one_more()?;
+            let next_blob_bytes = value.as_ref().map_or(Ok(self.blob_bytes), |value| {
+                self.blob_bytes.checked_add(value.len()).ok_or_else(|| {
+                    Error::config("store_immutable_read_session", "blob byte count overflow")
+                })
             })?;
-            if self.blob_bytes > self.capacity.blob_max_bytes {
+            if next_blob_bytes > self.capacity.blob_max_bytes {
                 return Err(Error::config(
                     "store_consistent_read_budget_exceeded",
                     format!(
-                        "blob bytes {} exceed {}",
-                        self.blob_bytes, self.capacity.blob_max_bytes
+                        "blob bytes {next_blob_bytes} exceed {}",
+                        self.capacity.blob_max_bytes
                     ),
                 ));
             }
-        }
-        let read = StoreBoundedKnownBlobRead {
-            namespace: namespace.to_string(),
-            key: key.to_string(),
-            value,
-        };
-        self.blob_reads.push(read.clone());
-        Ok(read)
+            let read = StoreBoundedKnownBlobRead {
+                namespace: namespace.to_string(),
+                key: key.to_string(),
+                value,
+            };
+            self.seen_blobs.insert(address);
+            self.blob_bytes = next_blob_bytes;
+            self.blob_reads.push(read.clone());
+            Ok(read)
+        })();
+        self.finish(result)
     }
 
     pub(crate) fn receipt(&self) -> Result<StoreReadReceipt> {
+        if self.poisoned {
+            return Err(immutable_read_session_poisoned_error());
+        }
         immutable_read_session_receipt(
             &self.json_reads,
             &self.blob_reads,
@@ -649,8 +699,24 @@ impl StoreReadSessionState {
         self.capacity.blob_max_bytes.saturating_sub(self.blob_bytes)
     }
 
-    fn enforce_entry_ceiling(&self) -> Result<()> {
-        let entries = self.seen_json.len().saturating_add(self.seen_blobs.len());
+    pub(crate) fn fail<T>(&mut self, error: Error) -> Result<T> {
+        self.poisoned = true;
+        Err(error)
+    }
+
+    fn finish<T>(&mut self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => self.fail(error),
+        }
+    }
+
+    fn enforce_entry_ceiling_with_one_more(&self) -> Result<()> {
+        let entries = self
+            .seen_json
+            .len()
+            .saturating_add(self.seen_blobs.len())
+            .saturating_add(1);
         if entries > self.capacity.kv_max_entries {
             return Err(Error::config(
                 "store_consistent_read_budget_exceeded",
@@ -661,6 +727,27 @@ impl StoreReadSessionState {
             ));
         }
         Ok(())
+    }
+}
+
+fn immutable_read_session_poisoned_error() -> Error {
+    Error::config(
+        "store_immutable_read_session_poisoned",
+        "immutable read session failed earlier and cannot resume or emit a receipt",
+    )
+}
+
+pub(crate) fn validate_immutable_read_session_capacity(
+    engine_capacity: StoreCapacityBudget,
+    requested_capacity: StoreCapacityBudget,
+) -> Result<()> {
+    if engine_capacity.admits_runtime_budget(requested_capacity.into_runtime_budget()) {
+        Ok(())
+    } else {
+        Err(Error::config(
+            "store_immutable_read_session_admission",
+            "requested immutable read capacity exceeds the engine capacity",
+        ))
     }
 }
 
@@ -851,6 +938,9 @@ pub(crate) fn apply_transaction(
             current,
             &next,
             request.graph_repair_authorized(),
+            request.governed_long_term_retention_limit(),
+            request.governed_runtime_skill_owner_limit(),
+            capacity,
         )?;
     }
 
@@ -1405,45 +1495,108 @@ pub(crate) fn json_document_matches_scoped_projection(
     value: &Value,
     scope: &crate::StoreScopedProjectionScope,
 ) -> bool {
+    if namespace == RUNTIME_SKILL_RECORD_NAMESPACE {
+        return serde_json::from_value::<RuntimeSkillOwnerRecord>(value.clone()).is_ok_and(
+            |record| {
+                record.memory_space_id == scope.memory_space_id
+                    && record.owning_scope == scope.runtime_skill_owning_scope()
+                    && record.physical_key == key
+                    && canonical_runtime_skill_owner_key(
+                        &record.memory_space_id,
+                        &record.owning_scope,
+                        &record.owner_ref.owner_id,
+                    )
+                    .is_ok_and(|expected| expected == key)
+            },
+        );
+    }
+    if namespace == RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE {
+        return serde_json::from_value::<RuntimeSkillScopeManifest>(value.clone()).is_ok_and(
+            |manifest| {
+                manifest.memory_space_id == scope.memory_space_id
+                    && manifest.owning_scope == scope.runtime_skill_owning_scope()
+                    && manifest.physical_key == key
+                    && runtime_skill_scope_manifest_key(
+                        &manifest.memory_space_id,
+                        &manifest.owning_scope,
+                    )
+                    .is_ok_and(|expected| expected == key)
+            },
+        );
+    }
+    let Some(mounted_subject_id) = scope.mounted_subject_id() else {
+        return false;
+    };
     match namespace {
+        LONG_TERM_VERSION_MATERIAL_NAMESPACE => serde_json::from_value::<
+            LongTermMemoryVersionMaterial,
+        >(value.clone())
+        .is_ok_and(|material| {
+            material.memory_space_id == scope.memory_space_id
+                && material.mounted_subject_id == mounted_subject_id
+                && long_term_version_material_key(
+                    &material.memory_space_id,
+                    &material.mounted_subject_id,
+                    &material.owner_ref,
+                    material.owner_revision,
+                )
+                .is_ok_and(|expected| expected == key)
+        }),
+        LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+            serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone()).is_ok_and(|head| {
+                head.memory_space_id == scope.memory_space_id
+                    && head.mounted_subject_id == mounted_subject_id
+                    && long_term_version_head_key(
+                        &head.memory_space_id,
+                        &head.mounted_subject_id,
+                        &head.owner_ref,
+                    )
+                    .is_ok_and(|expected| expected == key)
+            })
+        }
+        LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE => serde_json::from_value::<
+            LongTermMemoryVersionScopeManifest,
+        >(value.clone())
+        .is_ok_and(|manifest| {
+            manifest.memory_space_id == scope.memory_space_id
+                && manifest.mounted_subject_id == mounted_subject_id
+                && manifest.physical_key == key
+                && long_term_version_scope_manifest_key(
+                    &manifest.memory_space_id,
+                    &manifest.mounted_subject_id,
+                )
+                .is_ok_and(|expected| expected == key)
+        }),
         "long_term" => false,
-        "self_model"
-        | "self_authored_core"
-        | "core_revision_ledger"
-        | "self_continuity"
-        | "relationship_portfolio"
-        | "relationship_topology"
-        | "autonomy_strategy"
-        | "inner_life"
-        | "felt_significance"
-        | "temperament_continuity"
-        | "inner_conflict"
-        | "private_doc" => key == scope.mounted_subject_id,
+        namespace
+            if crate::store_internal::schema::is_subject_global_soul_json_namespace(namespace) =>
+        {
+            false
+        }
         "conversation_transcript" => {
             value
                 .get("key")
                 .and_then(|key| key.get("memory_space_id"))
                 .and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
-                && value.get("subject").and_then(Value::as_str)
-                    == Some(scope.mounted_subject_id.as_str())
+                && value.get("subject").and_then(Value::as_str) == Some(mounted_subject_id)
         }
-        "archive_recall_manifests" | "conversation_recall_manifests" => {
+        ARCHIVE_RECALL_MANIFEST_NAMESPACE
+        | CONVERSATION_RECALL_MANIFEST_NAMESPACE
+        | CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE
+        | CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE => {
             value.get("memory_space_id").and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
                 && value.get("mounted_subject_id").and_then(Value::as_str)
-                    == Some(scope.mounted_subject_id.as_str())
+                    == Some(mounted_subject_id)
         }
         CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE => {
             value.get("memory_space_id").and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
                 && value.get("mounted_subject_id").and_then(Value::as_str)
-                    == Some(scope.mounted_subject_id.as_str())
-                && control_plane_scope_manifest_key(
-                    &scope.memory_space_id,
-                    &scope.mounted_subject_id,
-                )
-                .is_ok_and(|expected| expected == key)
+                    == Some(mounted_subject_id)
+                && control_plane_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)
+                    .is_ok_and(|expected| expected == key)
         }
         "memory_graph_nodes"
         | "memory_graph_edges"
@@ -1460,7 +1613,7 @@ pub(crate) fn json_document_matches_scoped_projection(
             value.get("memory_space_id").and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
                 && value.get("mounted_subject_id").and_then(Value::as_str)
-                    == Some(scope.mounted_subject_id.as_str())
+                    == Some(mounted_subject_id)
         }
         "memory_facet_indexes" => {
             value.get("memory_space_id").and_then(Value::as_str)
@@ -1469,16 +1622,15 @@ pub(crate) fn json_document_matches_scoped_projection(
                     .get("subject_ids")
                     .and_then(Value::as_array)
                     .is_some_and(|subjects| {
-                        subjects.iter().any(|subject| {
-                            subject.as_str() == Some(scope.mounted_subject_id.as_str())
-                        })
+                        subjects
+                            .iter()
+                            .any(|subject| subject.as_str() == Some(mounted_subject_id))
                     })
         }
-        "memory_facet_postings" => {
+        MEMORY_FACET_POSTING_NAMESPACE => {
             value.get("memory_space_id").and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
-                && value.get("subject_id").and_then(Value::as_str)
-                    == Some(scope.mounted_subject_id.as_str())
+                && value.get("subject_id").and_then(Value::as_str) == Some(mounted_subject_id)
         }
         "conversation_transcript_alias"
         | "conversation_transcript_attr"
@@ -1489,9 +1641,8 @@ pub(crate) fn json_document_matches_scoped_projection(
             value.get("memory_space_id").and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
                 && (value.get("mounted_subject_id").and_then(Value::as_str)
-                    == Some(scope.mounted_subject_id.as_str())
-                    || value.get("subject_id").and_then(Value::as_str)
-                        == Some(scope.mounted_subject_id.as_str()))
+                    == Some(mounted_subject_id)
+                    || value.get("subject_id").and_then(Value::as_str) == Some(mounted_subject_id))
         }
         _ => false,
     }
@@ -1502,7 +1653,10 @@ pub(crate) fn event_matches_scoped_projection(
     scope: &crate::StoreScopedProjectionScope,
 ) -> bool {
     event.scope.memory_space_id == scope.memory_space_id
-        && event.scope.subject_id == scope.mounted_subject_id
+        && event.scope.physical_owning_scope == scope.physical_owning_scope
+        && scope
+            .mounted_subject_id()
+            .is_none_or(|subject_id| event.scope.subject_id == subject_id)
 }
 
 pub(crate) fn read_scoped_projection_from_parts(
@@ -1571,6 +1725,7 @@ pub(crate) fn scoped_projection_json_addresses(
     scope: &crate::StoreScopedProjectionScope,
     capacity: StoreCapacityBudget,
 ) -> Result<BTreeSet<(String, String)>> {
+    scoped_projection_root_addresses(json_namespaces, scope)?;
     let namespaces = json_namespaces
         .iter()
         .map(String::as_str)
@@ -1670,6 +1825,12 @@ pub(crate) fn validate_typed_recall_manifest_closure(
     mut read_json: impl FnMut(&str, &str) -> Result<Option<Value>>,
     mut read_blob: impl FnMut(&str, &str) -> Result<Option<Vec<u8>>>,
 ) -> Result<()> {
+    let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+        Error::config(
+            "typed_recall_manifest_closure",
+            "typed recall manifests require a subject physical owner",
+        )
+    })?;
     let entries = typed_recall_manifest_entries_for_scope(
         manifest_namespace,
         manifest_key,
@@ -1704,7 +1865,7 @@ pub(crate) fn validate_typed_recall_manifest_closure(
         binding.validate()?;
         if binding.physical_key != binding_key
             || binding.memory_space_id != scope.memory_space_id
-            || binding.mounted_subject_id != scope.mounted_subject_id
+            || binding.mounted_subject_id != mounted_subject_id
             || binding.owner_kind != owner_kind
             || binding.owner_namespace != entry.namespace
             || binding.owner_key != entry.key
@@ -1769,12 +1930,18 @@ fn typed_recall_manifest_entries_for_scope(
     manifest_value: &Value,
     scope: &crate::StoreScopedProjectionScope,
 ) -> Result<Vec<crate::store_internal::recall_index::RecallIndexAddress>> {
+    let expected_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+        Error::config(
+            "typed_recall_manifest_closure",
+            "typed recall manifests require a subject physical owner",
+        )
+    })?;
     let (memory_space_id, mounted_subject_id, entries) =
         decode_typed_recall_manifest_scope(manifest_namespace, manifest_key, manifest_value)?;
     if memory_space_id != scope.memory_space_id
         || mounted_subject_id
             .as_deref()
-            .is_some_and(|subject_id| subject_id != scope.mounted_subject_id)
+            .is_some_and(|subject_id| subject_id != expected_subject_id)
     {
         return Err(Error::config(
             "typed_recall_manifest_closure",
@@ -1801,6 +1968,26 @@ fn decode_typed_recall_manifest_scope(
             Ok((
                 manifest.memory_space_id,
                 Some(manifest.mounted_subject_id),
+                Vec::new(),
+            ))
+        }
+        CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE => {
+            let manifest = crate::store_internal::recall_index::decode_typed_recall_index::<
+                ConversationTranscriptPageIndex,
+            >(manifest_key, manifest_value.clone())?;
+            Ok((
+                manifest.memory_space_id,
+                Some(manifest.mounted_subject_id),
+                manifest.entries,
+            ))
+        }
+        CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE => {
+            let manifest = crate::store_internal::recall_index::decode_typed_recall_index::<
+                ConversationTranscriptAuxManifest,
+            >(manifest_key, manifest_value.clone())?;
+            Ok((
+                manifest.memory_space_id,
+                Some(manifest.mounted_subject_id),
                 manifest.entries,
             ))
         }
@@ -1813,12 +2000,6 @@ fn decode_typed_recall_manifest_scope(
                 Some(manifest.mounted_subject_id),
                 manifest.entries,
             ))
-        }
-        RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE => {
-            let manifest = crate::store_internal::recall_index::decode_typed_recall_index::<
-                crate::store_internal::recall_index::RuntimeSkillRecallManifest,
-            >(manifest_key, manifest_value.clone())?;
-            Ok((manifest.memory_space_id, None, manifest.entries))
         }
         CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE => {
             let manifest = crate::store_internal::recall_index::decode_typed_recall_index::<
@@ -1850,11 +2031,11 @@ fn validate_recall_owner_namespace(
     entry: &crate::store_internal::recall_index::RecallIndexAddress,
 ) -> Result<()> {
     let allowed = match manifest_namespace {
-        CONVERSATION_RECALL_MANIFEST_NAMESPACE => matches!(
+        CONVERSATION_RECALL_MANIFEST_NAMESPACE => false,
+        CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE => entry.namespace == "conversation_transcript",
+        CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE => matches!(
             entry.namespace.as_str(),
-            "conversation_transcript"
-                | "conversation_transcript_attr"
-                | "conversation_transcript_derived_ref"
+            "conversation_transcript_attr" | "conversation_transcript_derived_ref"
         ),
         ARCHIVE_RECALL_MANIFEST_NAMESPACE => matches!(
             entry.namespace.as_str(),
@@ -1866,7 +2047,6 @@ fn validate_recall_owner_namespace(
                 | "daily"
                 | "memory"
         ),
-        RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE => entry.namespace == "skills",
         CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE => entry.namespace == "continuity_capsule",
         ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE => entry.namespace == "task_run",
         TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE => entry.namespace == "task_learning",
@@ -1892,13 +2072,22 @@ fn validate_canonical_recall_json_owner(
     owner: &Value,
     scope: &crate::StoreScopedProjectionScope,
 ) -> Result<()> {
-    if manifest_namespace == CONVERSATION_RECALL_MANIFEST_NAMESPACE {
+    let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+        Error::config(
+            "typed_recall_manifest_closure",
+            "recall JSON owners require a subject physical owner",
+        )
+    })?;
+    if matches!(
+        manifest_namespace,
+        CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE | CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE
+    ) {
         return crate::store_internal::platform::validate_conversation_recall_owner_for_scope(
             owner_namespace,
             owner_key,
             owner,
             &scope.memory_space_id,
-            &scope.mounted_subject_id,
+            mounted_subject_id,
         );
     }
     if owner_namespace == "conversation_transcript_alias" {
@@ -1911,7 +2100,7 @@ fn validate_canonical_recall_json_owner(
                 )
             })?;
         if alias.memory_space_id != scope.memory_space_id
-            || alias.mounted_subject_id != scope.mounted_subject_id
+            || alias.mounted_subject_id != mounted_subject_id
             || alias.storage_key() != owner_key
         {
             return Err(Error::config(
@@ -1932,29 +2121,51 @@ pub(crate) fn scoped_projection_root_addresses(
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let mut addresses = BTreeSet::new();
-    for namespace in [
-        "self_model",
-        "self_authored_core",
-        "core_revision_ledger",
-        "self_continuity",
-        "relationship_portfolio",
-        "relationship_topology",
-        "autonomy_strategy",
-        "inner_life",
-        "felt_significance",
-        "temperament_continuity",
-        "inner_conflict",
-        "private_doc",
-    ] {
-        if namespaces.contains(namespace) {
-            addresses.insert((namespace.to_string(), scope.mounted_subject_id.clone()));
+    let runtime_skill_selected = namespaces.contains(RUNTIME_SKILL_RECORD_NAMESPACE)
+        || namespaces.contains(RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE);
+    if runtime_skill_selected {
+        if !namespaces.contains(RUNTIME_SKILL_RECORD_NAMESPACE)
+            || !namespaces.contains(RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE)
+        {
+            return Err(Error::config(
+                "store_scoped_projection",
+                "runtime-skill projection requires its scope manifest and owner-record namespaces",
+            ));
         }
+        addresses.insert((
+            RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+            runtime_skill_scope_manifest_key(
+                &scope.memory_space_id,
+                &scope.runtime_skill_owning_scope(),
+            )?,
+        ));
+    }
+    let Some(mounted_subject_id) = scope.mounted_subject_id() else {
+        return Ok(addresses.into_iter().collect());
+    };
+    let long_term_selected = namespaces.contains(LONG_TERM_VERSION_MATERIAL_NAMESPACE)
+        || namespaces.contains(LONG_TERM_HEAD_MANIFEST_NAMESPACE)
+        || namespaces.contains(LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE);
+    if long_term_selected {
+        if !namespaces.contains(LONG_TERM_VERSION_MATERIAL_NAMESPACE)
+            || !namespaces.contains(LONG_TERM_HEAD_MANIFEST_NAMESPACE)
+            || !namespaces.contains(LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE)
+        {
+            return Err(Error::config(
+                "store_scoped_projection",
+                "long-term projection requires scope-manifest, head-manifest, and material namespaces",
+            ));
+        }
+        addresses.insert((
+            LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+            long_term_version_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)?,
+        ));
     }
     if namespaces.contains("archive_recall_manifests") {
         let manifest = ArchiveRecallManifest::build(
             1,
             &scope.memory_space_id,
-            &scope.mounted_subject_id,
+            mounted_subject_id,
             std::iter::empty(),
         )?;
         addresses.insert((
@@ -1962,17 +2173,17 @@ pub(crate) fn scoped_projection_root_addresses(
             manifest.physical_key,
         ));
     }
-    if namespaces.contains("memory_facet_postings") {
+    if namespaces.contains(MEMORY_FACET_POSTING_NAMESPACE) {
         addresses.insert((
-            "memory_facet_postings".to_string(),
-            memory_facet_manifest_key(&scope.memory_space_id, &scope.mounted_subject_id)
+            MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+            memory_facet_manifest_key(&scope.memory_space_id, mounted_subject_id)
                 .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?,
         ));
     }
     if namespaces.contains("memory_graph_manifests") {
         addresses.insert((
             "memory_graph_manifests".to_string(),
-            memory_graph_scope_manifest_key(&scope.memory_space_id, &scope.mounted_subject_id),
+            memory_graph_scope_manifest_key(&scope.memory_space_id, mounted_subject_id),
         ));
     }
     if namespaces.contains(GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE) {
@@ -1980,14 +2191,14 @@ pub(crate) fn scoped_projection_root_addresses(
             GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE.to_string(),
             governed_evidence_source_claim_manifest_key(
                 &scope.memory_space_id,
-                &scope.mounted_subject_id,
+                mounted_subject_id,
             )?,
         ));
     }
     if namespaces.contains(CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE) {
         addresses.insert((
             CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
-            control_plane_scope_manifest_key(&scope.memory_space_id, &scope.mounted_subject_id)?,
+            control_plane_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)?,
         ));
     }
     Ok(addresses.into_iter().collect())
@@ -2054,9 +2265,125 @@ fn scoped_manifest_dependency_addresses(
     scope: &crate::StoreScopedProjectionScope,
 ) -> Result<Vec<(String, String)>> {
     let mut addresses = BTreeSet::new();
-    for ((namespace, _), value) in scoped_json {
+    for ((namespace, key), value) in scoped_json {
         match namespace.as_str() {
-            "memory_facet_postings" if value.get("posting_revisions").is_some() => {
+            LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE => {
+                let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+                    Error::config(
+                        "store_scoped_projection",
+                        "long-term scope manifests require a subject physical owner",
+                    )
+                })?;
+                let manifest =
+                    serde_json::from_value::<LongTermMemoryVersionScopeManifest>(value.clone())
+                        .map_err(|error| {
+                            Error::config(
+                                "store_scoped_projection",
+                                format!("long-term scope manifest: {error}"),
+                            )
+                        })?;
+                if manifest.physical_key != *key
+                    || manifest.memory_space_id != scope.memory_space_id
+                    || manifest.mounted_subject_id != mounted_subject_id
+                    || long_term_version_scope_manifest_key(
+                        &manifest.memory_space_id,
+                        &manifest.mounted_subject_id,
+                    )? != *key
+                {
+                    return Err(Error::config(
+                        "store_scoped_projection",
+                        "long-term scope manifest differs from the exact projection scope",
+                    ));
+                }
+                if namespaces.contains(LONG_TERM_HEAD_MANIFEST_NAMESPACE) {
+                    addresses.extend(manifest.head_bindings.into_iter().map(|binding| {
+                        (
+                            LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                            binding.head_physical_key,
+                        )
+                    }));
+                }
+                if namespaces.contains(bm_core::memory::LONG_TERM_CONTROL_REVISION_NAMESPACE) {
+                    addresses.extend(manifest.transition_bindings.into_iter().map(|binding| {
+                        (
+                            bm_core::memory::LONG_TERM_CONTROL_REVISION_NAMESPACE.to_string(),
+                            binding.control_revision_physical_key,
+                        )
+                    }));
+                }
+            }
+            LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+                let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+                    Error::config(
+                        "store_scoped_projection",
+                        "long-term head manifests require a subject physical owner",
+                    )
+                })?;
+                let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
+                    .map_err(|error| {
+                        Error::config(
+                            "store_scoped_projection",
+                            format!("long-term head manifest: {error}"),
+                        )
+                    })?;
+                if head.memory_space_id != scope.memory_space_id
+                    || head.mounted_subject_id != mounted_subject_id
+                    || long_term_version_head_key(
+                        &head.memory_space_id,
+                        &head.mounted_subject_id,
+                        &head.owner_ref,
+                    )? != *key
+                {
+                    return Err(Error::config(
+                        "store_scoped_projection",
+                        "long-term head manifest differs from the exact projection scope",
+                    ));
+                }
+                if namespaces.contains(LONG_TERM_VERSION_MATERIAL_NAMESPACE) {
+                    for retained in head.retained_revision_digests {
+                        addresses.insert((
+                            LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                            long_term_version_material_key(
+                                &head.memory_space_id,
+                                &head.mounted_subject_id,
+                                &head.owner_ref,
+                                retained.owner_revision,
+                            )?,
+                        ));
+                    }
+                }
+            }
+            RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE => {
+                let manifest = serde_json::from_value::<RuntimeSkillScopeManifest>(value.clone())
+                    .map_err(|error| {
+                    Error::config(
+                        "store_scoped_projection",
+                        format!("runtime-skill scope manifest: {error}"),
+                    )
+                })?;
+                if manifest.physical_key != *key
+                    || manifest.memory_space_id != scope.memory_space_id
+                    || manifest.owning_scope != scope.runtime_skill_owning_scope()
+                    || runtime_skill_scope_manifest_key(
+                        &manifest.memory_space_id,
+                        &manifest.owning_scope,
+                    )? != *key
+                {
+                    return Err(Error::config(
+                        "store_scoped_projection",
+                        "runtime-skill manifest differs from the exact projection scope",
+                    ));
+                }
+                if namespaces.contains(RUNTIME_SKILL_RECORD_NAMESPACE) {
+                    addresses.extend(manifest.owner_bindings.into_iter().map(|binding| {
+                        (
+                            RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+                            binding.owner_physical_key,
+                        )
+                    }));
+                }
+            }
+            MEMORY_FACET_POSTING_NAMESPACE if value.get("posting_revisions").is_some() => {
                 let manifest = serde_json::from_value::<MemoryFacetIndexManifest>(value.clone())
                     .map_err(|error| {
                         Error::config(
@@ -2065,7 +2392,10 @@ fn scoped_manifest_dependency_addresses(
                         )
                     })?;
                 for posting in manifest.posting_revisions {
-                    addresses.insert(("memory_facet_postings".to_string(), posting.posting_key));
+                    addresses.insert((
+                        MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                        posting.posting_key,
+                    ));
                 }
                 if namespaces.contains("memory_facet_indexes") {
                     for owner in manifest.owner_versions {
@@ -2073,7 +2403,12 @@ fn scoped_manifest_dependency_addresses(
                             "memory_facet_indexes".to_string(),
                             scoped_memory_facet_owner_storage_key(
                                 &scope.memory_space_id,
-                                &scope.mounted_subject_id,
+                                scope.mounted_subject_id().ok_or_else(|| {
+                                    Error::config(
+                                        "store_scoped_projection",
+                                        "facet manifests require a subject physical owner",
+                                    )
+                                })?,
                                 &owner.owner_ref,
                             )
                             .map_err(|error| {
@@ -2148,8 +2483,14 @@ fn scoped_manifest_dependency_addresses(
                     )
                 })?;
                 manifest.validate(usize::MAX)?;
+                let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+                    Error::config(
+                        "store_scoped_projection",
+                        "control-plane manifests require a subject physical owner",
+                    )
+                })?;
                 if manifest.memory_space_id != scope.memory_space_id
-                    || manifest.mounted_subject_id != scope.mounted_subject_id
+                    || manifest.mounted_subject_id != mounted_subject_id
                 {
                     return Err(Error::config(
                         "store_scoped_projection",
@@ -2178,6 +2519,12 @@ fn scoped_typed_recall_index_addresses(
     let mut addresses = BTreeSet::new();
     for ((namespace, key), value) in scoped_json {
         if namespace == "conversation_transcript_alias" {
+            let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+                Error::config(
+                    "store_scoped_projection",
+                    "conversation aliases require a subject physical owner",
+                )
+            })?;
             let alias = serde_json::from_value::<bm_core::memory::TranscriptConversationAlias>(
                 value.clone(),
             )
@@ -2194,7 +2541,7 @@ fn scoped_typed_recall_index_addresses(
                 ));
             }
             if alias.memory_space_id != scope.memory_space_id
-                || alias.mounted_subject_id != scope.mounted_subject_id
+                || alias.mounted_subject_id != mounted_subject_id
             {
                 return Err(Error::config(
                     "store_scoped_projection",
@@ -2210,7 +2557,8 @@ fn scoped_typed_recall_index_addresses(
                         &alias.mounted_subject_id,
                         &alias.channel_id,
                         &alias.conversation_id,
-                        std::iter::empty(),
+                        0,
+                        0,
                     )?
                     .physical_key,
                 ));
@@ -2220,8 +2568,9 @@ fn scoped_typed_recall_index_addresses(
         if !matches!(
             namespace.as_str(),
             CONVERSATION_RECALL_MANIFEST_NAMESPACE
+                | CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE
+                | CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE
                 | ARCHIVE_RECALL_MANIFEST_NAMESPACE
-                | RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE
                 | CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE
                 | ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE
                 | TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE
@@ -2256,8 +2605,9 @@ pub(crate) fn validate_scoped_recall_manifest_documents(
         if !matches!(
             namespace.as_str(),
             CONVERSATION_RECALL_MANIFEST_NAMESPACE
+                | CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE
+                | CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE
                 | ARCHIVE_RECALL_MANIFEST_NAMESPACE
-                | RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE
                 | CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE
                 | ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE
                 | TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE
@@ -2292,8 +2642,9 @@ pub(crate) fn validate_snapshot_recall_manifest_documents(
         if !matches!(
             namespace.as_str(),
             CONVERSATION_RECALL_MANIFEST_NAMESPACE
+                | CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE
+                | CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE
                 | ARCHIVE_RECALL_MANIFEST_NAMESPACE
-                | RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE
                 | CONTINUITY_CAPSULE_SCOPE_INDEX_NAMESPACE
                 | ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE
                 | TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE
@@ -2340,7 +2691,8 @@ pub(crate) fn validate_snapshot_recall_manifest_documents(
                 binding.mounted_subject_id
             }
         };
-        let scope = crate::StoreScopedProjectionScope::new(memory_space_id, mounted_subject_id)?;
+        let scope =
+            crate::StoreScopedProjectionScope::subject(memory_space_id, mounted_subject_id)?;
         validate_typed_recall_manifest_closure(
             namespace,
             key,
@@ -2443,12 +2795,6 @@ pub(crate) fn validate_scoped_control_plane_documents(
     scope: &crate::StoreScopedProjectionScope,
     max_entries: usize,
 ) -> Result<()> {
-    let manifest_key =
-        control_plane_scope_manifest_key(&scope.memory_space_id, &scope.mounted_subject_id)?;
-    let manifest_value = json.get(&(
-        CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
-        manifest_key.clone(),
-    ));
     let control_namespaces = BTreeSet::from([
         "long_term_control_revision",
         "long_term_control_tombstone",
@@ -2460,6 +2806,25 @@ pub(crate) fn validate_scoped_control_plane_documents(
         .filter(|(namespace, _)| control_namespaces.contains(namespace.as_str()))
         .cloned()
         .collect::<BTreeSet<_>>();
+    let Some(mounted_subject_id) = scope.mounted_subject_id() else {
+        if actual_addresses.is_empty()
+            && !json
+                .keys()
+                .any(|(namespace, _)| namespace == CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE)
+        {
+            return Ok(());
+        }
+        return Err(Error::config(
+            "control_plane_scope_manifest",
+            "control-plane documents require a subject physical owner",
+        ));
+    };
+    let manifest_key =
+        control_plane_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)?;
+    let manifest_value = json.get(&(
+        CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+        manifest_key.clone(),
+    ));
     let Some(manifest_value) = manifest_value else {
         if actual_addresses.is_empty() {
             return Ok(());
@@ -2491,7 +2856,7 @@ pub(crate) fn validate_scoped_control_plane_documents(
     manifest.validate(max_entries)?;
     if manifest.physical_key != manifest_key
         || manifest.memory_space_id != scope.memory_space_id
-        || manifest.mounted_subject_id != scope.mounted_subject_id
+        || manifest.mounted_subject_id != mounted_subject_id
     {
         return Err(Error::config(
             "control_plane_scope_manifest",
@@ -2585,6 +2950,9 @@ pub(crate) fn scoped_long_term_addresses_from_facet_docs(
     scope: &crate::StoreScopedProjectionScope,
 ) -> Result<Vec<(String, String)>> {
     let mut addresses = BTreeSet::new();
+    let Some(mounted_subject_id) = scope.mounted_subject_id() else {
+        return Ok(Vec::new());
+    };
     for ((namespace, key), value) in scoped_json {
         if namespace != "memory_facet_indexes"
             || !json_document_matches_scoped_projection(namespace, key, value, scope)
@@ -2600,7 +2968,7 @@ pub(crate) fn scoped_long_term_addresses_from_facet_docs(
             })?;
         let expected_key = bm_core::memory::scoped_memory_facet_owner_storage_key(
             &scope.memory_space_id,
-            &scope.mounted_subject_id,
+            mounted_subject_id,
             &facet.owner_ref,
         )
         .map_err(|error| {
@@ -2614,7 +2982,7 @@ pub(crate) fn scoped_long_term_addresses_from_facet_docs(
             || !facet
                 .subject_ids
                 .iter()
-                .any(|subject| subject == &scope.mounted_subject_id)
+                .any(|subject| subject == mounted_subject_id)
             || key != &expected_key
         {
             return Err(Error::config(
@@ -3045,6 +3413,40 @@ mod tests {
     }
 
     #[test]
+    fn immutable_read_session_failure_poison_blocks_later_reads_and_receipt() {
+        let mut capacity = StoreCapacityBudget::full();
+        capacity.kv_max_entries = 1;
+        let mut read = StoreReadSessionState::new(capacity);
+
+        read.record_json(
+            "session",
+            "first",
+            Some(serde_json::json!({"generation": 1})),
+        )
+        .expect("first read fits the pinned budget");
+        let error = read
+            .record_json(
+                "session",
+                "second",
+                Some(serde_json::json!({"generation": 1})),
+            )
+            .expect_err("entry plus one must fail closed");
+        assert_eq!(error.stage(), "store_consistent_read_budget_exceeded");
+
+        let later_error = read
+            .record_json("session", "third", None)
+            .expect_err("a failed immutable session cannot resume");
+        assert_eq!(later_error.stage(), "store_immutable_read_session_poisoned");
+        let receipt_error = read
+            .receipt()
+            .expect_err("a failed immutable session cannot attest a partial transcript");
+        assert_eq!(
+            receipt_error.stage(),
+            "store_immutable_read_session_poisoned"
+        );
+    }
+
+    #[test]
     fn exact_evidence_absence_never_reads_an_owner_outside_the_subject_manifest() {
         let memory_space_id = "space:manifest-first";
         let mounted_subject_id = "subject:a";
@@ -3149,7 +3551,7 @@ mod tests {
         let error = validate_scoped_recall_manifest_documents(
             &json,
             &BTreeMap::new(),
-            &crate::StoreScopedProjectionScope::new("space-a", "subject-a").expect("scope"),
+            &crate::StoreScopedProjectionScope::subject("space-a", "subject-a").expect("scope"),
         )
         .expect_err("subject-b owner must not be admitted into subject-a recall manifest");
 
@@ -3164,18 +3566,39 @@ mod tests {
         let revision = bm_core::memory::LongTermMemoryControlRevision {
             schema_version: bm_core::memory::LONG_TERM_CONTROL_SCHEMA_VERSION,
             revision_id: "revision-b".to_string(),
-            record_id: "record-b".to_string(),
-            successor_record_id: None,
-            operation: "correct".to_string(),
-            owner_revision: 2,
-            source_revision: Some(1),
-            previous_digest: "before".to_string(),
-            new_digest: "after".to_string(),
+            memory_space_id: memory_space_id.to_string(),
+            mounted_subject_id: "subject-b".to_string(),
+            operation: bm_core::memory::LongTermControlOperation::Correct,
+            transition: bm_core::memory::GovernedOwnerTransition {
+                predecessor: bm_core::memory::GovernedOwnerRevisionRef::try_new(
+                    bm_core::memory::GovernedMemoryOwnerRef::new(
+                        bm_core::memory::GovernedMemoryOwnerPlane::LongTerm,
+                        "record-b",
+                    ),
+                    1,
+                )
+                .expect("predecessor"),
+                terminated_at: 2,
+                termination: bm_core::memory::GovernedOwnerTermination::Corrected,
+                successor: Some(
+                    bm_core::memory::GovernedOwnerRevisionRef::try_new(
+                        bm_core::memory::GovernedMemoryOwnerRef::new(
+                            bm_core::memory::GovernedMemoryOwnerPlane::LongTerm,
+                            "record-b",
+                        ),
+                        2,
+                    )
+                    .expect("successor"),
+                ),
+            },
+            predecessor_material_digest: "before".to_string(),
+            successor_material_digest: Some("after".to_string()),
+            governed_evidence_refs: Vec::new(),
+            invalidation_reason_code: None,
             reason: "cross-subject fixture".to_string(),
-            owner_subject_id: "subject-b".to_string(),
             actor_subject_id: Some("governor".to_string()),
-            memory_space_id: Some(memory_space_id.to_string()),
             created_at: 1,
+            content_digest: "fixture".to_string(),
         };
         let revision_key = bm_core::memory::scoped_long_term_control_storage_key(
             memory_space_id,
@@ -3210,7 +3633,7 @@ mod tests {
 
         let error = validate_scoped_control_plane_documents(
             &json,
-            &crate::StoreScopedProjectionScope::new(memory_space_id, mounted_subject_id)
+            &crate::StoreScopedProjectionScope::subject(memory_space_id, mounted_subject_id)
                 .expect("scope"),
             8,
         )
@@ -3218,6 +3641,272 @@ mod tests {
 
         assert_eq!(error.stage(), "control_plane_scope_manifest");
         assert!(error.to_string().contains("owner scope"));
+    }
+
+    #[test]
+    fn p8_scoped_projection_roots_are_typed_by_physical_owner() {
+        let subject_scope =
+            crate::StoreScopedProjectionScope::subject("space-a", "subject-a").expect("subject");
+        let subject_roots = scoped_projection_root_addresses(
+            &[
+                crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
+                    .to_string(),
+                crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+            ],
+            &subject_scope,
+        )
+        .expect("subject roots")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            subject_roots,
+            BTreeSet::from([
+                (
+                    crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
+                        .to_string(),
+                    bm_core::memory::long_term_version_scope_manifest_key("space-a", "subject-a")
+                        .expect("long-term root"),
+                ),
+                (
+                    crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE
+                        .to_string(),
+                    bm_core::skills::runtime_skill_scope_manifest_key(
+                        "space-a",
+                        &bm_core::skills::RuntimeSkillOwningScope::Subject {
+                            mounted_subject_id: "subject-a".to_string(),
+                        },
+                    )
+                    .expect("runtime-skill subject root"),
+                ),
+            ])
+        );
+
+        let shared_scope =
+            crate::StoreScopedProjectionScope::shared_program("space-a").expect("shared program");
+        let shared_roots = scoped_projection_root_addresses(
+            &[
+                crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
+                    .to_string(),
+                crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+            ],
+            &shared_scope,
+        )
+        .expect("shared-program roots");
+        assert_eq!(
+            shared_roots,
+            vec![(
+                crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                bm_core::skills::runtime_skill_scope_manifest_key(
+                    "space-a",
+                    &bm_core::skills::RuntimeSkillOwningScope::SharedProgram,
+                )
+                .expect("runtime-skill shared root"),
+            )]
+        );
+    }
+
+    #[test]
+    fn p8_scoped_projection_events_require_exact_physical_owner() {
+        let subject_scope =
+            crate::StoreScopedProjectionScope::subject("space-a", "subject-a").expect("subject");
+        let shared_scope =
+            crate::StoreScopedProjectionScope::shared_program("space-a").expect("shared program");
+        let subject_event = MemoryStoreEvent::new(
+            "subject-event",
+            MemoryStoreEventKind::MemoryProjection,
+            StoreEventScope::new("agent", "owner", "runtime", "chat")
+                .with_memory_space("space-a")
+                .with_subject("subject-a"),
+            1,
+        );
+        let shared_event = MemoryStoreEvent::new(
+            "shared-event",
+            MemoryStoreEventKind::MemoryProjection,
+            StoreEventScope::new("agent", "owner", "runtime", "chat")
+                .with_memory_space("space-a")
+                .with_subject("subject-a")
+                .with_shared_program(),
+            1,
+        );
+
+        assert!(event_matches_scoped_projection(
+            &subject_event,
+            &subject_scope
+        ));
+        assert!(!event_matches_scoped_projection(
+            &shared_event,
+            &subject_scope
+        ));
+        assert!(event_matches_scoped_projection(
+            &shared_event,
+            &shared_scope
+        ));
+        assert!(!event_matches_scoped_projection(
+            &subject_event,
+            &shared_scope
+        ));
+    }
+
+    #[test]
+    fn p8_scoped_projection_manifests_expand_exact_known_key_closure() {
+        let subject_scope =
+            crate::StoreScopedProjectionScope::subject("space-a", "subject-a").expect("subject");
+        let long_term_owner = bm_core::memory::GovernedMemoryOwnerRef::new(
+            bm_core::memory::GovernedMemoryOwnerPlane::LongTerm,
+            "memory-a",
+        );
+        let long_term_root_key =
+            bm_core::memory::long_term_version_scope_manifest_key("space-a", "subject-a")
+                .expect("long-term root key");
+        let long_term_head_key =
+            bm_core::memory::long_term_version_head_key("space-a", "subject-a", &long_term_owner)
+                .expect("long-term head key");
+        let long_term_root = bm_core::memory::LongTermMemoryVersionScopeManifest {
+            schema_version: bm_core::memory::LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+            physical_key: long_term_root_key.clone(),
+            memory_space_id: "space-a".to_string(),
+            mounted_subject_id: "subject-a".to_string(),
+            manifest_revision: 1,
+            head_bindings: vec![bm_core::memory::LongTermMemoryVersionHeadBinding {
+                owner_ref: long_term_owner.clone(),
+                head_physical_key: long_term_head_key.clone(),
+                head_content_digest: "0".repeat(64),
+                head_manifest_revision: 1,
+            }],
+            transition_bindings: Vec::new(),
+            head_count: 1,
+            material_count: 1,
+            transition_count: 0,
+            closure_digest: "0".repeat(64),
+        };
+        let long_term_head = bm_core::memory::LongTermMemoryHeadManifest {
+            schema_version: bm_core::memory::LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+            memory_space_id: "space-a".to_string(),
+            mounted_subject_id: "subject-a".to_string(),
+            owner_ref: long_term_owner.clone(),
+            current_revision: 1,
+            retained_revision_digests: vec![
+                bm_core::memory::LongTermMemoryRetainedRevisionDigest {
+                    owner_revision: 1,
+                    content_digest: "0".repeat(64),
+                },
+            ],
+            terminal_transition_ref: None,
+            manifest_revision: 1,
+        };
+        let long_term_docs = BTreeMap::from([
+            (
+                (
+                    LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                    long_term_root_key,
+                ),
+                serde_json::to_value(long_term_root).expect("long-term root"),
+            ),
+            (
+                (
+                    LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                    long_term_head_key.clone(),
+                ),
+                serde_json::to_value(long_term_head).expect("long-term head"),
+            ),
+        ]);
+        let long_term_dependencies = scoped_projection_dependency_addresses(
+            &long_term_docs,
+            &[
+                LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+            ],
+            &subject_scope,
+        )
+        .expect("long-term dependencies")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert!(long_term_dependencies.contains(&(
+            LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+            long_term_head_key,
+        )));
+        assert!(long_term_dependencies.contains(&(
+            LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+            bm_core::memory::long_term_version_material_key(
+                "space-a",
+                "subject-a",
+                &long_term_owner,
+                1,
+            )
+            .expect("long-term material key"),
+        )));
+
+        let shared_scope =
+            crate::StoreScopedProjectionScope::shared_program("space-a").expect("shared program");
+        let runtime_creation_ref = bm_core::skills::RuntimeSkillCreationRef::ReplayPromotion {
+            candidate_ref: "test:shared-program-archive".to_string(),
+            verification_receipt_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+        };
+        let runtime_owner_id = bm_core::skills::canonical_runtime_skill_owner_id(
+            "space-a",
+            &bm_core::skills::RuntimeSkillOwningScope::SharedProgram,
+            &runtime_creation_ref,
+        )
+        .expect("canonical runtime owner id");
+        let runtime_owner = bm_core::memory::GovernedMemoryOwnerRef::new(
+            bm_core::memory::GovernedMemoryOwnerPlane::RuntimeSkill,
+            runtime_owner_id.clone(),
+        );
+        let runtime_owning_scope = bm_core::skills::RuntimeSkillOwningScope::SharedProgram;
+        let runtime_root_key =
+            bm_core::skills::runtime_skill_scope_manifest_key("space-a", &runtime_owning_scope)
+                .expect("runtime root key");
+        let runtime_owner_key = bm_core::skills::canonical_runtime_skill_owner_key(
+            "space-a",
+            &runtime_owning_scope,
+            &runtime_owner_id,
+        )
+        .expect("runtime owner key");
+        let runtime_root = bm_core::skills::RuntimeSkillScopeManifest::build(
+            1,
+            "space-a",
+            runtime_owning_scope,
+            vec![bm_core::skills::RuntimeSkillOwnerBinding {
+                owner_ref: runtime_owner,
+                owner_revision: 1,
+                owner_physical_key: runtime_owner_key.clone(),
+                privacy_class: bm_core::memory::MemoryPrivacyClass::PublicRuntime,
+                content_digest: format!("sha256:{}", "0".repeat(64)),
+            }],
+            8,
+        )
+        .expect("runtime root");
+        let runtime_dependencies = scoped_projection_dependency_addresses(
+            &BTreeMap::from([(
+                (
+                    RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                    runtime_root_key,
+                ),
+                serde_json::to_value(runtime_root).expect("runtime root"),
+            )]),
+            &[
+                RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+            ],
+            &shared_scope,
+        )
+        .expect("runtime dependencies");
+        assert_eq!(
+            runtime_dependencies,
+            vec![(
+                RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+                runtime_owner_key
+            )]
+        );
     }
 
     #[test]

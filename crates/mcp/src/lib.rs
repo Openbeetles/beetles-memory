@@ -9,7 +9,7 @@
 ))]
 compile_error!("bm-mcp server-stdio is forbidden for ESP profiles.");
 
-use bm_adapter::AdapterOperation;
+use bm_adapter::{governed_adapter_json_command_schema, AdapterOperation};
 
 #[cfg(feature = "server-stdio")]
 use bm_adapter::{
@@ -58,16 +58,8 @@ pub struct McpResourceSpec {
 pub fn tool_specs() -> Vec<McpToolSpec> {
     vec![
         tool("memory_capabilities", AdapterOperation::Capabilities, &[]),
-        tool(
-            "memory_recall",
-            AdapterOperation::Recall,
-            &["query", "limit"],
-        ),
-        tool(
-            "memory_project",
-            AdapterOperation::Project,
-            &["query", "system_max_len"],
-        ),
+        governed_tool("memory_recall", AdapterOperation::Recall),
+        governed_tool("memory_project", AdapterOperation::Project),
         tool(
             "memory_inspect",
             AdapterOperation::Inspect,
@@ -124,6 +116,21 @@ pub fn resource_specs() -> Vec<McpResourceSpec> {
         resource("memory://scope", "memory_scope"),
         resource("memory://projection-preview", "memory_projection_preview"),
     ]
+}
+
+fn governed_tool(name: &'static str, operation: AdapterOperation) -> McpToolSpec {
+    let schema = governed_adapter_json_command_schema(operation)
+        .expect("governed MCP tool operation must have one adapter-owned schema");
+    McpToolSpec {
+        name,
+        operation,
+        schema_fields: schema
+            .field_names
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect(),
+        private_raw_allowed: false,
+    }
 }
 
 fn tool(name: &'static str, operation: AdapterOperation, fields: &[&str]) -> McpToolSpec {
@@ -449,7 +456,7 @@ impl McpToolServer {
             .ok_or_else(|| bm_sdk::Error::config("mcp_resource", "unsupported resource"))?;
         let content = match spec.uri {
             "memory://profile" => {
-                let overview = runtime.console_overview();
+                let overview = runtime.console_overview()?;
                 json!({
                     "profile": overview.runtime_shape.profile,
                     "runtime_shape": overview.runtime_shape,
@@ -502,7 +509,7 @@ impl McpToolServer {
     ) -> bm_sdk::Result<EntryResponse> {
         let command = decode_json_adapter_command(
             AdapterOperation::Project,
-            r#"{"query":"projection preview","system_max_len":1200}"#,
+            r#"{"temporal_operation":{"kind":"current"},"user_query":"projection preview","system_max_len":1200}"#,
             &mcp_command_options(runtime),
         )?;
         let request_identity = AdapterRequestIdentityOwner::new(
@@ -1278,21 +1285,6 @@ fn mcp_auth_error(code: i64, message: impl Into<String>) -> String {
 #[cfg(feature = "server-stdio")]
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct McpProjectArguments {
-    query: String,
-    system_max_len: usize,
-}
-
-#[cfg(feature = "server-stdio")]
-impl McpProjectArguments {
-    fn input_schema() -> Value {
-        bounded_query_schema()
-    }
-}
-
-#[cfg(feature = "server-stdio")]
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
 struct McpInspectArguments {
     query: String,
     system_max_len: usize,
@@ -1321,9 +1313,6 @@ fn bounded_query_schema() -> Value {
 #[cfg(feature = "server-stdio")]
 fn normalize_typed_tool_arguments(name: &str, arguments: &str) -> bm_sdk::Result<String> {
     match name {
-        "memory_project" => serde_json::from_str::<McpProjectArguments>(arguments)
-            .and_then(|arguments| serde_json::to_string(&arguments))
-            .map_err(|error| bm_sdk::Error::config("mcp_tool_arguments", error.to_string())),
         "memory_inspect" => serde_json::from_str::<McpInspectArguments>(arguments)
             .and_then(|arguments| serde_json::to_string(&arguments))
             .map_err(|error| bm_sdk::Error::config("mcp_tool_arguments", error.to_string())),
@@ -1347,8 +1336,8 @@ fn mcp_tool_descriptor(tool: &McpToolSpec) -> Value {
 
 #[cfg(feature = "server-stdio")]
 fn mcp_tool_input_schema(tool: &McpToolSpec) -> Value {
-    if tool.name == "memory_project" {
-        return McpProjectArguments::input_schema();
+    if let Some(schema) = governed_adapter_json_command_schema(tool.operation) {
+        return schema.input_schema;
     }
     if tool.name == "memory_inspect" {
         return McpInspectArguments::input_schema();
@@ -1456,47 +1445,38 @@ fn render_mcp_tool_execution_error(message: String) -> Value {
 fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolResult {
     match response {
         AdapterResponse::Accepted { report, .. } => {
-            let content = match report {
-                AdapterSdkReport::Recall(report) => json!({
-                    "status": "accepted",
-                    "query": report.query,
-                    "procedural_hits": report.procedural_hits.len(),
-                })
-                .to_string(),
-                AdapterSdkReport::Capabilities(catalog) => json!({
-                    "status": "accepted",
-                    "profile": catalog.profile.as_str(),
-                })
-                .to_string(),
-                AdapterSdkReport::Project(report) => json!({
-                    "status": "accepted",
-                    "projection_surface": "ui_api",
-                    "projection_block": report.projection_block,
-                    "chars": report.chars,
-                    "agent_tool_hints": report.agent_tool_hints,
-                    "audit": report.audit,
-                    "private_raw_allowed": false,
-                })
-                .to_string(),
-                AdapterSdkReport::TranscriptAttrWrite(report) => json!({
-                    "status": "accepted",
-                    "memory_space_id": report.key.memory_space_id,
-                    "channel_id": report.key.channel_id,
-                    "conversation_id": report.key.conversation_id,
-                    "accepted_attrs": report.accepted_attrs,
-                    "rejected_attrs": report.rejected_attrs,
-                    "redactions_preview": report.redactions_preview,
-                    "profile_budget_applied": report.profile_budget_applied,
-                    "audit_event_id": report.audit_event_id,
-                    "dry_run": report.dry_run,
-                    "lifecycle": report.lifecycle_report.result_summary,
-                })
-                .to_string(),
-                other => json!({
-                    "status": "accepted",
-                    "report_kind": other.public_kind(),
-                })
-                .to_string(),
+            let content = if let Some(governed) = report.governed_safe_report() {
+                json!({"status":"accepted","result":governed}).to_string()
+            } else {
+                match report {
+                    AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
+                        unreachable!("governed DTO handled above")
+                    }
+                    AdapterSdkReport::Capabilities(catalog) => json!({
+                        "status": "accepted",
+                        "profile": catalog.profile.as_str(),
+                    })
+                    .to_string(),
+                    AdapterSdkReport::TranscriptAttrWrite(report) => json!({
+                        "status": "accepted",
+                        "memory_space_id": report.key.memory_space_id,
+                        "channel_id": report.key.channel_id,
+                        "conversation_id": report.key.conversation_id,
+                        "accepted_attrs": report.accepted_attrs,
+                        "rejected_attrs": report.rejected_attrs,
+                        "redactions_preview": report.redactions_preview,
+                        "profile_budget_applied": report.profile_budget_applied,
+                        "audit_event_id": report.audit_event_id,
+                        "dry_run": report.dry_run,
+                        "lifecycle": report.lifecycle_report.result_summary,
+                    })
+                    .to_string(),
+                    other => json!({
+                        "status": "accepted",
+                        "report_kind": other.public_kind(),
+                    })
+                    .to_string(),
+                }
             };
             McpToolResult {
                 status: "accepted".to_string(),
@@ -1533,18 +1513,15 @@ fn render_projection_preview_resource(
     response: AdapterResponse<AdapterSdkReport>,
 ) -> bm_sdk::Result<Value> {
     match response {
-        AdapterResponse::Accepted { report, .. } => match report {
-            AdapterSdkReport::Project(report) => Ok(json!({
+        AdapterResponse::Accepted { report, .. } => match report.governed_safe_report() {
+            Some(bm_adapter::AdapterGovernedSafeReportV1::Project(project)) => Ok(json!({
                 "status": "accepted",
-                "preview": report.projection_block,
-                "chars": report.chars,
-                "agent_tool_hints": report.agent_tool_hints,
-                "audit": report.audit,
+                "result": bm_adapter::AdapterGovernedSafeReportV1::Project(project),
                 "private_raw_allowed": false,
             })),
             _ => Err(bm_sdk::Error::config(
                 "mcp_resource",
-                "projection preview returned non-project report",
+                "projection preview returned non-project governed DTO",
             )),
         },
         AdapterResponse::Rejected { reason, .. } => Ok(json!({

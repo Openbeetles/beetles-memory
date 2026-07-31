@@ -4,13 +4,12 @@ mod support;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bm_core::platform::Platform as _;
 use bm_sdk::{
-    IngressKind, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
+    IngressKind, LongTermMemoryDraft, LongTermMemoryKind, MemoryArchiveScope,
+    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
     MemoryRecallRequest, MemorySpaceExportRequest, MemorySpaceImportRequest,
-    MemorySpacePrivateMaterialPolicy, MemorySpaceScope, MemoryWriteRequest, PressureLevel,
-    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    MemorySpacePrivateMaterialPolicy, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
+    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, StoreBackendConfig,
 };
 
 use support::{test_runtime, StaticHttpClient, StaticLlmClient};
@@ -33,21 +32,34 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
     let runtime = test_runtime(store.clone(), support::host_test_profile());
 
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "store_contract".to_string(),
-                topic: "store backend".to_string(),
-                title: "Use MemoryStoreHandle directly".to_string(),
-                summary: "SDK hosts open MemoryStoreHandle instead of implementing store traits."
-                    .to_string(),
-                content:
-                    "1. choose backend\n2. open MemoryStoreHandle\n3. pass platform to runtime"
-                        .to_string(),
-                citations: vec!["sdk store opening contract".to_string()],
-                source_chat_id: Some("chat-1".to_string()),
-                observed_at: 1_800_000_000,
-            }],
-            source: RuntimeSkillWriteSource::Manual,
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![LongTermMemoryDraft {
+                    kind: LongTermMemoryKind::Project,
+                    privacy: MemoryPrivacyClass::SharedWithSubject,
+                    topic: "store backend".to_string(),
+                    content:
+                        "SDK hosts open MemoryStoreHandle instead of implementing store traits."
+                            .to_string(),
+                    keywords: vec!["MemoryStoreHandle".to_string(), "backend".to_string()],
+                    source_chat_id: Some("chat-1".to_string()),
+                    source_type: None,
+                    source_scope: None,
+                    confidence: None,
+                    freshness: None,
+                    stale_hint: None,
+                    supporting_citations: vec!["sdk store opening contract".to_string()],
+                    canonical_entities: Vec::new(),
+                    evidence_count: Some(1),
+                    observed_at: Some(1_800_000_000),
+                    last_confirmed_at: Some(1_800_000_000),
+                    source_revision: Some(1),
+                }],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
         })
         .expect("write");
 
@@ -56,6 +68,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "MemoryStoreHandle backend".to_string(),
             limit: 4,
@@ -63,13 +76,11 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
         })
         .expect("recall");
 
-    assert!(recall
-        .procedural_hits
-        .iter()
-        .any(|hit| hit.record.name == "runtime_skill__store_contract"));
+    assert_eq!(recall.delivery_report.selected_candidate_ids.len(), 1);
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How do I open storage?".to_string(),
             system_max_len: 4096,
@@ -79,7 +90,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
             tool_registry_refs: Vec::new(),
         })
         .expect("projection");
-    assert!(projection.system_memory_block.len() <= 4096);
+    assert!(projection.provider_payload().system_memory_block().len() <= 4096);
 
     let llm = StaticLlmClient::summary_response("Summary: store backend opening");
     let mut http = StaticHttpClient;
@@ -115,17 +126,20 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
         .expect("inspection");
     assert_eq!(inspection.working.query, "store backend");
 
-    let runtime_scope = MemorySpaceScope {
-        memory_space_id: runtime.memory_space_id().to_string(),
-        mounted_subject_id: runtime.subject_id().to_string(),
-    };
+    let runtime_scope =
+        MemoryArchiveScope::subject(runtime.memory_space_id(), runtime.subject_id())
+            .expect("runtime archive scope");
     let exported = runtime
         .export_memory_space(MemorySpaceExportRequest {
             scope: runtime_scope.clone(),
-            include_private: true,
+            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
         })
         .expect("export");
     assert_eq!(exported.projection_scope.scope, runtime_scope);
+    assert_eq!(
+        exported.projection_scope.private_material_policy,
+        MemorySpacePrivateMaterialPolicy::IncludePrivate
+    );
 
     let imported = runtime
         .import_memory_space(MemorySpaceImportRequest {
@@ -140,10 +154,18 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
         StoreBackendConfig::file(&root, support::host_test_profile()).expect("config"),
     )
     .expect("reopen");
-    assert!(reopened
-        .replay_harness()
-        .skill_storage()
-        .list_names()
-        .expect("list")
-        .contains(&"runtime_skill__store_contract".to_string()));
+    let reopened_runtime = support::test_runtime(reopened, support::host_test_profile());
+    let reopened_recall = reopened_runtime
+        .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            structured_query_facets: Vec::new(),
+            query: "MemoryStoreHandle backend".to_string(),
+            limit: 4,
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("reopened typed recall");
+    assert_eq!(
+        reopened_recall.delivery_report.selected_candidate_ids.len(),
+        1
+    );
 }

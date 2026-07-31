@@ -33,11 +33,11 @@ pub use console::{
     EntryConsoleSkillDetail, EntryConsoleSkillList, EntryConsoleSkillMutation,
     EntryConsoleSkillSetEnabled, EntryConsoleSkillSummary, EntryConsoleState,
     EntryConsoleSystemInfo, EntryConsoleTransport, EntryConsoleTransportUpdate,
-    EntryConsoleWorkbenchBenchmarkWall, EntryConsoleWorkbenchFacetInspector,
-    EntryConsoleWorkbenchProceduralEvolution, EntryConsoleWorkbenchProjectionInspector,
-    EntryConsoleWorkbenchRecallInspector, EntryConsoleWorkbenchReport,
-    EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth, EntryConsoleWorkbenchStatus,
-    EntryConsoleWorkbenchVaultMigration,
+    EntryConsoleWorkbenchArchiveRestore, EntryConsoleWorkbenchBenchmarkWall,
+    EntryConsoleWorkbenchFacetInspector, EntryConsoleWorkbenchProceduralEvolution,
+    EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
+    EntryConsoleWorkbenchReport, EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth,
+    EntryConsoleWorkbenchStatus,
 };
 pub use error::EntryErrorKey;
 pub use http_ingress::{

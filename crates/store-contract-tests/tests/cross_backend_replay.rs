@@ -1,7 +1,10 @@
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind, MemoryPrivacyClass};
 use bm_core::platform::Platform;
-use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StorePlatform};
+use bm_sdk::nonproduction_replay_harness::{
+    StoreBackendConfig, StorePlatform, LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+    RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+};
 use support::seed_scoped_long_term;
 
 fn seed(platform: &StorePlatform) {
@@ -212,5 +215,47 @@ fn snapshot_import_rejects_manifest_schema_drift() {
 
     assert_eq!(err.stage(), "store_snapshot_import");
     assert!(err.to_string().contains("schema version"));
+}
+
+fn assert_missing_typed_scope_root_rejected_unchanged(missing_namespace: &str) {
+    let profile = ProfileId::native_dev_full().expect("native dev-full profile");
+    let source =
+        support::open_store_in_memory(StoreBackendConfig::in_memory(profile).unwrap()).unwrap();
+    seed(&source);
+    let mut snapshot = source.export_store_snapshot().unwrap();
+    let before_len = snapshot.json_docs.len();
+    snapshot
+        .json_docs
+        .retain(|doc| doc.namespace != missing_namespace);
+    assert!(
+        snapshot.json_docs.len() < before_len,
+        "fixture must remove at least one typed scope root"
+    );
+
+    let target =
+        support::open_store_in_memory(StoreBackendConfig::in_memory(profile).unwrap()).unwrap();
+    target
+        .state_fs()
+        .write("runtime/state.json", b"keep")
+        .unwrap();
+    let before = target.export_store_snapshot().unwrap();
+
+    let error = target
+        .import_store_snapshot(&snapshot)
+        .expect_err("typed owner without its exact scope root must fail closed");
+    assert_eq!(error.stage(), "store_snapshot_import");
+    let after = target.export_store_snapshot().unwrap();
+    assert_eq!(after.state_fingerprint(), before.state_fingerprint());
+    assert_eq!(after.event_fingerprint(), before.event_fingerprint());
+}
+
+#[test]
+fn snapshot_import_rejects_long_term_owner_without_scope_root_before_touching_target() {
+    assert_missing_typed_scope_root_rejected_unchanged(LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE);
+}
+
+#[test]
+fn snapshot_import_rejects_runtime_skill_owner_without_scope_root_before_touching_target() {
+    assert_missing_typed_scope_root_rejected_unchanged(RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE);
 }
 mod support;

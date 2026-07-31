@@ -61,6 +61,7 @@ fn context(auth: EntryAuthDecision, operation: AdapterOperation) -> EntryTranspo
 
 fn recall_command() -> AdapterCommand {
     AdapterCommand::Recall(MemoryRecallRequest {
+        temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
         structured_query_facets: Vec::new(),
         query: "release".to_string(),
         limit: 2,
@@ -70,7 +71,7 @@ fn recall_command() -> AdapterCommand {
 
 fn write_command() -> AdapterCommand {
     AdapterCommand::Write(MemoryWriteRequest::Procedural {
-        writes: vec![RuntimeSkillWrite {
+        writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
             name: "runtime_skill__auth_capability".to_string(),
             topic: "auth".to_string(),
             title: "Capability gate".to_string(),
@@ -79,7 +80,8 @@ fn write_command() -> AdapterCommand {
             citations: Vec::new(),
             source_chat_id: Some("chat-remote".to_string()),
             observed_at: 1_800_000_000,
-        }],
+        })],
+        owning_scope: support::runtime_skill_subject_scope("agent-main"),
         source: RuntimeSkillWriteSource::Manual,
     })
 }

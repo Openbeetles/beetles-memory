@@ -68,7 +68,10 @@ fn console_route_catalog_is_separate_from_memory_operations() {
         .iter()
         .any(|route| route.method == HttpMethod::Get && route.path == "/console/skills"));
     assert!(routes.iter().any(|route| {
-        route.method == HttpMethod::Delete && route.path == "/console/skills/{name}"
+        route.method == HttpMethod::Post && route.path == "/console/skills/retire"
+    }));
+    assert!(routes.iter().any(|route| {
+        route.method == HttpMethod::Post && route.path == "/console/skills/detail"
     }));
     assert!(routes.iter().any(|route| {
         route.method == HttpMethod::Patch && route.path == "/console/transports/{id}"

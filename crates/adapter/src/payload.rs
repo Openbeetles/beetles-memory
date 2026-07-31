@@ -1,15 +1,18 @@
 use bm_sdk::{
-    AgentToolRegistryRef, AgentToolUsageFeedback, IngressKind, LongTermMemoryQuery,
-    MemoryCloseRequest, MemoryGovernancePolicyMutation, MemoryInspectionRequest,
-    MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermListRequest,
-    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
-    MemoryLongTermTarget, MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRecoverRequest, MemoryReplayRequest, MemoryTranscriptAttrWriteRequest,
-    MemoryWriteRequest, PressureLevel, QueryFacetInput, Result, RuntimeLifecycleModeInput,
-    RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    AgentToolRegistryRef, AgentToolUsageFeedback, GovernedRuntimeSkillWriteInput, IngressKind,
+    LongTermMemoryQuery, MemoryCloseRequest, MemoryGovernancePolicyMutation,
+    MemoryInspectionRequest, MemoryLongTermControlView, MemoryLongTermDetailRequest,
+    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryMaintenanceRequest,
+    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRecallTemporalOperation, MemoryRecoverRequest, MemoryReplayRequest,
+    MemoryTranscriptAttrWriteRequest, MemoryWriteRequest, PressureLevel, QueryFacetInput, Result,
+    RuntimeLifecycleModeInput, RuntimeLifecycleTrigger, RuntimeSkillCreationRef,
+    RuntimeSkillOwningScope, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
     TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use crate::{AdapterCommand, AdapterOperation};
 
@@ -17,6 +20,101 @@ use crate::{AdapterCommand, AdapterOperation};
 pub struct AdapterJsonCommandOptions {
     pub citation: String,
     pub default_source_chat_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernedAdapterJsonCommandSchema {
+    pub field_names: &'static [&'static str],
+    pub input_schema: Value,
+}
+
+pub fn governed_adapter_json_command_schema(
+    operation: AdapterOperation,
+) -> Option<GovernedAdapterJsonCommandSchema> {
+    let temporal_operation = json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "current"}
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "historical_as_of"},
+                    "as_of_time": {"type": "integer", "minimum": 1}
+                },
+                "required": ["kind", "as_of_time"],
+                "additionalProperties": false
+            }
+        ]
+    });
+    match operation {
+        AdapterOperation::Recall => Some(GovernedAdapterJsonCommandSchema {
+            field_names: &[
+                "temporal_operation",
+                "query",
+                "limit",
+                "structured_query_facets",
+                "tool_registry_refs",
+            ],
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "temporal_operation": temporal_operation,
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1},
+                    "structured_query_facets": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    },
+                    "tool_registry_refs": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                },
+                "required": ["temporal_operation", "query"],
+                "additionalProperties": false
+            }),
+        }),
+        AdapterOperation::Project => Some(GovernedAdapterJsonCommandSchema {
+            field_names: &[
+                "temporal_operation",
+                "user_query",
+                "system_max_len",
+                "recent_messages_limit",
+                "pressure",
+                "mode_input",
+                "structured_query_facets",
+                "tool_registry_refs",
+            ],
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "temporal_operation": temporal_operation,
+                    "user_query": {"type": "string"},
+                    "system_max_len": {"type": "integer", "minimum": 1},
+                    "recent_messages_limit": {"type": "integer", "minimum": 1},
+                    "pressure": {"type": "string"},
+                    "mode_input": {"type": "object"},
+                    "structured_query_facets": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    },
+                    "tool_registry_refs": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                },
+                "required": ["temporal_operation", "user_query", "system_max_len"],
+                "additionalProperties": false
+            }),
+        }),
+        _ => None,
+    }
 }
 
 impl AdapterJsonCommandOptions {
@@ -44,6 +142,7 @@ pub fn decode_json_adapter_command(
         AdapterOperation::Recall => {
             let payload: RecallPayload = parse_json(body)?;
             Ok(AdapterCommand::Recall(MemoryRecallRequest {
+                temporal_operation: payload.temporal_operation,
                 query: payload.query,
                 limit: payload.limit.unwrap_or(8),
                 structured_query_facets: payload.structured_query_facets,
@@ -53,6 +152,7 @@ pub fn decode_json_adapter_command(
         AdapterOperation::Project => {
             let payload: ProjectPayload = parse_json(body)?;
             Ok(AdapterCommand::Project(MemoryProjectionRequest {
+                temporal_operation: payload.temporal_operation,
                 user_query: payload.user_query,
                 system_max_len: payload.system_max_len,
                 recent_messages_limit: payload.recent_messages_limit.unwrap_or(8),
@@ -174,21 +274,35 @@ fn decode_write(body: &str, options: &AdapterJsonCommandOptions) -> Result<Adapt
             MemoryWriteRequest::AgentToolUsageFeedback { feedback },
         ));
     }
+    let owning_scope = payload.owning_scope.ok_or_else(|| {
+        bm_sdk::Error::config("adapter_json_command", "write payload missing owning_scope")
+    })?;
     let mut writes = if payload.writes.is_empty() {
-        vec![RuntimeSkillWrite {
-            name: required_field(payload.name, "name")?,
-            topic: required_field(payload.topic, "topic")?,
-            title: required_field(payload.title, "title")?,
-            summary: required_field(payload.summary, "summary")?,
-            content: required_field(payload.content, "content")?,
-            citations: payload
-                .citations
-                .filter(|citations| !citations.is_empty())
-                .unwrap_or_else(|| vec![options.citation.clone()]),
-            source_chat_id: payload
-                .source_chat_id
-                .or_else(|| options.default_source_chat_id.clone()),
-            observed_at: 0,
+        vec![GovernedRuntimeSkillWriteInput {
+            write: RuntimeSkillWrite {
+                name: required_field(payload.name, "name")?,
+                topic: required_field(payload.topic, "topic")?,
+                title: required_field(payload.title, "title")?,
+                summary: required_field(payload.summary, "summary")?,
+                content: required_field(payload.content, "content")?,
+                citations: payload
+                    .citations
+                    .filter(|citations| !citations.is_empty())
+                    .unwrap_or_else(|| vec![options.citation.clone()]),
+                source_chat_id: payload
+                    .source_chat_id
+                    .or_else(|| options.default_source_chat_id.clone()),
+                observed_at: 0,
+            },
+            creation_ref: payload.creation_ref.ok_or_else(|| {
+                bm_sdk::Error::config("adapter_json_command", "write payload missing creation_ref")
+            })?,
+            privacy_class: payload.privacy_class.ok_or_else(|| {
+                bm_sdk::Error::config(
+                    "adapter_json_command",
+                    "write payload missing privacy_class",
+                )
+            })?,
         }]
     } else {
         payload
@@ -198,10 +312,11 @@ fn decode_write(body: &str, options: &AdapterJsonCommandOptions) -> Result<Adapt
             .collect()
     };
     for write in &mut writes {
-        write.observed_at = 0;
+        write.write.observed_at = 0;
     }
     Ok(AdapterCommand::Write(MemoryWriteRequest::Procedural {
         writes,
+        owning_scope,
         source: payload.source,
     }))
 }
@@ -237,6 +352,12 @@ struct WritePayload {
     #[serde(default)]
     source: RuntimeSkillWriteSource,
     #[serde(default)]
+    owning_scope: Option<RuntimeSkillOwningScope>,
+    #[serde(default)]
+    creation_ref: Option<RuntimeSkillCreationRef>,
+    #[serde(default)]
+    privacy_class: Option<MemoryPrivacyClass>,
+    #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     topic: Option<String>,
@@ -264,25 +385,33 @@ struct AdapterRuntimeSkillWritePayload {
     citations: Vec<String>,
     #[serde(default)]
     source_chat_id: Option<String>,
+    creation_ref: RuntimeSkillCreationRef,
+    privacy_class: MemoryPrivacyClass,
 }
 
 impl AdapterRuntimeSkillWritePayload {
-    fn into_runtime_write(self) -> RuntimeSkillWrite {
-        RuntimeSkillWrite {
-            name: self.name,
-            topic: self.topic,
-            title: self.title,
-            summary: self.summary,
-            content: self.content,
-            citations: self.citations,
-            source_chat_id: self.source_chat_id,
-            observed_at: 0,
+    fn into_runtime_write(self) -> GovernedRuntimeSkillWriteInput {
+        GovernedRuntimeSkillWriteInput {
+            write: RuntimeSkillWrite {
+                name: self.name,
+                topic: self.topic,
+                title: self.title,
+                summary: self.summary,
+                content: self.content,
+                citations: self.citations,
+                source_chat_id: self.source_chat_id,
+                observed_at: 0,
+            },
+            creation_ref: self.creation_ref,
+            privacy_class: self.privacy_class,
         }
     }
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecallPayload {
+    temporal_operation: MemoryRecallTemporalOperation,
     query: String,
     #[serde(default)]
     limit: Option<usize>,
@@ -293,8 +422,9 @@ struct RecallPayload {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectPayload {
-    #[serde(alias = "query")]
+    temporal_operation: MemoryRecallTemporalOperation,
     user_query: String,
     system_max_len: usize,
     #[serde(default)]

@@ -14,7 +14,7 @@ path = "src/lib.rs"
 default = []
 nonproduction-replay-harness = ["bm-core/nonproduction-replay-harness"]
 sqlite-index = ["bm-core/sqlite-index"]
-sqlite-store = ["dep:rusqlite"]
+sqlite-store = ["dep:rusqlite", "dep:windows-sys"]
 embedded-store = []
 profile-esp-standalone-memory = [
     "bm-core/profile-esp-standalone-memory",
@@ -74,3 +74,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 rusqlite = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }

@@ -1,41 +1,49 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "nonproduction-replay-harness")]
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(feature = "nonproduction-replay-harness")]
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 
 use bm_core::{Error, Result};
-use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::enforce_event_key_budget;
+use crate::store_internal::snapshot::StoreSnapshotBlob;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::store_internal::transaction::{
     read_consistent_from_state, validate_restore_post_image_blob_bytes,
 };
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::StoreSnapshotReplaceReport;
 use crate::{
     enforce_logical_key_budget, store_budget_error,
+    store_internal::platform::StoreOpenPreflight,
     store_internal::transaction::{
         apply_transaction, read_bounded_known_keys_from_parts,
         scoped_projection_dependency_addresses, scoped_projection_root_addresses,
-        validate_scoped_projection_post_image, BackendTransactionState, StoreAdmissionAuthority,
-        StoreBackendUsage, StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead,
-        StoreBoundedKnownKeyReadResult, StoreImmutableReadSession, StoreReadReceipt,
-        StoreReadSessionState, StoreTransactionAdmission, StoreTransactionContext,
+        validate_immutable_read_session_capacity, validate_scoped_projection_post_image,
+        BackendTransactionState, StoreAdmissionAuthority, StoreBackendUsage,
+        StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead, StoreBoundedKnownKeyReadResult,
+        StoreImmutableReadSession, StoreReadReceipt, StoreReadSessionState,
+        StoreTransactionAdmission, StoreTransactionContext,
     },
     MemoryStoreEvent, StoreBackendConfig, StoreCapacityBudget, StoreEngine, StoreEngineMutation,
-    StoreEventLog, StoreSchemaManifest, StoreTransactionReport, StoreTransactionRequest,
-    STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
+    StoreEventLog, StoreMetricEventSourceRead, StoreSchemaManifest, StoreSnapshot,
+    StoreSnapshotJsonDoc, StoreTransactionReport, StoreTransactionRequest, STORE_SCHEMA_ID,
+    STORE_SCHEMA_VERSION,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::{StoreConsistentReadRequest, StoreConsistentReadResult};
-#[cfg(feature = "nonproduction-replay-harness")]
-use crate::{StoreSnapshotBlob, StoreSnapshotJsonDoc, StoreSnapshotReplaceReport};
 
 pub struct SqliteStoreEngine {
     capacity: StoreCapacityBudget,
@@ -43,9 +51,782 @@ pub struct SqliteStoreEngine {
     connection: Mutex<Connection>,
 }
 
+const SQLITE_SCHEMA_DDL: &str = r#"
+    CREATE TABLE bm_schema (
+        schema_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        manifest_json TEXT NOT NULL
+    );
+    CREATE TABLE bm_event_log (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        event_json TEXT NOT NULL
+    );
+    CREATE TABLE bm_kv (
+        namespace TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        PRIMARY KEY(namespace, key)
+    );
+    CREATE TABLE bm_blob (
+        namespace TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value_blob BLOB NOT NULL,
+        PRIMARY KEY(namespace, key)
+    );
+    CREATE TABLE bm_snapshot_manifest (
+        snapshot_id TEXT PRIMARY KEY,
+        manifest_json TEXT NOT NULL
+    );
+"#;
+
+#[derive(Debug, PartialEq, Eq)]
+struct SqliteSchemaEntry {
+    kind: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SqliteFileIdentity {
+    canonical_path: PathBuf,
+    length: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    windows: WindowsSqliteFileIdentity,
+    #[cfg(not(any(unix, windows)))]
+    created_nanos: Option<u128>,
+}
+
+impl SqliteFileIdentity {
+    fn same_file_object(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.device == other.device && self.inode == other.inode
+        }
+        #[cfg(windows)]
+        {
+            self.windows == other.windows
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.canonical_path == other.canonical_path
+                && self.created_nanos.is_some()
+                && self.created_nanos == other.created_nanos
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WindowsSqliteFileIdentity {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
+
+struct FreshSqlitePlaceholder {
+    path: PathBuf,
+    identity: SqliteFileIdentity,
+    armed: bool,
+}
+
+impl FreshSqlitePlaceholder {
+    fn create(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| {
+                Error::io(
+                    "sqlite_store_open_preflight",
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        std::io::Error::new(
+                            error.kind(),
+                            "SQLite main database appeared during fresh-store admission",
+                        )
+                    } else {
+                        error
+                    },
+                )
+            })?;
+        let identity = sqlite_file_identity_from_open_file(path, &file)?;
+        let placeholder = Self {
+            path: path.to_path_buf(),
+            identity,
+            armed: true,
+        };
+        placeholder.require_current()?;
+        Ok(placeholder)
+    }
+
+    fn require_current(&self) -> Result<()> {
+        require_sqlite_file_identity(&self.path, &self.identity)
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn cleanup_if_current(&mut self) -> Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        let current = sqlite_file_identity(&self.path)?;
+        if current
+            .as_ref()
+            .is_some_and(|current| current.same_file_object(&self.identity))
+        {
+            std::fs::remove_file(&self.path)
+                .map_err(|error| Error::io("sqlite_store_open_preflight", error))?;
+        }
+        self.disarm();
+        Ok(())
+    }
+}
+
+impl Drop for FreshSqlitePlaceholder {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.cleanup_if_current();
+    }
+}
+
+#[cfg(windows)]
+fn sqlite_windows_file_identity(file: &std::fs::File) -> Result<WindowsSqliteFileIdentity> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    };
+
+    let mut info = MaybeUninit::<FILE_ID_INFO>::uninit();
+    // SAFETY: file owns a live handle and info has the exact layout required by
+    // FileIdInfo.
+    let status = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if status == 0 {
+        return Err(Error::io(
+            "sqlite_store_open_preflight",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: a successful GetFileInformationByHandleEx initialized info.
+    let info = unsafe { info.assume_init() };
+    Ok(WindowsSqliteFileIdentity {
+        volume_serial_number: info.VolumeSerialNumber,
+        file_id: info.FileId.Identifier,
+    })
+}
+
+fn sqlite_file_identity_from_open_file(
+    path: &Path,
+    file: &std::fs::File,
+) -> Result<SqliteFileIdentity> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| Error::io("sqlite_store_open_preflight", error))?;
+    if !metadata.is_file() {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite main database path must be a regular file",
+        ));
+    }
+    #[cfg(windows)]
+    let windows = sqlite_windows_file_identity(file)?;
+    Ok(SqliteFileIdentity {
+        canonical_path: std::fs::canonicalize(path)
+            .map_err(|error| Error::io("sqlite_store_open_preflight", error))?,
+        length: metadata.len(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(windows)]
+        windows,
+        #[cfg(not(any(unix, windows)))]
+        created_nanos: metadata
+            .created()
+            .ok()
+            .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos()),
+    })
+}
+
+fn sqlite_file_identity(path: &Path) -> Result<Option<SqliteFileIdentity>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::io("sqlite_store_open_preflight", error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite main database path must not be a symbolic link",
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| Error::io("sqlite_store_open_preflight", error))?;
+    sqlite_file_identity_from_open_file(path, &file).map(Some)
+}
+
+fn require_sqlite_file_identity(path: &Path, expected: &SqliteFileIdentity) -> Result<()> {
+    if sqlite_file_identity(path)?.as_ref() != Some(expected) {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite main database identity changed during open admission",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_existing_sqlite_file_fence(path: &Path, expected: &SqliteFileIdentity) -> Result<()> {
+    // This is a conservative pathname fence, not an OS-level binding between a
+    // rusqlite connection and its file handle. Repeat it around every SQLite
+    // admission boundary so any observable replacement fails closed.
+    require_sqlite_file_identity(path, expected)?;
+    validate_sqlite_physical_open_preflight(path)?;
+    require_sqlite_file_identity(path, expected)
+}
+
 struct ScopedJsonRead {
     documents: BTreeMap<(String, String), Value>,
     logical_bytes: usize,
+}
+
+fn decode_current_event(raw: &str, stage: &'static str) -> Result<MemoryStoreEvent> {
+    let event: MemoryStoreEvent =
+        serde_json::from_str(raw).map_err(|error| Error::config(stage, error.to_string()))?;
+    event.validate_current_schema(stage)?;
+    Ok(event)
+}
+
+fn validate_existing_sqlite_schema_read_only(
+    path: &Path,
+    config: &StoreBackendConfig,
+) -> Result<Option<StoreSchemaManifest>> {
+    validate_sqlite_physical_open_preflight(path)?;
+    if !path
+        .try_exists()
+        .map_err(|error| Error::io("sqlite_store_schema", error))?
+    {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+    validate_existing_sqlite_schema_connection(&connection, config)
+}
+
+fn validate_existing_sqlite_schema_connection(
+    connection: &Connection,
+    config: &StoreBackendConfig,
+) -> Result<Option<StoreSchemaManifest>> {
+    let schema_table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bm_schema')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+    if !schema_table_exists {
+        let table_count: usize = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+        if table_count == 0 {
+            return Ok(None);
+        }
+        return Err(Error::config(
+            "sqlite_store_schema",
+            "schema is missing for a non-empty SQLite store",
+        ));
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT schema_id, schema_version, manifest_json FROM bm_schema ORDER BY schema_id",
+        )
+        .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row.map_err(|error| Error::storage("sqlite_store_schema", error))?);
+    }
+    if entries.len() != 1 {
+        return Err(Error::config(
+            "sqlite_store_schema",
+            "SQLite store must contain exactly one schema authority row",
+        ));
+    }
+    let (schema_id, schema_version, manifest_json) = entries.pop().expect("checked one row");
+    let manifest: StoreSchemaManifest = serde_json::from_str(&manifest_json)
+        .map_err(|error| Error::config("sqlite_store_schema", error.to_string()))?;
+    if schema_id != manifest.schema_id || schema_version != manifest.schema_version {
+        return Err(Error::config(
+            "sqlite_store_schema",
+            "SQLite schema columns do not match the manifest",
+        ));
+    }
+    manifest.validate_against(
+        config.backend,
+        config.profile,
+        config.memory_system_kind,
+        "sqlite_store_schema",
+    )?;
+    validate_sqlite_schema_inventory(connection)?;
+    Ok(Some(manifest))
+}
+
+fn validate_sqlite_sidecar_absence(path: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
+        match std::fs::symlink_metadata(&sidecar) {
+            Ok(_) => {
+                return Err(Error::config(
+                    "sqlite_store_open_preflight",
+                    format!(
+                        "SQLite sidecar {} requires an explicit recovery owner",
+                        sidecar.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io("sqlite_store_open_preflight", error)),
+        }
+    }
+    Ok(())
+}
+
+fn validate_sqlite_physical_open_preflight(path: &Path) -> Result<()> {
+    validate_sqlite_sidecar_absence(path)?;
+    let Some(identity) = sqlite_file_identity(path)? else {
+        return Ok(());
+    };
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| Error::io("sqlite_store_open_preflight", error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| Error::io("sqlite_store_open_preflight", error))?
+        .len();
+    if length != identity.length {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite main database length changed during physical admission",
+        ));
+    }
+    if length == 0 {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "an existing SQLite database must contain a complete v6 header",
+        ));
+    }
+    if length < 100 {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite database header is truncated",
+        ));
+    }
+    let mut header = [0_u8; 100];
+    file.read_exact(&mut header)
+        .map_err(|error| Error::io("sqlite_store_open_preflight", error))?;
+    if &header[..16] != b"SQLite format 3\0" {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite database header signature is invalid",
+        ));
+    }
+    if header[18] != 1 || header[19] != 1 {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "WAL-mode SQLite headers are not admitted by the rollback-journal store contract",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sqlite_integrity_read_only(connection: &Connection) -> Result<()> {
+    let mut statement = connection
+        .prepare("PRAGMA quick_check")
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    let results = rows
+        .map(|row| row.map_err(|error| Error::storage("sqlite_store_open_preflight", error)))
+        .collect::<Result<Vec<_>>>()?;
+    if results != ["ok"] {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            format!("SQLite quick_check rejected the physical database: {results:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn sqlite_schema_inventory(connection: &Connection) -> Result<Vec<SqliteSchemaEntry>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_schema
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+             ORDER BY type, name, tbl_name",
+        )
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(SqliteSchemaEntry {
+                kind: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    rows.map(|row| row.map_err(|error| Error::storage("sqlite_store_open_preflight", error)))
+        .collect()
+}
+
+fn validate_sqlite_schema_inventory(connection: &Connection) -> Result<()> {
+    let canonical = Connection::open_in_memory()
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    canonical
+        .execute_batch(SQLITE_SCHEMA_DDL)
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    if sqlite_schema_inventory(connection)? != sqlite_schema_inventory(&canonical)? {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite schema inventory does not match the exact v6 DDL",
+        ));
+    }
+    Ok(())
+}
+
+fn sqlite_bounded_row_count(
+    connection: &Connection,
+    query: &'static str,
+    capacity: usize,
+    label: &'static str,
+) -> Result<usize> {
+    let probe_limit = i64::try_from(capacity.saturating_add(1)).unwrap_or(i64::MAX);
+    let count = connection
+        .query_row(query, params![probe_limit], |row| row.get::<_, usize>(0))
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    if count > capacity {
+        return Err(store_budget_error(format!(
+            "SQLite preflight {label} items {count} exceed {capacity}"
+        )));
+    }
+    Ok(count)
+}
+
+fn sqlite_address_exceeds_budget(
+    connection: &Connection,
+    query: &'static str,
+    first_max_bytes: usize,
+    second_max_bytes: usize,
+) -> Result<bool> {
+    let first_max_bytes = i64::try_from(first_max_bytes).unwrap_or(i64::MAX);
+    let second_max_bytes = i64::try_from(second_max_bytes).unwrap_or(i64::MAX);
+    connection
+        .query_row(query, params![first_max_bytes, second_max_bytes], |row| {
+            row.get(0)
+        })
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))
+}
+
+fn validate_sqlite_snapshot_envelope(
+    connection: &Connection,
+    capacity: StoreCapacityBudget,
+) -> Result<(usize, usize, usize)> {
+    let json_count = sqlite_bounded_row_count(
+        connection,
+        "SELECT COUNT(*) FROM (SELECT 1 FROM bm_kv LIMIT ?1)",
+        capacity.kv_max_entries,
+        "JSON",
+    )?;
+    let blob_capacity = capacity.kv_max_entries.saturating_sub(json_count);
+    let blob_count = sqlite_bounded_row_count(
+        connection,
+        "SELECT COUNT(*) FROM (SELECT 1 FROM bm_blob LIMIT ?1)",
+        blob_capacity,
+        "blob",
+    )?;
+    let event_count = sqlite_bounded_row_count(
+        connection,
+        "SELECT COUNT(*) FROM (SELECT 1 FROM bm_event_log LIMIT ?1)",
+        capacity.event_log_max_items,
+        "event",
+    )?;
+
+    if sqlite_address_exceeds_budget(
+        connection,
+        "SELECT EXISTS(
+             SELECT 1 FROM bm_kv
+             WHERE length(CAST(namespace AS BLOB)) > ?1
+                OR length(CAST(key AS BLOB)) > ?2
+             LIMIT 1
+         )",
+        capacity.logical_namespace_max_bytes,
+        capacity.logical_key_max_bytes,
+    )? {
+        return Err(store_budget_error(
+            "SQLite preflight JSON address exceeds its logical byte budget",
+        ));
+    }
+    if sqlite_address_exceeds_budget(
+        connection,
+        "SELECT EXISTS(
+             SELECT 1 FROM bm_blob
+             WHERE length(CAST(namespace AS BLOB)) > ?1
+                OR length(CAST(key AS BLOB)) > ?2
+             LIMIT 1
+         )",
+        capacity.logical_namespace_max_bytes,
+        capacity.logical_key_max_bytes,
+    )? {
+        return Err(store_budget_error(
+            "SQLite preflight blob address exceeds its logical byte budget",
+        ));
+    }
+    let oversized_event_id: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM bm_event_log
+                 WHERE length(CAST(event_id AS BLOB)) > ?1
+                 LIMIT 1
+             )",
+            params![i64::try_from(capacity.logical_key_max_bytes).unwrap_or(i64::MAX)],
+            |row| row.get(0),
+        )
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    if oversized_event_id {
+        return Err(store_budget_error(
+            "SQLite preflight event id exceeds the logical key byte budget",
+        ));
+    }
+
+    let snapshot_manifest_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM bm_snapshot_manifest LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    if snapshot_manifest_exists {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite snapshot manifest lane is not part of the active v6 footprint",
+        ));
+    }
+
+    Ok((json_count, blob_count, event_count))
+}
+
+fn read_existing_sqlite_snapshot_read_only(
+    connection: &Connection,
+    manifest: StoreSchemaManifest,
+    capacity: StoreCapacityBudget,
+) -> Result<StoreSnapshot> {
+    let (json_count, blob_count, event_count) =
+        validate_sqlite_snapshot_envelope(connection, capacity)?;
+    let mut json_docs = Vec::with_capacity(json_count);
+    let mut json_bytes = 0_usize;
+    let mut statement = connection
+        .prepare(
+            "SELECT namespace, key, length(CAST(value_json AS BLOB)), value_json
+             FROM bm_kv ORDER BY namespace, key",
+        )
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?
+    {
+        let namespace = row
+            .get::<_, String>(0)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        let key = row
+            .get::<_, String>(1)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        let raw_len = row
+            .get::<_, usize>(2)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        if raw_len > capacity.snapshot_max_bytes.saturating_sub(json_bytes) {
+            return Err(store_budget_error(
+                "SQLite preflight JSON value exceeds the remaining snapshot budget",
+            ));
+        }
+        let raw = row
+            .get::<_, String>(3)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        if raw.len() != raw_len {
+            return Err(Error::config(
+                "sqlite_store_open_preflight",
+                "SQLite JSON byte length changed during bounded row admission",
+            ));
+        }
+        json_bytes = json_bytes
+            .checked_add(raw.len())
+            .ok_or_else(|| store_budget_error("SQLite preflight JSON byte count overflow"))?;
+        if json_bytes > capacity.snapshot_max_bytes {
+            return Err(store_budget_error(format!(
+                "SQLite preflight JSON bytes {json_bytes} exceed {}",
+                capacity.snapshot_max_bytes
+            )));
+        }
+        let value = serde_json::from_str(&raw)
+            .map_err(|error| Error::config("sqlite_store_open_preflight", error.to_string()))?;
+        json_docs.push(StoreSnapshotJsonDoc {
+            namespace,
+            key,
+            value,
+        });
+    }
+    drop(rows);
+    drop(statement);
+
+    let mut blobs = Vec::with_capacity(blob_count);
+    let mut blob_bytes = 0_usize;
+    let mut statement = connection
+        .prepare(
+            "SELECT namespace, key, length(value_blob), value_blob
+             FROM bm_blob ORDER BY namespace, key",
+        )
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?
+    {
+        let namespace = row
+            .get::<_, String>(0)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        let key = row
+            .get::<_, String>(1)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        let value_len = row
+            .get::<_, usize>(2)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        if value_len > capacity.blob_max_bytes.saturating_sub(blob_bytes) {
+            return Err(store_budget_error(
+                "SQLite preflight blob exceeds the remaining blob budget",
+            ));
+        }
+        let value = row
+            .get::<_, Vec<u8>>(3)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        if value.len() != value_len {
+            return Err(Error::config(
+                "sqlite_store_open_preflight",
+                "SQLite blob byte length changed during bounded row admission",
+            ));
+        }
+        blob_bytes = blob_bytes
+            .checked_add(value.len())
+            .ok_or_else(|| store_budget_error("SQLite preflight blob byte count overflow"))?;
+        if blob_bytes > capacity.blob_max_bytes {
+            return Err(store_budget_error(format!(
+                "SQLite preflight blob bytes {blob_bytes} exceed {}",
+                capacity.blob_max_bytes
+            )));
+        }
+        blobs.push(StoreSnapshotBlob {
+            namespace,
+            key,
+            value,
+        });
+    }
+    drop(rows);
+    drop(statement);
+
+    let mut events = Vec::with_capacity(event_count);
+    let mut statement = connection
+        .prepare(
+            "SELECT event_id, length(CAST(event_json AS BLOB)), event_json
+             FROM bm_event_log ORDER BY sequence",
+        )
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?
+    {
+        let event_id = row
+            .get::<_, String>(0)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        let raw_len = row
+            .get::<_, usize>(1)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        if raw_len > capacity.snapshot_max_bytes.saturating_sub(json_bytes) {
+            return Err(store_budget_error(
+                "SQLite preflight event bytes exceed snapshot budget",
+            ));
+        }
+        let raw = row
+            .get::<_, String>(2)
+            .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+        if raw.len() != raw_len {
+            return Err(Error::config(
+                "sqlite_store_open_preflight",
+                "SQLite event byte length changed during bounded row admission",
+            ));
+        }
+        json_bytes = json_bytes.saturating_add(raw_len);
+        let event = decode_current_event(&raw, "sqlite_store_open_preflight")?;
+        if event.event_id != event_id {
+            return Err(Error::config(
+                "sqlite_store_open_preflight",
+                "SQLite event_id column does not match typed event",
+            ));
+        }
+        events.push(event);
+    }
+    drop(rows);
+    drop(statement);
+    if events.len() != event_count {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite event count changed during bounded snapshot admission",
+        ));
+    }
+
+    if json_docs.len() != json_count || blobs.len() != blob_count {
+        return Err(Error::config(
+            "sqlite_store_open_preflight",
+            "SQLite entry count changed during bounded snapshot admission",
+        ));
+    }
+    Ok(StoreSnapshot::new(manifest, json_docs, blobs, events))
 }
 
 fn read_scoped_json_exact(
@@ -137,7 +918,7 @@ impl StoreImmutableReadSession for SqliteImmutableReadSession<'_> {
     ) -> Result<Vec<StoreBoundedKnownJsonRead>> {
         let mut reads = Vec::with_capacity(addresses.len());
         for (namespace, key) in addresses {
-            let raw: Option<String> = self
+            let raw: Option<String> = match self
                 .connection
                 .query_row(
                     "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
@@ -145,8 +926,12 @@ impl StoreImmutableReadSession for SqliteImmutableReadSession<'_> {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(|error| map_transaction_error("store_immutable_read_session", error))?;
-            let value = raw
+                .map_err(|error| map_transaction_error("store_immutable_read_session", error))
+            {
+                Ok(raw) => raw,
+                Err(error) => return self.read.fail(error),
+            };
+            let value = match raw
                 .map(|raw| {
                     if raw.len() > self.read.remaining_json_bytes() {
                         return Err(Error::config(
@@ -158,7 +943,11 @@ impl StoreImmutableReadSession for SqliteImmutableReadSession<'_> {
                         Error::config("store_immutable_read_session", error.to_string())
                     })
                 })
-                .transpose()?;
+                .transpose()
+            {
+                Ok(value) => value,
+                Err(error) => return self.read.fail(error),
+            };
             reads.push(self.read.record_json(namespace, key, value)?);
         }
         Ok(reads)
@@ -170,7 +959,7 @@ impl StoreImmutableReadSession for SqliteImmutableReadSession<'_> {
     ) -> Result<Vec<StoreBoundedKnownBlobRead>> {
         let mut reads = Vec::with_capacity(addresses.len());
         for (namespace, key) in addresses {
-            let value: Option<Vec<u8>> = self
+            let value: Option<Vec<u8>> = match self
                 .connection
                 .query_row(
                     "SELECT value_blob FROM bm_blob WHERE namespace = ?1 AND key = ?2",
@@ -178,12 +967,16 @@ impl StoreImmutableReadSession for SqliteImmutableReadSession<'_> {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(|error| map_transaction_error("store_immutable_read_session", error))?;
+                .map_err(|error| map_transaction_error("store_immutable_read_session", error))
+            {
+                Ok(value) => value,
+                Err(error) => return self.read.fail(error),
+            };
             if value
                 .as_ref()
                 .is_some_and(|value| value.len() > self.read.remaining_blob_bytes())
             {
-                return Err(Error::config(
+                return self.read.fail(Error::config(
                     "store_consistent_read_budget_exceeded",
                     "SQLite blob exceeds remaining immutable session ceiling",
                 ));
@@ -204,13 +997,29 @@ impl SqliteStoreEngine {
         config: &StoreBackendConfig,
         capacity: StoreCapacityBudget,
     ) -> Result<(Self, StoreSchemaManifest)> {
-        Self::open_with_capacity_and_authority(config, capacity, StoreAdmissionAuthority::new())
+        let open_preflight = StoreOpenPreflight::for_nonproduction_harness(config, capacity)?;
+        Self::open_internal(
+            config,
+            capacity,
+            StoreAdmissionAuthority::new(),
+            Some(&open_preflight),
+        )
     }
 
     pub(crate) fn open_with_capacity_and_authority(
         config: &StoreBackendConfig,
         capacity: StoreCapacityBudget,
         admission_authority: StoreAdmissionAuthority,
+        open_preflight: &StoreOpenPreflight,
+    ) -> Result<(Self, StoreSchemaManifest)> {
+        Self::open_internal(config, capacity, admission_authority, Some(open_preflight))
+    }
+
+    fn open_internal(
+        config: &StoreBackendConfig,
+        capacity: StoreCapacityBudget,
+        admission_authority: StoreAdmissionAuthority,
+        open_preflight: Option<&StoreOpenPreflight>,
     ) -> Result<(Self, StoreSchemaManifest)> {
         let path = config
             .data_path
@@ -220,8 +1029,109 @@ impl SqliteStoreEngine {
             std::fs::create_dir_all(parent)
                 .map_err(|error| Error::io("sqlite_store_open", error))?;
         }
-        let connection =
-            Connection::open(&path).map_err(|error| Error::storage("sqlite_store_open", error))?;
+        validate_sqlite_physical_open_preflight(&path)?;
+        let initial_identity = sqlite_file_identity(&path)?;
+        let existing_store = initial_identity.is_some();
+        let mut fresh_placeholder = if existing_store {
+            None
+        } else {
+            Some(FreshSqlitePlaceholder::create(&path)?)
+        };
+        let expected_identity = initial_identity
+            .clone()
+            .or_else(|| {
+                fresh_placeholder
+                    .as_ref()
+                    .map(|placeholder| placeholder.identity.clone())
+            })
+            .ok_or_else(|| {
+                Error::config(
+                    "sqlite_store_open_preflight",
+                    "SQLite main database identity is missing after admission",
+                )
+            })?;
+
+        let result = Self::open_claimed_path(
+            config,
+            capacity,
+            admission_authority,
+            open_preflight,
+            path,
+            &expected_identity,
+            existing_store,
+        );
+        match result {
+            Ok(result) => {
+                if let Some(placeholder) = fresh_placeholder.as_mut() {
+                    placeholder.disarm();
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                if let Some(placeholder) = fresh_placeholder.as_mut() {
+                    placeholder.cleanup_if_current()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn open_claimed_path(
+        config: &StoreBackendConfig,
+        capacity: StoreCapacityBudget,
+        admission_authority: StoreAdmissionAuthority,
+        open_preflight: Option<&StoreOpenPreflight>,
+        path: PathBuf,
+        expected_identity: &SqliteFileIdentity,
+        existing_store: bool,
+    ) -> Result<(Self, StoreSchemaManifest)> {
+        if existing_store {
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+            validate_existing_sqlite_schema_read_only(&path, config)?.ok_or_else(|| {
+                Error::config(
+                    "sqlite_store_open_preflight",
+                    "an existing SQLite file is not a complete v6 store",
+                )
+            })?;
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+            if let Some(open_preflight) = open_preflight {
+                validate_existing_sqlite_file_fence(&path, expected_identity)?;
+                let connection =
+                    Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                        .map_err(|error| Error::storage("sqlite_store_open_preflight", error))?;
+                validate_existing_sqlite_file_fence(&path, expected_identity)?;
+                let manifest = validate_existing_sqlite_schema_connection(&connection, config)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "sqlite_store_open_preflight",
+                            "SQLite schema disappeared during read-only admission",
+                        )
+                    })?;
+                let snapshot =
+                    read_existing_sqlite_snapshot_read_only(&connection, manifest, capacity)?;
+                open_preflight.admit_snapshot(&snapshot, "sqlite_store_open_preflight")?;
+                validate_sqlite_integrity_read_only(&connection)?;
+                validate_existing_sqlite_file_fence(&path, expected_identity)?;
+            }
+        } else {
+            validate_sqlite_sidecar_absence(&path)?;
+            require_sqlite_file_identity(&path, expected_identity)?;
+        }
+
+        if existing_store {
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+        } else {
+            validate_sqlite_sidecar_absence(&path)?;
+            require_sqlite_file_identity(&path, expected_identity)?;
+        }
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|error| Error::storage("sqlite_store_open", error))?;
+        if existing_store {
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+        } else {
+            validate_sqlite_sidecar_absence(&path)?;
+            require_sqlite_file_identity(&path, expected_identity)?;
+        }
         connection
             .busy_timeout(config.lock_timeout)
             .map_err(|error| Error::storage("sqlite_store_open", error))?;
@@ -230,7 +1140,13 @@ impl SqliteStoreEngine {
             admission_authority,
             connection: Mutex::new(connection),
         };
-        let manifest = engine.init_schema(config, path)?;
+        let manifest = engine.init_schema(
+            config,
+            path,
+            expected_identity,
+            existing_store,
+            open_preflight,
+        )?;
         Ok((engine, manifest))
     }
 
@@ -238,120 +1154,60 @@ impl SqliteStoreEngine {
         &self,
         config: &StoreBackendConfig,
         path: PathBuf,
+        expected_identity: &SqliteFileIdentity,
+        existing_store: bool,
+        open_preflight: Option<&StoreOpenPreflight>,
     ) -> Result<StoreSchemaManifest> {
         let mut connection = self
             .connection
             .lock()
             .map_err(|error| Error::config("sqlite_store_open", error.to_string()))?;
+        if existing_store {
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+        } else {
+            validate_sqlite_sidecar_absence(&path)?;
+            require_sqlite_file_identity(&path, expected_identity)?;
+        }
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| Error::storage("sqlite_store_schema", error))?;
-        transaction
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS bm_schema (
-                    schema_id TEXT PRIMARY KEY,
-                    schema_version INTEGER NOT NULL,
-                    manifest_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS bm_event_log (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id TEXT NOT NULL UNIQUE,
-                    event_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS bm_kv (
-                    namespace TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    value_json TEXT NOT NULL,
-                    PRIMARY KEY(namespace, key)
-                );
-                CREATE TABLE IF NOT EXISTS bm_blob (
-                    namespace TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    value_blob BLOB NOT NULL,
-                    PRIMARY KEY(namespace, key)
-                );
-                CREATE TABLE IF NOT EXISTS bm_snapshot_manifest (
-                    snapshot_id TEXT PRIMARY KEY,
-                    manifest_json TEXT NOT NULL
-                );
-                "#,
-            )
-            .map_err(|error| Error::storage("sqlite_store_schema", error))?;
-        let incompatible_schema: Option<String> = transaction
-            .query_row(
-                "SELECT schema_id FROM bm_schema WHERE schema_id <> ?1 LIMIT 1",
-                params![STORE_SCHEMA_ID],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| Error::storage("sqlite_store_schema", error))?;
-        if let Some(schema_id) = incompatible_schema {
-            return Err(Error::config(
-                "sqlite_store_schema",
-                format!("unsupported schema {} in {}", schema_id, path.display()),
-            ));
-        }
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT manifest_json FROM bm_schema WHERE schema_id = ?1",
-                params![STORE_SCHEMA_ID],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| Error::storage("sqlite_store_schema", error))?;
         let now_secs = current_unix_secs();
-        let manifest = match existing {
-            Some(raw) => {
-                let mut manifest: StoreSchemaManifest = serde_json::from_str(&raw)
-                    .map_err(|error| Error::config("sqlite_store_schema", error.to_string()))?;
-                if manifest.schema_id != STORE_SCHEMA_ID {
-                    return Err(Error::config(
-                        "sqlite_store_schema",
-                        format!(
-                            "unsupported schema {} in {}",
-                            manifest.schema_id,
-                            path.display()
-                        ),
-                    ));
-                }
-                manifest.validate_against(
-                    config.backend,
-                    config.profile,
-                    config.memory_system_kind,
-                    "sqlite_store_schema",
-                )?;
-                manifest.touch_opened(now_secs);
-                manifest
-            }
-            None => {
-                let persistent_state_exists: bool = transaction
-                    .query_row(
-                        r#"
-                        SELECT
-                            EXISTS(SELECT 1 FROM bm_event_log) OR
-                            EXISTS(SELECT 1 FROM bm_kv) OR
-                            EXISTS(SELECT 1 FROM bm_blob) OR
-                            EXISTS(SELECT 1 FROM bm_snapshot_manifest)
-                        "#,
-                        [],
-                        |row| row.get(0),
+        if existing_store {
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+            let manifest = validate_existing_sqlite_schema_connection(&transaction, config)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "sqlite_store_open_preflight",
+                        "SQLite schema disappeared before the write fence",
                     )
-                    .map_err(|error| Error::storage("sqlite_store_schema", error))?;
-                if persistent_state_exists {
-                    return Err(Error::config(
-                        "sqlite_store_schema",
-                        format!("schema is missing for non-empty store {}", path.display()),
-                    ));
-                }
-                StoreSchemaManifest::new(config.backend, config.profile, now_secs)
+                })?;
+            if let Some(open_preflight) = open_preflight {
+                let snapshot = read_existing_sqlite_snapshot_read_only(
+                    &transaction,
+                    manifest.clone(),
+                    self.capacity,
+                )?;
+                open_preflight.admit_snapshot(&snapshot, "sqlite_store_open_preflight")?;
             }
-        };
+            validate_sqlite_integrity_read_only(&transaction)?;
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+            transaction
+                .rollback()
+                .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+            validate_existing_sqlite_file_fence(&path, expected_identity)?;
+            return Ok(manifest);
+        }
+
+        transaction
+            .execute_batch(SQLITE_SCHEMA_DDL)
+            .map_err(|error| Error::storage("sqlite_store_schema", error))?;
+        let manifest = StoreSchemaManifest::new(config.backend, config.profile, now_secs);
         let raw = serde_json::to_string(&manifest)
             .map_err(|error| Error::config("sqlite_store_schema", error.to_string()))?;
         transaction
             .execute(
-                "INSERT OR REPLACE INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
+                "INSERT INTO bm_schema(schema_id, schema_version, manifest_json)
+                     VALUES (?1, ?2, ?3)",
                 params![STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, raw],
             )
             .map_err(|error| Error::storage("sqlite_store_schema", error))?;
@@ -630,6 +1486,7 @@ impl StoreEventLog for SqliteStoreEngine {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>> {
         let connection = self
             .connection
@@ -653,10 +1510,7 @@ impl StoreEventLog for SqliteStoreEngine {
         let mut events = Vec::new();
         for row in rows {
             let raw = row.map_err(|error| Error::storage("store_event_log", error))?;
-            events.push(
-                serde_json::from_str(&raw)
-                    .map_err(|error| Error::config("store_event_log", error.to_string()))?,
-            );
+            events.push(decode_current_event(&raw, "store_event_log")?);
         }
         Ok(events)
     }
@@ -666,6 +1520,76 @@ impl StoreEngine for SqliteStoreEngine {
     fn admission_authority(&self) -> &StoreAdmissionAuthority {
         &self.admission_authority
     }
+
+    fn read_metric_events(
+        &self,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreMetricEventSourceRead> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|error| Error::config("runtime_metrics_event_store", error.to_string()))?;
+        let (count, accounted_snapshot_bytes): (i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(event_json AS BLOB))), 0) FROM bm_event_log",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| Error::storage("runtime_metrics_event_store", error))?;
+        let count = usize::try_from(count).map_err(|_| {
+            Error::config(
+                "runtime_metrics_event_capacity",
+                "runtime metric event count exceeds the platform address space",
+            )
+        })?;
+        let accounted_snapshot_bytes = usize::try_from(accounted_snapshot_bytes).map_err(|_| {
+            Error::config(
+                "runtime_metrics_event_bytes",
+                "runtime metric event bytes exceed the platform address space",
+            )
+        })?;
+        if count > capacity.event_log_max_items {
+            return Err(Error::config(
+                "runtime_metrics_event_capacity",
+                "runtime metric event source exceeds the active item budget",
+            ));
+        }
+        if accounted_snapshot_bytes > capacity.snapshot_max_bytes {
+            return Err(Error::config(
+                "runtime_metrics_event_bytes",
+                "runtime metric event source exceeds the active byte budget",
+            ));
+        }
+        let mut statement = connection
+            .prepare("SELECT event_json FROM bm_event_log ORDER BY sequence ASC")
+            .map_err(|error| Error::storage("runtime_metrics_event_store", error))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| Error::storage("runtime_metrics_event_store", error))?;
+        let mut events = Vec::with_capacity(count);
+        let mut observed_bytes = 0_usize;
+        for row in rows {
+            let raw = row.map_err(|error| Error::storage("runtime_metrics_event_store", error))?;
+            observed_bytes = observed_bytes.checked_add(raw.len()).ok_or_else(|| {
+                Error::config(
+                    "runtime_metrics_event_bytes",
+                    "runtime metric event byte count overflow",
+                )
+            })?;
+            events.push(decode_current_event(&raw, "runtime_metrics_event_store")?);
+        }
+        if events.len() != count || observed_bytes != accounted_snapshot_bytes {
+            return Err(Error::config(
+                "runtime_metrics_event_store",
+                "runtime metric SQLite source changed during its bounded read",
+            ));
+        }
+        Ok(StoreMetricEventSourceRead {
+            events,
+            accounted_snapshot_bytes,
+        })
+    }
+
     #[cfg(feature = "nonproduction-replay-harness")]
     fn store_capacity(&self) -> StoreCapacityBudget {
         self.capacity
@@ -807,11 +1731,9 @@ impl StoreEngine for SqliteStoreEngine {
             for row in rows {
                 let raw =
                     row.map_err(|error| map_transaction_error("store_consistent_read", error))?;
-                state.events.push(
-                    serde_json::from_str(&raw).map_err(|error| {
-                        Error::config("store_consistent_read", error.to_string())
-                    })?,
-                );
+                state
+                    .events
+                    .push(decode_current_event(&raw, "store_consistent_read")?);
             }
         }
         let result = read_consistent_from_state(request, &state);
@@ -924,41 +1846,38 @@ impl StoreEngine for SqliteStoreEngine {
                 blobs.insert((namespace.clone(), key.clone()), value);
             }
         }
-        let events =
-            if include_events {
-                let (event_count, event_bytes): (usize, usize) = tx
-                    .query_row(
-                        "SELECT COUNT(*), COALESCE(SUM(length(event_json)), 0) FROM bm_event_log",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-                if event_count > capacity.event_log_max_items
-                    || json_bytes.saturating_add(event_bytes) > capacity.snapshot_max_bytes
-                {
-                    return Err(Error::config(
-                        "store_consistent_read_budget_exceeded",
-                        "event log exceeds the consistent known-key read budget",
-                    ));
-                }
-                let mut statement = tx
-                    .prepare("SELECT event_json FROM bm_event_log ORDER BY sequence ASC")
-                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-                let rows = statement
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .map_err(|error| map_transaction_error("store_consistent_read", error))?;
-                let mut events = Vec::with_capacity(event_count);
-                for row in rows {
-                    let raw =
-                        row.map_err(|error| map_transaction_error("store_consistent_read", error))?;
-                    events.push(serde_json::from_str(&raw).map_err(|error| {
-                        Error::config("store_consistent_read", error.to_string())
-                    })?);
-                }
-                events
-            } else {
-                Vec::new()
-            };
+        let events = if include_events {
+            let (event_count, event_bytes): (usize, usize) = tx
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(length(event_json)), 0) FROM bm_event_log",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| map_transaction_error("store_consistent_read", error))?;
+            if event_count > capacity.event_log_max_items
+                || json_bytes.saturating_add(event_bytes) > capacity.snapshot_max_bytes
+            {
+                return Err(Error::config(
+                    "store_consistent_read_budget_exceeded",
+                    "event log exceeds the consistent known-key read budget",
+                ));
+            }
+            let mut statement = tx
+                .prepare("SELECT event_json FROM bm_event_log ORDER BY sequence ASC")
+                .map_err(|error| map_transaction_error("store_consistent_read", error))?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| map_transaction_error("store_consistent_read", error))?;
+            let mut events = Vec::with_capacity(event_count);
+            for row in rows {
+                let raw =
+                    row.map_err(|error| map_transaction_error("store_consistent_read", error))?;
+                events.push(decode_current_event(&raw, "store_consistent_read")?);
+            }
+            events
+        } else {
+            Vec::new()
+        };
         let result = read_bounded_known_keys_from_parts(
             json_keys,
             blob_keys,
@@ -977,6 +1896,7 @@ impl StoreEngine for SqliteStoreEngine {
         &'a self,
         capacity: StoreCapacityBudget,
     ) -> Result<Box<dyn StoreImmutableReadSession + 'a>> {
+        validate_immutable_read_session_capacity(self.capacity, capacity)?;
         let connection = self
             .connection
             .lock()
@@ -984,6 +1904,37 @@ impl StoreEngine for SqliteStoreEngine {
         connection
             .execute_batch("BEGIN DEFERRED")
             .map_err(|error| map_transaction_error("store_immutable_read_session", error))?;
+        let pinned_schema_version = connection
+            .query_row(
+                "SELECT schema_version FROM bm_schema WHERE schema_id = ?1",
+                params![STORE_SCHEMA_ID],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()
+            .map_err(|error| map_transaction_error("store_immutable_read_session", error));
+        match pinned_schema_version {
+            Ok(Some(schema_version)) if schema_version == STORE_SCHEMA_VERSION => {}
+            Ok(Some(schema_version)) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(Error::config(
+                    "store_immutable_read_session",
+                    format!(
+                        "pinned schema version {schema_version} differs from {STORE_SCHEMA_VERSION}"
+                    ),
+                ));
+            }
+            Ok(None) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(Error::config(
+                    "store_immutable_read_session",
+                    "pinned schema manifest row is missing",
+                ));
+            }
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
         Ok(Box::new(SqliteImmutableReadSession {
             connection,
             read: StoreReadSessionState::new(capacity),
@@ -1009,10 +1960,21 @@ impl StoreEngine for SqliteStoreEngine {
                     r#"SELECT COUNT(*), COALESCE(SUM(length(event_json)), 0)
                        FROM bm_event_log
                        WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
-                         AND json_extract(event_json, '$.scope.subject_id') = ?2"#,
+                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
+                         AND (
+                           ?2 = 'shared_program'
+                           OR (
+                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
+                             AND json_extract(event_json, '$.scope.subject_id') = ?3
+                           )
+                         )"#,
                     params![
                         &request.scope.memory_space_id,
-                        &request.scope.mounted_subject_id
+                        match &request.scope.physical_owning_scope {
+                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
+                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
+                        },
+                        request.scope.mounted_subject_id(),
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
@@ -1029,7 +1991,14 @@ impl StoreEngine for SqliteStoreEngine {
                 .prepare(
                     r#"SELECT event_json FROM bm_event_log
                        WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
-                         AND json_extract(event_json, '$.scope.subject_id') = ?2
+                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
+                         AND (
+                           ?2 = 'shared_program'
+                           OR (
+                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
+                             AND json_extract(event_json, '$.scope.subject_id') = ?3
+                           )
+                         )
                        ORDER BY sequence"#,
                 )
                 .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
@@ -1037,7 +2006,11 @@ impl StoreEngine for SqliteStoreEngine {
                 .query_map(
                     params![
                         &request.scope.memory_space_id,
-                        &request.scope.mounted_subject_id
+                        match &request.scope.physical_owning_scope {
+                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
+                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
+                        },
+                        request.scope.mounted_subject_id(),
                     ],
                     |row| row.get::<_, String>(0),
                 )
@@ -1046,9 +2019,7 @@ impl StoreEngine for SqliteStoreEngine {
             for row in rows {
                 let raw =
                     row.map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-                events.push(serde_json::from_str(&raw).map_err(|error| {
-                    Error::config("store_scoped_projection", error.to_string())
-                })?);
+                events.push(decode_current_event(&raw, "store_scoped_projection")?);
             }
             events
         } else {
@@ -1132,10 +2103,21 @@ impl StoreEngine for SqliteStoreEngine {
             .execute(
                 r#"DELETE FROM bm_event_log
                    WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
-                     AND json_extract(event_json, '$.scope.subject_id') = ?2"#,
+                     AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
+                     AND (
+                       ?2 = 'shared_program'
+                       OR (
+                         json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
+                         AND json_extract(event_json, '$.scope.subject_id') = ?3
+                       )
+                     )"#,
                 params![
                     &request.scope.memory_space_id,
-                    &request.scope.mounted_subject_id
+                    match &request.scope.physical_owning_scope {
+                        crate::StorePhysicalOwningScope::Subject { .. } => "subject",
+                        crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
+                    },
+                    request.scope.mounted_subject_id(),
                 ],
             )
             .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
@@ -1619,5 +2601,58 @@ fn map_event_insert_error(error: rusqlite::Error) -> Error {
         Error::config("store_event_log", "duplicate event id")
     } else {
         Error::storage("store_event_log", error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_schema_is_rejected_by_read_only_preflight_without_byte_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "bm-sqlite-v5-zero-mutation-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let profile = crate::ProfileId::native_dev_full().expect("native test profile");
+        let config = StoreBackendConfig::sqlite(&path, profile).expect("sqlite config");
+        let mut legacy = StoreSchemaManifest::new(config.backend, config.profile, 7);
+        legacy.schema_id = "beetle_memory_store_schema_v5".to_string();
+        legacy.schema_version = 5;
+        {
+            let connection = Connection::open(&path).expect("create legacy sqlite");
+            connection
+                .execute_batch(
+                    "CREATE TABLE bm_schema (
+                        schema_id TEXT PRIMARY KEY,
+                        schema_version INTEGER NOT NULL,
+                        manifest_json TEXT NOT NULL
+                    );",
+                )
+                .expect("create schema table");
+            connection
+                .execute(
+                    "INSERT INTO bm_schema(schema_id, schema_version, manifest_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        &legacy.schema_id,
+                        legacy.schema_version,
+                        serde_json::to_string(&legacy).expect("legacy manifest")
+                    ],
+                )
+                .expect("insert legacy schema");
+        }
+        let before = std::fs::read(&path).expect("read sqlite before");
+
+        let error = validate_existing_sqlite_schema_read_only(&path, &config)
+            .expect_err("v5 must fail closed");
+        assert_eq!(error.stage(), "sqlite_store_schema");
+        assert_eq!(std::fs::read(&path).expect("read sqlite after"), before);
+
+        std::fs::remove_file(path).expect("remove sqlite fixture");
     }
 }

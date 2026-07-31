@@ -89,6 +89,44 @@ fn store_platform_persists_lifecycle_and_operator_events() {
 }
 
 #[test]
+fn lifecycle_payload_cannot_override_typed_completion_fields() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .expect("config"),
+    )
+    .expect("store");
+    let engine = RuntimeLifecycleEngine;
+    let admission = engine.admit(
+        RuntimeLifecycleOperation::Maintain,
+        RuntimeLifecycleTrigger::SdkCall,
+        RuntimeLifecycleModeInput {
+            profile: ProfileId::native_dev_full().expect("native dev-full profile"),
+            pressure: PressureLevel::Normal,
+            ..RuntimeLifecycleModeInput::default()
+        },
+    );
+    let report = RuntimeLifecycleReport::from_admission(admission, 1_800_000_004).finish_success(
+        1_800_000_005,
+        true,
+        "maintenance_completed",
+    );
+    let event = RuntimeLifecycleEvent::from_report(
+        RuntimeLifecycleEventKind::RuntimeLifecycle,
+        RuntimeLifecycleEffect::RunMaintenance,
+        &report,
+        1_800_000_005,
+    )
+    .with_payload("success", "false");
+
+    let error = RuntimeLifecycleEventSink::record_lifecycle_event(&platform, event)
+        .expect_err("free payload cannot override a typed lifecycle field");
+
+    assert_eq!(error.stage(), "runtime_lifecycle_event_payload");
+}
+
+#[test]
 fn runtime_lifecycle_events_survive_store_snapshot_import() {
     let source = support::open_store_in_memory(
         StoreBackendConfig::in_memory(
@@ -119,8 +157,7 @@ fn runtime_lifecycle_events_survive_store_snapshot_import() {
             RuntimeLifecycleEffect::Noop,
             &report,
             1_800_000_011,
-        )
-        .with_payload("result_summary", "runtime_closed"),
+        ),
     )
     .expect("close event");
 

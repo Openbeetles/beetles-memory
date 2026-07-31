@@ -13,12 +13,13 @@ use bm_core::runtime::continuity_flush::{
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
     system_governor_subject_id, IngressKind, MemoryCloseRequest, MemoryIdentity,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryProjectionRequest,
+    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryRecoverRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleDisposition,
-    RuntimeLifecycleModeInput, RuntimeLifecycleOperation, RuntimeLifecycleTrigger,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
-    StoreRuntimeBudget, SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
+    RuntimeLifecycleDisposition, RuntimeLifecycleModeInput, RuntimeLifecycleOperation,
+    RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    StoreBackendConfig, StoreRuntimeBudget, SubjectRegistry, SubjectRelationshipGraph,
+    SubjectScopedRuntime,
 };
 
 use support::{
@@ -58,7 +59,7 @@ fn recovery_snapshot(
 ) -> ContinuitySnapshot {
     let long_term_memory = source
         .replay_harness()
-        .scoped_long_term_memory_read_store(memory_space_id)
+        .scoped_long_term_memory_read_store(memory_space_id, "agent:agent-main")
         .expect("recovery source store")
         .list(usize::MAX)
         .expect("recovery source entries");
@@ -89,7 +90,7 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
 
     let write = runtime
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "lifecycle_contract".to_string(),
                 topic: "runtime lifecycle".to_string(),
                 title: "Runtime lifecycle contract".to_string(),
@@ -98,7 +99,8 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
                 citations: vec!["runtime lifecycle contract test".to_string()],
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
-            }],
+            })],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("write");
@@ -114,6 +116,7 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "runtime lifecycle".to_string(),
             limit: 4,
@@ -128,6 +131,7 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should SDK hosts use lifecycle?".to_string(),
             system_max_len: 4096,
@@ -138,10 +142,10 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
         })
         .expect("project");
     assert_eq!(
-        projection.lifecycle_report.operation,
+        projection.report().lifecycle_report().operation,
         RuntimeLifecycleOperation::Project
     );
-    assert!(projection.lifecycle_report.success);
+    assert!(projection.report().lifecycle_report().success);
 }
 
 #[test]
@@ -154,20 +158,33 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
     let runtime = test_runtime(platform, support::host_test_profile());
 
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
-                name: "ollama_memory_projection_hit".to_string(),
-                topic: "ollama transparent metrics".to_string(),
-                title: "Ollama transparent metrics".to_string(),
-                summary: "Ollama transparent projection must be counted as a memory hit."
-                    .to_string(),
-                content: "- When projection injects remembered context, record memory_hit=true.\n- Use hit_count to back UI metrics instead of fabricating counters."
-                    .to_string(),
-                citations: vec!["runtime lifecycle telemetry contract".to_string()],
-                source_chat_id: Some("chat-1".to_string()),
-                observed_at: 1_800_000_000,
-            }],
-            source: RuntimeSkillWriteSource::Manual,
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![bm_sdk::LongTermMemoryDraft {
+                    kind: bm_sdk::LongTermMemoryKind::Fact,
+                    topic: "ollama transparent metrics".to_string(),
+                    content: "When projection injects remembered context, record memory_hit=true."
+                        .to_string(),
+                    keywords: vec!["ollama".to_string(), "metrics".to_string()],
+                    privacy: MemoryPrivacyClass::SharedWithSubject,
+                    source_chat_id: Some("chat-1".to_string()),
+                    source_type: None,
+                    source_scope: None,
+                    confidence: None,
+                    freshness: None,
+                    stale_hint: None,
+                    supporting_citations: vec!["runtime lifecycle telemetry contract".to_string()],
+                    canonical_entities: Vec::new(),
+                    evidence_count: Some(1),
+                    observed_at: Some(1_800_000_000),
+                    last_confirmed_at: Some(1_800_000_000),
+                    source_revision: Some(1),
+                }],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
         })
         .expect("write");
     assert!(
@@ -177,6 +194,7 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
 
     runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "ollama transparent metrics".to_string(),
             limit: 4,
@@ -185,6 +203,7 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
         .expect("recall");
     runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should Ollama transparent metrics be counted?".to_string(),
             system_max_len: 4096,
@@ -525,7 +544,7 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
     assert_eq!(
         target_platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default")
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
             .expect("target owner store")
             .count()
             .expect("target owner count"),
@@ -557,6 +576,7 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
 
     let event_log_max_items = 6;
     let budget = StoreRuntimeBudget {
+        metric_source_max_items: 1,
         event_log_max_items,
         kv_max_entries: 129,
         blob_max_bytes: 4096,
@@ -622,7 +642,7 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
     assert_eq!(
         target_platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default")
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
             .expect("target owner store")
             .count()
             .expect("target owner count"),

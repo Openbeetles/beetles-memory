@@ -66,6 +66,7 @@ Use this when a release needs artifact verification and changelog inspection.
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "release artifact checksums".to_string(),
             limit: 4,
@@ -76,6 +77,7 @@ Use this when a release needs artifact verification and changelog inspection.
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "prepare release artifact checks".to_string(),
             system_max_len: 4096,
@@ -85,12 +87,9 @@ Use this when a release needs artifact verification and changelog inspection.
             tool_registry_refs: Vec::new(),
         })
         .expect("project");
-    assert_eq!(projection.runtime_projection.agent_skill_hints.len(), 1);
-    assert_eq!(projection.audit.agent_skills.selected.len(), 1);
-    assert!(projection.system_memory_block.contains("Agent Skill Hints"));
+    assert_eq!(projection.report().audit().agent_skill_selected_count, 1);
     assert!(projection
-        .audit
-        .sources
-        .iter()
-        .any(|source| source.plane == "agent_skill" && source.selected_count == 1));
+        .provider_payload()
+        .system_memory_block()
+        .contains("Agent Skill Hints"));
 }

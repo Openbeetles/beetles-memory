@@ -12,6 +12,8 @@ import {
 import type { ConsoleCopy } from "./i18n";
 import type {
   ConsoleApiDevice,
+  ConsoleApiMemoryArchiveScope,
+  ConsoleApiMemorySpacePrivateMaterialPolicy,
   ConsoleApiMetric,
   ConsoleApiOverview,
   ConsoleApiSession,
@@ -53,6 +55,28 @@ export const mapDev = <T extends { deviceId: string }>(list: T[], id: string, fn
 
 export const statusLabel = (t: ConsoleCopy, status: StatusKind) => t.statusLabels[status] ?? status;
 export const statusIcon = (status: StatusKind) => STATUS_ICONS[status] ?? Circle;
+
+export function archiveScopeLabel(
+  scope: ConsoleApiMemoryArchiveScope,
+  currentLang: Lang,
+): string {
+  if (scope.kind === "subject") {
+    const kind = currentLang === "zh-CN" ? "主体" : "Subject";
+    return `${kind}: ${scope.memory_space_id} / ${scope.mounted_subject_id}`;
+  }
+  const kind = currentLang === "zh-CN" ? "共享程序" : "Shared program";
+  return `${kind}: ${scope.memory_space_id}`;
+}
+
+export function archivePolicyLabel(
+  policy: ConsoleApiMemorySpacePrivateMaterialPolicy,
+  currentLang: Lang,
+): string {
+  if (policy === "exclude_private") {
+    return currentLang === "zh-CN" ? "排除私密材料" : "Private material excluded";
+  }
+  return currentLang === "zh-CN" ? "包含私密材料" : "Private material included";
+}
 
 export const fromApiTransport = (transport: ConsoleApiTransport): Transport => ({
   id: transport.id,
@@ -266,7 +290,7 @@ function localizeEventText(text: string): string {
       .replace(" updated", " 已更新")
       .replace(" disabled", " 已停用")
       .replace(" enabled", " 已启用")
-      .replace(" deleted", " 已删除");
+      .replace(" retired", " 已退役");
   }
   if (text.startsWith("Memory write accepted")) return text.replace("Memory write accepted, changed", "记忆写入已接受，变更");
   if (text.startsWith("Recall served for")) return text.replace("Recall served for", "召回已执行：").replace(" with ", "，命中 ").replace(" hits", " 条");
@@ -371,11 +395,11 @@ export function filterSkills(
 ): ConsoleApiSkillSummary[] {
   const needle = search.trim().toLowerCase();
   return source.filter((skill) => {
-    if (statusFilter === "active" && (!skill.enabled || skill.status === "retired")) return false;
+    if (statusFilter === "active" && (!skill.enabled || skill.status !== "active")) return false;
     if (statusFilter === "disabled" && skill.enabled) return false;
     if (statusFilter === "retired" && skill.status !== "retired") return false;
     if (!needle) return true;
-    return [skill.name, skill.title, skill.topic, skill.status]
+    return [skill.ownerId, skill.title, skill.topic, skill.status]
       .some((value) => value.toLowerCase().includes(needle));
   });
 }

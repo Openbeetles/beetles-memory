@@ -40,13 +40,14 @@ fn seed_runtime_skill(
     let resolved = GatewayScopeResolver::new(config.scope.clone())
         .resolve(scope)
         .expect("scope");
+    let agent_id = resolved.entry_scope.identity.agent_id.clone();
     let runtime = gateway
         .runtime_for_scope(resolved.entry_scope)
         .expect("runtime");
     runtime
         .runtime()
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![RuntimeSkillWrite {
+            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "responses_gateway_style".to_string(),
                 topic: "llm_gateway_responses".to_string(),
                 title: "Responses gateway style".to_string(),
@@ -56,7 +57,8 @@ fn seed_runtime_skill(
                 citations: Vec::new(),
                 source_chat_id: Some("thread-7".to_string()),
                 observed_at: 1,
-            }],
+            })],
+            owning_scope: support::runtime_skill_subject_scope(&agent_id),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("seed skill");

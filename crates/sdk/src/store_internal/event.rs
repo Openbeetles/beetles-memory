@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use bm_core::Result;
+use bm_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::store_internal::schema::STORE_SCHEMA_VERSION;
@@ -36,15 +36,22 @@ impl MemoryStoreEventKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StorePhysicalOwningScope {
+    Subject { mounted_subject_id: String },
+    SharedProgram,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StoreEventScope {
     pub agent_id: String,
     pub owner_id: String,
     pub channel: String,
     pub chat_id: String,
-    #[serde(default)]
     pub memory_space_id: String,
-    #[serde(default)]
     pub subject_id: String,
+    pub physical_owning_scope: StorePhysicalOwningScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
 }
@@ -61,6 +68,9 @@ impl StoreEventScope {
             agent_id: agent_id.into(),
             memory_space_id: owner_id.clone(),
             subject_id: owner_id.clone(),
+            physical_owning_scope: StorePhysicalOwningScope::Subject {
+                mounted_subject_id: owner_id.clone(),
+            },
             owner_id,
             channel: channel.into(),
             chat_id: chat_id.into(),
@@ -76,6 +86,9 @@ impl StoreEventScope {
             chat_id: operation.into(),
             memory_space_id: "system".to_string(),
             subject_id: "system".to_string(),
+            physical_owning_scope: StorePhysicalOwningScope::Subject {
+                mounted_subject_id: "system".to_string(),
+            },
             conversation_id: None,
         }
     }
@@ -87,6 +100,14 @@ impl StoreEventScope {
 
     pub fn with_subject(mut self, subject_id: impl Into<String>) -> Self {
         self.subject_id = subject_id.into();
+        self.physical_owning_scope = StorePhysicalOwningScope::Subject {
+            mounted_subject_id: self.subject_id.clone(),
+        };
+        self
+    }
+
+    pub fn with_shared_program(mut self) -> Self {
+        self.physical_owning_scope = StorePhysicalOwningScope::SharedProgram;
         self
     }
 
@@ -97,6 +118,7 @@ impl StoreEventScope {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryStoreEvent {
     pub event_id: String,
     pub kind: MemoryStoreEventKind,
@@ -107,7 +129,6 @@ pub struct MemoryStoreEvent {
     pub content_hash: String,
     pub schema_version: u32,
     pub timestamp_unix_secs: u64,
-    #[serde(default)]
     pub payload: BTreeMap<String, String>,
 }
 
@@ -152,10 +173,58 @@ impl MemoryStoreEvent {
         self.payload.insert(key.into(), value.into());
         self
     }
+
+    pub(crate) fn validate_current_schema(&self, stage: &'static str) -> Result<()> {
+        if self.schema_version != STORE_SCHEMA_VERSION {
+            return Err(Error::config(
+                stage,
+                format!("unsupported event schema version {}", self.schema_version),
+            ));
+        }
+        if self.event_id.trim().is_empty()
+            || self.kind_name != self.kind.as_str()
+            || self.scope.memory_space_id.trim().is_empty()
+            || self.scope.subject_id.trim().is_empty()
+        {
+            return Err(Error::config(
+                stage,
+                "event identity, kind, memory space, and subject must be canonical",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub trait StoreEventLog: Send + Sync {
     #[cfg(feature = "nonproduction-replay-harness")]
     fn append_event(&self, event: MemoryStoreEvent) -> Result<()>;
+    #[cfg(any(test, feature = "nonproduction-replay-harness"))]
     fn read_events(&self) -> Result<Vec<MemoryStoreEvent>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_schema_is_exact_and_unknown_fields_are_rejected() {
+        let event = MemoryStoreEvent::new(
+            "event-1",
+            MemoryStoreEventKind::MemoryWrite,
+            StoreEventScope::new("agent", "owner", "channel", "chat")
+                .with_memory_space("space")
+                .with_subject("subject"),
+            7,
+        );
+        assert!(event.validate_current_schema("event_test").is_ok());
+
+        let mut legacy = serde_json::to_value(&event).expect("event value");
+        legacy["schema_version"] = serde_json::json!(5);
+        let legacy: MemoryStoreEvent = serde_json::from_value(legacy).expect("legacy shape");
+        assert!(legacy.validate_current_schema("event_test").is_err());
+
+        let mut unknown = serde_json::to_value(&event).expect("event value");
+        unknown["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<MemoryStoreEvent>(unknown).is_err());
+    }
 }

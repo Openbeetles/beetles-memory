@@ -2679,6 +2679,9 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
         .expect("replay public contract");
     let secure_fs = fs::read_to_string(repo_root.join("crates/replay/src/p7_secure_fs.rs"))
         .expect("retained cohort filesystem owner");
+    let sealed_execution =
+        fs::read_to_string(repo_root.join("crates/replay/src/sealed_execution.rs"))
+            .expect("generation-neutral sealed execution owner");
     let frozen_identity_owner = fs::read_to_string(
         repo_root
             .join("crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs"),
@@ -2832,7 +2835,11 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
             "Linux execution authority gate uses unattested parser or digest tool: {forbidden}"
         );
     }
-    assert!(secure_fs.contains("Mutex<P7ExecutionAuthorityClaimState>"));
+    assert!(secure_fs.contains("ClaimedSealedExecution::claim_typed(P7_SEALED_EXECUTION_DOMAIN)"));
+    assert!(!secure_fs.contains("Mutex<P7ExecutionAuthorityClaimState>"));
+    assert!(sealed_execution.contains("static CLAIMED_DOMAINS"));
+    assert!(sealed_execution.contains("F_DUPFD_CLOEXEC"));
+    assert!(sealed_execution.contains("F_GET_SEALS"));
     assert!(secure_fs.contains("open_or_create_p7_runner_authority_probe_store_with_authority"));
     assert!(secure_fs.contains("pub(crate) struct P7CohortArtifactOwner"));
     assert!(!replay_lib.contains("P7CohortArtifactOwner,"));

@@ -77,7 +77,10 @@ let recall = runtime.recall(MemoryRecallRequest {
     structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
-assert!(!recall.procedural_hits.is_empty());
+assert!(recall
+    .procedural_delivery_reports
+    .iter()
+    .any(|delivery| delivery.selected));
 
 let projection = runtime.project(MemoryProjectionRequest {
     user_query: "How should this host release?".to_string(),

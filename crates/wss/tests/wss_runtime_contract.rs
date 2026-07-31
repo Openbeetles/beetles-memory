@@ -45,6 +45,17 @@ fn write_payload(name: &str, summary: &str) -> String {
         "title": format!("WSS write {name}"),
         "summary": summary,
         "content": "Dispatch this write through the governed EntryRuntime path.",
+        "owning_scope": {
+            "kind": "subject",
+            "mounted_subject_id": "agent:wss-agent",
+        },
+        "creation_ref": {
+            "kind": "replay_promotion",
+            "candidate_ref": format!("test:wss:{name}"),
+            "verification_receipt_digest":
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        },
+        "privacy_class": "shared_with_subject",
     })
     .to_string()
 }
@@ -56,6 +67,16 @@ fn response_status(response: &bm_wss::WssRuntimeEvent) -> String {
         .as_str()
         .expect("WSS response status")
         .to_string()
+}
+
+fn assert_exact_governed_result(payload: &serde_json::Value) {
+    let result = payload["result"].clone();
+    let dto: bm_adapter::AdapterGovernedSafeReportV1 =
+        serde_json::from_value(result.clone()).expect("strict adapter governed safe DTO");
+    assert_eq!(
+        serde_json::to_value(dto).expect("serialize adapter governed safe DTO"),
+        result
+    );
 }
 
 #[test]
@@ -171,7 +192,7 @@ fn wss_session_dispatches_command_frame_through_entry_runtime() {
     let response = session
         .handle_frame(WssRuntimeFrame::command(
             "command.recall",
-            r#"{"query":"release","limit":2}"#,
+            r#"{"temporal_operation":{"kind":"current"},"query":"release","limit":2}"#,
         ))
         .expect("wss frame");
 
@@ -184,6 +205,7 @@ fn wss_session_dispatches_command_frame_through_entry_runtime() {
         payload["runtime_budget_report_id"],
         response.budget_report_id
     );
+    assert_exact_governed_result(&payload);
 }
 
 #[test]
@@ -262,7 +284,7 @@ fn wss_network_session_processes_multiple_frames_ping_and_close_under_one_lease(
         "Bearer secret-token",
         &[
             r#"{"kind":"command.capabilities","payload":"{}"}"#,
-            r#"{"kind":"command.recall","payload":"{\"query\":\"sequence\",\"limit\":2}"}"#,
+            r#"{"kind":"command.recall","payload":"{\"temporal_operation\":{\"kind\":\"current\"},\"query\":\"sequence\",\"limit\":2}"}"#,
         ],
     );
 
@@ -326,11 +348,11 @@ fn wss_runtime_decodes_declared_command_operations() {
     let frames = [
         (
             "command.write",
-            r#"{"name":"runtime_skill__wss_write","topic":"wss","title":"WSS write","summary":"WSS write summary","content":"1. Decode WSS write.\n2. Dispatch through EntryRuntime."}"#,
+            r#"{"name":"runtime_skill__wss_write","topic":"wss","title":"WSS write","summary":"WSS write summary","content":"1. Decode WSS write.\n2. Dispatch through EntryRuntime.","owning_scope":{"kind":"subject","mounted_subject_id":"agent:wss-agent"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:wss:runtime_skill__wss_write","verification_receipt_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"privacy_class":"shared_with_subject"}"#,
         ),
         (
             "command.project",
-            r#"{"query":"release","system_max_len":1024}"#,
+            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
         ),
         (
             "command.inspect",

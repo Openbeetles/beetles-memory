@@ -162,9 +162,9 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
         1
     );
     assert_eq!(
-        platform
+        runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default")
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
             .expect("scoped owner store")
             .count()
             .expect("owner count"),
@@ -187,6 +187,7 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
 
 fn transaction_budget(event_log_max_items: usize, kv_max_entries: usize) -> StoreRuntimeBudget {
     StoreRuntimeBudget {
+        metric_source_max_items: 1,
         event_log_max_items,
         kv_max_entries,
         blob_max_bytes: 4096,
@@ -351,6 +352,9 @@ fn manual_runtime_skill_write(name: &str) -> RuntimeSkillWrite {
 fn promotion_input(task_id: &str) -> ProceduralMemoryPromotionInput {
     ProceduralMemoryPromotionInput {
         task_id: task_id.to_string(),
+        learning_id: format!("learning:{task_id}"),
+        learning_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            .to_string(),
         trigger: "transaction promotion checklist".to_string(),
         procedure: "Promote procedural memory only through the transaction planner.".to_string(),
         constraints: vec!["commit once".to_string()],
@@ -360,6 +364,7 @@ fn promotion_input(task_id: &str) -> ProceduralMemoryPromotionInput {
         quality_score: 90,
         repeated_evidence_count: 2,
         capability_affinity: vec!["memory".to_string()],
+        privacy_class: MemoryPrivacyClass::SharedWithSubject,
     }
 }
 
@@ -603,9 +608,9 @@ fn candidate_write_event_budget_rejects_without_partial_memory() {
         .replay_harness()
         .read_events()
         .expect("events before");
-    let before_long_term_count = platform
+    let before_long_term_count = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .count()
         .expect("long-term before");
@@ -617,15 +622,16 @@ fn candidate_write_event_budget_rejects_without_partial_memory() {
 
     let err = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             candidates: vec![long_term_candidate(), runtime_skill_candidate()],
         })
         .expect_err("event budget should reject the whole memory write transaction");
 
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
     assert_eq!(
-        platform
+        runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default")
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
             .expect("scoped long-term store")
             .count()
             .unwrap(),
@@ -657,6 +663,7 @@ fn candidate_write_success_reports_transaction_lineage() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             candidates: vec![long_term_candidate(), runtime_skill_candidate()],
         })
         .expect("candidate write");
@@ -686,9 +693,9 @@ fn candidate_write_success_reports_transaction_lineage() {
         event.payload.get("operation").map(String::as_str) == Some("write.candidates")
     }));
 
-    let long_term_records = platform
+    let long_term_records = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list");
@@ -704,6 +711,18 @@ fn candidate_write_success_reports_transaction_lineage() {
         .as_array()
         .is_some_and(|subjects| !subjects.is_empty()));
     assert!(facet_doc["owner_revision"].as_u64().unwrap_or(0) > 0);
+    let runtime_skill_owners = platform
+        .replay_harness()
+        .read_json_namespace("runtime_skill_records")
+        .expect("typed runtime skill owners");
+    assert_eq!(runtime_skill_owners.len(), 1);
+    assert!(platform
+        .replay_harness()
+        .skill_storage()
+        .list_names()
+        .expect("generic skills")
+        .iter()
+        .all(|name| !name.starts_with("runtime_skill__")));
 }
 
 #[test]
@@ -748,12 +767,13 @@ fn candidate_to_draft_to_entry_to_exact_entity_posting_to_typed_query_is_reachab
 
     runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![candidate],
         })
         .expect("typed entity candidate write");
-    let entry = platform
+    let entry = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -764,6 +784,7 @@ fn candidate_to_draft_to_entry_to_exact_entity_posting_to_typed_query_is_reachab
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "unrelated plain text".to_string(),
             limit: 8,
             structured_query_facets: vec![QueryFacetInput::Entity(key)],
@@ -799,6 +820,7 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
     };
     runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![typed_entity_candidate(
                 "The governed entity payload is version one.",
                 old_key.clone(),
@@ -809,6 +831,7 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
         .expect("seed old entity");
     runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![typed_entity_candidate(
                 "The governed entity payload is version two.",
                 new_key.clone(),
@@ -820,6 +843,7 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
 
     let old_recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "unrelated".to_string(),
             limit: 8,
             structured_query_facets: vec![QueryFacetInput::Entity(old_key)],
@@ -833,6 +857,7 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
 
     let new_recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             query: "unrelated".to_string(),
             limit: 8,
             structured_query_facets: vec![QueryFacetInput::Entity(new_key.clone())],
@@ -846,9 +871,9 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
             .len(),
         1
     );
-    let owner = platform
+    let owner = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -879,14 +904,15 @@ fn same_content_candidate_reinforcement_unions_entity_aliases_and_evidence() {
     ] {
         runtime
             .write(MemoryWriteRequest::Candidates {
+                runtime_skill_owning_scope: None,
                 candidates: vec![candidate],
             })
             .expect("reinforce entity payload");
     }
 
-    let owner = platform
+    let owner = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -916,6 +942,7 @@ fn rejected_candidate_does_not_write_recallable_facet_index() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![candidate],
         })
         .expect("rejected candidate write");
@@ -923,9 +950,9 @@ fn rejected_candidate_does_not_write_recallable_facet_index() {
     assert!(!report.accepted);
     assert_eq!(report.changed, 0);
     assert_eq!(
-        platform
+        runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default")
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
             .expect("scoped long-term store")
             .count()
             .unwrap(),
@@ -959,9 +986,10 @@ fn procedural_write_event_budget_rejects_without_partial_skill() {
 
     let err = runtime
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![manual_runtime_skill_write(
-                "runtime_skill__transaction_manual",
+            writes: vec![support::governed_runtime_skill_write(
+                manual_runtime_skill_write("runtime_skill__transaction_manual"),
             )],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect_err("event budget should reject skill write and lifecycle together");
@@ -993,9 +1021,10 @@ fn procedural_write_success_reports_transaction_lineage() {
 
     let report = runtime
         .write(MemoryWriteRequest::Procedural {
-            writes: vec![manual_runtime_skill_write(
-                "runtime_skill__transaction_manual",
+            writes: vec![support::governed_runtime_skill_write(
+                manual_runtime_skill_write("runtime_skill__transaction_manual"),
             )],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::Manual,
         })
         .expect("procedural write");
@@ -1039,6 +1068,7 @@ fn procedural_promotion_event_budget_rejects_without_partial_skill() {
     let err = runtime
         .write(MemoryWriteRequest::ProceduralPromotions {
             promotions: vec![promotion_input("promotion-budget")],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::TaskLearning,
         })
         .expect_err("event budget should reject promotion and lifecycle together");
@@ -1071,6 +1101,7 @@ fn procedural_promotion_success_reports_transaction_lineage() {
     let report = runtime
         .write(MemoryWriteRequest::ProceduralPromotions {
             promotions: vec![promotion_input("promotion-success")],
+            owning_scope: support::runtime_skill_subject_scope(),
             source: RuntimeSkillWriteSource::TaskLearning,
         })
         .expect("promotion write");
@@ -1101,15 +1132,17 @@ fn long_term_extraction_event_budget_rejects_without_partial_memory() {
         .replay_harness()
         .read_events()
         .expect("events before");
-    let before_long_term_count = platform
+    let before_long_term_count = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .count()
         .expect("long-term before");
 
     let err = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1120,9 +1153,9 @@ fn long_term_extraction_event_budget_rejects_without_partial_memory() {
 
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
     assert_eq!(
-        platform
+        runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default")
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
             .expect("scoped long-term store")
             .count()
             .unwrap(),
@@ -1144,14 +1177,17 @@ fn long_term_extraction_success_reports_transaction_lineage() {
         "chat-a",
     );
 
+    let extracted_skill = manual_runtime_skill_write("runtime_skill__transaction_extraction");
     let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: vec![support::governed_runtime_skill_write(
+                extracted_skill.clone(),
+            )],
+            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
-                skill_writes: vec![manual_runtime_skill_write(
-                    "runtime_skill__transaction_extraction",
-                )],
+                skill_writes: vec![extracted_skill],
             },
         })
         .expect("extraction write");
@@ -1168,9 +1204,9 @@ fn long_term_extraction_success_reports_transaction_lineage() {
         transaction.event_ids.len(),
     );
 
-    let long_term_records = platform
+    let long_term_records = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list");
@@ -1196,6 +1232,8 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1203,9 +1241,9 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
             },
         })
         .expect("seed extraction");
-    let owner_id = platform
+    let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1217,6 +1255,8 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
 
     let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: Vec::new(),
                 deletes: vec![LongTermMemorySlot {
@@ -1233,7 +1273,7 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
     assert_eq!(transaction.operation, "write.long_term_extraction");
     assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
@@ -1258,7 +1298,13 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
         &platform,
         &transaction.transaction_id,
         "write.long_term_extraction",
-        &["long_term", "memory_facet_indexes", "memory_facet_postings"],
+        &[
+            "long_term_version_materials",
+            "long_term_head_manifests",
+            "long_term_version_scope_manifests",
+            "memory_facet_indexes",
+            "memory_facet_postings",
+        ],
     );
 }
 
@@ -1273,6 +1319,8 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1288,6 +1336,8 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
     replacement.supporting_citations = vec!["fixture:replacement-extraction".to_string()];
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![replacement],
                 deletes: vec![LongTermMemorySlot {
@@ -1324,9 +1374,9 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
         1
     );
     assert_eq!(
-        platform
+        runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default")
+            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
             .expect("scoped long-term store")
             .count()
             .expect("owner count"),
@@ -1355,6 +1405,8 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![draft],
                 deletes: Vec::new(),
@@ -1362,9 +1414,9 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
             },
         })
         .expect("seed transcript-backed extraction");
-    let owner_id = platform
+    let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1499,6 +1551,8 @@ fn temporal_memory_graph_write_success_reports_transaction_lineage() {
     verify_owner.supporting_citations = vec!["turn:release".to_string()];
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![release_owner, verify_owner],
                 deletes: Vec::new(),
@@ -1506,9 +1560,9 @@ fn temporal_memory_graph_write_success_reports_transaction_lineage() {
             },
         })
         .expect("seed graph owners");
-    let owners = platform
+    let owners = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(usize::MAX)
         .expect("graph owners");
@@ -1602,6 +1656,8 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
     );
     seed_runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1654,9 +1710,9 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
         .expect_err("event budget should reject control mutation as one transaction");
 
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
-    assert!(platform
+    assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .get(&record_id)
         .unwrap()
@@ -1686,6 +1742,8 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1693,9 +1751,9 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
             },
         })
         .expect("seed extraction");
-    let owner_id = platform
+    let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1720,9 +1778,9 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
     assert_eq!(report.operation, "delete");
     assert_eq!(report.affected_records.len(), 1);
     assert_eq!(report.affected_records[0].record_id, owner_id);
-    assert!(platform
+    assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
@@ -1739,7 +1797,9 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
         &platform,
         "long_term_control.mutation",
         &[
-            "long_term",
+            "long_term_version_materials",
+            "long_term_head_manifests",
+            "long_term_version_scope_manifests",
             "memory_facet_indexes",
             "memory_facet_postings",
             "long_term_control_tombstone",
@@ -1760,6 +1820,8 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1767,9 +1829,9 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
             },
         })
         .expect("seed extraction");
-    let owner_id = platform
+    let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1804,9 +1866,9 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
     assert_eq!(report.affected_records[0].record_id, owner_id);
     assert_eq!(report.affected_records[0].new_owner_revision, Some(2));
     assert_eq!(report.affected_records[0].new_source_revision, Some(1));
-    let updated = platform
+    let updated = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
@@ -1822,7 +1884,9 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
         &platform,
         "long_term_control.mutation",
         &[
-            "long_term",
+            "long_term_version_materials",
+            "long_term_head_manifests",
+            "long_term_version_scope_manifests",
             "memory_facet_indexes",
             "memory_facet_postings",
             "long_term_control_revision",
@@ -1843,6 +1907,8 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1850,9 +1916,9 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
             },
         })
         .expect("seed extraction");
-    let old_owner_id = platform
+    let old_owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1881,17 +1947,17 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
 
     assert!(report.accepted);
     assert_eq!(report.operation, "supersede");
-    assert!(platform
+    assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .get(&old_owner_id)
         .expect("old long-term get")
         .is_none());
     assert_no_facet_index_doc_for_owner(&platform, &old_owner_id);
-    let new_owner_id = platform
+    let new_owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1904,7 +1970,9 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
         &platform,
         "long_term_control.mutation",
         &[
-            "long_term",
+            "long_term_version_materials",
+            "long_term_head_manifests",
+            "long_term_version_scope_manifests",
             "memory_facet_indexes",
             "memory_facet_postings",
             "long_term_control_tombstone",
@@ -1926,6 +1994,8 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1933,9 +2003,9 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
             },
         })
         .expect("seed extraction");
-    let owner_id = platform
+    let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1966,9 +2036,9 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
         .projection_impact
         .notes
         .contains(&"report_only_subject_visibility_not_indexed".to_string()));
-    let updated = platform
+    let updated = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
@@ -1983,7 +2053,9 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
         &platform,
         "long_term_control.mutation",
         &[
-            "long_term",
+            "long_term_version_materials",
+            "long_term_head_manifests",
+            "long_term_version_scope_manifests",
             "memory_facet_indexes",
             "memory_facet_postings",
             "long_term_control_revision",
@@ -2006,6 +2078,8 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
         "SOUL_PRIVATE_TRANSITION_SENTINEL must leave every public delivery surface.".to_string();
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![draft],
                 deletes: Vec::new(),
@@ -2013,9 +2087,9 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
             },
         })
         .expect("seed extraction");
-    let owner_id = platform
+    let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -2067,9 +2141,9 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
 
     assert!(report.accepted);
     assert_eq!(report.operation, "change_privacy");
-    let owner = platform
+    let owner = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("owner read")
@@ -2112,6 +2186,7 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "transaction extraction privacy".to_string(),
             limit: 8,
@@ -2142,6 +2217,7 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
     assert!(!format!("{:?}", recall.delivery_report).contains("SOUL_PRIVATE_TRANSITION_SENTINEL"));
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "What is the transaction extraction privacy policy?".to_string(),
             system_max_len: 4096,
@@ -2152,13 +2228,16 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
         })
         .expect("private transition projection");
     assert!(!projection
-        .system_memory_block
+        .provider_payload()
+        .system_memory_block()
         .contains("SOUL_PRIVATE_TRANSITION_SENTINEL"));
     assert_operation_events_include_planes(
         &platform,
         "long_term_control.mutation",
         &[
-            "long_term",
+            "long_term_version_materials",
+            "long_term_head_manifests",
+            "long_term_version_scope_manifests",
             "memory_facet_indexes",
             "memory_facet_postings",
             "memory_graph",

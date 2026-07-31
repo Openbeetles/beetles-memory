@@ -15,7 +15,7 @@ use bm_sdk::nonproduction_replay_harness::{
 };
 use serde_json::{json, Value};
 
-const NAMESPACE: &str = "memory_graph_manifests";
+const NAMESPACE: &str = "session";
 const KEY: &str = "concurrency-generation";
 
 fn temp_root(name: &str) -> PathBuf {
@@ -374,7 +374,9 @@ fn generation_request(
 #[test]
 fn multiprocess_file_exact_cas_has_one_winner() {
     let root = temp_root("file-multiprocess");
+    let control_root = temp_root("file-multiprocess-control");
     fs::create_dir_all(&root).expect("root");
+    fs::create_dir_all(&control_root).expect("control root");
     let config = StoreBackendConfig::file(
         &root,
         ProfileId::native_dev_full().expect("native dev-full profile"),
@@ -391,13 +393,13 @@ fn multiprocess_file_exact_cas_has_one_winner() {
     ))
     .expect("seed");
 
-    let ready = root.join("ready");
+    let ready = control_root.join("ready");
     fs::create_dir_all(&ready).expect("ready dir");
-    let go = root.join("go");
-    let first_result = root.join("first.result");
-    let second_result = root.join("second.result");
-    let mut first = spawn_file_worker(&root, "first", &first_result);
-    let mut second = spawn_file_worker(&root, "second", &second_result);
+    let go = control_root.join("go");
+    let first_result = control_root.join("first.result");
+    let second_result = control_root.join("second.result");
+    let mut first = spawn_file_worker(&root, &control_root, "first", &first_result);
+    let mut second = spawn_file_worker(&root, &control_root, "second", &second_result);
     wait_for_paths(&[ready.join("first"), ready.join("second")]);
     fs::write(&go, b"go").expect("release workers");
     assert!(first.wait().expect("first worker").success());
@@ -425,13 +427,19 @@ fn multiprocess_file_exact_cas_has_one_winner() {
     assert_eq!(reader.read_events().expect("events").len(), 2);
 }
 
-fn spawn_file_worker(root: &Path, writer: &str, result: &Path) -> std::process::Child {
+fn spawn_file_worker(
+    root: &Path,
+    control_root: &Path,
+    writer: &str,
+    result: &Path,
+) -> std::process::Child {
     Command::new(std::env::current_exe().expect("test executable"))
         .arg("--exact")
         .arg("file_transaction_worker")
         .arg("--nocapture")
         .env("BM_STORE_FILE_TX_WORKER", "1")
         .env("BM_STORE_FILE_TX_ROOT", root)
+        .env("BM_STORE_FILE_TX_CONTROL_ROOT", control_root)
         .env("BM_STORE_FILE_TX_WRITER", writer)
         .env("BM_STORE_FILE_TX_RESULT", result)
         .stdout(Stdio::null())
@@ -454,6 +462,9 @@ fn file_transaction_worker() {
         return;
     }
     let root = PathBuf::from(std::env::var_os("BM_STORE_FILE_TX_ROOT").expect("worker root"));
+    let control_root = PathBuf::from(
+        std::env::var_os("BM_STORE_FILE_TX_CONTROL_ROOT").expect("worker control root"),
+    );
     let writer = std::env::var("BM_STORE_FILE_TX_WRITER").expect("writer");
     let result =
         PathBuf::from(std::env::var_os("BM_STORE_FILE_TX_RESULT").expect("worker result path"));
@@ -463,8 +474,8 @@ fn file_transaction_worker() {
     )
     .expect("config");
     let (engine, _, _) = support::open_file_engine(&config).expect("worker engine");
-    fs::write(root.join("ready").join(&writer), b"ready").expect("ready marker");
-    wait_for_paths(&[root.join("go")]);
+    fs::write(control_root.join("ready").join(&writer), b"ready").expect("ready marker");
+    wait_for_paths(&[control_root.join("go")]);
     let outcome = engine.commit_transaction(&put_request(
         &format!("process-{writer}"),
         StoreJsonPrecondition::Exact {

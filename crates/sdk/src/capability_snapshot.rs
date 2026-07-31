@@ -1,8 +1,11 @@
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-use crate::{MemoryCapabilityCatalog, ProfileId};
+use crate::{
+    MemoryCapabilityCatalog, MemoryOperationVisibility, ProfileId, RuntimeSkillRecallTransport,
+};
 
-pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v1";
+pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlatformCapabilitySnapshot {
@@ -17,6 +20,7 @@ pub struct PlatformCapabilitySnapshot {
     pub adapter: PlatformAdapterSnapshot,
     pub entry: PlatformEntryRuntimeSnapshot,
     pub indexed_recall: PlatformIndexedRecallSnapshot,
+    pub governed_state: PlatformGovernedStateSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -109,6 +113,23 @@ pub struct PlatformIndexedRecallSnapshot {
     pub continuity_capsule: bool,
     pub runtime_skill: bool,
     pub task_learning: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlatformGovernedOperationSnapshot {
+    pub profile_allowed: bool,
+    pub compiled: bool,
+    pub visible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlatformGovernedStateSnapshot {
+    pub dynamic_state_recall: PlatformGovernedOperationSnapshot,
+    pub historical_as_of_recall: PlatformGovernedOperationSnapshot,
+    pub procedural_recall: PlatformGovernedOperationSnapshot,
+    pub environment_premise_evaluation: PlatformGovernedOperationSnapshot,
+    pub update_lineage_inspection: PlatformGovernedOperationSnapshot,
+    pub runtime_skill_recall_transport: &'static str,
 }
 
 pub const fn platform_profile_feature_id(profile: ProfileId) -> &'static str {
@@ -208,6 +229,61 @@ pub fn platform_capability_snapshot(
             runtime_skill: catalog.sqlite_index_recall.runtime_skill.visible,
             task_learning: catalog.sqlite_index_recall.task_learning.visible,
         },
+        governed_state: PlatformGovernedStateSnapshot {
+            dynamic_state_recall: governed_operation_snapshot(
+                catalog.governed_state.dynamic_state_recall,
+            ),
+            historical_as_of_recall: governed_operation_snapshot(
+                catalog.governed_state.historical_as_of_recall,
+            ),
+            procedural_recall: governed_operation_snapshot(
+                catalog.governed_state.procedural_recall,
+            ),
+            environment_premise_evaluation: governed_operation_snapshot(
+                catalog.governed_state.environment_premise_evaluation,
+            ),
+            update_lineage_inspection: governed_operation_snapshot(
+                catalog.governed_state.update_lineage_inspection,
+            ),
+            runtime_skill_recall_transport: match catalog
+                .governed_state
+                .runtime_skill_recall_transport
+            {
+                RuntimeSkillRecallTransport::IndexedSqlite => "indexed_sqlite",
+                RuntimeSkillRecallTransport::CompactTypedDirect => "compact_typed_direct",
+                RuntimeSkillRecallTransport::Unavailable => "unavailable",
+            },
+        },
+    }
+}
+
+pub(crate) fn platform_capability_snapshot_identity(catalog: &MemoryCapabilityCatalog) -> String {
+    let snapshot = platform_capability_snapshot(catalog);
+    let bytes = serde_json::to_vec(&snapshot)
+        .expect("platform capability snapshot serialization is infallible");
+    let mut hasher = Sha256::new();
+    hasher.update(
+        u64::try_from(b"beetle_memory_platform_capability_snapshot_v1".len())
+            .expect("capability identity domain length fits u64")
+            .to_be_bytes(),
+    );
+    hasher.update(b"beetle_memory_platform_capability_snapshot_v1");
+    hasher.update(
+        u64::try_from(bytes.len())
+            .expect("capability snapshot bytes fit u64")
+            .to_be_bytes(),
+    );
+    hasher.update(bytes);
+    format!("capability_catalog:sha256:{:x}", hasher.finalize())
+}
+
+fn governed_operation_snapshot(
+    operation: MemoryOperationVisibility,
+) -> PlatformGovernedOperationSnapshot {
+    PlatformGovernedOperationSnapshot {
+        profile_allowed: operation.profile_allowed,
+        compiled: operation.compiled,
+        visible: operation.visible,
     }
 }
 

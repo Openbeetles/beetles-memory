@@ -76,6 +76,7 @@ fn subject_candidate_shared_fact_is_owned_by_memory_space_governance() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![accepted_fact_candidate(
                 "candidate-fact-1",
                 "Shared factual records belong to the MemorySpace governance plane.",
@@ -115,6 +116,7 @@ fn candidate_report_rejects_semantically_accepted_but_non_durable_shared_fact() 
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![accepted_fact_candidate(
                 "candidate-structured-1",
                 "# Copied block\n- first item\n- second item\n- third item\n- fourth item",
@@ -143,6 +145,7 @@ fn candidate_report_exposes_partial_durable_shared_fact_admission() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![
                 accepted_fact_candidate(
                     "candidate-fact-accepted",
@@ -178,6 +181,9 @@ fn candidate_report_rejects_semantically_accepted_but_weak_procedural_candidate(
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: Some(bm_sdk::RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: bm_sdk::default_agent_subject_id("agent-alpha"),
+            }),
             candidates: vec![accepted_procedural_candidate(
                 "weak-procedure",
                 "This is a bare factual sentence.",
@@ -208,6 +214,9 @@ fn candidate_report_rejects_mixed_batch_with_a_final_plane_rejection() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: Some(bm_sdk::RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: bm_sdk::default_agent_subject_id("agent-alpha"),
+            }),
             candidates: vec![
                 accepted_fact_candidate(
                     "candidate-fact-accepted",
@@ -267,6 +276,7 @@ fn candidate_write_rejects_duplicate_durable_owner_identity_before_commit() {
 
     let error = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![first, second],
         })
         .expect_err("duplicate durable owner must fail closed");

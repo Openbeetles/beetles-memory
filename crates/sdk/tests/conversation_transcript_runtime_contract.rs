@@ -7,17 +7,18 @@ use bm_core::platform::Platform as _;
 use bm_sdk::{
     ActorAttribution, CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane,
     DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility, LongTermMemoryDraft,
-    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryReplayRequest, MemorySemanticJudgmentSource,
-    MemorySpaceExportRequest, MemorySpaceScope, MemoryTranscriptAttrWriteRequest,
-    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
-    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, TranscriptAttrEnvelope, TranscriptAttrGovernance,
-    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    LongTermMemoryKind, MemoryArchiveScope, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
+    MemorySemanticJudgmentSource, MemorySpaceExportRequest, MemorySpacePrivateMaterialPolicy,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome,
+    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
     TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptRedactionReason,
     TranscriptReplayView,
@@ -452,6 +453,7 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
             system_max_len: 4096,
@@ -471,13 +473,13 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
         0
     );
     assert!(projection
-        .context
-        .recent_messages
+        .provider_payload()
+        .recent_messages()
         .iter()
         .any(|message| message.content == "transcript-only user evidence"));
     assert!(projection
-        .context
-        .recent_messages
+        .provider_payload()
+        .recent_messages()
         .iter()
         .any(|message| message.content == "transcript-only assistant evidence"));
 }
@@ -517,6 +519,7 @@ fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
             system_max_len: 4096,
@@ -536,8 +539,8 @@ fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
         2
     );
     assert!(!projection
-        .context
-        .recent_messages
+        .provider_payload()
+        .recent_messages()
         .iter()
         .any(|message| message.content.contains("masked transcript")));
 }
@@ -575,6 +578,7 @@ fn transcript_backed_projection_honors_recent_message_limit() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "limit evidence".to_string(),
             system_max_len: 4096,
@@ -585,15 +589,15 @@ fn transcript_backed_projection_honors_recent_message_limit() {
         })
         .unwrap();
 
-    assert_eq!(projection.context.recent_messages.len(), 1);
+    assert_eq!(projection.provider_payload().recent_messages().len(), 1);
     assert!(!projection
-        .context
-        .recent_messages
+        .provider_payload()
+        .recent_messages()
         .iter()
         .any(|message| message.content == "limit first user"));
     assert!(projection
-        .context
-        .recent_messages
+        .provider_payload()
+        .recent_messages()
         .iter()
         .any(|message| message.content == "limit second assistant"));
 }
@@ -639,6 +643,7 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
     );
     let projection = fresh_runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
             system_max_len: 4096,
@@ -658,10 +663,9 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
         2
     );
     assert!(!projection
-        .context
-        .recent_messages
-        .iter()
-        .any(|message| message.content.contains("fresh runtime masked")));
+        .provider_payload()
+        .system_memory_block()
+        .contains("fresh runtime masked"));
 }
 
 #[test]
@@ -724,7 +728,7 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_raw_delete
 }
 
 #[test]
-fn fresh_runtime_rejects_tampered_transcript_alias_digest() {
+fn import_rejects_tampered_transcript_alias_before_runtime_projection() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
@@ -768,30 +772,14 @@ fn fresh_runtime_rejects_tampered_transcript_alias_digest() {
         "updated_at": 1_800_000_000_u64,
     });
     let corrupt_platform = empty_store_platform(profile);
-    corrupt_platform
+    let error = corrupt_platform
         .replay_harness()
         .import_store_snapshot(&snapshot)
-        .unwrap();
-    let fresh_runtime = test_runtime_with_scope_and_subject(
-        corrupt_platform,
-        profile,
-        "llm.gateway",
-        "chat-a",
-        "subject-default",
-    );
-    let error = match fresh_runtime.project(MemoryProjectionRequest {
-        structured_query_facets: Vec::new(),
-        user_query: "what evidence exists?".to_string(),
-        system_max_len: 4096,
-        recent_messages_limit: 8,
-        pressure: PressureLevel::Normal,
-        mode_input: RuntimeLifecycleModeInput::default(),
-        tool_registry_refs: Vec::new(),
-    }) {
-        Ok(_) => panic!("tampered typed owner digest must fail before projection"),
-        Err(error) => error,
-    };
-    assert!(format!("{error:?}").contains("content digest drift"));
+        .expect_err("tampered typed alias must fail at the import boundary");
+    assert_eq!(error.stage(), "typed_recall_manifest_closure");
+    assert!(error
+        .to_string()
+        .contains("conversation alias decode failed"));
 }
 
 #[test]
@@ -829,6 +817,7 @@ fn recall_inspect_and_maintenance_do_not_fallback_to_session_shadow_after_transc
 
     let recall = runtime
         .recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             query: "evidence".to_string(),
             limit: 8,
@@ -1004,6 +993,7 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
 
     let write = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-concise-style".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -1090,6 +1080,9 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
 
     let write = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: Some(RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: runtime.subject_id().to_string(),
+            }),
             candidates: vec![
                 MemoryWriteCandidate {
                     candidate_id: "candidate-structured-fact".to_string(),
@@ -1203,6 +1196,8 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
 
     let write = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Preference,
@@ -1224,21 +1219,11 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
                     source_revision: None,
                 }],
                 deletes: Vec::new(),
-                skill_writes: vec![RuntimeSkillWrite {
-                    name: "runtime_skill__structured_summary".to_string(),
-                    topic: "summary_style".to_string(),
-                    title: "Structured summaries".to_string(),
-                    summary: "Write concise structured summaries and verify headings.".to_string(),
-                    content: "- write a concise structured summary\n- verify headings before final output"
-                        .to_string(),
-                    citations: vec![evidence_ref.display_citation()],
-                    source_chat_id: Some("chat-a".to_string()),
-                    observed_at: 10,
-                }],
+                skill_writes: Vec::new(),
             },
         })
         .unwrap();
-    assert_eq!(write.changed, 2);
+    assert_eq!(write.changed, 1);
 
     let err = runtime
         .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
@@ -1291,7 +1276,7 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
     assert_eq!(report.semantic_governance.accepted_count, 1);
     let entries = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default")
+        .scoped_long_term_memory_read_store(runtime.memory_space_id(), runtime.subject_id())
         .expect("scoped long-term read store")
         .list(10)
         .unwrap();
@@ -1378,6 +1363,7 @@ fn soul_candidate_handoff_records_transcript_derived_ref_for_lifecycle_impact() 
 
     let write = runtime
         .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-soul-handoff".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -1504,11 +1490,9 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
 
     let redacted = runtime
         .export_memory_space(MemorySpaceExportRequest {
-            scope: MemorySpaceScope {
-                memory_space_id: runtime.memory_space_id().to_string(),
-                mounted_subject_id: runtime.subject_id().to_string(),
-            },
-            include_private: false,
+            scope: MemoryArchiveScope::subject(runtime.memory_space_id(), runtime.subject_id())
+                .expect("runtime archive scope"),
+            private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
         })
         .unwrap();
     assert!(redacted.privacy_redactions > 0);
@@ -1527,11 +1511,9 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
 
     let raw = runtime
         .export_memory_space(MemorySpaceExportRequest {
-            scope: MemorySpaceScope {
-                memory_space_id: runtime.memory_space_id().to_string(),
-                mounted_subject_id: runtime.subject_id().to_string(),
-            },
-            include_private: true,
+            scope: MemoryArchiveScope::subject(runtime.memory_space_id(), runtime.subject_id())
+                .expect("runtime archive scope"),
+            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
         })
         .unwrap();
     assert!(raw

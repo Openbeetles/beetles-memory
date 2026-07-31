@@ -10,9 +10,10 @@ use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_replay::{MemoryBenchmarkMode, MemoryBenchmarkReport};
 use bm_sdk::{
-    DeferredGovernanceQueueReport, MemoryStoreTelemetryReport, RuntimeBudgetReport,
+    DeferredGovernanceQueueReport, GovernedScopeArchiveRootV1, MemoryArchiveScope,
+    MemorySpacePrivateMaterialPolicy, RuntimeBudgetReport, RuntimeMetricsReport,
     RuntimeSkillDetailReport, RuntimeSkillListReport, RuntimeSkillMutationReport,
-    RuntimeSkillSummary, StoreBackendKind, WorkbenchApiMap,
+    RuntimeSkillOwnerLocator, RuntimeSkillSummary, StoreBackendKind, WorkbenchApiMap,
 };
 use serde::{Deserialize, Serialize};
 
@@ -173,7 +174,7 @@ pub struct EntryConsoleWorkbenchReport {
     pub facet_inspector: EntryConsoleWorkbenchFacetInspector,
     pub projection_inspector: EntryConsoleWorkbenchProjectionInspector,
     pub procedural_evolution: EntryConsoleWorkbenchProceduralEvolution,
-    pub vault_migration: EntryConsoleWorkbenchVaultMigration,
+    pub archive_restore: EntryConsoleWorkbenchArchiveRestore,
     pub soul_health: EntryConsoleWorkbenchSoulHealth,
 }
 
@@ -333,7 +334,7 @@ const fn memory_benchmark_mode(mode: MemoryBenchmarkMode) -> &'static str {
 pub struct EntryConsoleWorkbenchRecallInspector {
     pub status: EntryConsoleWorkbenchStatus,
     pub query: String,
-    pub procedural_hits: usize,
+    pub procedural_delivery_reports: usize,
     pub runtime_skill_selected: usize,
     pub working_selected_surfaces: usize,
     pub graph_nodes: usize,
@@ -407,7 +408,8 @@ pub struct EntryConsoleWorkbenchProceduralEvolution {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsoleWorkbenchSkillRef {
-    pub name: String,
+    pub locator: RuntimeSkillOwnerLocator,
+    pub owner_id: String,
     pub title: String,
     pub topic: String,
     pub status: String,
@@ -416,19 +418,11 @@ pub struct EntryConsoleWorkbenchSkillRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EntryConsoleWorkbenchVaultMigration {
+pub struct EntryConsoleWorkbenchArchiveRestore {
     pub status: EntryConsoleWorkbenchStatus,
-    pub source_memory_space_id: String,
-    pub target_memory_space_id: String,
-    pub json_docs: usize,
-    pub blobs: usize,
-    pub events: usize,
-    pub privacy_redactions: usize,
-    pub loss_risk: bool,
-    pub preflight_passed: bool,
-    pub preflight_failures: Vec<String>,
-    pub snapshot_fingerprint: String,
-    pub event_fingerprint: String,
+    pub scope: MemoryArchiveScope,
+    pub private_material_policy: MemorySpacePrivateMaterialPolicy,
+    pub archive_root: Option<GovernedScopeArchiveRootV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -544,7 +538,8 @@ pub struct EntryConsoleDeviceKeyReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsoleSkillSummary {
-    pub name: String,
+    pub locator: RuntimeSkillOwnerLocator,
+    pub owner_id: String,
     pub title: String,
     pub topic: String,
     pub status: String,
@@ -585,14 +580,11 @@ pub struct EntryConsoleSkillDetail {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsoleRuntimeSkillEdit {
+    pub locator: RuntimeSkillOwnerLocator,
     pub title: String,
     pub topic: String,
     pub summary: String,
     pub procedure: String,
-    #[serde(default)]
-    pub citations: Vec<String>,
-    #[serde(default)]
-    pub source_chat_id: Option<String>,
     #[serde(default)]
     pub edit_reason: Option<String>,
 }
@@ -600,6 +592,7 @@ pub struct EntryConsoleRuntimeSkillEdit {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsoleSkillSetEnabled {
+    pub locator: RuntimeSkillOwnerLocator,
     pub enabled: bool,
 }
 
@@ -608,7 +601,9 @@ pub struct EntryConsoleSkillSetEnabled {
 pub struct EntryConsoleSkillMutation {
     pub accepted: bool,
     pub changed: bool,
-    pub name: String,
+    pub previous_locator: RuntimeSkillOwnerLocator,
+    pub current_locator: RuntimeSkillOwnerLocator,
+    pub owner_id: String,
     pub operation: String,
     pub reason: String,
 }
@@ -638,39 +633,6 @@ pub struct EntryConsoleState {
     inner: Mutex<EntryConsoleInner>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct EntryConsoleTelemetrySnapshot {
-    pub writes_today: u64,
-    pub recall_requests: u64,
-    pub recall_hits: u64,
-    pub projection_requests: u64,
-    pub last_projection_chars: usize,
-}
-
-impl EntryConsoleTelemetrySnapshot {
-    pub fn from_store_telemetry(report: MemoryStoreTelemetryReport) -> Self {
-        Self {
-            writes_today: report.writes_since,
-            recall_requests: report.recall_requests,
-            recall_hits: report.recall_hits,
-            projection_requests: report.projection_requests,
-            last_projection_chars: report.last_projection_chars,
-        }
-    }
-
-    pub fn merge(&mut self, other: Self) {
-        self.writes_today = self.writes_today.saturating_add(other.writes_today);
-        self.recall_requests = self.recall_requests.saturating_add(other.recall_requests);
-        self.recall_hits = self.recall_hits.saturating_add(other.recall_hits);
-        self.projection_requests = self
-            .projection_requests
-            .saturating_add(other.projection_requests);
-        if other.last_projection_chars > 0 {
-            self.last_projection_chars = other.last_projection_chars;
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 struct EntryConsoleInner {
     runtime_shape: EntryConsoleRuntimeShape,
@@ -680,11 +642,6 @@ struct EntryConsoleInner {
     transports: Vec<EntryConsoleTransport>,
     devices: Vec<EntryConsoleDevice>,
     session: EntryConsoleSession,
-    writes_today: u64,
-    recall_requests: u64,
-    recall_hits: u64,
-    projection_requests: u64,
-    last_projection_chars: usize,
     events: Vec<EntryConsoleEvent>,
     api_key_counter: u64,
 }
@@ -705,11 +662,6 @@ impl EntryConsoleState {
                     memory_scope: config.scope.chat_id.clone(),
                     session_state: "paired".to_string(),
                 },
-                writes_today: 0,
-                recall_requests: 0,
-                recall_hits: 0,
-                projection_requests: 0,
-                last_projection_chars: 0,
                 events: vec![EntryConsoleEvent {
                     time: "boot".to_string(),
                     text: "Console runtime opened".to_string(),
@@ -720,9 +672,9 @@ impl EntryConsoleState {
         }
     }
 
-    pub fn overview_with_telemetry_and_budget(
+    pub fn overview_with_runtime_metrics_and_budget(
         &self,
-        telemetry: EntryConsoleTelemetrySnapshot,
+        metrics: &RuntimeMetricsReport,
         runtime_budget: &RuntimeBudgetReport,
         deferred_governance: DeferredGovernanceQueueReport,
     ) -> EntryConsoleOverview {
@@ -737,15 +689,11 @@ impl EntryConsoleState {
             .iter()
             .filter(|transport| transport.enabled)
             .count();
-        let writes_today = inner.writes_today.max(telemetry.writes_today);
-        let recall_requests = inner.recall_requests.max(telemetry.recall_requests);
-        let recall_hits = inner.recall_hits.max(telemetry.recall_hits);
-        let projection_requests = inner.projection_requests.max(telemetry.projection_requests);
-        let last_projection_chars = if telemetry.last_projection_chars > 0 {
-            telemetry.last_projection_chars
-        } else {
-            inner.last_projection_chars
-        };
+        let writes_today = metrics.counters.write_changed_count;
+        let recall_requests = metrics.counters.recall_requests;
+        let recall_hits = metrics.counters.recall_hits;
+        let projection_requests = metrics.counters.projection_requests;
+        let last_projection_chars = metrics.latest_projection_chars.unwrap_or_default();
         let recall_rate = percentage_value(recall_hits, recall_requests);
         EntryConsoleOverview {
             runtime_shape: inner.runtime_shape.clone(),
@@ -1085,12 +1033,12 @@ impl EntryConsoleState {
             .clone()
     }
 
-    pub fn record_skill_mutation(&self, name: &str, action: &str) {
+    pub fn record_skill_mutation(&self, owner_id: &str, action: &str) {
         let mut inner = self.inner.lock().expect("console state lock");
         push_event(
             &mut inner,
-            format!("Skill {} {}", name, action),
-            if action == "deleted" {
+            format!("Skill {} {}", owner_id, action),
+            if action == "retired" {
                 "limited"
             } else {
                 "ready"
@@ -1109,38 +1057,17 @@ impl EntryConsoleState {
         };
         match (operation, report) {
             (AdapterOperation::Write, AdapterSdkReport::Write(report)) => {
-                if report.accepted {
-                    inner.writes_today = inner.writes_today.saturating_add(report.changed as u64);
-                }
                 push_event(
                     &mut inner,
                     format!("Memory write accepted, changed {}", report.changed),
                     "ready",
                 );
             }
-            (AdapterOperation::Recall, AdapterSdkReport::Recall(report)) => {
-                inner.recall_requests = inner.recall_requests.saturating_add(1);
-                if !report.procedural_hits.is_empty() {
-                    inner.recall_hits = inner.recall_hits.saturating_add(1);
-                }
-                push_event(
-                    &mut inner,
-                    format!(
-                        "Recall served for '{}' with {} hits",
-                        report.query,
-                        report.procedural_hits.len()
-                    ),
-                    if report.procedural_hits.is_empty() {
-                        "limited"
-                    } else {
-                        "ready"
-                    },
-                );
+            (AdapterOperation::Recall, AdapterSdkReport::Recall(_)) => {
+                push_event(&mut inner, "Recall completed".to_string(), "ready");
             }
             (AdapterOperation::Project, AdapterSdkReport::Project(report)) => {
-                inner.projection_requests = inner.projection_requests.saturating_add(1);
-                inner.last_projection_chars = report.chars;
-                let chars = inner.last_projection_chars;
+                let chars = report.chars;
                 push_event(
                     &mut inner,
                     format!("Memory context added, {chars} characters"),
@@ -1183,7 +1110,8 @@ impl From<RuntimeSkillDetailReport> for EntryConsoleSkillDetail {
 impl From<RuntimeSkillSummary> for EntryConsoleSkillSummary {
     fn from(summary: RuntimeSkillSummary) -> Self {
         Self {
-            name: summary.name,
+            locator: summary.locator,
+            owner_id: summary.owner_id,
             title: summary.title,
             topic: summary.topic,
             status: summary.status,
@@ -1204,7 +1132,9 @@ impl From<RuntimeSkillMutationReport> for EntryConsoleSkillMutation {
         Self {
             accepted: report.accepted,
             changed: report.changed,
-            name: report.name,
+            previous_locator: report.previous_locator,
+            current_locator: report.current_locator,
+            owner_id: report.owner_id,
             operation: report.operation.to_string(),
             reason: report.reason,
         }

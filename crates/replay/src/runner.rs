@@ -116,9 +116,13 @@ fn run_operation(
     operation: &ReplayOperation,
 ) -> bm_core::Result<OperationReport> {
     match operation {
-        ReplayOperation::WriteProcedural { writes } => {
+        ReplayOperation::WriteProcedural {
+            writes,
+            owning_scope,
+        } => {
             let report = runtime.write(MemoryWriteRequest::Procedural {
                 writes: writes.clone(),
+                owning_scope: owning_scope.clone(),
                 source: RuntimeSkillWriteSource::Manual,
             })?;
             Ok(OperationReport::new(
@@ -131,24 +135,24 @@ fn run_operation(
         }
         ReplayOperation::Recall { query, limit } => {
             let report = runtime.recall(MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 query: query.clone(),
                 limit: *limit,
                 tool_registry_refs: Vec::new(),
             })?;
-            let skill_ids = report
-                .procedural_hits
+            let selected_count = report
+                .procedural_delivery_reports
                 .iter()
-                .map(|hit| hit.record.name.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
+                .filter(|delivery| delivery.selected)
+                .count();
             Ok(OperationReport::new(
                 &report.lifecycle_report,
                 format!(
-                    "recall query={} procedural_hits={} selected={}",
+                    "recall query={} procedural_delivery_reports={} selected_count={}",
                     report.query,
-                    report.procedural_hits.len(),
-                    skill_ids
+                    report.procedural_delivery_reports.len(),
+                    selected_count
                 ),
             ))
         }
@@ -156,7 +160,8 @@ fn run_operation(
             user_query,
             system_max_len,
         } => {
-            let report = runtime.project(MemoryProjectionRequest {
+            let report = runtime.project_safe(MemoryProjectionRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: user_query.clone(),
                 system_max_len: *system_max_len,
@@ -166,8 +171,8 @@ fn run_operation(
                 tool_registry_refs: Vec::new(),
             })?;
             Ok(OperationReport::new(
-                &report.lifecycle_report,
-                format!("project bytes={}", report.system_memory_block.len()),
+                report.lifecycle_report(),
+                format!("project bytes={}", report.ui_api_chars()),
             ))
         }
         ReplayOperation::Maintain {

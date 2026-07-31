@@ -11,7 +11,7 @@
     "voice realtime foreground"
   ],
   "expected_report_fragments": [
-    "procedural_hits=1",
+    "procedural_delivery_reports=1",
     "inspect query=defer background governance durable governance job",
     "replay chat_id=beetle-turn-1"
   ],

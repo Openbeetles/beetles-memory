@@ -1,11 +1,74 @@
 //! Replay-facing contracts for Beetle Memory.
 
 mod bench;
+mod bounded_process;
+#[path = "../build_support.rs"]
+mod build_support;
 mod fixture;
 mod harness;
 mod p7_process;
 mod p7_secure_fs;
+/// P8 quality schemas are intentionally not a caller-constructible API.
+///
+/// ```compile_fail
+/// use bm_replay::p8_quality::P8QualityExperimentPlanV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::P8SemanticQuestionDetailInputV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::P8SemanticProducerIdentityV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::P8SemanticRunPlanV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::P8ReaderReceiptV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::P8JudgeReceiptV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::P8BenchmarkJoinReceiptV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::P8SemanticShardManifestV1;
+/// ```
+/// ```compile_fail
+/// use bm_replay::produce_p8_semantic_summary;
+/// ```
+/// ```compile_fail
+/// use bm_replay::publish_p8_semantic_bundle_no_clobber;
+/// ```
+/// ```compile_fail
+/// use bm_replay::p8_semantic::P8SemanticShardSubmissionV1;
+/// ```
+/// ```compile_fail
+/// let _ = bm_replay::p8_semantic::P8SemanticQuestionPlanV1::new;
+/// ```
+/// ```compile_fail
+/// let _ = bm_replay::p8_semantic::P8SemanticQuestionDetailV1::build;
+/// ```
+/// ```compile_fail
+/// let _ = bm_replay::p8_semantic::P8AblationEvaluationV1::new;
+/// ```
+/// ```compile_fail
+/// let _ = bm_replay::p8_semantic::P8ArtifactIdentityV1::build;
+/// ```
+/// ```compile_fail
+/// let _ = bm_replay::p8_semantic::P8SemanticShardSubmissionV1::from_single_read;
+/// ```
+#[allow(dead_code)]
+pub mod p8_quality;
+#[allow(dead_code)]
+mod p8_quality_process;
+#[allow(dead_code)]
+mod p8_semantic;
+#[allow(dead_code)]
+mod retained_artifact_fs;
 mod runner;
+#[allow(dead_code)]
+mod sealed_execution;
 
 pub use bench::{
     attach_p7_soul_regression_gate, attach_p7_verifier_performance,

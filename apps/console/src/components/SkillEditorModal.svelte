@@ -4,7 +4,7 @@
   import { modalBackdrop, modalPanel } from "../lib/modal-transition";
   import type { SkillForm, SkillModal } from "../lib/types";
 
-  type SkillEditorMode = Exclude<SkillModal, "delete" | null>;
+  type SkillEditorMode = Exclude<SkillModal, "retire" | null>;
 
   let {
     t,

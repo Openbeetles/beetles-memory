@@ -112,6 +112,7 @@ fn projection_render_limit_does_not_cut_source_recall() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release artifact safety".to_string(),
             system_max_len: 64,
@@ -122,16 +123,9 @@ fn projection_render_limit_does_not_cut_source_recall() {
         })
         .expect("projection");
 
-    assert!(projection.system_memory_block.len() <= 64);
-    assert!(projection.context.long_term_memory_text.is_none());
-    assert!(!projection
-        .recall_delivery_report
-        .selected_candidate_ids
-        .is_empty());
-    assert!(projection
-        .recall_delivery_report
-        .rendered_capsules
-        .is_empty());
+    assert!(projection.provider_payload().system_memory_block().len() <= 64);
+    assert!(projection.report().recall_delivery().selected_count > 0);
+    assert_eq!(projection.report().recall_delivery().rendered_count, 0);
 }
 
 #[test]
@@ -148,6 +142,20 @@ fn runtime_exposes_compiled_budget_report() {
     assert!(budget.facet_recall_budget.max_facet_index_docs_read > 0);
     assert!(budget.facet_recall_budget.max_facet_anchor_candidates > 0);
     assert!(budget.facet_recall_budget.max_facet_expanded_candidates > 0);
+    assert!(budget.governed_state_budget.max_validity_joins > 0);
+    assert!(budget.governed_state_budget.max_lineage_depth > 0);
+    assert!(
+        budget
+            .governed_state_budget
+            .max_retained_long_term_revisions_per_owner
+            > 0
+    );
+    assert!(budget.governed_state_budget.max_as_of_candidates > 0);
+    assert!(budget.governed_state_budget.max_obsolete_decisions > 0);
+    assert!(budget.governed_state_budget.max_procedural_candidates > 0);
+    assert!(budget.governed_state_budget.max_premises_per_skill > 0);
+    assert!(budget.governed_state_budget.max_premise_evidence_reads > 0);
+    assert!(budget.governed_state_budget.max_state_transitions_per_write > 0);
     assert!(budget.adapter_budget.http_body_max_bytes > 0);
 }
 
@@ -471,6 +479,7 @@ fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release artifact safety".to_string(),
             system_max_len: 4096,
@@ -481,7 +490,7 @@ fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
         })
         .expect("projection");
 
-    let block = projection.system_memory_block;
+    let block = projection.provider_payload().system_memory_block();
     assert!(block.contains("## Runtime Constraints"), "{block}");
     assert!(block.contains("Resource pressure: cautious"), "{block}");
     assert!(block.contains("Beetle Memory"), "{block}");

@@ -56,6 +56,17 @@ fn write_payload(name: &str, summary: &str) -> String {
         "summary": summary,
         "content": "Dispatch this write through the governed EntryRuntime path.",
         "source_chat_id": "chat-1",
+        "owning_scope": {
+            "kind": "subject",
+            "mounted_subject_id": "agent:a2a-agent",
+        },
+        "creation_ref": {
+            "kind": "replay_promotion",
+            "candidate_ref": format!("test:a2a:{name}"),
+            "verification_receipt_digest":
+                "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        },
+        "privacy_class": "shared_with_subject",
     })
     .to_string()
 }
@@ -67,6 +78,17 @@ fn response_status(response: &bm_a2a::A2aRuntimeResponse) -> String {
         .as_str()
         .expect("A2A response status")
         .to_string()
+}
+
+fn assert_exact_governed_result(payload: &str) {
+    let value: serde_json::Value = serde_json::from_str(payload).expect("governed response JSON");
+    let result = value["result"].clone();
+    let dto: bm_adapter::AdapterGovernedSafeReportV1 =
+        serde_json::from_value(result.clone()).expect("strict adapter governed safe DTO");
+    assert_eq!(
+        serde_json::to_value(dto).expect("serialize adapter governed safe DTO"),
+        result
+    );
 }
 
 #[test]
@@ -158,7 +180,10 @@ fn a2a_bridge_dispatches_memory_request_without_executor_permissions() {
         .handle_in_process_request(
             &runtime,
             "a2a-in-process-principal",
-            A2aRuntimeMessage::json("memory_recall_request", r#"{"query":"release","limit":2}"#),
+            A2aRuntimeMessage::json(
+                "memory_recall_request",
+                r#"{"temporal_operation":{"kind":"current"},"query":"release","limit":2}"#,
+            ),
         )
         .expect("a2a request");
 
@@ -172,6 +197,7 @@ fn a2a_bridge_dispatches_memory_request_without_executor_permissions() {
         )
     }));
     assert!(response.payload.contains("\"status\""));
+    assert_exact_governed_result(&response.payload);
 }
 
 #[test]
@@ -181,11 +207,11 @@ fn a2a_bridge_decodes_declared_memory_operation_messages() {
     let messages = [
         (
             "memory_write_candidate",
-            r#"{"name":"runtime_skill__a2a_write","topic":"a2a","title":"A2A write","summary":"A2A write summary","content":"1. Decode A2A write.\n2. Dispatch through EntryRuntime.","source_chat_id":"chat-1"}"#,
+            r#"{"name":"runtime_skill__a2a_write","topic":"a2a","title":"A2A write","summary":"A2A write summary","content":"1. Decode A2A write.\n2. Dispatch through EntryRuntime.","source_chat_id":"chat-1","owning_scope":{"kind":"subject","mounted_subject_id":"agent:a2a-agent"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:a2a:runtime_skill__a2a_write","verification_receipt_digest":"sha256:6666666666666666666666666666666666666666666666666666666666666666"},"privacy_class":"shared_with_subject"}"#,
         ),
         (
             "memory_projection_request",
-            r#"{"query":"release","system_max_len":1024}"#,
+            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
         ),
         ("memory_long_term_list_request", r#"{"query":{},"limit":2}"#),
     ];

@@ -1,16 +1,14 @@
 use std::{
-    io::{self, Read},
-    process::{Command, ExitStatus, Stdio},
-    sync::mpsc::{self, SyncSender},
-    thread,
-    time::{Duration, Instant},
+    io,
+    process::{Command, ExitStatus},
+    time::Duration,
 };
 
+use crate::bounded_process::{
+    run_bounded_command, BoundedProcessLimits, BoundedProcessTermination,
+};
 use crate::p7_secure_fs::P7RetainedFile;
 use serde::{Deserialize, Serialize};
-
-const DRAIN_CHUNK_BYTES: usize = 64 * 1024;
-const DRAIN_QUEUE_DEPTH: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct P7ProcessLimits {
@@ -67,142 +65,39 @@ impl P7ProcessOutput {
     }
 }
 
-enum DrainEvent {
-    Chunk(Stream, Vec<u8>),
-    Done(Stream, io::Result<()>),
-}
-
-#[derive(Clone, Copy)]
-enum Stream {
-    Stdout,
-    Stderr,
-}
-
 pub fn run_p7_bounded_command(
     command: &mut Command,
     limits: P7ProcessLimits,
 ) -> io::Result<P7ProcessOutput> {
-    validate_limits(limits)?;
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    platform::prepare(command);
-    let started = Instant::now();
-    let mut child = command.spawn()?;
-    let pid = child.id();
-    let tree = match platform::ProcessTree::attach(&child) {
-        Ok(tree) => tree,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
+    let output = run_bounded_command(
+        command,
+        BoundedProcessLimits {
+            stdout_bytes: limits.stdout_bytes,
+            stderr_bytes: limits.stderr_bytes,
+            total_bytes: limits.total_bytes,
+            timeout: limits.timeout,
+        },
+    )?;
+    let termination = match output.termination {
+        BoundedProcessTermination::Exited => P7ProcessTermination::Exited,
+        BoundedProcessTermination::TimedOut => P7ProcessTermination::TimedOut,
+        BoundedProcessTermination::StdoutLimitExceeded => P7ProcessTermination::StdoutLimitExceeded,
+        BoundedProcessTermination::StderrLimitExceeded => P7ProcessTermination::StderrLimitExceeded,
+        BoundedProcessTermination::TotalLimitExceeded => P7ProcessTermination::TotalLimitExceeded,
     };
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("P7 supervisor did not receive child stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("P7 supervisor did not receive child stderr"))?;
-    let (sender, receiver) = mpsc::sync_channel(DRAIN_QUEUE_DEPTH);
-    let stdout_thread = spawn_drain(stdout, Stream::Stdout, sender.clone());
-    let stderr_thread = spawn_drain(stderr, Stream::Stderr, sender);
-
-    let mut stdout_body = Vec::new();
-    let mut stderr_body = Vec::new();
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-    let mut drain_error = None;
-    let mut termination = P7ProcessTermination::Exited;
-    let mut status = None;
-
-    while status.is_none() || !stdout_done || !stderr_done {
-        if termination == P7ProcessTermination::Exited && started.elapsed() > limits.timeout {
-            termination = P7ProcessTermination::TimedOut;
-            tree.kill(&mut child);
-        }
-        match receiver.recv_timeout(Duration::from_millis(10)) {
-            Ok(DrainEvent::Chunk(stream, chunk)) => {
-                let stdout_len = stdout_body.len();
-                let stderr_len = stderr_body.len();
-                let target = match stream {
-                    Stream::Stdout => &mut stdout_body,
-                    Stream::Stderr => &mut stderr_body,
-                };
-                let stream_limit = match stream {
-                    Stream::Stdout => limits.stdout_bytes,
-                    Stream::Stderr => limits.stderr_bytes,
-                };
-                let next_stream = u64::try_from(target.len())
-                    .ok()
-                    .and_then(|size| size.checked_add(u64::try_from(chunk.len()).ok()?));
-                let next_total = u64::try_from(stdout_len)
-                    .ok()
-                    .and_then(|size| size.checked_add(u64::try_from(stderr_len).ok()?))
-                    .and_then(|size| size.checked_add(u64::try_from(chunk.len()).ok()?));
-                if termination == P7ProcessTermination::Exited
-                    && next_stream.is_none_or(|size| size > stream_limit)
-                {
-                    termination = match stream {
-                        Stream::Stdout => P7ProcessTermination::StdoutLimitExceeded,
-                        Stream::Stderr => P7ProcessTermination::StderrLimitExceeded,
-                    };
-                    tree.kill(&mut child);
-                } else if termination == P7ProcessTermination::Exited
-                    && next_total.is_none_or(|size| size > limits.total_bytes)
-                {
-                    termination = P7ProcessTermination::TotalLimitExceeded;
-                    tree.kill(&mut child);
-                } else if termination == P7ProcessTermination::Exited {
-                    target.extend_from_slice(&chunk);
-                }
-            }
-            Ok(DrainEvent::Done(stream, result)) => {
-                if let Err(error) = result {
-                    tree.kill(&mut child);
-                    drain_error.get_or_insert(error);
-                }
-                match stream {
-                    Stream::Stdout => stdout_done = true,
-                    Stream::Stderr => stderr_done = true,
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) if stdout_done && stderr_done => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                tree.kill(&mut child);
-                return Err(io::Error::other("P7 supervisor drain workers disconnected"));
-            }
-        }
-        if status.is_none() {
-            status = tree.try_wait(&mut child)?;
-        }
-    }
-    let (status, maximum_rss_bytes) =
-        status.ok_or_else(|| io::Error::other("P7 wait4 supervisor lost its child status"))?;
-    stdout_thread
-        .join()
-        .map_err(|_| io::Error::other("P7 stdout drain worker panicked"))?;
-    stderr_thread
-        .join()
-        .map_err(|_| io::Error::other("P7 stderr drain worker panicked"))?;
-    if let Some(error) = drain_error {
-        return Err(error);
-    }
-    let elapsed = started.elapsed();
     Ok(P7ProcessOutput {
-        status,
-        stdout: stdout_body,
-        stderr: stderr_body,
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
         termination,
-        elapsed,
+        elapsed: output.elapsed,
         receipt: P7ProcessReceipt {
             schema_version: "p7_sealed_process_receipt_v1".to_string(),
             sealed_executable_sha256: None,
-            pid,
-            process_group: tree.process_group(),
-            maximum_rss_bytes,
-            elapsed_millis: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            pid: output.pid,
+            process_group: output.process_group,
+            maximum_rss_bytes: output.maximum_rss_bytes,
+            elapsed_millis: u64::try_from(output.elapsed.as_millis()).unwrap_or(u64::MAX),
         },
     })
 }
@@ -262,216 +157,12 @@ pub fn exec_p7_retained_executable(
     ))
 }
 
-fn validate_limits(limits: P7ProcessLimits) -> io::Result<()> {
-    if limits.stdout_bytes == 0
-        || limits.stderr_bytes == 0
-        || limits.total_bytes == 0
-        || limits.timeout.is_zero()
-        || limits.stdout_bytes > limits.total_bytes
-        || limits.stderr_bytes > limits.total_bytes
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "P7 supervisor limits are invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn spawn_drain<R: Read + Send + 'static>(
-    mut reader: R,
-    stream: Stream,
-    sender: SyncSender<DrainEvent>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let result = (|| -> io::Result<()> {
-            let mut buffer = vec![0_u8; DRAIN_CHUNK_BYTES];
-            loop {
-                let read = reader.read(&mut buffer)?;
-                if read == 0 {
-                    return Ok(());
-                }
-                sender
-                    .send(DrainEvent::Chunk(stream, buffer[..read].to_vec()))
-                    .map_err(|_| {
-                        io::Error::new(io::ErrorKind::BrokenPipe, "P7 supervisor stopped")
-                    })?;
-            }
-        })();
-        let _ = sender.send(DrainEvent::Done(stream, result));
-    })
-}
-
-#[cfg(unix)]
-mod platform {
-    use std::{
-        io,
-        os::unix::process::CommandExt,
-        process::{Child, Command},
-    };
-
-    pub(super) fn prepare(command: &mut Command) {
-        command.process_group(0);
-    }
-
-    pub(super) struct ProcessTree {
-        process_group: i32,
-    }
-
-    impl ProcessTree {
-        pub(super) fn attach(child: &Child) -> io::Result<Self> {
-            let process_group = i32::try_from(child.id())
-                .map_err(|_| io::Error::other("P7 child process id exceeds i32"))?;
-            Ok(Self { process_group })
-        }
-
-        pub(super) fn kill(&self, child: &mut Child) {
-            // SAFETY: a negative pid targets only the process group created for this child.
-            unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
-            let _ = child.kill();
-        }
-
-        pub(super) fn process_group(&self) -> i64 {
-            i64::from(self.process_group)
-        }
-
-        pub(super) fn try_wait(
-            &self,
-            child: &mut Child,
-        ) -> io::Result<Option<(std::process::ExitStatus, u64)>> {
-            use std::os::unix::process::ExitStatusExt;
-
-            let mut status = 0;
-            let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
-            // SAFETY: wait4 writes to the live status/rusage storage for this direct child only.
-            let waited = unsafe {
-                libc::wait4(
-                    i32::try_from(child.id())
-                        .map_err(|_| io::Error::other("P7 child pid exceeds i32"))?,
-                    &mut status,
-                    libc::WNOHANG,
-                    &mut usage,
-                )
-            };
-            if waited == 0 {
-                return Ok(None);
-            }
-            if waited < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            #[cfg(target_os = "macos")]
-            let maximum_rss_bytes = u64::try_from(usage.ru_maxrss).unwrap_or(u64::MAX);
-            #[cfg(not(target_os = "macos"))]
-            let maximum_rss_bytes = u64::try_from(usage.ru_maxrss)
-                .unwrap_or(u64::MAX)
-                .saturating_mul(1024);
-            Ok(Some((ExitStatusExt::from_raw(status), maximum_rss_bytes)))
-        }
-    }
-}
-
-#[cfg(windows)]
-mod platform {
-    use std::{
-        io,
-        mem::size_of,
-        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-        os::windows::process::CommandExt,
-        process::{Child, Command},
-        ptr::null,
-    };
-    use windows_sys::Win32::{
-        Foundation::HANDLE,
-        System::{
-            JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            },
-            Threading::CREATE_SUSPENDED,
-        },
-    };
-
-    #[link(name = "ntdll")]
-    unsafe extern "system" {
-        fn NtResumeProcess(process_handle: HANDLE) -> i32;
-    }
-
-    pub(super) fn prepare(command: &mut Command) {
-        command.creation_flags(CREATE_SUSPENDED);
-    }
-
-    pub(super) struct ProcessTree(OwnedHandle);
-
-    impl ProcessTree {
-        pub(super) fn attach(child: &Child) -> io::Result<Self> {
-            // SAFETY: null security/name arguments request a private unnamed Job object.
-            let raw = unsafe { CreateJobObjectW(null(), null()) };
-            if raw.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: CreateJobObjectW returned a new owned handle.
-            let job = unsafe { OwnedHandle::from_raw_handle(raw) };
-            let mut info = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: the handle and fixed-layout information buffer are live for the call.
-            if unsafe {
-                SetInformationJobObject(
-                    job.as_raw_handle(),
-                    JobObjectExtendedLimitInformation,
-                    (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            if unsafe {
-                AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle() as HANDLE)
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: Command spawned this process suspended; it is now contained by the Job.
-            if unsafe { NtResumeProcess(child.as_raw_handle() as HANDLE) } < 0 {
-                // SAFETY: this private Job contains only the still-suspended child process.
-                unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
-                return Err(io::Error::other(
-                    "P7 supervisor failed to resume Job-contained child",
-                ));
-            }
-            Ok(Self(job))
-        }
-
-        pub(super) fn kill(&self, child: &mut Child) {
-            // SAFETY: this private Job contains only the supervised process tree.
-            unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) };
-            let _ = child.kill();
-        }
-
-        pub(super) fn process_group(&self) -> i64 {
-            i64::from(child_process_group_unsupported())
-        }
-
-        pub(super) fn try_wait(
-            &self,
-            child: &mut Child,
-        ) -> io::Result<Option<(std::process::ExitStatus, u64)>> {
-            Ok(child.try_wait()?.map(|status| (status, 0)))
-        }
-    }
-
-    fn child_process_group_unsupported() -> i32 {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[cfg(target_os = "linux")]
-    use std::io::{Seek as _, Write as _};
+    use std::io::{Read as _, Seek as _, Write as _};
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
 

@@ -45,6 +45,7 @@ pub enum StoreRepairPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreCapacityBudget {
+    pub metric_source_max_items: usize,
     pub event_log_max_items: usize,
     pub kv_max_entries: usize,
     pub blob_max_bytes: usize,
@@ -59,6 +60,7 @@ pub struct StoreCapacityBudget {
 impl StoreCapacityBudget {
     pub const fn from_runtime_budget(budget: StoreRuntimeBudget) -> Self {
         Self {
+            metric_source_max_items: budget.metric_source_max_items,
             event_log_max_items: budget.event_log_max_items,
             kv_max_entries: budget.kv_max_entries,
             blob_max_bytes: budget.blob_max_bytes,
@@ -73,6 +75,7 @@ impl StoreCapacityBudget {
 
     pub const fn into_runtime_budget(self) -> StoreRuntimeBudget {
         StoreRuntimeBudget {
+            metric_source_max_items: self.metric_source_max_items,
             event_log_max_items: self.event_log_max_items,
             kv_max_entries: self.kv_max_entries,
             blob_max_bytes: self.blob_max_bytes,
@@ -86,7 +89,8 @@ impl StoreCapacityBudget {
     }
 
     pub const fn admits_runtime_budget(self, budget: StoreRuntimeBudget) -> bool {
-        self.event_log_max_items >= budget.event_log_max_items
+        self.metric_source_max_items >= budget.metric_source_max_items
+            && self.event_log_max_items >= budget.event_log_max_items
             && self.kv_max_entries >= budget.kv_max_entries
             && self.blob_max_bytes >= budget.blob_max_bytes
             && self.snapshot_max_bytes >= budget.snapshot_max_bytes
@@ -99,6 +103,7 @@ impl StoreCapacityBudget {
 
     pub const fn full() -> Self {
         Self {
+            metric_source_max_items: 8,
             event_log_max_items: 20_000,
             kv_max_entries: 20_000,
             blob_max_bytes: 64 * 1024 * 1024,
@@ -113,6 +118,7 @@ impl StoreCapacityBudget {
 
     pub const fn embedded_standalone() -> Self {
         Self {
+            metric_source_max_items: 1,
             event_log_max_items: 2_048,
             kv_max_entries: 4_096,
             blob_max_bytes: 4 * 1024 * 1024,
@@ -127,6 +133,7 @@ impl StoreCapacityBudget {
 
     pub const fn embedded_sdk() -> Self {
         Self {
+            metric_source_max_items: 1,
             event_log_max_items: 256,
             kv_max_entries: 512,
             blob_max_bytes: 1024 * 1024,

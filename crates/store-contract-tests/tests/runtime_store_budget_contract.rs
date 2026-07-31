@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 fn tiny_store_budget() -> StoreRuntimeBudget {
     StoreRuntimeBudget {
+        metric_source_max_items: 1,
         event_log_max_items: 8,
         kv_max_entries: 256,
         blob_max_bytes: 4,
@@ -28,6 +29,7 @@ fn tiny_store_budget() -> StoreRuntimeBudget {
 
 fn typed_restore_engine_capacity() -> StoreCapacityBudget {
     StoreCapacityBudget {
+        metric_source_max_items: 1,
         event_log_max_items: 8,
         kv_max_entries: 16,
         blob_max_bytes: 8,
@@ -56,7 +58,7 @@ fn typed_restore_event(event_id: &str, revision: &str) -> MemoryStoreEvent {
 
 fn typed_restore_request() -> StoreScopedProjectionReplaceRequest {
     StoreScopedProjectionReplaceRequest {
-        scope: StoreScopedProjectionScope::new("space:typed-restore", "subject:typed-restore")
+        scope: StoreScopedProjectionScope::subject("space:typed-restore", "subject:typed-restore")
             .expect("typed restore scope"),
         json_namespaces: vec!["self_model".to_string()],
         json_docs: vec![StoreSnapshotJsonDoc {
@@ -248,12 +250,14 @@ fn file_store_consumes_compiled_snapshot_budget() {
             .unwrap()
             .as_nanos()
     ));
+    let mut budget = tiny_store_budget();
+    budget.snapshot_max_bytes = 1024;
     let config = StoreBackendConfig::file(
         &root,
         ProfileId::native_dev_full().expect("native dev-full profile"),
     )
     .expect("config")
-    .try_with_nonproduction_store_budget_limit(tiny_store_budget())
+    .try_with_nonproduction_store_budget_limit(budget)
     .expect("valid store budget");
     let platform = support::open_store(config).expect("store");
     let err = platform
@@ -323,6 +327,7 @@ fn in_memory_store_platform_rejects_event_log_overflow_without_persisting_state(
 #[test]
 fn direct_in_memory_engine_consumes_capacity_budget() {
     let capacity = StoreCapacityBudget {
+        metric_source_max_items: 1,
         event_log_max_items: 1,
         kv_max_entries: 1,
         blob_max_bytes: 1,

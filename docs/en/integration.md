@@ -240,7 +240,7 @@ if let Some(record) = page.records.first() {
 
 Bulk `forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. Use `MemoryLongTermPolicyRequest` for "do not remember this kind of thing again" or pausing future long-term memory updates for a scope; policies do not retroactively delete accepted records.
 
-Transcript lifecycle raw delete/mask only affects conversation evidence. It reports affected `DerivedMemoryRef` values, but revoking the corresponding long-term memory still goes through `mutate_long_term_memory`. Runtime Skill edit/delete only manages procedural runtime skill memory and is not the control surface for ordinary long-term memory.
+Transcript lifecycle raw delete/mask only affects conversation evidence. It reports affected `DerivedMemoryRef` values, but revoking the corresponding long-term memory still goes through `mutate_long_term_memory`. Runtime Skill edit/retire only manages procedural runtime skill memory and is not the control surface for ordinary long-term memory; retire appends a terminal revision and preserves owner lineage.
 
 ## 10. Host Turn Lifecycle
 
@@ -252,16 +252,16 @@ A complete SDK host turn uses one public path:
 4. Finalize the turn through canonical turn semantics when transcript governance is required.
 5. Use `recall` and `project` to build model context; do not assemble memory planes in the host.
 6. Use `inspect` for operator visibility and safe recovery context.
-7. Use memory-space export, migration dry-run, apply/import, and replay for replacement or release gates.
+7. Use typed memory-space export, direct same-scope import, and replay for replacement or release gates.
 
 Generic host fixtures and Beetle-derived fixtures under `fixtures/sdk-host-readiness/` follow this same path. Beetle-derived data is current-contract host evidence only, not a special SDK or compatibility branch.
 
-## 11. Migration Dry-Run, Import, And Replay
+## 11. Archive Import And Replay
 
 ```rust
 use bm_sdk::{
-    apply_memory_space_migration, preview_memory_space_migration, MemoryReplayRequest,
-    MemorySpaceExportRequest, MemorySpaceMigrateApplyRequest, MemorySpaceMigratePreviewRequest,
+    MemoryArchiveScope, MemoryReplayRequest, MemorySpaceExportRequest, MemorySpaceImportRequest,
+    MemorySpacePrivateMaterialPolicy,
 };
 
 let replay = runtime.replay(MemoryReplayRequest {
@@ -269,42 +269,27 @@ let replay = runtime.replay(MemoryReplayRequest {
     limit: 32,
 })?;
 
-let space = runtime.export_memory_space(MemorySpaceExportRequest {
-    scope: bm_sdk::MemorySpaceScope {
-        memory_space_id: runtime.memory_space_id().to_string(),
-        mounted_subject_id: runtime.subject_id().to_string(),
-    },
-    include_private: true,
+let scope = MemoryArchiveScope::subject(
+    runtime.memory_space_id(),
+    runtime.subject_id(),
+)?;
+let private_material_policy = MemorySpacePrivateMaterialPolicy::IncludePrivate;
+let exported = runtime.export_memory_space(MemorySpaceExportRequest {
+    scope: scope.clone(),
+    private_material_policy,
 })?;
-let preview = preview_memory_space_migration(MemorySpaceMigratePreviewRequest {
-    source_scope: space.projection_scope.scope.clone(),
-    target_scope: space.projection_scope.scope.clone(),
-    expected_private_material_policy:
-        bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
-    source_profile: profile,
-    target_profile: profile,
-    archive: space.archive,
+
+assert_eq!(&exported.archive.root().scope, &scope);
+target_runtime.import_memory_space(MemorySpaceImportRequest {
+    scope,
+    expected_private_material_policy: private_material_policy,
+    archive: exported.archive,
 })?;
-if preview.vault_preflight.passed {
-    apply_memory_space_migration(
-        &target_store,
-        MemorySpaceMigrateApplyRequest { plan: preview.plan },
-    )?;
-}
 ```
 
-Public recovery never accepts a free-form continuity snapshot. The runtime, request, and typed archive must declare the exact same `(memory_space_id, mounted_subject_id)` before any store read or migration/import planning begins.
+Public recovery never accepts a free-form continuity snapshot. The source and target runtimes, request, and opaque archive root must declare the exact same `MemoryArchiveScope` and private-material policy before replacement begins.
 
-Use memory-space export/preview/apply when replacing a host memory implementation or moving a configured SDK store. Bootstrap and full continuity modes belong only to the internal Soul-recovery bundle.
-The expected private-material policy is part of the migration authority. Preview and apply fail closed when it differs from the archive manifest.
-
-Dry-run reports must be inspected before apply. Treat `loss_risk`, schema id, record counts, state fingerprint, event fingerprint, and privacy redaction count as release evidence. A host replacing its own memory implementation should keep a generic fixture and one host-derived legacy fixture in the readiness gate.
-`preview.manifest` also reports the exact memory-space/mounted-subject projection
-scope, private-material mode, plane/privacy counts, and identity-remap state.
-Apply atomically replaces only that typed scope. When source and target scope
-identities differ, the manifest marks `identity_remap.required=true` and
-`applied=false`; preflight rejects relabeling until an explicit typed remapper
-produces a new identity-bound archive.
+The archive root is the portable integrity report. Inspect its schema id/version, exact scope, private-material policy, JSON/event counts and byte counts, and canonical `closure_sha256`. Import recomputes that root before any backend mutation and atomically replaces only the declared scope. Bootstrap and full continuity modes belong only to the internal Soul-recovery bundle.
 
 ## 11. Operator Inspect
 
@@ -312,7 +297,7 @@ produces a new identity-bound archive.
 use bm_sdk::{MemoryInspectionRequest, PressureLevel, RuntimeLifecycleModeInput};
 
 let inspect = runtime.inspect(MemoryInspectionRequest {
-    query: "migration readiness".to_string(),
+    query: "archive readiness".to_string(),
     system_max_len: 4096,
     pressure: PressureLevel::Normal,
     mode_input: RuntimeLifecycleModeInput::default(),
@@ -360,5 +345,5 @@ Add a smoke test in the integrating project that:
 5. Checks `deferred_governance_report()` and `inspect.deferred_governance`.
 6. Recalls or projects the candidate-backed memory from a different chat and checks `MemoryProjectionReport.audit`.
 7. Calls `run_retention_compaction()` and verifies that host deletion of accepted memory is not allowed.
-8. Runs migration dry-run and apply/import through the public memory-space migrator and checks `preview.manifest`.
-9. Runs operator inspect and replay against the migrated store.
+8. Exports an opaque archive, imports it into a runtime with the same exact typed scope and policy, and checks the governed archive root.
+9. Runs operator inspect and replay against the replaced scope.

@@ -19,7 +19,7 @@ English topics:
 - [Profiles](en/profiles.md)
 - [Store Backends](en/store-backends.md)
 - [Adapters](en/adapters.md)
-- [Replay and Migration](en/replay-and-migration.md)
+- [Replay and Archive](en/replay-and-archive.md)
 - [Operator Guide](en/operator-guide.md)
 - [Release Checklist](en/release-checklist.md)
 
@@ -35,6 +35,6 @@ English topics:
 - [Profile 矩阵](zh-CN/profiles.md)
 - [存储后端](zh-CN/store-backends.md)
 - [Adapter 合同](zh-CN/adapters.md)
-- [回放与迁移](zh-CN/replay-and-migration.md)
+- [回放与归档](zh-CN/replay-and-archive.md)
 - [运维与检查](zh-CN/operator-guide.md)
 - [发布清单](zh-CN/release-checklist.md)

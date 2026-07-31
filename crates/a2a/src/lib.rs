@@ -633,33 +633,35 @@ struct A2aHttpRequest {
 #[cfg(feature = "bridge-http")]
 fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
     match response {
-        AdapterResponse::Accepted { report, .. } => match report {
-            AdapterSdkReport::Recall(report) => json!({
-                "status": "accepted",
-                "query": report.query,
-                "procedural_hits": report.procedural_hits.len(),
-            })
-            .to_string(),
-            AdapterSdkReport::TranscriptAttrWrite(report) => json!({
-                "status": "accepted",
-                "memory_space_id": report.key.memory_space_id,
-                "channel_id": report.key.channel_id,
-                "conversation_id": report.key.conversation_id,
-                "accepted_attrs": report.accepted_attrs,
-                "rejected_attrs": report.rejected_attrs,
-                "redactions_preview": report.redactions_preview,
-                "profile_budget_applied": report.profile_budget_applied,
-                "audit_event_id": report.audit_event_id,
-                "dry_run": report.dry_run,
-                "lifecycle": report.lifecycle_report.result_summary,
-            })
-            .to_string(),
-            other => json!({
-                "status": "accepted",
-                "report_kind": other.public_kind(),
-            })
-            .to_string(),
-        },
+        AdapterResponse::Accepted { report, .. } => {
+            if let Some(governed) = report.governed_safe_report() {
+                return json!({"status":"accepted","result":governed}).to_string();
+            }
+            match report {
+                AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
+                    unreachable!("governed DTO handled above")
+                }
+                AdapterSdkReport::TranscriptAttrWrite(report) => json!({
+                    "status": "accepted",
+                    "memory_space_id": report.key.memory_space_id,
+                    "channel_id": report.key.channel_id,
+                    "conversation_id": report.key.conversation_id,
+                    "accepted_attrs": report.accepted_attrs,
+                    "rejected_attrs": report.rejected_attrs,
+                    "redactions_preview": report.redactions_preview,
+                    "profile_budget_applied": report.profile_budget_applied,
+                    "audit_event_id": report.audit_event_id,
+                    "dry_run": report.dry_run,
+                    "lifecycle": report.lifecycle_report.result_summary,
+                })
+                .to_string(),
+                other => json!({
+                    "status": "accepted",
+                    "report_kind": other.public_kind(),
+                })
+                .to_string(),
+            }
+        }
         AdapterResponse::Rejected { reason, .. } => {
             json!({"status":"rejected","reason":reason}).to_string()
         }

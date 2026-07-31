@@ -475,6 +475,7 @@ fn handle_chat_completion(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
             system_max_len: runtime_budget
@@ -494,15 +495,19 @@ fn handle_chat_completion(
         GatewayAuditStage::Projection,
         GatewayAuditOutcome::Succeeded,
     );
-    audit.record_projection(&config.audit, &projection)?;
+    audit.record_projection(&config.audit, projection.report())?;
 
     let stream = body_object
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let model = provider_model_name(provider, model_alias);
-    let upstream_body = build_upstream_chat_body(&body, &projection.system_memory_block, &model)?;
-    let carry = projection.context.into_runtime_carry();
+    let upstream_body = build_upstream_chat_body(
+        &body,
+        projection.provider_payload().system_memory_block(),
+        &model,
+    )?;
+    let carry = projection.provider_payload().maintenance_carry();
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
@@ -528,8 +533,8 @@ fn handle_chat_completion(
             client_conversation_hint: request.scope.client_conversation_hint.clone(),
         },
         external_content_used,
-        runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
-        task_learning_selected_ids: carry.task_recall_selected_ids,
+        runtime_skill_selected_ids: carry.runtime_skill_selected_ids().to_vec(),
+        task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         config: config.maintenance,
@@ -624,6 +629,7 @@ fn handle_responses(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
             system_max_len: runtime_budget
@@ -643,16 +649,19 @@ fn handle_responses(
         GatewayAuditStage::Projection,
         GatewayAuditOutcome::Succeeded,
     );
-    audit.record_projection(&config.audit, &projection)?;
+    audit.record_projection(&config.audit, projection.report())?;
 
     let stream = body_object
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let model = provider_model_name(provider, model_alias);
-    let upstream_body =
-        build_upstream_responses_body(&body, &projection.system_memory_block, &model)?;
-    let carry = projection.context.into_runtime_carry();
+    let upstream_body = build_upstream_responses_body(
+        &body,
+        projection.provider_payload().system_memory_block(),
+        &model,
+    )?;
+    let carry = projection.provider_payload().maintenance_carry();
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
         user_content: extracted_user_text.clone(),
@@ -678,8 +687,8 @@ fn handle_responses(
             client_conversation_hint: request.scope.client_conversation_hint.clone(),
         },
         external_content_used,
-        runtime_skill_selected_ids: carry.runtime_skill_selected_ids,
-        task_learning_selected_ids: carry.task_recall_selected_ids,
+        runtime_skill_selected_ids: carry.runtime_skill_selected_ids().to_vec(),
+        task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         config: config.maintenance,
