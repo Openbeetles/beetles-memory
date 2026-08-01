@@ -29,6 +29,7 @@ fn every_first_class_profile_has_a_catalog_entry() {
         ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
         ProfileId::DesktopMacosDevFull,
+        ProfileId::DesktopLinuxEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
         ProfileId::DesktopWindowsDevFull,
         ProfileId::ServerLinuxMemoryGateway,
@@ -55,6 +56,12 @@ fn profile_identity_exposes_canonical_target_and_role() {
             RoleFeature::DevFull,
         ),
         (
+            ProfileId::DesktopLinuxEmbeddedSdk,
+            "target-desktop-linux+role-embedded-sdk",
+            TargetFeature::DesktopLinux,
+            RoleFeature::EmbeddedSdk,
+        ),
+        (
             ProfileId::DesktopWindowsDevFull,
             "target-desktop-windows+role-dev-full",
             TargetFeature::DesktopWindows,
@@ -73,6 +80,20 @@ fn profile_identity_exposes_canonical_target_and_role() {
         assert_eq!(profile.target(), target);
         assert_eq!(profile.role(), role);
     }
+}
+
+#[test]
+fn linux_desktop_embedded_sdk_is_not_a_server_gateway_role() {
+    let catalog = profile_capability_catalog();
+    let embedded = catalog
+        .iter()
+        .find(|entry| entry.profile == ProfileId::DesktopLinuxEmbeddedSdk)
+        .expect("Linux desktop embedded SDK profile");
+
+    assert_eq!(embedded.target, TargetFeature::DesktopLinux);
+    assert_eq!(embedded.role, RoleFeature::EmbeddedSdk);
+    assert!(!embedded.llm_gateway_server_allowed);
+    assert!(!embedded.adapter.a2a.allowed);
 }
 
 #[test]

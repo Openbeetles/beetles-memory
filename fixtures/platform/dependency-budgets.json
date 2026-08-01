@@ -115,6 +115,24 @@
       "sqlite_allowed": true,
       "server_listener_allowed": true
     },
+    "profile-desktop-linux-embedded-sdk": {
+      "package": "bm-sdk",
+      "features": [
+        "profile-desktop-linux-embedded-sdk"
+      ],
+      "forbidden_tree_needles": [
+        "esp-idf-svc",
+        "embedded-svc"
+      ],
+      "required_tree_needles": [
+        "bm-core",
+        "bm-sdk",
+        "rusqlite"
+      ],
+      "store_backend": "sqlite-store",
+      "sqlite_allowed": true,
+      "server_listener_allowed": false
+    },
     "profile-desktop-windows-embedded-sdk": {
       "package": "bm-sdk",
       "features": [

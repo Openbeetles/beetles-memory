@@ -1,5 +1,5 @@
 {
-  "schema": "beetle-memory.platform.capability.v2",
+  "schema": "beetle-memory.platform.capability.v3",
   "profile": "profile-desktop-windows-dev-full",
   "target": "target-desktop-windows",
   "role": "role-dev-full",
@@ -7,6 +7,7 @@
     "target_esp": false,
     "target_linux_device": false,
     "target_desktop_macos": false,
+    "target_desktop_linux": false,
     "target_desktop_windows": true,
     "target_server_linux": false,
     "role_standalone_memory": false,
@@ -24,6 +25,7 @@
     "maintenance": true,
     "inspection": true,
     "transcript_replay": true,
+    "transcript_export": true,
     "replay": true,
     "export": true,
     "import": true,

@@ -43,6 +43,10 @@ profile-desktop-macos-dev-full = [
     "bm-adapter/profile-desktop-macos-dev-full",
     "bm-entry?/profile-desktop-macos-dev-full",
 ]
+profile-desktop-linux-embedded-sdk = [
+    "bm-adapter/profile-desktop-linux-embedded-sdk",
+    "bm-entry?/profile-desktop-linux-embedded-sdk",
+]
 profile-desktop-windows-embedded-sdk = [
     "bm-adapter/profile-desktop-windows-embedded-sdk",
     "bm-entry?/profile-desktop-windows-embedded-sdk",

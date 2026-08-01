@@ -3911,7 +3911,7 @@ mod tests {
         #[cfg(target_os = "windows")]
         return crate::ProfileId::DesktopWindowsEmbeddedSdk;
         #[cfg(target_os = "linux")]
-        return crate::ProfileId::ServerLinuxMemoryGateway;
+        return crate::ProfileId::DesktopLinuxEmbeddedSdk;
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         compile_error!("file store tests require a supported production host target");
     }

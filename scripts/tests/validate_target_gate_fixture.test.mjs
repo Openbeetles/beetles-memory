@@ -15,10 +15,10 @@ const canonicalPath = new URL(
 const canonical = JSON.parse(readFileSync(canonicalPath, "utf8"));
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
-test("canonical target gate fixture is the exact ten-row matrix", () => {
+test("canonical target gate fixture is the exact eleven-row matrix", () => {
   const rows = validateTargetGateFixture(clone(canonical));
-  assert.equal(rows.length, 10);
-  assert.equal(renderTargetGateRows(clone(canonical)).split("\n").length, 10);
+  assert.equal(rows.length, 11);
+  assert.equal(renderTargetGateRows(clone(canonical)).split("\n").length, 11);
 });
 
 test("legacy schema is rejected", () => {
@@ -30,18 +30,18 @@ test("legacy schema is rejected", () => {
 test("missing row is rejected", () => {
   const fixture = clone(canonical);
   fixture.gates.pop();
-  assert.throws(() => validateTargetGateFixture(fixture), /exactly 10 rows/);
+  assert.throws(() => validateTargetGateFixture(fixture), /exactly 11 rows/);
 });
 
 test("extra row is rejected", () => {
   const fixture = clone(canonical);
   fixture.gates.push(clone(fixture.gates[0]));
-  assert.throws(() => validateTargetGateFixture(fixture), /exactly 10 rows/);
+  assert.throws(() => validateTargetGateFixture(fixture), /exactly 11 rows/);
 });
 
-test("duplicate row is rejected even when row count remains ten", () => {
+test("duplicate row is rejected even when row count remains eleven", () => {
   const fixture = clone(canonical);
-  fixture.gates[9] = clone(fixture.gates[0]);
+  fixture.gates[10] = clone(fixture.gates[0]);
   assert.throws(() => validateTargetGateFixture(fixture), /identity\/order/);
 });
 
@@ -62,19 +62,19 @@ test("profile feature drift is rejected", () => {
 
 test("dev-full replay requirement is exact", () => {
   const fixture = clone(canonical);
-  fixture.gates[8].replay_all_targets = false;
+  fixture.gates[9].replay_all_targets = false;
   assert.throws(() => validateTargetGateFixture(fixture), /identity\/order/);
 });
 
 test("xwin row cannot downgrade to plain cargo", () => {
   const fixture = clone(canonical);
-  fixture.gates[7].executor_kind = "cargo";
+  fixture.gates[8].executor_kind = "cargo";
   assert.throws(() => validateTargetGateFixture(fixture), /xwin toolchain/);
 });
 
 test("xwin row requires the exact LLVM command set", () => {
   const fixture = clone(canonical);
-  fixture.gates[7].c_linker = "link.exe";
+  fixture.gates[8].c_linker = "link.exe";
   assert.throws(() => validateTargetGateFixture(fixture), /xwin toolchain/);
 });
 

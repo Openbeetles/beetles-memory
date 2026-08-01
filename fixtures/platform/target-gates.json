@@ -98,6 +98,22 @@
       "replay_all_targets": false
     },
     {
+      "profile": "profile-desktop-linux-embedded-sdk",
+      "target": "x86_64-unknown-linux-gnu",
+      "package": "bm-sdk",
+      "features": ["profile-desktop-linux-embedded-sdk"],
+      "rust_toolchain": "stable",
+      "target_std_mode": "rustup_component",
+      "build_std": [],
+      "executor_kind": "cargo",
+      "c_toolchain_kind": "gnu_glibc",
+      "c_compiler": "x86_64-linux-gnu-gcc",
+      "c_archiver": "x86_64-linux-gnu-ar",
+      "c_linker": "x86_64-linux-gnu-gcc",
+      "gateway_check": false,
+      "replay_all_targets": false
+    },
+    {
       "profile": "profile-server-linux-memory-gateway",
       "target": "x86_64-unknown-linux-gnu",
       "package": "bm-sdk",

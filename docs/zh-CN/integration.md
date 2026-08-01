@@ -11,6 +11,7 @@
 | Beetle Memory macOS 独立桌面 App | `profile-desktop-macos-standalone-memory` | `ProfileId::DesktopMacosStandaloneMemory` |
 | macOS Rust desktop host | `profile-desktop-macos-embedded-sdk` | `ProfileId::DesktopMacosEmbeddedSdk` |
 | Windows Rust desktop host | `profile-desktop-windows-embedded-sdk` | `ProfileId::DesktopWindowsEmbeddedSdk` |
+| Linux Rust desktop host | `profile-desktop-linux-embedded-sdk` | `ProfileId::DesktopLinuxEmbeddedSdk` |
 | Linux 硬件设备 runtime | `profile-linux-device-standalone-memory` | `ProfileId::LinuxDeviceStandaloneMemory` |
 | Linux server memory gateway | `profile-server-linux-memory-gateway` | `ProfileId::ServerLinuxMemoryGateway` |
 | ESP embedded SDK host | `profile-esp-embedded-sdk` | `ProfileId::EspEmbeddedSdk` |
@@ -32,7 +33,7 @@ crates 发布后：
 bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-每次构建只使用一个 profile feature。
+每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
 
 ## 3. 打开 Store
 
@@ -112,10 +113,12 @@ Long-term extraction 写入应由 extraction pipeline 产生，然后通过 `Mem
 
 ```rust
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryRecallRequest, PressureLevel, RuntimeLifecycleModeInput,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation, PressureLevel,
+    RuntimeLifecycleModeInput,
 };
 
 let recall = runtime.recall(MemoryRecallRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     query: "release artifacts".to_string(),
     limit: 4,
     structured_query_facets: Vec::new(),
@@ -123,6 +126,7 @@ let recall = runtime.recall(MemoryRecallRequest {
 })?;
 
 let projection = runtime.project(MemoryProjectionRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
     recent_messages_limit: 8,

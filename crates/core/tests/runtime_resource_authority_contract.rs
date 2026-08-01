@@ -160,6 +160,25 @@ fn production_host_authority_accepts_only_core_owned_probe() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn desktop_linux_embedded_sdk_accepts_host_linux_attestation() {
+    let profile = ProfileId::DesktopLinuxEmbeddedSdk;
+    let authority = RuntimeBudgetAuthority::with_host_probe(
+        profile,
+        StaticPlatformManifest::for_profile(profile, RuntimeStoreMedium::VolatileMemory),
+        None,
+        HostRuntimeResourceProbe::for_volatile_memory(),
+        10,
+    )
+    .unwrap();
+
+    assert_eq!(
+        authority.current_snapshot(10).source,
+        RuntimeResourceProbeSource::HostLinux
+    );
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn trusted_host_probe_binds_storage_observation_to_data_path() {

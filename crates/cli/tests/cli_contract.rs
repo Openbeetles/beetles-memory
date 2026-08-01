@@ -22,7 +22,7 @@ fn host_profile_name() -> &'static str {
     }
     #[cfg(target_os = "linux")]
     {
-        "profile-server-linux-memory-gateway"
+        "profile-desktop-linux-embedded-sdk"
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {

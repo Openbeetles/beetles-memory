@@ -14,6 +14,10 @@ fn snapshot_uses_cargo_profile_feature_ids_not_internal_display_strings() {
         platform_capability_snapshot_file_name(ProfileId::ServerLinuxMemoryGateway),
         "profile-server-linux-memory-gateway"
     );
+    assert_eq!(
+        platform_profile_feature_id(ProfileId::DesktopLinuxEmbeddedSdk),
+        "profile-desktop-linux-embedded-sdk"
+    );
 }
 
 #[test]
@@ -25,12 +29,14 @@ fn snapshot_shape_is_stable_and_reviewable() {
     let snapshot = platform_capability_snapshot(&catalog);
     let value = serde_json::to_value(&snapshot).expect("snapshot json");
 
-    assert_eq!(value["schema"], "beetle-memory.platform.capability.v2");
+    assert_eq!(value["schema"], "beetle-memory.platform.capability.v3");
     assert_eq!(value["profile"], "profile-esp-standalone-memory");
     assert_eq!(value["target"], "target-esp");
     assert_eq!(value["role"], "role-standalone-memory");
     assert_eq!(value["compiled"]["sqlite_index_compiled"], false);
     assert_eq!(value["memory"]["write"], true);
+    assert!(value["compiled"].get("target_desktop_linux").is_some());
+    assert!(value["memory"].get("transcript_export").is_some());
     assert_eq!(value["adapter"]["wss"]["client_allowed"], true);
     assert_eq!(value["adapter"]["wss"]["server_allowed"], false);
     assert_eq!(value["entry"]["llm_gateway_server"]["visible"], false);

@@ -18,6 +18,8 @@ From an external repository, adjust the path or use the published version once t
 bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
+Select exactly one desktop embedded feature for the host OS: `profile-desktop-macos-embedded-sdk`, `profile-desktop-windows-embedded-sdk`, or `profile-desktop-linux-embedded-sdk`. Linux desktop hosts must not use a server or dev-full profile.
+
 ## Build A Runtime
 
 ```rust
@@ -27,6 +29,7 @@ use bm_sdk::{
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
+    // Use DesktopWindowsEmbeddedSdk or DesktopLinuxEmbeddedSdk on those desktop hosts.
     let profile = ProfileId::DesktopMacosEmbeddedSdk;
     let store = MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile)?)?;
 
@@ -50,8 +53,9 @@ The default single-agent entry only needs `owner_id + agent_id`. The SDK creates
 
 ```rust
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation,
+    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
 };
 
 let runtime = build_runtime()?;
@@ -72,6 +76,7 @@ let write = runtime.write(MemoryWriteRequest::Procedural {
 assert!(write.accepted);
 
 let recall = runtime.recall(MemoryRecallRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     query: "release artifacts".to_string(),
     limit: 4,
     structured_query_facets: Vec::new(),
@@ -83,6 +88,7 @@ assert!(recall
     .any(|delivery| delivery.selected));
 
 let projection = runtime.project(MemoryProjectionRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
     recent_messages_limit: 8,

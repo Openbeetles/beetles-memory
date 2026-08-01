@@ -589,6 +589,7 @@ fn is_embedded_profile(profile: ProfileId) -> bool {
         profile,
         ProfileId::EspEmbeddedSdk
             | ProfileId::DesktopMacosEmbeddedSdk
+            | ProfileId::DesktopLinuxEmbeddedSdk
             | ProfileId::DesktopWindowsEmbeddedSdk
     )
 }

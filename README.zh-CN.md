@@ -30,7 +30,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 - 检查运行状态、生命周期报告和 operator-safe recovery action。
 - 导出、导入 typed memory-space archive，并回放受治理的 runtime history；continuity snapshot 仅作为内部 Soul recovery 载荷。
 - 通过 SDK、CLI、HTTP、WebSocket、MCP 或 A2A adapter shell 进入同一套记忆语义。
-- 面向 ESP、Linux 硬件设备、macOS 桌面独立 App、macOS/Windows SDK 宿主和 Linux server gateway profile 编译。
+- 面向 ESP、Linux 硬件设备、macOS 桌面独立 App、macOS/Windows/Linux SDK 宿主和 Linux server gateway profile 编译。
 
 ## 控制台预览
 
@@ -56,9 +56,9 @@ bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"
 ```rust
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemoryWriteRequest, PressureLevel, ProfileId,
-    MemoryStoreHandle, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StoreBackendConfig,
+    MemoryRecallTemporalOperation, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
@@ -92,6 +92,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     })?;
 
     let recall = runtime.recall(MemoryRecallRequest {
+        temporal_operation: MemoryRecallTemporalOperation::Current,
         query: "release artifacts".to_string(),
         limit: 4,
         structured_query_facets: Vec::new(),
@@ -103,6 +104,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         .any(|delivery| delivery.selected));
 
     let projection = runtime.project(MemoryProjectionRequest {
+        temporal_operation: MemoryRecallTemporalOperation::Current,
         user_query: "How should this host release?".to_string(),
         system_max_len: 4096,
         recent_messages_limit: 8,
@@ -163,6 +165,7 @@ English documentation:
 | `profile-desktop-macos-dev-full` | macOS | 非生产开发 profile | sqlite、file 或 in-memory |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file、sqlite 或 in-memory |
 | `profile-desktop-windows-dev-full` | Windows | 非生产开发 profile | sqlite、file 或 in-memory |
+| `profile-desktop-linux-embedded-sdk` | Linux 桌面 | embedded SDK | file、sqlite 或 in-memory |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file |
 | `profile-server-linux-dev-full` | Linux server | 非生产开发 profile | sqlite、file 或 in-memory |
 
@@ -173,6 +176,7 @@ ESP profile 会在配置时拒绝 file 和 sqlite store。server、desktop 和 L
 
 ```bash
 cargo run --manifest-path examples/rust-sdk-embedded/Cargo.toml
+cargo run --manifest-path examples/rust-sdk-embedded/Cargo.toml --no-default-features --features desktop-linux
 cargo run --manifest-path examples/server-runtime/Cargo.toml
 cargo run --manifest-path examples/linux-device/Cargo.toml
 cargo run --manifest-path examples/esp-standalone-memory/Cargo.toml

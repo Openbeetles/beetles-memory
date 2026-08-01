@@ -22,6 +22,7 @@ profile-linux-device-standalone-memory = ["bm-entry/profile-linux-device-standal
 profile-desktop-macos-standalone-memory = ["bm-entry/profile-desktop-macos-standalone-memory"]
 profile-desktop-macos-embedded-sdk = ["bm-entry/profile-desktop-macos-embedded-sdk"]
 profile-desktop-macos-dev-full = ["bm-entry/profile-desktop-macos-dev-full"]
+profile-desktop-linux-embedded-sdk = ["bm-entry/profile-desktop-linux-embedded-sdk"]
 profile-desktop-windows-embedded-sdk = ["bm-entry/profile-desktop-windows-embedded-sdk"]
 profile-desktop-windows-dev-full = ["bm-entry/profile-desktop-windows-dev-full"]
 profile-server-linux-memory-gateway = ["bm-entry/profile-server-linux-memory-gateway"]

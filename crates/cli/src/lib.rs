@@ -139,6 +139,7 @@ pub const fn platform_profiles() -> &'static [ProfileId] {
         ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
         ProfileId::DesktopMacosDevFull,
+        ProfileId::DesktopLinuxEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
         ProfileId::DesktopWindowsDevFull,
         ProfileId::ServerLinuxMemoryGateway,

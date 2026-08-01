@@ -422,7 +422,7 @@ fn test_host_profile() -> ProfileId {
     }
     #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "linux"))]
     {
-        ProfileId::ServerLinuxMemoryGateway
+        ProfileId::DesktopLinuxEmbeddedSdk
     }
 }
 
@@ -466,6 +466,7 @@ mod historical_as_of_profile_admission_tests {
             ProfileId::DesktopMacosStandaloneMemory,
             ProfileId::DesktopMacosEmbeddedSdk,
             ProfileId::DesktopMacosDevFull,
+            ProfileId::DesktopLinuxEmbeddedSdk,
             ProfileId::DesktopWindowsEmbeddedSdk,
             ProfileId::DesktopWindowsDevFull,
             ProfileId::ServerLinuxMemoryGateway,
@@ -1816,6 +1817,10 @@ mod runtime_skill_materializer_resolver_contract_tests {
             ),
             (
                 ProfileId::DesktopMacosDevFull,
+                crate::RuntimeSkillRecallTransport::IndexedSqlite,
+            ),
+            (
+                ProfileId::DesktopLinuxEmbeddedSdk,
                 crate::RuntimeSkillRecallTransport::IndexedSqlite,
             ),
             (
@@ -4778,7 +4783,10 @@ impl MemoryRuntime {
             None
         } else {
             let store = self.config.long_term_memory_read_store.clone();
-            let planning_store = PlanningLongTermMemoryStore::new(store.as_ref());
+            let planning_store = PlanningLongTermMemoryStore::new(
+                store.as_ref(),
+                &self.config.scoped_runtime.actor_subject_id,
+            )?;
             let mut context = SharedFactWriteGovernanceContext::new(
                 self.config.memory_space_id.clone(),
                 self.config.scoped_runtime.mounted_subject_id.clone(),
@@ -7637,7 +7645,10 @@ impl MemoryRuntime {
         pressure: PressureLevel,
         profile: MemoryProfile,
     ) -> Result<LongTermMemoryRefreshOutcome> {
-        let planning_long_term = PlanningLongTermMemoryStore::new(ctx.long_term_memory_store);
+        let planning_long_term = PlanningLongTermMemoryStore::new(
+            ctx.long_term_memory_store,
+            &self.config.scoped_runtime.actor_subject_id,
+        )?;
         let outcome = run_long_term_memory_refresh(
             http,
             llm,
@@ -7744,7 +7755,10 @@ impl MemoryRuntime {
         now_secs: u64,
     ) -> Result<MemoryLongTermExtractionTransactionPlan> {
         let store = self.config.long_term_memory_read_store.clone();
-        let planning_store = PlanningLongTermMemoryStore::new(store.as_ref());
+        let planning_store = PlanningLongTermMemoryStore::new(
+            store.as_ref(),
+            &self.config.scoped_runtime.actor_subject_id,
+        )?;
         let mut changed = 0usize;
         if extraction.skill_writes.is_empty() {
             if !governed_skill_writes.is_empty() || runtime_skill_owning_scope.is_some() {
@@ -7937,6 +7951,7 @@ impl MemoryRuntime {
                     control_base: control_store.as_ref(),
                     memory_space_id: &self.config.memory_space_id,
                     mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                    expected_actor_subject_id: &self.config.scoped_runtime.actor_subject_id,
                     store_platform: self.config.store_platform.as_ref().ok_or_else(|| {
                         Error::config("long_term_version_plan", "store platform is required")
                     })?,
@@ -12257,7 +12272,10 @@ impl MemoryRuntime {
         let execution_state_store = platform.execution_state_store();
         let active_work_store = platform.active_work_store();
         let long_term_memory_store = self.config.long_term_memory_read_store.clone();
-        let planning_long_term = PlanningLongTermMemoryStore::new(long_term_memory_store.as_ref());
+        let planning_long_term = PlanningLongTermMemoryStore::new(
+            long_term_memory_store.as_ref(),
+            &self.config.scoped_runtime.actor_subject_id,
+        )?;
         let continuity_capsule_store = platform.continuity_capsule_store();
         let extraction_state_store = platform.long_term_memory_extraction_state_store();
         let turn_ledger_store = platform.turn_ledger_store();
@@ -12865,7 +12883,10 @@ impl MemoryRuntime {
         let long_term_memory_store = self.config.long_term_memory_read_store.clone();
         let skill_storage = platform.skill_storage();
         let before_count = long_term_memory_store.count().unwrap_or(0);
-        let planning_long_term = PlanningLongTermMemoryStore::new(long_term_memory_store.as_ref());
+        let planning_long_term = PlanningLongTermMemoryStore::new(
+            long_term_memory_store.as_ref(),
+            &self.config.scoped_runtime.actor_subject_id,
+        )?;
         let hygiene = run_memory_retention_compaction(
             MemoryHygieneContext {
                 session_store: session_store.as_ref(),
@@ -13005,7 +13026,10 @@ impl MemoryRuntime {
             task_run_store: Some(task_run_store.as_ref()),
             task_learning_store: Some(task_learning_store.as_ref()),
         });
-        let hygiene_long_term = PlanningLongTermMemoryStore::new(long_term_memory_store.as_ref());
+        let hygiene_long_term = PlanningLongTermMemoryStore::new(
+            long_term_memory_store.as_ref(),
+            &self.config.scoped_runtime.actor_subject_id,
+        )?;
         let hygiene = inspect_memory_hygiene(
             MemoryHygieneContext {
                 session_store: session_store.as_ref(),
@@ -13257,7 +13281,7 @@ impl MemoryRuntime {
         &self,
         request: MemoryTranscriptExportRequest,
     ) -> Result<MemoryTranscriptExportReport> {
-        self.ensure_visible("export.transcript", self.capabilities.export)?;
+        self.ensure_visible("export.transcript", self.capabilities.transcript_export)?;
         self.ensure_runtime_memory_space("export.transcript", &request.memory_space_id)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Export,
@@ -13469,8 +13493,10 @@ impl MemoryRuntime {
             )
         })?;
         let platform = self.config.platform.as_ref();
-        let planning_long_term =
-            PlanningLongTermMemoryStore::new(self.config.long_term_memory_read_store.as_ref());
+        let planning_long_term = PlanningLongTermMemoryStore::new(
+            self.config.long_term_memory_read_store.as_ref(),
+            &self.config.scoped_runtime.actor_subject_id,
+        )?;
         let session_summary_store = platform.session_summary_store();
         let execution_state_store = platform.execution_state_store();
         let self_model_store = platform.self_model_store();
@@ -14093,6 +14119,7 @@ impl MemoryRuntime {
             | ProfileId::DesktopMacosStandaloneMemory
             | ProfileId::DesktopMacosEmbeddedSdk
             | ProfileId::DesktopMacosDevFull
+            | ProfileId::DesktopLinuxEmbeddedSdk
             | ProfileId::DesktopWindowsEmbeddedSdk
             | ProfileId::DesktopWindowsDevFull
             | ProfileId::ServerLinuxMemoryGateway
@@ -19540,6 +19567,7 @@ fn runtime_awareness_profile_label(profile: ProfileId) -> &'static str {
         ProfileId::DesktopMacosStandaloneMemory => "macOS desktop standalone memory",
         ProfileId::DesktopMacosEmbeddedSdk => "macOS desktop SDK memory",
         ProfileId::DesktopMacosDevFull => "macOS development runtime",
+        ProfileId::DesktopLinuxEmbeddedSdk => "Linux desktop SDK memory",
         ProfileId::DesktopWindowsEmbeddedSdk => "Windows desktop SDK memory",
         ProfileId::DesktopWindowsDevFull => "Windows development runtime",
         ProfileId::ServerLinuxMemoryGateway => "server memory gateway",
@@ -20838,8 +20866,46 @@ struct PlanningLongTermTransitionIntent {
     governed_evidence_refs: Vec<bm_core::memory::GovernedOwnerRevisionRef>,
 }
 
+fn validated_planning_actor_subject_id(actor_subject_id: &str) -> Result<String> {
+    let trimmed = actor_subject_id.trim();
+    if trimmed.is_empty() || actor_subject_id != trimmed {
+        return Err(Error::config(
+            "long_term_version_plan",
+            "runtime long-term transition requires an exact scoped actor subject",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validated_planning_transition_actor_subject_id(
+    expected_actor_subject_id: &str,
+    transition_actor_subject_id: Option<&str>,
+) -> Result<String> {
+    let expected = validated_planning_actor_subject_id(expected_actor_subject_id)?;
+    let actual = transition_actor_subject_id
+        .ok_or_else(|| {
+            Error::config(
+                "long_term_version_plan",
+                "runtime long-term transition requires an exact scoped actor subject",
+            )
+        })
+        .and_then(validated_planning_actor_subject_id)?;
+    if actual != expected {
+        return Err(Error::config(
+            "long_term_version_plan",
+            "runtime long-term transition actor differs from the scoped runtime actor",
+        ));
+    }
+    Ok(actual)
+}
+
 impl PlanningLongTermTransitionIntent {
-    fn refresh(before: &LongTermMemoryEntry, after: &LongTermMemoryEntry, reason: &str) -> Self {
+    fn refresh(
+        before: &LongTermMemoryEntry,
+        after: &LongTermMemoryEntry,
+        reason: &str,
+        actor_subject_id: &str,
+    ) -> Self {
         Self {
             revision_id: format!(
                 "refresh:{}:{}",
@@ -20851,19 +20917,19 @@ impl PlanningLongTermTransitionIntent {
             operation: bm_core::memory::LongTermControlOperation::Refresh,
             invalidation_reason_code: None,
             reason: reason.to_string(),
-            actor_subject_id: None,
+            actor_subject_id: Some(actor_subject_id.to_string()),
             created_at: after.updated_at.max(after.observed_at).max(1),
             governed_evidence_refs: Vec::new(),
         }
     }
 
-    fn delete(before: &LongTermMemoryEntry, reason: &str) -> Self {
+    fn delete(before: &LongTermMemoryEntry, reason: &str, actor_subject_id: &str) -> Self {
         Self {
             revision_id: format!("delete:{}:{}", before.id, before.owner_revision),
             operation: bm_core::memory::LongTermControlOperation::Delete,
             invalidation_reason_code: None,
             reason: reason.to_string(),
-            actor_subject_id: None,
+            actor_subject_id: Some(actor_subject_id.to_string()),
             created_at: before.updated_at.max(before.observed_at).saturating_add(1),
             governed_evidence_refs: Vec::new(),
         }
@@ -20950,16 +21016,23 @@ impl PlanningLongTermTransitionIntent {
         )
     }
 
-    fn from_core(intent: &bm_core::memory::LongTermMemoryControlRevisionIntent) -> Self {
-        Self {
+    fn from_core(
+        intent: &bm_core::memory::LongTermMemoryControlRevisionIntent,
+        expected_actor_subject_id: &str,
+    ) -> Result<Self> {
+        let actor_subject_id = validated_planning_transition_actor_subject_id(
+            expected_actor_subject_id,
+            intent.actor_subject_id.as_deref(),
+        )?;
+        Ok(Self {
             revision_id: intent.revision_id.clone(),
             operation: intent.operation,
             invalidation_reason_code: intent.invalidation_reason_code,
             reason: intent.reason.clone(),
-            actor_subject_id: intent.actor_subject_id.clone(),
+            actor_subject_id: Some(actor_subject_id),
             created_at: intent.created_at,
             governed_evidence_refs: intent.governed_evidence_refs.clone(),
-        }
+        })
     }
 }
 
@@ -20984,7 +21057,10 @@ fn checked_next_persisted_revision(current: u64, owner: &'static str) -> Result<
 
 #[cfg(test)]
 mod persisted_revision_tests {
-    use super::checked_next_persisted_revision;
+    use super::{
+        checked_next_persisted_revision, validated_planning_actor_subject_id,
+        validated_planning_transition_actor_subject_id,
+    };
 
     #[test]
     fn persisted_revision_increment_is_checked() {
@@ -21000,26 +21076,66 @@ mod persisted_revision_tests {
             .expect_err("maximum revision must fail closed");
         assert_eq!(error.stage(), "governed_revision_overflow");
     }
+
+    #[test]
+    fn planning_transition_actor_is_required_and_exact() {
+        assert_eq!(
+            validated_planning_actor_subject_id("subject:human").expect("exact actor"),
+            "subject:human"
+        );
+        assert_eq!(
+            validated_planning_transition_actor_subject_id("subject:human", Some("subject:human"),)
+                .expect("matching transition actor"),
+            "subject:human"
+        );
+        for invalid in ["", " ", " subject:human", "subject:human "] {
+            let error = validated_planning_actor_subject_id(invalid)
+                .expect_err("invalid actor must fail before planning");
+            assert_eq!(error.stage(), "long_term_version_plan");
+        }
+        let error = validated_planning_transition_actor_subject_id("subject:human", None)
+            .expect_err("a missing transition actor must fail closed");
+        assert_eq!(error.stage(), "long_term_version_plan");
+        let error = validated_planning_transition_actor_subject_id(
+            "subject:human",
+            Some("subject:other-human"),
+        )
+        .expect_err("a nonempty different actor must fail closed");
+        assert_eq!(error.stage(), "long_term_version_plan");
+    }
 }
 
 struct PlanningLongTermMemoryStore<'a> {
     base: &'a dyn LongTermMemoryReadStore,
+    actor_subject_id: Option<String>,
     changes: Mutex<BTreeMap<String, PlanningLongTermVersionIntent>>,
     read_set: Mutex<BTreeMap<String, Option<LongTermMemoryEntry>>>,
     complete_snapshot_read: Mutex<bool>,
 }
 
 impl<'a> PlanningLongTermMemoryStore<'a> {
-    fn new(base: &'a dyn LongTermMemoryReadStore) -> Self {
-        Self {
+    fn new(base: &'a dyn LongTermMemoryReadStore, actor_subject_id: &str) -> Result<Self> {
+        let actor_subject_id = validated_planning_actor_subject_id(actor_subject_id)?;
+        Ok(Self {
             base,
+            actor_subject_id: Some(actor_subject_id),
             changes: Mutex::new(BTreeMap::new()),
             read_set: Mutex::new(BTreeMap::new()),
             complete_snapshot_read: Mutex::new(false),
-        }
+        })
+    }
+
+    fn actor_subject_id(&self) -> Result<&str> {
+        self.actor_subject_id.as_deref().ok_or_else(|| {
+            Error::config(
+                "long_term_version_plan",
+                "planning long-term mutation has no scoped actor subject",
+            )
+        })
     }
 
     fn stage_entries(&self, entries: &[LongTermMemoryEntry]) -> Result<()> {
+        let actor_subject_id = self.actor_subject_id()?.to_string();
         for entry in entries {
             let id = entry.id.clone();
             let prior = self.planning_prior(&id)?;
@@ -21041,6 +21157,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                             &before,
                             entry,
                             "governed long-term refresh",
+                            &actor_subject_id,
                         ),
                         before,
                         after: Box::new(entry.clone()),
@@ -21058,6 +21175,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                             &before,
                             entry,
                             "governed long-term refresh",
+                            &actor_subject_id,
                         ),
                         before,
                         after: Box::new(entry.clone()),
@@ -22199,6 +22317,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
     }
 
     fn delete(&self, id: &str) -> Result<bool> {
+        let actor_subject_id = self.actor_subject_id()?.to_string();
         let current = LongTermMemoryStore::get(self, id)?;
         let Some(current) = current else {
             return Ok(false);
@@ -22224,6 +22343,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
                         transition: PlanningLongTermTransitionIntent::delete(
                             &before,
                             "governed long-term deletion",
+                            &actor_subject_id,
                         ),
                         before,
                     },
@@ -22237,6 +22357,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
                         transition: PlanningLongTermTransitionIntent::delete(
                             &current,
                             "governed long-term deletion",
+                            &actor_subject_id,
                         ),
                         before: current,
                     },
@@ -22263,6 +22384,7 @@ struct LongTermOwnerPlanningContext<'a> {
     control_base: &'a dyn LongTermMemoryControlReadStore,
     memory_space_id: &'a str,
     mounted_subject_id: &'a str,
+    expected_actor_subject_id: &'a str,
     store_platform: &'a StorePlatform,
     max_retained_revisions_per_owner: usize,
 }
@@ -22277,9 +22399,11 @@ fn plan_owner_writes(
         control_base,
         memory_space_id,
         mounted_subject_id,
+        expected_actor_subject_id,
         store_platform,
         max_retained_revisions_per_owner,
     } = context;
+    let expected_actor_subject_id = validated_planning_actor_subject_id(expected_actor_subject_id)?;
     let mut puts = BTreeMap::new();
     let mut deletes = BTreeSet::new();
     for write in owner_writes {
@@ -22331,7 +22455,8 @@ fn plan_owner_writes(
                 "control predecessor revision differs from the exact typed read view",
             ));
         }
-        let transition = PlanningLongTermTransitionIntent::from_core(&intent);
+        let transition =
+            PlanningLongTermTransitionIntent::from_core(&intent, &expected_actor_subject_id)?;
         let change = match &intent.transition.successor {
             Some(successor_ref) => {
                 let after = puts
@@ -22397,6 +22522,7 @@ fn plan_owner_writes(
     }
     let planning_store = PlanningLongTermMemoryStore {
         base,
+        actor_subject_id: Some(expected_actor_subject_id),
         changes: Mutex::new(changes),
         read_set: Mutex::new(read_set),
         complete_snapshot_read: Mutex::new(false),

@@ -268,7 +268,7 @@ fn host_test_profile() -> ProfileId {
     }
     #[cfg(target_os = "linux")]
     {
-        ProfileId::ServerLinuxMemoryGateway
+        ProfileId::DesktopLinuxEmbeddedSdk
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {

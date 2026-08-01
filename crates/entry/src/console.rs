@@ -1201,6 +1201,7 @@ fn runtime_shape(
             bm_sdk::ProfileId::EspStandaloneMemory => "ESP standalone memory".to_string(),
             bm_sdk::ProfileId::EspEmbeddedSdk => "ESP embedded SDK".to_string(),
             bm_sdk::ProfileId::DesktopMacosEmbeddedSdk => "macOS embedded SDK".to_string(),
+            bm_sdk::ProfileId::DesktopLinuxEmbeddedSdk => "Linux embedded SDK".to_string(),
             bm_sdk::ProfileId::DesktopWindowsEmbeddedSdk => "Windows embedded SDK".to_string(),
             bm_sdk::ProfileId::DesktopMacosDevFull => "macOS development runtime".to_string(),
             bm_sdk::ProfileId::DesktopWindowsDevFull => "Windows development runtime".to_string(),

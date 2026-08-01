@@ -58,12 +58,12 @@ XWIN_CACHE_DIR="$fake_xwin_cache" \
 PATH="$fake_bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
   bash scripts/check_cross_target_compile_gates.sh --strict >"$output"
 
-[[ "$(grep -c '^FAKE_CARGO' "$output")" -eq 25 ]]
-[[ "$(grep -c $'^FAKE_CARGO\t--locked check -p bm-sdk' "$output")" -eq 10 ]]
+[[ "$(grep -c '^FAKE_CARGO' "$output")" -eq 26 ]]
+[[ "$(grep -c $'^FAKE_CARGO\t--locked check -p bm-sdk' "$output")" -eq 11 ]]
 [[ "$(grep -c $'^FAKE_CARGO\t--locked check -p bm-llm-gateway' "$output")" -eq 3 ]]
 [[ "$(grep -c 'xwin check --locked -p bm-sdk' "$output")" -eq 2 ]]
 [[ "$(grep -c 'xwin check --locked -p bm-replay' "$output")" -eq 1 ]]
-[[ "$(grep -c -- '--target x86_64-unknown-linux-gnu' "$output")" -eq 3 ]]
+[[ "$(grep -c -- '--target x86_64-unknown-linux-gnu' "$output")" -eq 4 ]]
 [[ "$(grep -c -- '--target aarch64-unknown-linux-gnu' "$output")" -eq 1 ]]
 [[ "$(grep -c -- '--target xtensa-esp32s3-espidf' "$output")" -eq 2 ]]
 grep -Fx 'OK: strict target platform compile gates passed' "$output" >/dev/null

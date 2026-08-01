@@ -14,6 +14,7 @@ fn governed_state_and_benchmark_profile_participation_totals_are_exact() {
         ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
         ProfileId::DesktopMacosDevFull,
+        ProfileId::DesktopLinuxEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
         ProfileId::DesktopWindowsDevFull,
         ProfileId::ServerLinuxMemoryGateway,
@@ -24,13 +25,13 @@ fn governed_state_and_benchmark_profile_participation_totals_are_exact() {
         resolve_memory_capabilities(profile, &policy, &privacy).expect("profile catalog")
     })
     .collect::<Vec<_>>();
-    assert_eq!(catalogs.len(), 10);
+    assert_eq!(catalogs.len(), 11);
     assert_eq!(
         catalogs
             .iter()
             .filter(|catalog| catalog.governed_state.dynamic_state_recall.profile_allowed)
             .count(),
-        10
+        11
     );
     assert_eq!(
         catalogs
@@ -40,14 +41,14 @@ fn governed_state_and_benchmark_profile_participation_totals_are_exact() {
                 .historical_as_of_recall
                 .profile_allowed)
             .count(),
-        7
+        8
     );
     assert_eq!(
         catalogs
             .iter()
             .filter(|catalog| catalog.governed_state.procedural_recall.profile_allowed)
             .count(),
-        10
+        11
     );
     assert_eq!(
         catalogs
@@ -57,7 +58,7 @@ fn governed_state_and_benchmark_profile_participation_totals_are_exact() {
                 .environment_premise_evaluation
                 .profile_allowed)
             .count(),
-        10
+        11
     );
     assert_eq!(
         catalogs
@@ -67,7 +68,7 @@ fn governed_state_and_benchmark_profile_participation_totals_are_exact() {
                 .update_lineage_inspection
                 .profile_allowed)
             .count(),
-        8
+        9
     );
     assert_eq!(
         catalogs
@@ -91,6 +92,7 @@ fn governed_state_profile_participation_matrix_is_typed_and_not_yet_advertised()
         (ProfileId::DesktopMacosStandaloneMemory, true, true, true),
         (ProfileId::DesktopMacosEmbeddedSdk, true, true, true),
         (ProfileId::DesktopMacosDevFull, true, true, true),
+        (ProfileId::DesktopLinuxEmbeddedSdk, true, true, true),
         (ProfileId::DesktopWindowsEmbeddedSdk, true, true, true),
         (ProfileId::DesktopWindowsDevFull, true, true, true),
         (ProfileId::ServerLinuxMemoryGateway, true, true, true),
@@ -145,7 +147,7 @@ fn governed_state_profile_participation_matrix_is_typed_and_not_yet_advertised()
             RuntimeSkillRecallTransport::Unavailable
         );
     }
-    assert_eq!(historical_allowed_count, 7);
+    assert_eq!(historical_allowed_count, 8);
     assert_eq!(historical_blocked_count, 3);
 }
 
@@ -214,6 +216,7 @@ fn desktop_profiles_allow_safe_transcript_replay_without_debug_replay() {
     for profile in [
         ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopLinuxEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
     ] {
         let catalog =
@@ -237,6 +240,52 @@ fn desktop_profiles_allow_safe_transcript_replay_without_debug_replay() {
 }
 
 #[test]
+fn desktop_embedded_profiles_expose_host_triggered_maintenance_and_transcript_export_only() {
+    let policy = MemoryCapabilityPolicy::strict_profile();
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+
+    for profile in [
+        ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopLinuxEmbeddedSdk,
+        ProfileId::DesktopWindowsEmbeddedSdk,
+    ] {
+        let catalog =
+            resolve_memory_capabilities(profile, &policy, &privacy).expect("desktop catalog");
+        assert!(catalog.maintenance.visible, "{}", profile.as_str());
+        assert!(
+            catalog.lifecycle.maintain_full.visible,
+            "{}",
+            profile.as_str()
+        );
+        assert!(
+            catalog.lifecycle.maintain_lightweight.visible,
+            "{}",
+            profile.as_str()
+        );
+        assert!(catalog.transcript_export.visible, "{}", profile.as_str());
+        assert!(!catalog.export.visible, "{}", profile.as_str());
+        assert!(!catalog.import.visible, "{}", profile.as_str());
+        assert!(
+            !catalog.lifecycle.export_snapshot.visible,
+            "{}",
+            profile.as_str()
+        );
+        assert!(
+            !catalog.lifecycle.import_snapshot.visible,
+            "{}",
+            profile.as_str()
+        );
+    }
+
+    let esp = resolve_memory_capabilities(ProfileId::EspEmbeddedSdk, &policy, &privacy)
+        .expect("esp embedded catalog");
+    assert!(!esp.maintenance.visible);
+    assert!(!esp.lifecycle.maintain_full.visible);
+    assert!(!esp.lifecycle.maintain_lightweight.visible);
+    assert!(!esp.transcript_export.visible);
+}
+
+#[test]
 fn long_term_control_capabilities_follow_profile_and_policy_boundaries() {
     let policy = MemoryCapabilityPolicy::strict_profile();
     let privacy = MemoryPrivacyPolicy::standard_private_boundary();
@@ -244,6 +293,7 @@ fn long_term_control_capabilities_follow_profile_and_policy_boundaries() {
     for profile in [
         ProfileId::DesktopMacosStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopLinuxEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
         ProfileId::ServerLinuxMemoryGateway,
         ProfileId::ServerLinuxDevFull,
@@ -382,6 +432,7 @@ fn llm_gateway_entry_is_limited_to_server_profiles() {
         ProfileId::EspEmbeddedSdk,
         ProfileId::LinuxDeviceStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopLinuxEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
     ] {
         let catalog =
@@ -409,6 +460,7 @@ fn privacy_gate_blocks_projection_and_export_visibility() {
         .expect("dev full catalog");
 
     assert!(!catalog.projection.visible);
+    assert!(!catalog.transcript_export.visible);
     assert!(!catalog.export.visible);
     assert!(!catalog.lifecycle.export_snapshot.visible);
     assert!(catalog.import.visible);

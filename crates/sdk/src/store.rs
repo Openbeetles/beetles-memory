@@ -466,7 +466,7 @@ mod runtime_metric_event_acquisition_tests {
         #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "windows"))]
         return crate::ProfileId::DesktopWindowsEmbeddedSdk;
         #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "linux"))]
-        return crate::ProfileId::ServerLinuxMemoryGateway;
+        return crate::ProfileId::DesktopLinuxEmbeddedSdk;
         #[cfg(all(
             not(feature = "nonproduction-replay-harness"),
             not(any(target_os = "macos", target_os = "windows", target_os = "linux"))

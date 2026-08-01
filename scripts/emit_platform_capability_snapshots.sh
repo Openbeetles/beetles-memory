@@ -36,6 +36,7 @@ profiles=(
   profile-desktop-macos-standalone-memory
   profile-desktop-macos-embedded-sdk
   profile-desktop-macos-dev-full
+  profile-desktop-linux-embedded-sdk
   profile-desktop-windows-embedded-sdk
   profile-desktop-windows-dev-full
   profile-server-linux-memory-gateway

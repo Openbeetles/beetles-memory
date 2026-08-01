@@ -55,6 +55,14 @@ const EXPECTED_ROWS = [
     gateway_check: false,
   },
   {
+    profile: "profile-desktop-linux-embedded-sdk",
+    target: "x86_64-unknown-linux-gnu",
+    package: "bm-sdk",
+    features: ["profile-desktop-linux-embedded-sdk"],
+    replay_all_targets: false,
+    gateway_check: false,
+  },
+  {
     profile: "profile-server-linux-memory-gateway",
     target: "x86_64-unknown-linux-gnu",
     package: "bm-sdk",

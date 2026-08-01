@@ -18,7 +18,7 @@ pub fn native_runtime_profile() -> ProfileId {
     }
     #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "linux"))]
     {
-        ProfileId::ServerLinuxMemoryGateway
+        ProfileId::DesktopLinuxEmbeddedSdk
     }
     #[cfg(all(
         not(feature = "nonproduction-replay-harness"),

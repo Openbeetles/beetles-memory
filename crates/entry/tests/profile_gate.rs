@@ -70,6 +70,7 @@ fn linux_device_and_desktop_embedded_hide_llm_gateway_entry() {
     for profile in [
         ProfileId::LinuxDeviceStandaloneMemory,
         ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopLinuxEmbeddedSdk,
         ProfileId::DesktopWindowsEmbeddedSdk,
     ] {
         let view = entry_capability_view(

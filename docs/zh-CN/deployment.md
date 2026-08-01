@@ -101,6 +101,7 @@ HTTP adapter 在 ingress 固定一份 fresh runtime budget report，并让 heade
 
 ```json
 {
+  "temporal_operation": {"kind": "current"},
   "query": "server entry",
   "limit": 4
 }
@@ -228,6 +229,7 @@ Tool call arguments 示例：
 
 ```json
 {
+  "temporal_operation": {"kind": "current"},
   "query": "gateway",
   "limit": 2
 }
@@ -243,6 +245,7 @@ JSON-RPC call 示例：
   "params": {
     "name": "memory_recall",
     "arguments": {
+      "temporal_operation": {"kind": "current"},
       "query": "gateway",
       "limit": 2
     }
@@ -281,6 +284,7 @@ Message 示例：
 {
   "name": "memory_recall_request",
   "payload": {
+    "temporal_operation": {"kind": "current"},
     "query": "gateway",
     "limit": 2
   }

@@ -101,6 +101,27 @@ fn runtime_lifecycle_admission_respects_mode_pressure_and_private_depth() {
 }
 
 #[test]
+fn linux_desktop_embedded_sdk_uses_bounded_embedded_maintenance() {
+    let admission = RuntimeLifecycleEngine.admit(
+        RuntimeLifecycleOperation::Maintain,
+        RuntimeLifecycleTrigger::PostReply,
+        RuntimeLifecycleModeInput {
+            profile: ProfileId::DesktopLinuxEmbeddedSdk,
+            pressure: PressureLevel::Cautious,
+            post_reply_defer_elapsed_ms: Some(30_000),
+            ..RuntimeLifecycleModeInput::default()
+        },
+    );
+
+    assert_eq!(
+        admission.disposition,
+        RuntimeLifecycleDisposition::ExecuteNow
+    );
+    assert_eq!(admission.reason, "bounded_lightweight_maintenance");
+    assert!(admission.lightweight_allowed);
+}
+
+#[test]
 fn lifecycle_diagnosis_explains_repair_and_safe_actions() {
     let surface = MemoryOperatorSurfaceSummary {
         inspect: MemoryOperatorInspectView {

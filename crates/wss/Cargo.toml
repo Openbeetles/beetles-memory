@@ -20,6 +20,7 @@ profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]
 profile-desktop-macos-standalone-memory = ["bm-adapter/profile-desktop-macos-standalone-memory"]
 profile-desktop-macos-embedded-sdk = ["bm-adapter/profile-desktop-macos-embedded-sdk"]
+profile-desktop-linux-embedded-sdk = ["bm-adapter/profile-desktop-linux-embedded-sdk"]
 profile-desktop-windows-embedded-sdk = ["bm-adapter/profile-desktop-windows-embedded-sdk"]
 profile-server-linux-memory-gateway = ["bm-adapter/profile-server-linux-memory-gateway"]
 profile-server-linux-dev-full = [

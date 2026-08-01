@@ -18,13 +18,14 @@ use bm_core::resource::{
 };
 use bm_core::EvidenceDocumentRuntimeBudget;
 
-const PROFILES: [ProfileId; 10] = [
+const PROFILES: [ProfileId; 11] = [
     ProfileId::EspStandaloneMemory,
     ProfileId::EspEmbeddedSdk,
     ProfileId::LinuxDeviceStandaloneMemory,
     ProfileId::DesktopMacosStandaloneMemory,
     ProfileId::DesktopMacosEmbeddedSdk,
     ProfileId::DesktopMacosDevFull,
+    ProfileId::DesktopLinuxEmbeddedSdk,
     ProfileId::DesktopWindowsEmbeddedSdk,
     ProfileId::DesktopWindowsDevFull,
     ProfileId::ServerLinuxMemoryGateway,

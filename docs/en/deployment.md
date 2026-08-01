@@ -101,6 +101,7 @@ Example recall body:
 
 ```json
 {
+  "temporal_operation": {"kind": "current"},
   "query": "server entry",
   "limit": 4
 }
@@ -228,6 +229,7 @@ Example tool call arguments:
 
 ```json
 {
+  "temporal_operation": {"kind": "current"},
   "query": "gateway",
   "limit": 2
 }
@@ -243,6 +245,7 @@ Example JSON-RPC call:
   "params": {
     "name": "memory_recall",
     "arguments": {
+      "temporal_operation": {"kind": "current"},
       "query": "gateway",
       "limit": 2
     }
@@ -281,6 +284,7 @@ Example message:
 {
   "name": "memory_recall_request",
   "payload": {
+    "temporal_operation": {"kind": "current"},
     "query": "gateway",
     "limit": 2
   }

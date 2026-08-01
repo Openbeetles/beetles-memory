@@ -27,6 +27,10 @@ fn compiled_feature_report_names_target_role_and_profile_features() {
         cfg!(feature = "target-desktop-macos")
     );
     assert_eq!(
+        report.target_desktop_linux,
+        cfg!(feature = "target-desktop-linux")
+    );
+    assert_eq!(
         report.target_desktop_windows,
         cfg!(feature = "target-desktop-windows")
     );
@@ -66,6 +70,10 @@ fn compiled_feature_report_names_target_role_and_profile_features() {
     assert_eq!(
         report.profile_desktop_macos_dev_full,
         cfg!(feature = "profile-desktop-macos-dev-full")
+    );
+    assert_eq!(
+        report.profile_desktop_linux_embedded_sdk,
+        cfg!(feature = "profile-desktop-linux-embedded-sdk")
     );
     assert_eq!(
         report.profile_desktop_windows_embedded_sdk,
@@ -117,6 +125,22 @@ fn dev_full_profile_features_force_the_nonproduction_compile_contract() {
             assert!(report.role_dev_full);
             assert!(report.replay_harness_compiled);
         }
+    }
+}
+
+#[test]
+fn desktop_linux_embedded_profile_feature_owns_target_and_role() {
+    let report = compiled_feature_report();
+
+    assert_eq!(
+        profile_compiled(ProfileId::DesktopLinuxEmbeddedSdk),
+        report.profile_desktop_linux_embedded_sdk
+    );
+    if report.profile_desktop_linux_embedded_sdk {
+        assert!(report.target_desktop_linux);
+        assert!(report.role_embedded_sdk);
+        assert!(!report.role_memory_gateway);
+        assert!(!report.role_dev_full);
     }
 }
 

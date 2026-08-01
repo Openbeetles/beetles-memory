@@ -30,7 +30,7 @@ The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-
 - Inspect runtime state, lifecycle reports, and operator-safe recovery actions.
 - Export and import typed memory-space archives, and replay governed runtime history; continuity snapshots remain internal Soul-recovery payloads.
 - Run through SDK, CLI, HTTP, WebSocket, MCP, or A2A adapter shells without duplicating memory semantics.
-- Compile for ESP, Linux hardware devices, the macOS standalone desktop app, macOS/Windows SDK hosts, and Linux server gateway profiles.
+- Compile for ESP, Linux hardware devices, the macOS standalone desktop app, macOS/Windows/Linux SDK hosts, and Linux server gateway profiles.
 
 ## Console Preview
 
@@ -56,9 +56,9 @@ After publishing, use the crate version instead of a path dependency.
 ```rust
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemoryWriteRequest, PressureLevel, ProfileId,
-    MemoryStoreHandle, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StoreBackendConfig,
+    MemoryRecallTemporalOperation, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
@@ -92,6 +92,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     })?;
 
     let recall = runtime.recall(MemoryRecallRequest {
+        temporal_operation: MemoryRecallTemporalOperation::Current,
         query: "release artifacts".to_string(),
         limit: 4,
         structured_query_facets: Vec::new(),
@@ -103,6 +104,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         .any(|delivery| delivery.selected));
 
     let projection = runtime.project(MemoryProjectionRequest {
+        temporal_operation: MemoryRecallTemporalOperation::Current,
         user_query: "How should this host release?".to_string(),
         system_max_len: 4096,
         recent_messages_limit: 8,
@@ -164,6 +166,7 @@ The documentation index is [docs/README.md](docs/README.md).
 | `profile-desktop-macos-dev-full` | macOS | nonproduction development profile | sqlite, file, or in-memory |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory |
 | `profile-desktop-windows-dev-full` | Windows | nonproduction development profile | sqlite, file, or in-memory |
+| `profile-desktop-linux-embedded-sdk` | Linux desktop | embedded SDK | file, sqlite, or in-memory |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file |
 | `profile-server-linux-dev-full` | Linux server | nonproduction development profile | sqlite, file, or in-memory |
 
@@ -174,6 +177,7 @@ Every `*-dev-full` profile enables the nonproduction replay harness and must mat
 
 ```bash
 cargo run --manifest-path examples/rust-sdk-embedded/Cargo.toml
+cargo run --manifest-path examples/rust-sdk-embedded/Cargo.toml --no-default-features --features desktop-linux
 cargo run --manifest-path examples/server-runtime/Cargo.toml
 cargo run --manifest-path examples/linux-device/Cargo.toml
 cargo run --manifest-path examples/esp-standalone-memory/Cargo.toml

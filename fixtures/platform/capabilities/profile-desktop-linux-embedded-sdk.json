@@ -1,20 +1,20 @@
 {
   "schema": "beetle-memory.platform.capability.v3",
-  "profile": "profile-server-linux-dev-full",
-  "target": "target-server-linux",
-  "role": "role-dev-full",
+  "profile": "profile-desktop-linux-embedded-sdk",
+  "target": "target-desktop-linux",
+  "role": "role-embedded-sdk",
   "compiled": {
     "target_esp": false,
     "target_linux_device": false,
     "target_desktop_macos": false,
-    "target_desktop_linux": false,
+    "target_desktop_linux": true,
     "target_desktop_windows": false,
-    "target_server_linux": true,
+    "target_server_linux": false,
     "role_standalone_memory": false,
-    "role_embedded_sdk": false,
+    "role_embedded_sdk": true,
     "role_memory_gateway": false,
-    "role_dev_full": true,
-    "replay_harness_compiled": true,
+    "role_dev_full": false,
+    "replay_harness_compiled": false,
     "sqlite_index_compiled": true,
     "rusqlite_dependency_compiled": true
   },
@@ -26,32 +26,32 @@
     "inspection": true,
     "transcript_replay": true,
     "transcript_export": true,
-    "replay": true,
-    "export": true,
-    "import": true,
+    "replay": false,
+    "export": false,
+    "import": false,
     "long_term_control_inspect": true,
     "long_term_control_mutation": true,
     "long_term_control_policy": true,
     "long_term_control_bulk_forget": true
   },
   "lifecycle": {
-    "recover": true,
+    "recover": false,
     "maintain_full": true,
     "maintain_lightweight": true,
     "operator_diagnosis": true,
-    "export_snapshot": true,
-    "import_snapshot": true,
-    "replay_inspection": true
+    "export_snapshot": false,
+    "import_snapshot": false,
+    "replay_inspection": false
   },
   "validation": {
-    "compact_replay_fixture": true,
-    "memory_harness": true,
-    "full_replay_suite": true,
-    "benchmark_gate": true,
+    "compact_replay_fixture": false,
+    "memory_harness": false,
+    "full_replay_suite": false,
+    "benchmark_gate": false,
     "proposal_preview": true,
-    "compact_proposal_sandbox": true,
-    "full_proposal_sandbox": true,
-    "proposal_submission": true
+    "compact_proposal_sandbox": false,
+    "full_proposal_sandbox": false,
+    "proposal_submission": false
   },
   "adapter": {
     "cli": {
@@ -70,18 +70,18 @@
       "visible": false,
       "client_allowed": true,
       "server_allowed": true,
-      "private_data_allowed": false
+      "private_data_allowed": true
     },
     "mcp": {
       "visible": false,
-      "client_allowed": false,
+      "client_allowed": true,
       "server_allowed": true,
-      "private_data_allowed": false
+      "private_data_allowed": true
     },
     "a2a": {
       "visible": false,
-      "client_allowed": true,
-      "server_allowed": true,
+      "client_allowed": false,
+      "server_allowed": false,
       "private_data_allowed": false
     }
   },
@@ -102,30 +102,30 @@
       "visible": false,
       "client_allowed": true,
       "server_allowed": false,
-      "private_data_allowed": false
+      "private_data_allowed": true
     },
     "wss_server": {
       "visible": false,
       "client_allowed": false,
       "server_allowed": true,
-      "private_data_allowed": false
+      "private_data_allowed": true
     },
     "mcp_server": {
       "visible": false,
       "client_allowed": false,
       "server_allowed": true,
-      "private_data_allowed": false
+      "private_data_allowed": true
     },
     "a2a_bridge": {
       "visible": false,
       "client_allowed": false,
-      "server_allowed": true,
+      "server_allowed": false,
       "private_data_allowed": false
     },
     "llm_gateway_server": {
       "visible": false,
       "client_allowed": false,
-      "server_allowed": true,
+      "server_allowed": false,
       "private_data_allowed": false
     }
   },

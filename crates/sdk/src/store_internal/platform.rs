@@ -10464,7 +10464,7 @@ mod transaction_error_contract_tests {
         #[cfg(target_os = "windows")]
         return ProfileId::DesktopWindowsEmbeddedSdk;
         #[cfg(target_os = "linux")]
-        return ProfileId::ServerLinuxMemoryGateway;
+        return ProfileId::DesktopLinuxEmbeddedSdk;
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         compile_error!("store preparation tests require a supported host target");
     }

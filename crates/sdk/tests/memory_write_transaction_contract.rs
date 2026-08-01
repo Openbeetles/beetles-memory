@@ -4,9 +4,12 @@ mod support;
 
 use bm_core::memory::{
     canonical_evidence_ref_from_source, governed_memory_recall_candidate_id,
-    memory_facet_manifest_key, scoped_memory_facet_owner_storage_key, CanonicalEntityKey,
-    CanonicalEntityKind, CanonicalEntityRef, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
-    LongTermMemorySlot, MemoryFacetIndexManifest, QueryFacetInput, MEMORY_FACET_POSTING_NAMESPACE,
+    memory_facet_manifest_key, primary_human_subject_id, scoped_memory_facet_owner_storage_key,
+    CanonicalEntityKey, CanonicalEntityKind, CanonicalEntityRef, GovernedMemoryOwnerPlane,
+    GovernedMemoryOwnerRef, LongTermMemoryControlRevision, LongTermMemorySlot,
+    LongTermMemoryTombstone, MemoryFacetIndexManifest, QueryFacetInput,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_core::platform::Platform as _;
 use bm_core::task_execution::{
@@ -1306,6 +1309,89 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
             "memory_facet_postings",
         ],
     );
+}
+
+#[test]
+fn long_term_extraction_delete_binds_the_scoped_human_actor_to_the_tombstone() {
+    let profile = support::host_test_profile();
+    let platform = store_with_transaction_budget(128, 256);
+    let actor_subject_id = primary_human_subject_id("owner-default");
+    let runtime = support::test_runtime_with_delegated_actor(
+        platform.clone(),
+        profile,
+        "agent-owner",
+        &actor_subject_id,
+        "chat-human-delete",
+    );
+
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed human-attributed extraction");
+    let mut refreshed = extraction_draft();
+    refreshed.content = "A refreshed owner must preserve the scoped human actor.".to_string();
+    refreshed.source_revision = Some(2);
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![refreshed],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("refresh with scoped human actor");
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: Vec::new(),
+                deletes: vec![LongTermMemorySlot {
+                    kind: LongTermMemoryKind::Profile,
+                    topic: "transaction_extraction".to_string(),
+                }],
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("delete with scoped human actor");
+
+    let tombstones = platform
+        .replay_harness()
+        .read_json_namespace(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE)
+        .expect("read tombstones");
+    assert_eq!(tombstones.len(), 1);
+    let tombstone = serde_json::from_value::<LongTermMemoryTombstone>(tombstones[0].value.clone())
+        .expect("typed tombstone");
+    assert_eq!(
+        tombstone.actor_subject_id.as_deref(),
+        Some(actor_subject_id.as_str())
+    );
+    assert_eq!(tombstone.owner_subject_id, runtime.subject_id());
+    assert_ne!(tombstone.owner_subject_id, actor_subject_id);
+
+    let revisions = platform
+        .replay_harness()
+        .read_json_namespace(LONG_TERM_CONTROL_REVISION_NAMESPACE)
+        .expect("read transition revisions")
+        .into_iter()
+        .map(|doc| {
+            serde_json::from_value::<LongTermMemoryControlRevision>(doc.value)
+                .expect("typed transition revision")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(revisions.len(), 2);
+    assert!(revisions
+        .iter()
+        .all(|revision| revision.actor_subject_id.as_deref() == Some(actor_subject_id.as_str())));
 }
 
 #[test]

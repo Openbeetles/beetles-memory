@@ -6,5 +6,11 @@ publish = false
 
 [workspace]
 
+[features]
+default = ["desktop-macos"]
+desktop-macos = ["bm-sdk/profile-desktop-macos-embedded-sdk"]
+desktop-windows = ["bm-sdk/profile-desktop-windows-embedded-sdk"]
+desktop-linux = ["bm-sdk/profile-desktop-linux-embedded-sdk"]
+
 [dependencies]
-bm-sdk = { path = "../../crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { path = "../../crates/sdk", default-features = false }

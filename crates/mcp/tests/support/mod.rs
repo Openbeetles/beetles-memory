@@ -11,6 +11,6 @@ pub fn native_runtime_profile() -> ProfileId {
     }
     #[cfg(target_os = "linux")]
     {
-        ProfileId::ServerLinuxMemoryGateway
+        ProfileId::DesktopLinuxEmbeddedSdk
     }
 }

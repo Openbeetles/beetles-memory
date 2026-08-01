@@ -14,6 +14,7 @@ Profiles bind a target platform to a runtime role. They control feature selectio
 | `profile-desktop-macos-dev-full` | macOS | nonproduction development full | sqlite, file, or in-memory | full adapter, LLM gateway, replay, and benchmark validation surfaces |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface |
 | `profile-desktop-windows-dev-full` | Windows | nonproduction development full | sqlite, file, or in-memory | full adapter, LLM gateway, replay, and benchmark validation surfaces |
+| `profile-desktop-linux-embedded-sdk` | Linux desktop | embedded SDK | file, sqlite, or in-memory | in-process SDK plus local entry surface; never a server gateway |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite or file | HTTP, WebSocket, MCP, A2A, and LLM gateway server surfaces are profile-allowed; runtime visibility still depends on capability policy and transport config |
 | `profile-server-linux-dev-full` | Linux server | development full profile | sqlite, file, or in-memory | full adapter, LLM gateway server, and replay validation surfaces are profile-allowed; runtime visibility still depends on capability policy and transport config |
 
@@ -36,6 +37,8 @@ cargo run --locked -p bm-cli --bin bm --no-default-features \
 - ESP profiles may use `embedded` or `in-memory` store backends.
 - ESP profiles reject `file` and `sqlite` store backends.
 - Linux device, desktop, and server profiles can use sqlite when the matching profile/store features are enabled.
+- Desktop embedded SDK profiles expose host-triggered maintenance and transcript export. Snapshot/archive export and import remain hidden, and the SDK does not start a background worker.
+- Desktop embedded SDK profiles own an 8,192-item event-log ceiling. Transcript replay/export remains cursor-paginated; the larger ceiling supports long host sessions without making the log unbounded.
 - Every `*-dev-full` profile compiles the nonproduction replay harness, must match the real host target, and cannot be a production or embedded default.
 - `llm_gateway_server` belongs to the server Linux memory gateway, the macOS standalone-memory profile used by local transparent Ollama, and all three dev-full profiles. ESP, device, and desktop embedded SDK profiles do not expose this entry surface. Gateway startup still evaluates the runtime capability view before binding; catalog permission alone is not sufficient.
 - The profile catalog answers whether a surface is allowed for a profile. Runtime `EntryCapabilityView.visible` is the intersection of profile allowance, enabled capability policy, and `EntryTransportConfig`.

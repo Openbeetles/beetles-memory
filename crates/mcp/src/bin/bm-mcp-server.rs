@@ -388,6 +388,7 @@ fn platform_profiles() -> &'static [bm_sdk::ProfileId] {
         bm_sdk::ProfileId::LinuxDeviceStandaloneMemory,
         bm_sdk::ProfileId::DesktopMacosStandaloneMemory,
         bm_sdk::ProfileId::DesktopMacosEmbeddedSdk,
+        bm_sdk::ProfileId::DesktopLinuxEmbeddedSdk,
         bm_sdk::ProfileId::DesktopWindowsEmbeddedSdk,
         bm_sdk::ProfileId::ServerLinuxMemoryGateway,
         bm_sdk::ProfileId::ServerLinuxDevFull,

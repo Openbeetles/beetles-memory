@@ -1,7 +1,7 @@
 use bm_core::feature_gate::{profile_capability_catalog, ProfileId};
 
 #[test]
-fn historical_as_of_profile_participation_is_exactly_seven_allowed_and_three_blocked() {
+fn historical_as_of_profile_participation_is_exactly_eight_allowed_and_three_blocked() {
     let catalog = profile_capability_catalog();
     let expectations = [
         (ProfileId::EspStandaloneMemory, false),
@@ -9,6 +9,7 @@ fn historical_as_of_profile_participation_is_exactly_seven_allowed_and_three_blo
         (ProfileId::LinuxDeviceStandaloneMemory, false),
         (ProfileId::DesktopMacosStandaloneMemory, true),
         (ProfileId::DesktopMacosEmbeddedSdk, true),
+        (ProfileId::DesktopLinuxEmbeddedSdk, true),
         (ProfileId::DesktopMacosDevFull, true),
         (ProfileId::DesktopWindowsEmbeddedSdk, true),
         (ProfileId::DesktopWindowsDevFull, true),
@@ -33,7 +34,7 @@ fn historical_as_of_profile_participation_is_exactly_seven_allowed_and_three_blo
             .iter()
             .filter(|entry| entry.historical_as_of_recall_allowed)
             .count(),
-        7
+        8
     );
     assert_eq!(
         catalog
@@ -47,14 +48,14 @@ fn historical_as_of_profile_participation_is_exactly_seven_allowed_and_three_blo
 #[test]
 fn procedural_and_premise_participation_cover_all_profiles() {
     let catalog = profile_capability_catalog();
-    assert_eq!(catalog.len(), 10);
+    assert_eq!(catalog.len(), 11);
     assert!(catalog.iter().all(|entry| entry.procedural_recall_allowed));
     assert_eq!(
         catalog
             .iter()
             .filter(|entry| entry.environment_premise_evaluation_allowed)
             .count(),
-        10
+        11
     );
     assert!(catalog
         .iter()

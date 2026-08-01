@@ -39,6 +39,11 @@ profile-desktop-macos-embedded-sdk = [
     "bm-core/sqlite-index",
     "sqlite-store",
 ]
+profile-desktop-linux-embedded-sdk = [
+    "bm-core/profile-desktop-linux-embedded-sdk",
+    "bm-core/sqlite-index",
+    "sqlite-store",
+]
 profile-desktop-windows-embedded-sdk = [
     "bm-core/profile-desktop-windows-embedded-sdk",
     "bm-core/sqlite-index",

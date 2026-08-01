@@ -11,6 +11,7 @@ Choose the profile that matches the deployment target and runtime role:
 | Beetle Memory macOS standalone desktop app | `profile-desktop-macos-standalone-memory` | `ProfileId::DesktopMacosStandaloneMemory` |
 | Rust desktop host on macOS | `profile-desktop-macos-embedded-sdk` | `ProfileId::DesktopMacosEmbeddedSdk` |
 | Rust desktop host on Windows | `profile-desktop-windows-embedded-sdk` | `ProfileId::DesktopWindowsEmbeddedSdk` |
+| Rust desktop host on Linux | `profile-desktop-linux-embedded-sdk` | `ProfileId::DesktopLinuxEmbeddedSdk` |
 | Linux hardware device runtime | `profile-linux-device-standalone-memory` | `ProfileId::LinuxDeviceStandaloneMemory` |
 | Linux server memory gateway | `profile-server-linux-memory-gateway` | `ProfileId::ServerLinuxMemoryGateway` |
 | ESP embedded SDK host | `profile-esp-embedded-sdk` | `ProfileId::EspEmbeddedSdk` |
@@ -32,7 +33,7 @@ After the crates are published:
 bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-Use exactly one profile feature for a build.
+Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
 
 ## 3. Open A Store
 
@@ -112,10 +113,12 @@ Long-term extraction writes should be produced by the extraction pipeline and pa
 
 ```rust
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryRecallRequest, PressureLevel, RuntimeLifecycleModeInput,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation, PressureLevel,
+    RuntimeLifecycleModeInput,
 };
 
 let recall = runtime.recall(MemoryRecallRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     query: "release artifacts".to_string(),
     limit: 4,
     structured_query_facets: Vec::new(),
@@ -123,6 +126,7 @@ let recall = runtime.recall(MemoryRecallRequest {
 })?;
 
 let projection = runtime.project(MemoryProjectionRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
     recent_messages_limit: 8,

@@ -10,7 +10,7 @@ use bm_sdk::{
     LongTermMemoryKind, MemoryArchiveScope, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryEvidenceAuthority, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
     MemorySemanticJudgmentSource, MemorySpaceExportRequest, MemorySpacePrivateMaterialPolicy,
     MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
@@ -26,7 +26,8 @@ use bm_sdk::{
 use serde_json::json;
 
 use support::{
-    empty_store_platform, test_runtime_with_scope_and_subject, StaticHttpClient, StaticLlmClient,
+    empty_store_platform, test_runtime_with_scope_and_subject,
+    test_runtime_with_scope_subject_and_privacy, StaticHttpClient, StaticLlmClient,
 };
 
 fn turn_source() -> MemoryTurnSource {
@@ -177,7 +178,7 @@ fn finalize_turn_commits_conversation_transcript_in_runtime_memory_space() {
 }
 
 #[test]
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn host_desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
     #[cfg(target_os = "macos")]
     let profiles = [
@@ -186,6 +187,8 @@ fn host_desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
     ];
     #[cfg(target_os = "windows")]
     let profiles = [ProfileId::DesktopWindowsEmbeddedSdk];
+    #[cfg(target_os = "linux")]
+    let profiles = [ProfileId::DesktopLinuxEmbeddedSdk];
 
     for profile in profiles {
         let platform = empty_store_platform(profile);
@@ -235,6 +238,51 @@ fn host_desktop_profiles_can_read_host_ui_transcript_without_debug_replay() {
             profile.as_str()
         );
     }
+}
+
+#[test]
+fn desktop_transcript_export_fails_closed_when_privacy_denies_export() {
+    let profile = ProfileId::DesktopMacosEmbeddedSdk;
+    let platform = empty_store_platform(profile);
+    let mut privacy = MemoryPrivacyPolicy::standard_private_boundary();
+    privacy.export_allowed = false;
+    let runtime = test_runtime_with_scope_subject_and_privacy(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+        privacy,
+    );
+
+    runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: finalize_request("privacy-gated export", "transcript remains replayable").turn,
+            host_refs: Vec::new(),
+        })
+        .expect("privacy export denial must not hide transcript commit");
+    runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .expect("privacy export denial must not hide host transcript replay");
+
+    let error = runtime
+        .export_transcript(MemoryTranscriptExportRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            limit: 10,
+            cursor: None,
+        })
+        .expect_err("transcript export must fail closed at the runtime boundary");
+    assert_eq!(error.stage(), "memory_runtime_operation");
+    assert!(error.to_string().contains("export.transcript"));
 }
 
 #[test]

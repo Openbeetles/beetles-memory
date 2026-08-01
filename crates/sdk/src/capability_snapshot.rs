@@ -5,7 +5,7 @@ use crate::{
     MemoryCapabilityCatalog, MemoryOperationVisibility, ProfileId, RuntimeSkillRecallTransport,
 };
 
-pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v2";
+pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v3";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlatformCapabilitySnapshot {
@@ -28,6 +28,7 @@ pub struct PlatformCompiledFeatureSnapshot {
     pub target_esp: bool,
     pub target_linux_device: bool,
     pub target_desktop_macos: bool,
+    pub target_desktop_linux: bool,
     pub target_desktop_windows: bool,
     pub target_server_linux: bool,
     pub role_standalone_memory: bool,
@@ -47,6 +48,7 @@ pub struct PlatformMemoryOperationSnapshot {
     pub maintenance: bool,
     pub inspection: bool,
     pub transcript_replay: bool,
+    pub transcript_export: bool,
     pub replay: bool,
     pub export: bool,
     pub import: bool,
@@ -140,6 +142,7 @@ pub const fn platform_profile_feature_id(profile: ProfileId) -> &'static str {
         ProfileId::DesktopMacosStandaloneMemory => "profile-desktop-macos-standalone-memory",
         ProfileId::DesktopMacosEmbeddedSdk => "profile-desktop-macos-embedded-sdk",
         ProfileId::DesktopMacosDevFull => "profile-desktop-macos-dev-full",
+        ProfileId::DesktopLinuxEmbeddedSdk => "profile-desktop-linux-embedded-sdk",
         ProfileId::DesktopWindowsEmbeddedSdk => "profile-desktop-windows-embedded-sdk",
         ProfileId::DesktopWindowsDevFull => "profile-desktop-windows-dev-full",
         ProfileId::ServerLinuxMemoryGateway => "profile-server-linux-memory-gateway",
@@ -163,6 +166,7 @@ pub fn platform_capability_snapshot(
             target_esp: catalog.compiled.target_esp,
             target_linux_device: catalog.compiled.target_linux_device,
             target_desktop_macos: catalog.compiled.target_desktop_macos,
+            target_desktop_linux: catalog.compiled.target_desktop_linux,
             target_desktop_windows: catalog.compiled.target_desktop_windows,
             target_server_linux: catalog.compiled.target_server_linux,
             role_standalone_memory: catalog.compiled.role_standalone_memory,
@@ -180,6 +184,7 @@ pub fn platform_capability_snapshot(
             maintenance: catalog.maintenance.visible,
             inspection: catalog.inspection.visible,
             transcript_replay: catalog.transcript_replay.visible,
+            transcript_export: catalog.transcript_export.visible,
             replay: catalog.replay.visible,
             export: catalog.export.visible,
             import: catalog.import.visible,

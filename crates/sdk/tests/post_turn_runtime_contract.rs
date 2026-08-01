@@ -4,9 +4,10 @@ mod support;
 
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationScope, MemoryProjectionRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, TranscriptInputMessage,
+    CanonicalTurnDelta, ConversationScope, MemoryProjectionRequest, MemoryTranscriptExportRequest,
+    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
+    MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    TranscriptInputMessage, TranscriptReplayView,
 };
 
 use support::{
@@ -230,7 +231,7 @@ fn finalize_turn_commits_transcript_when_maintenance_services_are_unavailable() 
 }
 
 #[test]
-fn finalize_turn_commits_transcript_when_profile_hides_maintenance() {
+fn desktop_embedded_profile_runs_host_triggered_maintenance() {
     let profile = ProfileId::DesktopMacosEmbeddedSdk;
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
@@ -241,7 +242,7 @@ fn finalize_turn_commits_transcript_when_profile_hides_maintenance() {
         "subject-default",
     );
     let mut http = StaticHttpClient;
-    let llm = StaticLlmClient::summary_response("Summary: should not run");
+    let llm = StaticLlmClient::summary_response("Summary: desktop host-triggered maintenance");
 
     let report = runtime
         .finalize_turn_and_maintain(
@@ -252,7 +253,7 @@ fn finalize_turn_commits_transcript_when_profile_hides_maintenance() {
         .expect("finalize turn");
 
     assert!(report.session_commit.committed);
-    assert!(report.maintenance.is_none());
+    assert!(report.maintenance.is_some());
     assert_eq!(
         platform
             .replay_harness()
@@ -261,10 +262,73 @@ fn finalize_turn_commits_transcript_when_profile_hides_maintenance() {
             .unwrap(),
         2
     );
-    assert_eq!(
-        report.semantic_governance.skipped_reason.as_deref(),
-        Some("maintenance_not_visible")
+    assert!(report.semantic_governance.executed);
+}
+
+#[test]
+fn desktop_embedded_public_lifecycle_keeps_capacity_after_sixty_four_turns() {
+    let profile = ProfileId::DesktopMacosEmbeddedSdk;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
     );
+
+    for index in 0..64 {
+        let report = runtime
+            .finalize_turn_and_maintain(
+                None,
+                None,
+                finalize_request(
+                    &format!("desktop embedded lifecycle turn {index}"),
+                    Some(&format!("desktop embedded reply {index}")),
+                ),
+            )
+            .expect("official desktop embedded lifecycle must retain capacity for 64 turns");
+        assert!(report.session_commit.committed);
+    }
+
+    let replay = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "ollama-window".to_string(),
+            limit: 64,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .expect("64-turn runtime must still admit transcript replay");
+    assert!(!replay.slice.turns.is_empty());
+    assert!(
+        replay.has_more,
+        "desktop profile must keep cursor pagination"
+    );
+
+    let export = runtime
+        .export_transcript(MemoryTranscriptExportRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "ollama-window".to_string(),
+            limit: 64,
+            cursor: None,
+        })
+        .expect("64-turn runtime must retain capacity for transcript export");
+    assert!(!export.slice.turns.is_empty());
+
+    let next = runtime
+        .finalize_turn_and_maintain(
+            None,
+            None,
+            finalize_request(
+                "desktop embedded lifecycle turn 64",
+                Some("next turn remains writable"),
+            ),
+        )
+        .expect("64-turn runtime must retain capacity for the next turn");
+    assert!(next.session_commit.committed);
 }
 
 #[test]

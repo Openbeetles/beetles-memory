@@ -1380,6 +1380,9 @@ const fn target_accepts_source(target: TargetFeature, source: RuntimeResourcePro
             TargetFeature::DesktopMacos,
             RuntimeResourceProbeSource::HostMacos
         ) | (
+            TargetFeature::DesktopLinux,
+            RuntimeResourceProbeSource::HostLinux
+        ) | (
             TargetFeature::DesktopWindows,
             RuntimeResourceProbeSource::HostWindows
         ) | (
@@ -2065,30 +2068,30 @@ const fn profile_budget_ceiling(profile: ProfileId) -> ProfileBudgetCeiling {
             graph_default_recall_multi_hop_allowed: false,
             graph_eval_recall_multi_hop_allowed: false,
         }),
-        ProfileId::DesktopMacosEmbeddedSdk | ProfileId::DesktopWindowsEmbeddedSdk => {
-            profile_budget(ProfileBudgetSpec {
-                memory_floor_bytes: 512 * MB,
-                storage_floor_bytes: 256 * MB,
-                records: 4096,
-                retained_long_term_revisions_per_owner: 8,
-                retained_runtime_skill_owners_per_scope: 128,
-                runtime_skill_lineage_depth: 8,
-                events: 2048,
-                metric_source_max_items: 2,
-                blob_max_bytes: 8 * 1024 * 1024,
-                snapshot_max_bytes: 2 * 1024 * 1024,
-                http_body_max_bytes: 32 * 1024,
-                llm_response_max_bytes: 512 * 1024,
-                source_chars: 2048,
-                render_chars: 4096,
-                maintenance_chars: 2048,
-                runtime_cache_max_runtimes: 16,
-                wss_subscriptions: 8,
-                graph_max_hops: 1,
-                graph_default_recall_multi_hop_allowed: false,
-                graph_eval_recall_multi_hop_allowed: false,
-            })
-        }
+        ProfileId::DesktopMacosEmbeddedSdk
+        | ProfileId::DesktopLinuxEmbeddedSdk
+        | ProfileId::DesktopWindowsEmbeddedSdk => profile_budget(ProfileBudgetSpec {
+            memory_floor_bytes: 512 * MB,
+            storage_floor_bytes: 256 * MB,
+            records: 4096,
+            retained_long_term_revisions_per_owner: 8,
+            retained_runtime_skill_owners_per_scope: 128,
+            runtime_skill_lineage_depth: 8,
+            events: 8192,
+            metric_source_max_items: 2,
+            blob_max_bytes: 8 * 1024 * 1024,
+            snapshot_max_bytes: 2 * 1024 * 1024,
+            http_body_max_bytes: 32 * 1024,
+            llm_response_max_bytes: 512 * 1024,
+            source_chars: 2048,
+            render_chars: 4096,
+            maintenance_chars: 2048,
+            runtime_cache_max_runtimes: 16,
+            wss_subscriptions: 8,
+            graph_max_hops: 1,
+            graph_default_recall_multi_hop_allowed: false,
+            graph_eval_recall_multi_hop_allowed: false,
+        }),
         ProfileId::DesktopMacosStandaloneMemory => profile_budget(ProfileBudgetSpec {
             memory_floor_bytes: 1024 * MB,
             storage_floor_bytes: 512 * MB,
@@ -2470,7 +2473,7 @@ mod tests {
     }
 
     #[test]
-    fn ten_profiles_have_distinct_budget_reports() {
+    fn eleven_profiles_have_distinct_budget_reports() {
         let profiles = [
             ProfileId::EspStandaloneMemory,
             ProfileId::EspEmbeddedSdk,
@@ -2478,6 +2481,7 @@ mod tests {
             ProfileId::DesktopMacosStandaloneMemory,
             ProfileId::DesktopMacosEmbeddedSdk,
             ProfileId::DesktopMacosDevFull,
+            ProfileId::DesktopLinuxEmbeddedSdk,
             ProfileId::DesktopWindowsEmbeddedSdk,
             ProfileId::DesktopWindowsDevFull,
             ProfileId::ServerLinuxMemoryGateway,
@@ -2497,12 +2501,28 @@ mod tests {
     }
 
     #[test]
+    fn desktop_embedded_sdks_share_an_exact_8192_event_ceiling() {
+        for profile in [
+            ProfileId::DesktopMacosEmbeddedSdk,
+            ProfileId::DesktopLinuxEmbeddedSdk,
+            ProfileId::DesktopWindowsEmbeddedSdk,
+        ] {
+            let report = compile_runtime_budget(full_resource_compiler_fixture(profile));
+            assert_eq!(report.store_budget.event_log_max_items, 8192, "{profile:?}");
+        }
+
+        let esp = compile_runtime_budget(full_resource_compiler_fixture(ProfileId::EspEmbeddedSdk));
+        assert_eq!(esp.store_budget.event_log_max_items, 256);
+    }
+
+    #[test]
     fn metric_source_count_is_explicitly_owned_by_each_profile_budget() {
         for (profile, expected) in [
             (ProfileId::EspEmbeddedSdk, 1),
             (ProfileId::EspStandaloneMemory, 1),
             (ProfileId::LinuxDeviceStandaloneMemory, 2),
             (ProfileId::DesktopMacosEmbeddedSdk, 2),
+            (ProfileId::DesktopLinuxEmbeddedSdk, 2),
             (ProfileId::DesktopWindowsEmbeddedSdk, 2),
             (ProfileId::DesktopMacosStandaloneMemory, 2),
             (ProfileId::ServerLinuxMemoryGateway, 2),
@@ -2528,6 +2548,7 @@ mod tests {
             (ProfileId::LinuxDeviceStandaloneMemory, 8),
             (ProfileId::DesktopMacosStandaloneMemory, 16),
             (ProfileId::DesktopMacosEmbeddedSdk, 8),
+            (ProfileId::DesktopLinuxEmbeddedSdk, 8),
             (ProfileId::DesktopMacosDevFull, 32),
             (ProfileId::DesktopWindowsEmbeddedSdk, 8),
             (ProfileId::DesktopWindowsDevFull, 32),
@@ -2557,6 +2578,7 @@ mod tests {
             (ProfileId::LinuxDeviceStandaloneMemory, 256, 8),
             (ProfileId::DesktopMacosStandaloneMemory, 512, 16),
             (ProfileId::DesktopMacosEmbeddedSdk, 128, 8),
+            (ProfileId::DesktopLinuxEmbeddedSdk, 128, 8),
             (ProfileId::DesktopMacosDevFull, 2048, 32),
             (ProfileId::DesktopWindowsEmbeddedSdk, 128, 8),
             (ProfileId::DesktopWindowsDevFull, 2048, 32),
@@ -2614,6 +2636,10 @@ mod tests {
                 (312, 16, 32, 2048, 32, 156, 312, 64, 16, 32, 8),
             ),
             (
+                ProfileId::DesktopLinuxEmbeddedSdk,
+                (16, 16, 8, 128, 8, 8, 16, 8, 2, 4, 8),
+            ),
+            (
                 ProfileId::DesktopWindowsEmbeddedSdk,
                 (16, 16, 8, 128, 8, 8, 16, 8, 2, 4, 8),
             ),
@@ -2658,6 +2684,7 @@ mod tests {
             ProfileId::DesktopMacosStandaloneMemory,
             ProfileId::DesktopMacosEmbeddedSdk,
             ProfileId::DesktopMacosDevFull,
+            ProfileId::DesktopLinuxEmbeddedSdk,
             ProfileId::DesktopWindowsEmbeddedSdk,
             ProfileId::DesktopWindowsDevFull,
             ProfileId::ServerLinuxMemoryGateway,

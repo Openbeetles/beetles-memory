@@ -18,6 +18,7 @@ thread_panic_catch = []
 target-esp = []
 target-linux-device = []
 target-desktop-macos = []
+target-desktop-linux = []
 target-desktop-windows = []
 target-server-linux = []
 role-standalone-memory = []
@@ -34,6 +35,7 @@ profile-desktop-macos-dev-full = [
     "role-dev-full",
     "nonproduction-replay-harness",
 ]
+profile-desktop-linux-embedded-sdk = ["target-desktop-linux", "role-embedded-sdk"]
 profile-desktop-windows-embedded-sdk = ["target-desktop-windows", "role-embedded-sdk"]
 profile-desktop-windows-dev-full = [
     "target-desktop-windows",

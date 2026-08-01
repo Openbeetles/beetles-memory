@@ -18,6 +18,8 @@ bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"
 bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
+宿主必须按操作系统只选择一个 desktop embedded feature：`profile-desktop-macos-embedded-sdk`、`profile-desktop-windows-embedded-sdk` 或 `profile-desktop-linux-embedded-sdk`。Linux 桌面宿主禁止借用 server 或 dev-full profile。
+
 ## 构建 Runtime
 
 ```rust
@@ -27,6 +29,7 @@ use bm_sdk::{
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
+    // Windows 或 Linux 桌面宿主分别使用对应的 EmbeddedSdk ProfileId。
     let profile = ProfileId::DesktopMacosEmbeddedSdk;
     let store = MemoryStoreHandle::open(StoreBackendConfig::in_memory(profile)?)?;
 
@@ -50,8 +53,9 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
 
 ```rust
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation,
+    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
 };
 
 let runtime = build_runtime()?;
@@ -72,6 +76,7 @@ let write = runtime.write(MemoryWriteRequest::Procedural {
 assert!(write.accepted);
 
 let recall = runtime.recall(MemoryRecallRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     query: "release artifacts".to_string(),
     limit: 4,
     structured_query_facets: Vec::new(),
@@ -83,6 +88,7 @@ assert!(recall
     .any(|delivery| delivery.selected));
 
 let projection = runtime.project(MemoryProjectionRequest {
+    temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
     recent_messages_limit: 8,

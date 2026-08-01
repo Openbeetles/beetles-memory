@@ -225,6 +225,15 @@ impl StorePathBudget {
         }
     }
 
+    pub const fn desktop_linux() -> Self {
+        Self {
+            max_file_name_bytes: 128,
+            max_directory_name_bytes: 128,
+            max_relative_path_bytes: 1024,
+            physical_key_digest_hex_chars: 24,
+        }
+    }
+
     pub const fn desktop_windows() -> Self {
         Self {
             max_file_name_bytes: 64,
@@ -549,6 +558,7 @@ pub const fn profile_memory_system_kind(profile: ProfileId) -> MemorySystemKind 
     match profile {
         ProfileId::EspEmbeddedSdk
         | ProfileId::DesktopMacosEmbeddedSdk
+        | ProfileId::DesktopLinuxEmbeddedSdk
         | ProfileId::DesktopWindowsEmbeddedSdk => MemorySystemKind::SdkEmbedded,
         ProfileId::EspStandaloneMemory
         | ProfileId::LinuxDeviceStandaloneMemory
@@ -576,6 +586,7 @@ pub const fn default_path_budget(profile: ProfileId) -> StorePathBudget {
         ProfileId::DesktopMacosStandaloneMemory
         | ProfileId::DesktopMacosEmbeddedSdk
         | ProfileId::DesktopMacosDevFull => StorePathBudget::desktop_macos(),
+        ProfileId::DesktopLinuxEmbeddedSdk => StorePathBudget::desktop_linux(),
         ProfileId::DesktopWindowsEmbeddedSdk | ProfileId::DesktopWindowsDevFull => {
             StorePathBudget::desktop_windows()
         }

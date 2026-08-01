@@ -14,6 +14,7 @@ Profile 把目标平台和运行角色绑定在一起。它控制 feature select
 | `profile-desktop-macos-dev-full` | macOS | nonproduction development full | sqlite、file 或 in-memory | 完整 adapter、LLM gateway、replay 与 benchmark validation surface |
 | `profile-desktop-windows-embedded-sdk` | Windows | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface |
 | `profile-desktop-windows-dev-full` | Windows | nonproduction development full | sqlite、file 或 in-memory | 完整 adapter、LLM gateway、replay 与 benchmark validation surface |
+| `profile-desktop-linux-embedded-sdk` | Linux 桌面 | embedded SDK | file、sqlite 或 in-memory | in-process SDK 加本地 entry surface；绝不等同 server gateway |
 | `profile-server-linux-memory-gateway` | Linux server | memory gateway | sqlite 或 file | 允许 HTTP、WebSocket、MCP、A2A 与 LLM gateway server surface；运行时 visible 仍取决于 capability policy 和 transport config |
 | `profile-server-linux-dev-full` | Linux server | development full profile | sqlite、file 或 in-memory | 允许完整 adapter、LLM gateway server 和 replay validation surface；运行时 visible 仍取决于 capability policy 和 transport config |
 
@@ -36,6 +37,8 @@ cargo run --locked -p bm-cli --bin bm --no-default-features \
 - ESP profile 可以使用 `embedded` 或 `in-memory` store backend。
 - ESP profile 会拒绝 `file` 和 `sqlite` store backend。
 - Linux device、desktop 和 server profile 在启用对应 profile/store feature 后可以使用 sqlite。
+- Desktop embedded SDK profile 对宿主开放 host-triggered maintenance 与 transcript export；snapshot/archive export 和 import 继续隐藏，SDK 不会自行启动后台 worker。
+- Desktop embedded SDK profile 的 event log 上限为 8,192 项。Transcript replay/export 仍按 cursor 分页；提高上限是为了支撑长会话，不会把日志改成无界存储。
 - 所有 `*-dev-full` 都会编译 nonproduction replay harness，只能匹配当前真实 host target，不能成为生产或嵌入式默认 profile。
 - `llm_gateway_server` 属于 server Linux memory gateway、承载本机透明 Ollama 的 macOS standalone-memory profile 与三种 dev-full profile。ESP、device 与 desktop embedded SDK profile 不暴露这个 entry surface。Gateway 启动绑定前仍必须执行 runtime capability view；仅有 catalog 许可不构成启动授权。
 - Profile catalog 表达某个 surface 是否被该 profile 允许。运行时 `EntryCapabilityView.visible` 是 profile allowed、enabled capability policy 和 `EntryTransportConfig` 三者共同生效后的结果。

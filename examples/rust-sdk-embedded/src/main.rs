@@ -10,7 +10,7 @@ use bm_sdk::{
 use bm_sdk::{MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment};
 
 fn main() -> bm_sdk::Result<()> {
-    let profile = ProfileId::DesktopMacosEmbeddedSdk;
+    let profile = desktop_profile();
     let runtime = build_runtime(MemoryStoreHandle::open(StoreBackendConfig::in_memory(
         profile,
     )?)?)?;
@@ -18,6 +18,35 @@ fn main() -> bm_sdk::Result<()> {
     println!("rust-sdk-embedded host lifecycle smoke passed");
     Ok(())
 }
+
+#[cfg(any(
+    all(feature = "desktop-macos", feature = "desktop-windows"),
+    all(feature = "desktop-macos", feature = "desktop-linux"),
+    all(feature = "desktop-windows", feature = "desktop-linux")
+))]
+compile_error!("select exactly one rust-sdk-embedded desktop feature");
+
+#[cfg(feature = "desktop-macos")]
+fn desktop_profile() -> ProfileId {
+    ProfileId::DesktopMacosEmbeddedSdk
+}
+
+#[cfg(feature = "desktop-windows")]
+fn desktop_profile() -> ProfileId {
+    ProfileId::DesktopWindowsEmbeddedSdk
+}
+
+#[cfg(feature = "desktop-linux")]
+fn desktop_profile() -> ProfileId {
+    ProfileId::DesktopLinuxEmbeddedSdk
+}
+
+#[cfg(not(any(
+    feature = "desktop-macos",
+    feature = "desktop-windows",
+    feature = "desktop-linux"
+)))]
+compile_error!("select one of desktop-macos, desktop-windows, or desktop-linux");
 
 fn build_runtime(store: MemoryStoreHandle) -> bm_sdk::Result<MemoryRuntime> {
     MemoryRuntime::builder()
@@ -106,7 +135,7 @@ fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     assert!(inspect.capabilities.inspection.visible);
 
     let projection = runtime.project(MemoryProjectionRequest {
-            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+        temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
         user_query: "How should this host release?".to_string(),
         system_max_len: 4096,
         recent_messages_limit: 8,

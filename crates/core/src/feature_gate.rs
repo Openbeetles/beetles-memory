@@ -5,13 +5,18 @@ use serde::{Deserialize, Serialize};
 #[cfg(any(
     all(feature = "target-esp", feature = "target-linux-device"),
     all(feature = "target-esp", feature = "target-desktop-macos"),
+    all(feature = "target-esp", feature = "target-desktop-linux"),
     all(feature = "target-esp", feature = "target-desktop-windows"),
     all(feature = "target-esp", feature = "target-server-linux"),
     all(feature = "target-linux-device", feature = "target-desktop-macos"),
+    all(feature = "target-linux-device", feature = "target-desktop-linux"),
     all(feature = "target-linux-device", feature = "target-desktop-windows"),
     all(feature = "target-linux-device", feature = "target-server-linux"),
+    all(feature = "target-desktop-macos", feature = "target-desktop-linux"),
     all(feature = "target-desktop-macos", feature = "target-desktop-windows"),
     all(feature = "target-desktop-macos", feature = "target-server-linux"),
+    all(feature = "target-desktop-linux", feature = "target-desktop-windows"),
+    all(feature = "target-desktop-linux", feature = "target-server-linux"),
     all(feature = "target-desktop-windows", feature = "target-server-linux")
 ))]
 compile_error!("Beetle Memory feature contract requires at most one target-* feature per build.");
@@ -47,6 +52,8 @@ pub enum TargetFeature {
     LinuxDevice,
     #[serde(rename = "target-desktop-macos")]
     DesktopMacos,
+    #[serde(rename = "target-desktop-linux")]
+    DesktopLinux,
     #[serde(rename = "target-desktop-windows")]
     DesktopWindows,
     #[serde(rename = "target-server-linux")]
@@ -59,6 +66,7 @@ impl TargetFeature {
             Self::Esp => "target-esp",
             Self::LinuxDevice => "target-linux-device",
             Self::DesktopMacos => "target-desktop-macos",
+            Self::DesktopLinux => "target-desktop-linux",
             Self::DesktopWindows => "target-desktop-windows",
             Self::ServerLinux => "target-server-linux",
         }
@@ -102,6 +110,8 @@ pub enum ProfileId {
     DesktopMacosEmbeddedSdk,
     #[serde(rename = "target-desktop-macos+role-dev-full")]
     DesktopMacosDevFull,
+    #[serde(rename = "target-desktop-linux+role-embedded-sdk")]
+    DesktopLinuxEmbeddedSdk,
     #[serde(rename = "target-desktop-windows+role-embedded-sdk")]
     DesktopWindowsEmbeddedSdk,
     #[serde(rename = "target-desktop-windows+role-dev-full")]
@@ -121,6 +131,7 @@ impl ProfileId {
             Self::DesktopMacosStandaloneMemory => "target-desktop-macos+role-standalone-memory",
             Self::DesktopMacosEmbeddedSdk => "target-desktop-macos+role-embedded-sdk",
             Self::DesktopMacosDevFull => "target-desktop-macos+role-dev-full",
+            Self::DesktopLinuxEmbeddedSdk => "target-desktop-linux+role-embedded-sdk",
             Self::DesktopWindowsEmbeddedSdk => "target-desktop-windows+role-embedded-sdk",
             Self::DesktopWindowsDevFull => "target-desktop-windows+role-dev-full",
             Self::ServerLinuxMemoryGateway => "target-server-linux+role-memory-gateway",
@@ -135,6 +146,7 @@ impl ProfileId {
             Self::DesktopMacosStandaloneMemory
             | Self::DesktopMacosEmbeddedSdk
             | Self::DesktopMacosDevFull => TargetFeature::DesktopMacos,
+            Self::DesktopLinuxEmbeddedSdk => TargetFeature::DesktopLinux,
             Self::DesktopWindowsEmbeddedSdk | Self::DesktopWindowsDevFull => {
                 TargetFeature::DesktopWindows
             }
@@ -149,6 +161,7 @@ impl ProfileId {
             | Self::DesktopMacosStandaloneMemory => RoleFeature::StandaloneMemory,
             Self::EspEmbeddedSdk
             | Self::DesktopMacosEmbeddedSdk
+            | Self::DesktopLinuxEmbeddedSdk
             | Self::DesktopWindowsEmbeddedSdk => RoleFeature::EmbeddedSdk,
             Self::ServerLinuxMemoryGateway => RoleFeature::MemoryGateway,
             Self::DesktopMacosDevFull | Self::DesktopWindowsDevFull | Self::ServerLinuxDevFull => {
@@ -269,6 +282,7 @@ pub struct CompiledFeatureReport {
     pub target_esp: bool,
     pub target_linux_device: bool,
     pub target_desktop_macos: bool,
+    pub target_desktop_linux: bool,
     pub target_desktop_windows: bool,
     pub target_server_linux: bool,
     pub role_standalone_memory: bool,
@@ -281,6 +295,7 @@ pub struct CompiledFeatureReport {
     pub profile_desktop_macos_standalone_memory: bool,
     pub profile_desktop_macos_embedded_sdk: bool,
     pub profile_desktop_macos_dev_full: bool,
+    pub profile_desktop_linux_embedded_sdk: bool,
     pub profile_desktop_windows_embedded_sdk: bool,
     pub profile_desktop_windows_dev_full: bool,
     pub profile_server_linux_memory_gateway: bool,
@@ -299,6 +314,7 @@ impl CompiledFeatureReport {
             ProfileId::DesktopMacosStandaloneMemory => self.profile_desktop_macos_standalone_memory,
             ProfileId::DesktopMacosEmbeddedSdk => self.profile_desktop_macos_embedded_sdk,
             ProfileId::DesktopMacosDevFull => self.profile_desktop_macos_dev_full,
+            ProfileId::DesktopLinuxEmbeddedSdk => self.profile_desktop_linux_embedded_sdk,
             ProfileId::DesktopWindowsEmbeddedSdk => self.profile_desktop_windows_embedded_sdk,
             ProfileId::DesktopWindowsDevFull => self.profile_desktop_windows_dev_full,
             ProfileId::ServerLinuxMemoryGateway => self.profile_server_linux_memory_gateway,
@@ -312,6 +328,7 @@ pub const fn compiled_feature_report() -> CompiledFeatureReport {
         target_esp: cfg!(feature = "target-esp"),
         target_linux_device: cfg!(feature = "target-linux-device"),
         target_desktop_macos: cfg!(feature = "target-desktop-macos"),
+        target_desktop_linux: cfg!(feature = "target-desktop-linux"),
         target_desktop_windows: cfg!(feature = "target-desktop-windows"),
         target_server_linux: cfg!(feature = "target-server-linux"),
         role_standalone_memory: cfg!(feature = "role-standalone-memory"),
@@ -328,6 +345,7 @@ pub const fn compiled_feature_report() -> CompiledFeatureReport {
         ),
         profile_desktop_macos_embedded_sdk: cfg!(feature = "profile-desktop-macos-embedded-sdk"),
         profile_desktop_macos_dev_full: cfg!(feature = "profile-desktop-macos-dev-full"),
+        profile_desktop_linux_embedded_sdk: cfg!(feature = "profile-desktop-linux-embedded-sdk"),
         profile_desktop_windows_embedded_sdk: cfg!(
             feature = "profile-desktop-windows-embedded-sdk"
         ),
@@ -352,7 +370,7 @@ pub const fn profile_capability_catalog() -> &'static [ProfileCapabilityCatalogE
     &PROFILE_CAPABILITY_CATALOG
 }
 
-const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 10] = [
+const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::EspStandaloneMemory,
         target: TargetFeature::Esp,
@@ -489,6 +507,33 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 10] = [
         },
     },
     dev_full_catalog_entry(ProfileId::DesktopMacosDevFull, TargetFeature::DesktopMacos),
+    ProfileCapabilityCatalogEntry {
+        profile: ProfileId::DesktopLinuxEmbeddedSdk,
+        target: TargetFeature::DesktopLinux,
+        role: RoleFeature::EmbeddedSdk,
+        sqlite_index_allowed: true,
+        lexical_archive_recall: true,
+        compact_runtime_skill_recall_allowed: false,
+        dynamic_state_recall_allowed: true,
+        historical_as_of_recall_allowed: true,
+        procedural_recall_allowed: true,
+        environment_premise_evaluation_allowed: true,
+        update_lineage_inspection_allowed: true,
+        heuristic_task_learning_recall: true,
+        indexed_archive_recall_allowed: true,
+        indexed_continuity_capsule_recall_allowed: true,
+        indexed_runtime_skill_recall_allowed: true,
+        indexed_task_learning_recall_allowed: true,
+        communication_adapter_allowed: true,
+        llm_gateway_server_allowed: false,
+        adapter: ProfileAdapterCapabilityCatalog {
+            cli: ProfileAdapterTransportCapability::local(true),
+            http: ProfileAdapterTransportCapability::server(true),
+            wss: ProfileAdapterTransportCapability::bidirectional(true),
+            mcp: ProfileAdapterTransportCapability::bidirectional(true),
+            a2a: ProfileAdapterTransportCapability::forbidden(),
+        },
+    },
     ProfileCapabilityCatalogEntry {
         profile: ProfileId::DesktopWindowsEmbeddedSdk,
         target: TargetFeature::DesktopWindows,

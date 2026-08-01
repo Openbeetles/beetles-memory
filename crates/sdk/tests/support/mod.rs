@@ -38,7 +38,7 @@ pub fn host_test_profile() -> ProfileId {
     }
     #[cfg(all(not(feature = "nonproduction-replay-harness"), target_os = "linux"))]
     {
-        ProfileId::ServerLinuxMemoryGateway
+        ProfileId::DesktopLinuxEmbeddedSdk
     }
     #[cfg(all(
         not(feature = "nonproduction-replay-harness"),
@@ -188,6 +188,27 @@ pub fn test_runtime_with_scope_and_subject(
         channel,
         chat_id,
     )
+}
+
+pub fn test_runtime_with_scope_subject_and_privacy(
+    platform: MemoryStoreHandle,
+    _profile: ProfileId,
+    channel: &str,
+    chat_id: &str,
+    subject_id: &str,
+    privacy_policy: MemoryPrivacyPolicy,
+) -> MemoryRuntime {
+    MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .subject_id(subject_id)
+        .scope(MemoryScope::new(channel, chat_id).expect("scope"))
+        .store(platform)
+        .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(privacy_policy)
+        .audit_sink(Arc::new(NoopMemoryAuditSink))
+        .build()
+        .expect("runtime")
 }
 
 pub fn test_runtime_with_identity_scope_and_subject(

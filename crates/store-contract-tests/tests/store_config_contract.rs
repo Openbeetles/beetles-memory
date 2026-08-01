@@ -61,6 +61,17 @@ fn desktop_and_server_profiles_accept_file_and_sqlite_backends() {
     assert_eq!(file.schema_id(), STORE_SCHEMA_ID);
     assert_eq!(file.repair_policy(), StoreRepairPolicy::ReportOnly);
 
+    let linux_desktop = StoreBackendConfig::sqlite(
+        temp_root("desktop-linux-sqlite").join("memory.sqlite3"),
+        ProfileId::DesktopLinuxEmbeddedSdk,
+    )
+    .expect("Linux desktop embedded profile should accept sqlite store");
+    assert_eq!(linux_desktop.backend(), StoreBackendKind::Sqlite);
+    assert_eq!(
+        linux_desktop.memory_system_kind(),
+        MemorySystemKind::SdkEmbedded
+    );
+
     let sqlite = StoreBackendConfig::sqlite(
         temp_root("server-sqlite").join("memory.sqlite3"),
         ProfileId::ServerLinuxMemoryGateway,
@@ -84,12 +95,19 @@ fn path_budget_is_profile_specific_and_shorter_for_embedded_profiles() {
         ProfileId::ServerLinuxDevFull,
     )
     .expect("server profile should accept sqlite store");
+    let linux_desktop = StoreBackendConfig::file(
+        temp_root("desktop-linux-path-budget"),
+        ProfileId::DesktopLinuxEmbeddedSdk,
+    )
+    .expect("Linux desktop embedded profile should accept file store");
 
     assert!(esp.path_budget().max_file_name_bytes < desktop.path_budget().max_file_name_bytes);
     assert!(desktop.path_budget().max_file_name_bytes < server.path_budget().max_file_name_bytes);
     assert!(
         esp.path_budget().max_relative_path_bytes < desktop.path_budget().max_relative_path_bytes
     );
+    assert_eq!(linux_desktop.path_budget().max_relative_path_bytes, 1024);
+    assert_eq!(linux_desktop.path_budget().max_file_name_bytes, 128);
 }
 
 #[test]

@@ -114,6 +114,7 @@
         feature = "profile-linux-device-standalone-memory",
         feature = "profile-desktop-macos-standalone-memory",
         feature = "profile-desktop-macos-embedded-sdk",
+        feature = "profile-desktop-linux-embedded-sdk",
         feature = "profile-desktop-windows-embedded-sdk",
         feature = "profile-server-linux-memory-gateway"
     )
