@@ -2120,9 +2120,16 @@ pub fn get_long_term_memory_control_detail(
     control_store: &dyn LongTermMemoryControlReadStore,
     request: LongTermMemoryControlDetailRequest,
 ) -> Result<MemoryLongTermDetailReport> {
+    let requested_record_id = match &request.target {
+        MemoryLongTermTarget::RecordId(record_id) => Some(record_id.clone()),
+        _ => None,
+    };
     let resolved = resolve_target(store, control_store, &request.target, false)?;
     let raw_record = resolved.records.first().cloned();
-    let record_id = raw_record.as_ref().map(|entry| entry.id.clone());
+    let record_id = raw_record
+        .as_ref()
+        .map(|entry| entry.id.clone())
+        .or(requested_record_id);
     let revisions = match record_id.as_deref() {
         Some(record_id) => control_store.list_long_term_control_revisions(record_id, 64)?,
         None => Vec::new(),

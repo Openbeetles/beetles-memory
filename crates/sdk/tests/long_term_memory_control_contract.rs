@@ -308,8 +308,16 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
         })
         .expect("deleted detail");
     assert!(deleted_detail.record.is_none());
-    assert!(deleted_detail.revisions.is_empty());
-    assert!(deleted_detail.tombstone.is_none());
+    assert!(!deleted_detail.revisions.is_empty());
+    let deleted_tombstone = deleted_detail
+        .tombstone
+        .as_ref()
+        .expect("public detail keeps the scoped typed tombstone");
+    assert_eq!(deleted_tombstone.record_id, record_id);
+    assert_eq!(
+        deleted_tombstone.actor_subject_id.as_deref(),
+        Some(runtime.scoped_runtime().actor_subject_id.as_str())
+    );
     assert!(deleted_detail.transcript_refs.is_empty());
 
     let control_store = runtime
