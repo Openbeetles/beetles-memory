@@ -68,16 +68,16 @@
   let workbenchLoading = $state(false);
   let consoleLoadSeq = 0;
 
-  let overviewData: ConsoleApiOverview | null = $state(null);
-  let consoleCapabilities: ConsoleApiCapabilities | null = $state(null);
-  let llmGateway: ConsoleApiLlmGateway | null = $state(null);
-  let workbenchReport: ConsoleApiWorkbenchReport | null = $state(null);
-  let ollamaTransparent: ConsoleApiOllamaTransparentStatus | null = $state(null);
-  let sessionData: ConsoleApiSession | null = $state(null);
+  let overviewData = $state<ConsoleApiOverview | null>(null);
+  let consoleCapabilities = $state<ConsoleApiCapabilities | null>(null);
+  let llmGateway = $state<ConsoleApiLlmGateway | null>(null);
+  let workbenchReport = $state<ConsoleApiWorkbenchReport | null>(null);
+  let ollamaTransparent = $state<ConsoleApiOllamaTransparentStatus | null>(null);
+  let sessionData = $state<ConsoleApiSession | null>(null);
   let transports: Transport[] = $state([]);
   let devices: Device[] = $state([]);
 
-  let skillReport: ConsoleApiSkillList | null = $state(null);
+  let skillReport = $state<ConsoleApiSkillList | null>(null);
   let skills: ConsoleApiSkillSummary[] = $state([]);
 
   let addDeviceOpen = $state(false);
@@ -106,6 +106,7 @@
   const kernelRows = $derived(localizedKernelRows(overviewData?.kernel, t.kernel.rows, lang));
   const memoryContextRows = $derived(localizedMemoryContextRows(overviewData?.memoryContext, lang));
   const systemInfoSpecs = $derived(systemInfoSpecRows(systemInfo, lang));
+  const appModalOpen = $derived(addDeviceOpen || issuedKeyDialog !== null || deviceConfirm !== null);
 
   $effect(() => writeStorage(STORAGE_KEYS.theme, theme));
   $effect(() => writeStorage(STORAGE_KEYS.lang, lang));
@@ -242,7 +243,7 @@
     e.preventDefault();
     if (addDeviceSaving) return;
     if (!newDevice.label.trim()) {
-      formError = lang === "zh-CN" ? "设备名称不能为空" : "Device name is required";
+      formError = t.addDevice.requiredError;
       return;
     }
     if (!backendConnected) {
@@ -367,10 +368,11 @@
 </svelte:head>
 
 <main class:light={theme === "light"} class:tauri={isTauri} class:macos={isMacOS} class:windows={isWindows} class="shell">
-  <Sidebar pages={pages} activePage={activePage} {isTauri} {isMacOS} brand={t.brand} onSelectPage={setActivePage} />
+  <div class="shell-grid" aria-hidden="true"></div>
+  <Sidebar {t} pages={pages} activePage={activePage} {isTauri} brand={t.brand} onSelectPage={setActivePage} />
 
   <section class="workspace">
-    <Topbar consoleLabel={t.labels.console} currentPage={currentPage} />
+    <Topbar {t} currentPage={currentPage} />
     <div class="page-shell">
       {#if activePage === "overview"}
         <OverviewPage
@@ -382,6 +384,7 @@
           {transportStats}
           {kernelRows}
           {memoryContextRows}
+          {backendConnected}
         />
       {:else if activePage === "workbench"}
         <WorkbenchPage
@@ -395,7 +398,6 @@
       {:else if activePage === "skills"}
         <SkillMemoryPage
           {t}
-          {lang}
           {skillReport}
           {skills}
           {backendConnected}
@@ -448,48 +450,60 @@
     transportCount={transports.length}
     {activeDeviceCount}
     deviceCount={devices.length}
+    {backendConnected}
+    profile={overviewData?.runtimeShape?.profile ?? null}
     loading={consoleLoading}
     onThemeChange={setTheme}
     onRefresh={() => void loadConsoleData()}
   />
-
-  {#if addDeviceOpen}
-    <AddDeviceModal
-      {t}
-      label={newDevice.label}
-      error={formError}
-      loading={addDeviceSaving}
-      onClose={closeAddDeviceModal}
-      onSubmit={(event) => void saveDevice(event)}
-      onLabelChange={setNewDeviceLabel}
-    />
-  {/if}
-
-  {#if issuedKeyDialog}
-    <IssuedKeyModal
-      {t}
-      dialog={issuedKeyDialog}
-      copied={issuedKeyCopied}
-      loading={issuedKeyCopying}
-      onClose={closeIssuedKeyDialog}
-      onCopy={() => void copyIssuedKey()}
-    />
-  {/if}
-
-  {#if deviceConfirm}
-    {@const confirmAction = deviceConfirm.action}
-    {@const confirmDeviceId = deviceConfirm.device.deviceId}
-    <ConfirmActionModal
-      title={confirmAction === "rotate_key" ? t.deviceConfirm.rotateTitle : t.deviceConfirm.disableTitle}
-      description={confirmAction === "rotate_key" ? t.deviceConfirm.rotateDesc : t.deviceConfirm.disableDesc}
-      subjectLabel={t.deviceConfirm.deviceLabel}
-      subject={deviceName(deviceConfirm.device)}
-      meta={confirmDeviceId}
-      confirmLabel={confirmAction === "rotate_key" ? t.deviceConfirm.rotateConfirm : t.deviceConfirm.disableConfirm}
-      cancelLabel={t.actions.cancel}
-      closeLabel={t.addDevice.closeLabel}
-      onClose={closeDeviceConfirm}
-      onConfirm={() => runConfirmedDeviceAction(confirmAction, confirmDeviceId)}
-    />
-  {/if}
 </main>
+
+{#if appModalOpen}
+  <div
+    class="modal-root"
+    class:light={theme === "light"}
+    class:tauri={isTauri}
+    class:macos={isMacOS}
+    class:windows={isWindows}
+  >
+    {#if addDeviceOpen}
+      <AddDeviceModal
+        {t}
+        label={newDevice.label}
+        error={formError}
+        loading={addDeviceSaving}
+        onClose={closeAddDeviceModal}
+        onSubmit={(event) => void saveDevice(event)}
+        onLabelChange={setNewDeviceLabel}
+      />
+    {/if}
+
+    {#if issuedKeyDialog}
+      <IssuedKeyModal
+        {t}
+        dialog={issuedKeyDialog}
+        copied={issuedKeyCopied}
+        loading={issuedKeyCopying}
+        onClose={closeIssuedKeyDialog}
+        onCopy={() => void copyIssuedKey()}
+      />
+    {/if}
+
+    {#if deviceConfirm}
+      {@const confirmAction = deviceConfirm.action}
+      {@const confirmDeviceId = deviceConfirm.device.deviceId}
+      <ConfirmActionModal
+        title={confirmAction === "rotate_key" ? t.deviceConfirm.rotateTitle : t.deviceConfirm.disableTitle}
+        description={confirmAction === "rotate_key" ? t.deviceConfirm.rotateDesc : t.deviceConfirm.disableDesc}
+        subjectLabel={t.deviceConfirm.deviceLabel}
+        subject={deviceName(deviceConfirm.device)}
+        meta={confirmDeviceId}
+        confirmLabel={confirmAction === "rotate_key" ? t.deviceConfirm.rotateConfirm : t.deviceConfirm.disableConfirm}
+        cancelLabel={t.actions.cancel}
+        closeLabel={t.addDevice.closeLabel}
+        onClose={closeDeviceConfirm}
+        onConfirm={() => runConfirmedDeviceAction(confirmAction, confirmDeviceId)}
+      />
+    {/if}
+  </div>
+{/if}

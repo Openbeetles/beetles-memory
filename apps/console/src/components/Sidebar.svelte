@@ -1,48 +1,51 @@
 <script lang="ts">
   import type { ConsoleCopy } from "../lib/i18n";
   import type { Page, PageId } from "../lib/types";
+  import { navGroupsWithPages } from "../lib/view-model";
   import { windowDragRegion } from "../lib/window-drag";
+  import NavIcon from "./NavIcon.svelte";
 
   let {
+    t,
     pages,
     activePage,
     isTauri,
-    isMacOS = false,
     brand,
     onSelectPage,
   }: {
+    t: ConsoleCopy;
     pages: Page[];
     activePage: PageId;
     isTauri: boolean;
-    isMacOS?: boolean;
     brand: ConsoleCopy["brand"];
-    onSelectPage: (page: PageId) => void;
+    onSelectPage: (pageId: PageId) => void;
   } = $props();
+
+  const groups = $derived(navGroupsWithPages(t, pages));
 </script>
 
 <aside class="sidebar">
-  <div class="brand" data-tauri-drag-region use:windowDragRegion>
-    {#if !isTauri}
-      <div class="brand-icon"><img src="/logo.png" alt="Beetle Memory" /></div>
-      <div class="brand-text">
-        <span class="brand-name">{brand.name}</span>
-        <span class="brand-sub">{brand.sub}</span>
-      </div>
-    {/if}
-  </div>
+  {#if isTauri}
+    <div class="titlebar-spacer" data-tauri-drag-region use:windowDragRegion aria-hidden="true"></div>
+  {/if}
 
-  <nav class="nav">
-    {#each pages as page}
-      <button
-        class:active={activePage === page.id}
-        class="nav-item"
-        type="button"
-        onclick={() => onSelectPage(page.id)}
-      >
-        <span class="nav-chevron">{activePage === page.id ? "▶" : "›"}</span>
-        <span class="nav-label">{page.label}</span>
-        {#if page.count}<code class="nav-count">[{page.count}]</code>{/if}
-      </button>
+  <nav class="nav" aria-label={brand.name}>
+    {#each groups as group}
+      <div class="nav-group">
+        <div class="nav-group-label">{group.label}</div>
+        {#each group.pages as page}
+          <button
+            class:active={activePage === page.id}
+            class="nav-item"
+            type="button"
+            onclick={() => onSelectPage(page.id)}
+          >
+            <NavIcon pageId={page.id} />
+            <span class="nav-label">{page.label}</span>
+            {#if page.count}<code class="nav-count">{page.count}</code>{/if}
+          </button>
+        {/each}
+      </div>
     {/each}
   </nav>
 </aside>

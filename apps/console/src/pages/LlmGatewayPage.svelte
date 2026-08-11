@@ -22,6 +22,7 @@
     ConsoleApiTransitionStep,
     StatusKind,
   } from "../lib/types";
+  import StatusBadge from "../components/StatusBadge.svelte";
   import { statusLabel } from "../lib/view-model";
 
   let {
@@ -368,9 +369,9 @@
   <div class="gateway-top-grid">
     <!-- ① 外部工具接入：状态 + 监听地址 + 可复制协议地址 -->
     <section class="panel gateway-summary-panel">
-      <PanelHeader label={t.llmGatewayPanel.label} title={t.llmGatewayPanel.title} icon={Bot} />
+      <PanelHeader title={t.llmGatewayPanel.title} icon={Bot} />
       <div class="gateway-status-row">
-        <span class={`badge ${gatewayStatus}`}>{statusLabel(t, gatewayStatus)}</span>
+        <StatusBadge {t} status={gatewayStatus} />
         <span>{t.llmGatewayPanel.gatewayEndpoint}</span>
         <code class="gateway-main-url">{llmGateway?.endpoint ?? "—"}</code>
       </div>
@@ -381,7 +382,7 @@
             <article class="gateway-protocol-row {protocol.status}">
               <div class="gateway-protocol-body">
                 <div class="gateway-protocol-head">
-                  <span class={`badge ${protocol.status}`}>{statusLabel(t, protocol.status)}</span>
+                  <StatusBadge {t} status={protocol.status} />
                   <strong>{protocolTitle(protocol.id, protocol.title)}</strong>
                   <button
                     aria-label={`${t.llmGatewayPanel.copy} ${protocolTitle(protocol.id, protocol.title)}`}
@@ -406,7 +407,7 @@
 
     <!-- ② 验收命令 -->
     <section class="panel gateway-smoke-panel">
-      <PanelHeader label={t.llmGatewayPanel.smokeChecks} title={t.llmGatewayPanel.smokeChecks} icon={Activity} />
+      <PanelHeader title={t.llmGatewayPanel.smokeChecks} icon={Activity} />
       {#if smokeChecks.length > 0}
         <div class="gateway-smoke-list">
           {#each smokeChecks as check}
@@ -466,11 +467,7 @@
 
   {#if transparentAvailable}
     <section class="panel gateway-transparent-panel">
-      <PanelHeader
-        label={t.llmGatewayPanel.transparent.label}
-        title={t.llmGatewayPanel.transparent.title}
-        icon={Rocket}
-      />
+      <PanelHeader title={t.llmGatewayPanel.transparent.title} icon={Rocket} />
 
       <div class="gateway-transparent-grid user-facing">
         <div class={`gateway-transparent-kv ${memoryFlow.status}`}>
@@ -568,7 +565,7 @@
   <!-- ④ 规则导出：2 列卡片网格，每张卡片充分展示命令 -->
   {#if ruleExports.length > 0}
     <section class="panel gateway-rules-panel">
-      <PanelHeader label={t.llmGatewayPanel.ruleExports} title={t.llmGatewayPanel.ruleExports} icon={ClipboardList} />
+      <PanelHeader title={t.llmGatewayPanel.ruleExports} icon={ClipboardList} />
       <div class="gateway-rule-grid">
         {#each ruleExports as rule}
           <div class="gateway-rule-card">

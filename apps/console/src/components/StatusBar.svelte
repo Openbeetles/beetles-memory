@@ -12,6 +12,8 @@
     transportCount,
     activeDeviceCount,
     deviceCount,
+    backendConnected = false,
+    profile = null,
     loading = false,
     onThemeChange,
     onRefresh,
@@ -23,6 +25,8 @@
     transportCount: number;
     activeDeviceCount: number;
     deviceCount: number;
+    backendConnected?: boolean;
+    profile?: string | null;
     loading?: boolean;
     onThemeChange: (theme: Theme) => void;
     onRefresh: () => void | Promise<void>;
@@ -31,12 +35,21 @@
 
 <div class="statusbar" data-tauri-drag-region use:windowDragRegion>
   <span class="sb-brand" data-tauri-drag-region>{t.statusbar.brand}</span>
-  <span class="sb-live" aria-label="live" title="LIVE">●</span>
-  <span class="sb-item" data-tauri-drag-region>v1.0.0-dev</span>
+  <div class="sb-telemetry" data-tauri-drag-region>
+    <span class={`sb-item ${backendConnected ? "ok" : "bad"}`} data-tauri-drag-region>
+      {t.statusbar.link}: {backendConnected ? t.labels.connected : t.labels.disconnected}
+    </span>
+    {#if profile}
+      <span class="sb-sep" data-tauri-drag-region>│</span>
+      <span class="sb-item mono" data-tauri-drag-region title={profile}>
+        {t.statusbar.profile}: {profile}
+      </span>
+    {/if}
+  </div>
   <div class="sb-right" data-tauri-drag-region>
-    <div class="sb-theme-toggle">
-      <button class:active={theme === "light"} type="button" onclick={() => onThemeChange("light")} aria-label="日间模式"><Sun size={12} /></button>
-      <button class:active={theme === "dark"}  type="button" onclick={() => onThemeChange("dark")}  aria-label="夜间模式"><Moon size={12} /></button>
+    <div class="sb-theme-toggle" role="group" aria-label={t.actions.theme}>
+      <button class:active={theme === "light"} type="button" onclick={() => onThemeChange("light")} aria-label={t.actions.light} aria-pressed={theme === "light"}><Sun size={12} /></button>
+      <button class:active={theme === "dark"}  type="button" onclick={() => onThemeChange("dark")}  aria-label={t.actions.dark} aria-pressed={theme === "dark"}><Moon size={12} /></button>
     </div>
     <span class="sb-sep" data-tauri-drag-region>│</span>
     <span class="sb-item" data-tauri-drag-region>{t.statusbar.skills}: {skillCount}</span>

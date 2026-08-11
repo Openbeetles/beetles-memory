@@ -44,8 +44,28 @@ const STATUS_ICONS: Record<StatusKind, IconComponent> = {
   active: CheckCircle2,
   stale: Circle,
   low_value: AlertTriangle,
+  superseded: Circle,
   retired: AlertTriangle,
 };
+
+export type NavGroupId = "memoryCore" | "ingress" | "system";
+export type NavGroup = { id: NavGroupId; label: string; pages: Page[] };
+
+const NAV_GROUP_PAGE_IDS: Record<NavGroupId, Page["id"][]> = {
+  memoryCore: ["overview", "workbench", "skills"],
+  ingress: ["llm-gateway", "transports", "devices"],
+  system: ["account"],
+};
+
+export function navGroupsWithPages(t: ConsoleCopy, pages: Page[]): NavGroup[] {
+  return (Object.keys(NAV_GROUP_PAGE_IDS) as NavGroupId[]).map((id) => ({
+    id,
+    label: t.navGroups[id],
+    pages: NAV_GROUP_PAGE_IDS[id]
+      .map((pageId) => pages.find((page) => page.id === pageId))
+      .filter((page): page is Page => page !== undefined),
+  }));
+}
 
 export const mapId = <T extends { id: string }>(list: T[], id: string, fn: (t: T) => T) =>
   list.map((t) => (t.id === id ? fn(t) : t));
@@ -61,10 +81,10 @@ export function archiveScopeLabel(
   currentLang: Lang,
 ): string {
   if (scope.kind === "subject") {
-    const kind = currentLang === "zh-CN" ? "主体" : "Subject";
+    const kind = currentLang === "zh-CN" ? "主体记忆" : "Subject";
     return `${kind}: ${scope.memory_space_id} / ${scope.mounted_subject_id}`;
   }
-  const kind = currentLang === "zh-CN" ? "共享程序" : "Shared program";
+  const kind = currentLang === "zh-CN" ? "共享程序记忆" : "Shared program";
   return `${kind}: ${scope.memory_space_id}`;
 }
 
@@ -73,9 +93,9 @@ export function archivePolicyLabel(
   currentLang: Lang,
 ): string {
   if (policy === "exclude_private") {
-    return currentLang === "zh-CN" ? "排除私密材料" : "Private material excluded";
+    return currentLang === "zh-CN" ? "不包含私密内容" : "Private material excluded";
   }
-  return currentLang === "zh-CN" ? "包含私密材料" : "Private material included";
+  return currentLang === "zh-CN" ? "包含私密内容" : "Private material included";
 }
 
 export const fromApiTransport = (transport: ConsoleApiTransport): Transport => ({
@@ -108,20 +128,20 @@ export function sessionAccountLabel(account: string, currentLang: Lang): string 
 }
 
 export function sessionStateLabel(state: string, currentLang: Lang): string {
-  if (state === "paired") return currentLang === "zh-CN" ? "已通过配对门禁" : "Paired";
+  if (state === "paired") return currentLang === "zh-CN" ? "已配对" : "Paired";
   return state;
 }
 
 export function profileLabel(profile: string, currentLang: Lang): string {
   const zh: Record<string, string> = {
-    "profile-esp-standalone-memory": "ESP 独立记忆部署",
-    "profile-esp-embedded-sdk": "ESP SDK 集成",
-    "target-linux-device+role-standalone-memory": "Linux 设备独立部署",
+    "profile-esp-standalone-memory": "ESP 独立记忆设备",
+    "profile-esp-embedded-sdk": "ESP 嵌入式集成",
+    "target-linux-device+role-standalone-memory": "Linux 设备独立记忆",
     "target-desktop-macos+role-standalone-memory": "macOS 桌面独立记忆",
-    "target-desktop-macos+role-embedded-sdk": "macOS SDK 集成",
-    "target-desktop-windows+role-embedded-sdk": "Windows SDK 集成",
+    "target-desktop-macos+role-embedded-sdk": "macOS 应用内集成",
+    "target-desktop-windows+role-embedded-sdk": "Windows 应用内集成",
     "target-server-linux+role-memory-gateway": "Linux 服务器记忆网关",
-    "target-server-linux+role-dev-full": "本地开发完整运行时",
+    "target-server-linux+role-dev-full": "本机开发完整版",
   };
   const en: Record<string, string> = {
     "profile-esp-standalone-memory": "ESP standalone memory",
@@ -138,10 +158,10 @@ export function profileLabel(profile: string, currentLang: Lang): string {
 
 export function storeLabel(store: string, currentLang: Lang): string {
   const zh: Record<string, string> = {
-    "in-memory": "内存后端",
-    embedded: "嵌入式后端",
-    file: "文件后端",
-    sqlite: "SQLite 后端",
+    "in-memory": "内存存储",
+    embedded: "嵌入式存储",
+    file: "文件存储",
+    sqlite: "SQLite 存储",
   };
   const en: Record<string, string> = {
     "in-memory": "in-memory backend",
@@ -252,22 +272,27 @@ function localizedMetricDesc(
     }
     return desc || fallback;
   }
-  if (kind === "storage") return "当前记忆系统占用 / 当前系统总存储";
-  if (kind === "writes") return "当前运行时已接受的记忆写入";
-  if (kind === "recall") return desc.replace(" recall requests / ", " 次召回请求 / ").replace(" with hits", " 次命中");
+  if (kind === "storage") return "记忆占用 / 本机总空间";
+  if (kind === "writes") return "运行时已接受的记忆写入次数";
+  if (kind === "recall") {
+    const text = desc
+      .replace(" recall requests / ", " 次检索请求 / ")
+      .replace(" with hits", " 次命中");
+    return text || "相关记忆检索命中情况";
+  }
   if (kind === "projection") return localizedMemoryContextDesc(desc, fallback);
-  if (kind === "devices") return "开放设备访问状态";
+  if (kind === "devices") return "已授权 / 设备总数";
   return fallback;
 }
 
 function localizedMemoryContextDesc(desc: string, fallback: string): string {
   const text = desc || fallback;
   const match = /^(\d+)\s+(?:projection requests served|conversations received memory context)\s+\/\s+(?:render budget|max context|current limit)\s+(\d+)\s+(?:chars|characters)$/.exec(text.trim());
-  if (!match) return "为对话补充已记住的上下文";
+  if (!match) return "已为对话补充可用记忆";
   const requests = Number(match[1]);
   const limit = Number(match[2]);
-  if (!Number.isFinite(requests) || !Number.isFinite(limit)) return "为对话补充已记住的上下文";
-  return `${requests.toLocaleString("zh-CN")} 次对话已补充记忆 / 本次最多 ${limit.toLocaleString("zh-CN")} 字`;
+  if (!Number.isFinite(requests) || !Number.isFinite(limit)) return "已为对话补充可用记忆";
+  return `${requests.toLocaleString("zh-CN")} 次对话已补充记忆 / 单次上限 ${limit.toLocaleString("zh-CN")} 字`;
 }
 
 export function localizedEvents(events: TimelineEvent[] | undefined, fallback: TimelineEvent[], currentLang: Lang): TimelineEvent[] {
@@ -277,15 +302,15 @@ export function localizedEvents(events: TimelineEvent[] | undefined, fallback: T
 }
 
 function localizeEventText(text: string): string {
-  if (text.startsWith("Transport ")) return text.replace("Transport ", "通信 ").replace(" updated", " 已更新");
+  if (text.startsWith("Transport ")) return text.replace("Transport ", "通信方式 ").replace(" updated", " 已更新");
   if (text.startsWith("Device ") && text.endsWith(" key rotated")) {
-    return text.replace("Device ", "设备 ").replace(" key rotated", " 密钥已轮换");
+    return text.replace("Device ", "设备 ").replace(" key rotated", " 已更换访问密钥");
   }
   if (text.startsWith("Device ") && text.endsWith(" added")) return text.replace("Device ", "设备 ").replace(" added", " 已添加");
   if (text.startsWith("Device ") && text.endsWith(" updated")) return text.replace("Device ", "设备 ").replace(" updated", " 已更新");
   if (text.startsWith("Skill ")) {
     return text
-      .replace("Skill ", "Skill ")
+      .replace("Skill ", "经验记忆 ")
       .replace(" imported", " 已导入")
       .replace(" updated", " 已更新")
       .replace(" disabled", " 已停用")
@@ -293,11 +318,11 @@ function localizeEventText(text: string): string {
       .replace(" retired", " 已退役");
   }
   if (text.startsWith("Memory write accepted")) return text.replace("Memory write accepted, changed", "记忆写入已接受，变更");
-  if (text.startsWith("Recall served for")) return text.replace("Recall served for", "召回已执行：").replace(" with ", "，命中 ").replace(" hits", " 条");
-  if (text.startsWith("Projection served")) return text.replace("Projection served,", "已为对话补充记忆，").replace(" chars", " 字");
-  if (text.startsWith("Memory context added")) return text.replace("Memory context added,", "已为对话补充记忆，").replace(" characters", " 字");
+  if (text.startsWith("Recall served for")) return text.replace("Recall served for", "记忆检索：").replace(" with ", "，命中 ").replace(" hits", " 条");
+  if (text.startsWith("Projection served")) return text.replace("Projection served,", "已补充对话上下文，").replace(" chars", " 字");
+  if (text.startsWith("Memory context added")) return text.replace("Memory context added,", "已补充对话上下文，").replace(" characters", " 字");
   if (text.endsWith("communication entries enabled")) return text.replace("communication entries enabled", "个通信入口已启用");
-  if (text === "Console runtime opened") return "配置台运行时已打开";
+  if (text === "Console runtime opened") return "管理台运行时已打开";
   return text;
 }
 
@@ -328,7 +353,7 @@ export function localizedMemoryContextRows(rows: KVRow[] | undefined, currentLan
 function memoryContextChineseLabel(label: string): string {
   const labels: Record<string, string> = {
     Store: "存储位置",
-    Owner: "所属主体",
+    Owner: "记忆归属",
     Agent: "入口身份",
     Channel: "来源通道",
     Chat: "会话范围",
@@ -350,7 +375,7 @@ function memoryContextEnglishLabel(label: string): string {
 function kernelLabel(label: string): string {
   const labels: Record<string, string> = {
     Profile: "运行档位",
-    "Store backend": "存储后端",
+    "Store backend": "存储方式",
   };
   return labels[label] ?? label;
 }

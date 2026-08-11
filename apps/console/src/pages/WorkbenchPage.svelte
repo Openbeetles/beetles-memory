@@ -10,15 +10,20 @@
     Tags,
     Workflow,
   } from "lucide-svelte";
+  import InspectorCard from "../components/InspectorCard.svelte";
   import KvStack from "../components/KvStack.svelte";
   import PanelHeader from "../components/PanelHeader.svelte";
+  import StatusBadge from "../components/StatusBadge.svelte";
+  import VerdictStrip from "../components/VerdictStrip.svelte";
   import type { ConsoleCopy } from "../lib/i18n";
+  import { statusTone } from "../lib/status";
   import type {
     ConsoleApiBenchmarkBaseline,
     ConsoleApiWorkbenchReport,
     ConsoleApiWorkbenchStatus,
     KVRow,
     Lang,
+    StatusKind,
   } from "../lib/types";
   import {
     archivePolicyLabel,
@@ -53,6 +58,26 @@
   const soulStatus = $derived(report?.soulHealth.status ?? offlineStatus());
   const allPrivateRawClosed = $derived(report?.apiMap.surfaces.every((surface) => !surface.privateRawAllowed) ?? false);
   const missingApiCount = $derived(report?.apiMap.missingReportApis.length ?? 0);
+  const inspectorStatuses = $derived(
+    [benchmarkStatus, recallStatus, facetStatus, projectionStatus, proceduralStatus, archiveStatus, soulStatus],
+  );
+  const verdictCounts = $derived((() => {
+    let ready = 0;
+    let limited = 0;
+    let blocked = 0;
+    let unavailable = 0;
+    for (const status of inspectorStatuses) {
+      if (!status.available) {
+        unavailable += 1;
+        continue;
+      }
+      const tone = statusTone(status.status as StatusKind);
+      if (tone === "blocked") blocked += 1;
+      else if (tone === "limited" || tone === "locked") limited += 1;
+      else ready += 1;
+    }
+    return { ready, limited, blocked, unavailable };
+  })());
 
   function offlineStatus(): ConsoleApiWorkbenchStatus {
     return {
@@ -79,83 +104,21 @@
   }
 
   function classLabel(value: string): string {
-    if (lang === "en") return value.replace(/_/g, " ");
-    const labels: Record<string, string> = {
-      recall_multisession: "跨会话找回",
-      temporal_update: "新旧事实",
-      subject_projection: "上下文准备",
-      soul_regression: "个性稳定",
-      procedural_reuse: "经验复用",
-      privacy_refusal: "隐私保护",
-      agent_tool_experience: "工具经验",
-    };
-    return labels[value] ?? value;
+    return (wb.classLabels as Record<string, string>)[value] ?? value.replace(/_/g, " ");
   }
 
   function plainToken(value: string): string {
-    if (lang === "en") return value.replace(/_/g, " ");
-    const labels: Record<string, string> = {
-      memory_graph_nodes_empty: "还没有可展示的记忆关系",
-      memory_facet_index_no_query_match: "当前查询没有命中 facet index",
-      runtime_recall_graph_preview_not_persistent: "当前是预览结果，未写入长期记忆图",
-      inspection_unavailable: "健康检查暂时不可用",
-      no_governed_tool_experience: "还没有可复用工具经验",
-      governed_tool_experience_available: "已有可复用工具经验",
-      recall_unavailable: "找记忆暂时不可用",
-    };
-    return labels[value] ?? value.replace(/_/g, " ");
-  }
-
-  function localLabel(zh: string, en: string): string {
-    return lang === "zh-CN" ? zh : en;
+    return (wb.tokenLabels as Record<string, string>)[value] ?? value.replace(/_/g, " ");
   }
 
   function surfaceTitle(surfaceId: string): string {
-    const zh: Record<string, string> = {
-      home: "总览",
-      recall_inspector: "找记忆",
-      facet_inspector: "Facet 索引",
-      projection_inspector: "整理上下文",
-      soul_health: "健康状态",
-      procedural_evolution: "习惯与技能",
-      replay_diff: "回放验收",
-      archive_restore: "归档恢复",
-    };
-    const en: Record<string, string> = {
-      home: "Overview",
-      recall_inspector: "Find memory",
-      facet_inspector: "Facet index",
-      projection_inspector: "Prepare context",
-      soul_health: "Health status",
-      procedural_evolution: "Habits and skills",
-      replay_diff: "Replay check",
-      archive_restore: "Archive restore",
-    };
-    return (lang === "zh-CN" ? zh : en)[surfaceId] ?? plainToken(surfaceId);
+    const labels = wb.surfaceLabels as Record<string, { title: string; detail: string }>;
+    return labels[surfaceId]?.title ?? plainToken(surfaceId);
   }
 
   function surfaceDetail(surfaceId: string): string {
-    const zh: Record<string, string> = {
-      home: "运行状态和关键数量",
-      recall_inspector: "检查系统能不能找回相关记忆",
-      facet_inspector: "只读检查 facet index 和诊断",
-      projection_inspector: "检查放进对话前的记忆上下文",
-      soul_health: "检查治理队列和安全动作",
-      procedural_evolution: "检查可复用的习惯与技能",
-      replay_diff: "检查回放结果是否退化",
-      archive_restore: "检查类型化范围、隐私策略与归档闭包",
-    };
-    const en: Record<string, string> = {
-      home: "Runtime status and key counts",
-      recall_inspector: "Checks whether relevant memories can be found",
-      facet_inspector: "Read-only facet index diagnostics",
-      projection_inspector: "Checks the memory context before it enters a reply",
-      soul_health: "Checks governance queues and safe actions",
-      procedural_evolution: "Checks reusable habits and skills",
-      replay_diff: "Checks whether replay results regressed",
-      archive_restore: "Checks typed scope, privacy policy, and archive closure",
-    };
-    return (lang === "zh-CN" ? zh : en)[surfaceId] ?? plainToken(surfaceId);
+    const labels = wb.surfaceLabels as Record<string, { title: string; detail: string }>;
+    return labels[surfaceId]?.detail ?? plainToken(surfaceId);
   }
 
   function shortSha256(value: string): string {
@@ -164,7 +127,7 @@
   }
 
   function profileText(value: string): string {
-    if (lang === "zh-CN" && value === "local-desktop") return "本机桌面";
+    if (value === "local-desktop") return wb.localDesktop;
     return plainToken(value);
   }
 
@@ -188,9 +151,9 @@
       { label: wb.skills, value: numberText(recall.runtimeSkillSelected) },
       { label: wb.evidence, value: numberText(recall.evidenceBacklinks) },
       { label: wb.highConfidence, value: recall.highConfidenceProjectionAllowed ? wb.yes : wb.previewOnly },
-      { label: localLabel("候选工具", "Tool hints"), value: numberText(recall.agentToolHints) },
-      { label: localLabel("工具经验", "Tool experience"), value: plainToken(recall.toolExperienceReason) },
-      { label: localLabel("首次用工具", "First-use tools"), value: recall.hostFallbackRequired ? localLabel("由宿主决定", "Host decides") : wb.yes },
+      { label: wb.candidateTools, value: numberText(recall.agentToolHints) },
+      { label: wb.toolExperience, value: plainToken(recall.toolExperienceReason) },
+      { label: wb.firstUseTools, value: recall.hostFallbackRequired ? wb.hostDecides : wb.yes },
     ];
   }
 
@@ -198,13 +161,13 @@
     if (!report) return [];
     const facet = report.facetInspector;
     return [
-      { label: localLabel("Owner", "Owner"), value: facet.owner },
-      { label: localLabel("只读报告", "Report only"), value: boolText(facet.reportOnly) },
-      { label: localLabel("允许直接修改", "Direct mutation"), value: boolText(facet.directMutationAllowed) },
-      { label: localLabel("全量扫描回退", "Full-scan fallback"), value: boolText(facet.fallbackFullScan) },
-      { label: localLabel("命中来源", "Matched sources"), value: `${numberText(facet.matchedSourceCandidateCount)}/${numberText(facet.sourceCandidateCount)}` },
-      { label: localLabel("审计格式", "Audit format"), value: facet.auditMarkdownFormat },
-      { label: localLabel("索引版本", "Index revision"), value: facet.indexRevision ?? "none" },
+      { label: wb.owner, value: facet.owner },
+      { label: wb.reportOnly, value: boolText(facet.reportOnly) },
+      { label: wb.directMutation, value: boolText(facet.directMutationAllowed) },
+      { label: wb.fullScanFallback, value: boolText(facet.fallbackFullScan) },
+      { label: wb.matchedSources, value: `${numberText(facet.matchedSourceCandidateCount)}/${numberText(facet.sourceCandidateCount)}` },
+      { label: wb.auditFormat, value: facet.auditMarkdownFormat },
+      { label: wb.indexRevision, value: facet.indexRevision ?? wb.none },
     ];
   }
 
@@ -219,8 +182,8 @@
       { label: wb.publicDisclosure, value: boolText(projection.foregroundDisclosureAllowed) },
       { label: wb.faithfulness, value: boolText(projection.faithfulnessPassed) },
       { label: wb.privateEcho, value: String(projection.rawPrivateViolationCount) },
-      { label: localLabel("工具提示", "Tool hints"), value: numberText(projection.agentToolHints) },
-      { label: localLabel("旧工具经验", "Old tool experience"), value: numberText(projection.agentToolRejections) },
+      { label: wb.candidateTools, value: numberText(projection.agentToolHints) },
+      { label: wb.oldToolExperience, value: numberText(projection.agentToolRejections) },
     ];
   }
 
@@ -252,9 +215,9 @@
       { label: wb.skills, value: numberText(soul.runtimeSkillRecords) },
       { label: wb.deferred, value: `${soul.deferredPending}/${soul.deferredTotal}` },
       { label: wb.failed, value: numberText(soul.deferredFailed) },
-      { label: localLabel("工具索引", "Tool registries"), value: `${numberText(soul.agentToolRegistries)} / ${numberText(soul.agentToolRegistryTools)}` },
-      { label: localLabel("工具经验", "Tool experience"), value: numberText(soul.agentToolExperiences) },
-      { label: localLabel("过期工具经验", "Stale tool experience"), value: numberText(soul.agentToolStaleExperiences) },
+      { label: wb.toolRegistries, value: `${numberText(soul.agentToolRegistries)} / ${numberText(soul.agentToolRegistryTools)}` },
+      { label: wb.toolExperience, value: numberText(soul.agentToolExperiences) },
+      { label: wb.staleToolExperience, value: numberText(soul.agentToolStaleExperiences) },
     ];
   }
 </script>
@@ -262,10 +225,7 @@
 <div class="workbench-page">
   <section class="panel workbench-top">
     <div class="panel-title">
-      <div>
-        <p class="panel-label">{wb.label}</p>
-        <h3>{wb.title}</h3>
-      </div>
+      <h3>{wb.title}</h3>
       <div class="panel-title-actions">
         <button class="ghost-button" type="button" disabled={!backendConnected || loading} onclick={() => void onRefresh()}>
           {#if loading}<LoaderCircle class="spin-icon" size={13} />{:else}<RefreshCw size={13} />{/if}
@@ -273,11 +233,17 @@
         </button>
       </div>
     </div>
-
+    <VerdictStrip
+      {t}
+      ready={verdictCounts.ready}
+      limited={verdictCounts.limited}
+      blocked={verdictCounts.blocked}
+      unavailable={verdictCounts.unavailable}
+    />
     <div class="skill-stats workbench-stat-strip">
       <div><span>{wb.benchmark}</span><strong>{statusText(benchmarkStatus)}</strong></div>
       <div><span>{wb.recall}</span><strong>{statusText(recallStatus)}</strong></div>
-      <div><span>{localLabel("Facet", "Facet")}</span><strong>{statusText(facetStatus)}</strong></div>
+      <div><span>{wb.facet}</span><strong>{statusText(facetStatus)}</strong></div>
       <div><span>{wb.projection}</span><strong>{statusText(projectionStatus)}</strong></div>
       <div><span>{wb.archive}</span><strong>{statusText(archiveStatus)}</strong></div>
       <div><span>{wb.privateRawClosed}</span><strong>{boolText(allPrivateRawClosed)}</strong></div>
@@ -287,9 +253,141 @@
   {#if !report}
     <div class="skill-empty detail-empty">{loading ? wb.loading : t.labels.backendOffline}</div>
   {:else}
+    <div class="workbench-grid lower-grid">
+      <InspectorCard
+        {t}
+        title={wb.recallTitle}
+        icon={GitBranch}
+        status={(recallStatus.available ? recallStatus.status : "blocked") as StatusKind}
+        statusLabelText={statusText(recallStatus)}
+        metrics={[
+          { label: wb.memoryPoints, value: numberText(report.recallInspector.graphNodes) },
+          { label: wb.memoryLinks, value: numberText(report.recallInspector.graphEdges) },
+          { label: wb.skillHits, value: numberText(report.recallInspector.proceduralDeliveryReports) },
+        ]}
+        rows={recallRows()}
+      >
+        {#if report.recallInspector.graphFailures.length > 0}
+          <div class="chips">{#each report.recallInspector.graphFailures as failure}<span>{plainToken(failure)}</span>{/each}</div>
+        {/if}
+      </InspectorCard>
+
+      <InspectorCard
+        {t}
+        title={wb.indexDiagnostics}
+        icon={Tags}
+        status={(facetStatus.available ? facetStatus.status : "blocked") as StatusKind}
+        statusLabelText={statusText(facetStatus)}
+        metrics={[
+          { label: wb.exactDocs, value: numberText(report.facetInspector.exactFacetDocCount) },
+          { label: wb.expandedDocs, value: numberText(report.facetInspector.expandedFacetDocCount) },
+          { label: wb.renderGrowth, value: numberText(report.facetInspector.renderGrowth) },
+        ]}
+        rows={facetRows()}
+      >
+        {#if report.facetInspector.failures.length > 0}
+          <div class="chips">{#each report.facetInspector.failures as failure}<span>{plainToken(failure)}</span>{/each}</div>
+        {:else}
+          <div class="skill-empty">{wb.emptyFailures}</div>
+        {/if}
+        {#if report.facetInspector.auditMarkdownPreview}
+          <pre class="workbench-audit-preview">{report.facetInspector.auditMarkdownPreview}</pre>
+        {/if}
+      </InspectorCard>
+
+      <InspectorCard
+        {t}
+        title={wb.projectionTitle}
+        icon={Activity}
+        status={(projectionStatus.available ? projectionStatus.status : "blocked") as StatusKind}
+        statusLabelText={statusText(projectionStatus)}
+        metrics={[
+          { label: wb.citations, value: numberText(report.projectionInspector.evidenceRefs) },
+          { label: wb.lengthControl, value: numberText(report.projectionInspector.budgetDecisions) },
+          { label: wb.filtered, value: numberText(report.projectionInspector.droppedCandidates) },
+        ]}
+        rows={projectionRows()}
+      >
+        {#if report.projectionInspector.unsupportedClaims.length > 0}
+          <div class="chips">{#each report.projectionInspector.unsupportedClaims as claim}<span>{plainToken(claim)}</span>{/each}</div>
+        {:else}
+          <div class="skill-empty">{wb.emptyFailures}</div>
+        {/if}
+      </InspectorCard>
+
+      <InspectorCard
+        {t}
+        title={wb.proceduralTitle}
+        icon={DatabaseZap}
+        status={(proceduralStatus.available ? proceduralStatus.status : "blocked") as StatusKind}
+        statusLabelText={statusText(proceduralStatus)}
+        metrics={[
+          { label: wb.skills, value: numberText(report.proceduralEvolution.totalSkills) },
+          { label: wb.activeSkills, value: numberText(report.proceduralEvolution.activeSkills) },
+          { label: wb.runtimeLearned, value: numberText(report.proceduralEvolution.runtimeLearned) },
+        ]}
+      >
+        {#if report.proceduralEvolution.topSkills.length > 0}
+          <div class="workbench-surface-list">
+            {#each report.proceduralEvolution.topSkills as skill}
+              <div class="workbench-surface-row">
+                <div>
+                  <strong>{skill.title}</strong>
+                  <small>{skill.topic || wb.noTopic}</small>
+                </div>
+                <StatusBadge {t} status={skill.status} />
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="skill-empty">{wb.noSkills}</div>
+        {/if}
+      </InspectorCard>
+
+      <InspectorCard
+        {t}
+        title={wb.archiveTitle}
+        icon={ShieldCheck}
+        status={(archiveStatus.available ? archiveStatus.status : "blocked") as StatusKind}
+        statusLabelText={statusText(archiveStatus)}
+        rows={archiveRows()}
+      >
+        {#if report.archiveRestore.archiveRoot}
+          <div class="workbench-fingerprint">
+            <span>{wb.closureSha256}</span>
+            <code>{shortSha256(report.archiveRestore.archiveRoot.closure_sha256)}</code>
+          </div>
+        {:else}
+          <div class="skill-empty">{plainToken(report.archiveRestore.status.reason)}</div>
+        {/if}
+      </InspectorCard>
+
+      <InspectorCard
+        {t}
+        title={wb.soulTitle}
+        icon={ShieldCheck}
+        status={(soulStatus.available ? soulStatus.status : "blocked") as StatusKind}
+        statusLabelText={statusText(soulStatus)}
+        rows={soulRows()}
+      >
+        <section class="workbench-detail-section">
+          <h4>{wb.hygiene}</h4>
+          <p>{plainToken(report.soulHealth.hygieneSummary)}</p>
+        </section>
+        <section class="workbench-detail-section">
+          <h4>{wb.safeActions}</h4>
+          {#if report.soulHealth.safeActions.length > 0}
+            <div class="chips">{#each report.soulHealth.safeActions as action}<span>{plainToken(action)}</span>{/each}</div>
+          {:else}
+            <p>{wb.none}</p>
+          {/if}
+        </section>
+      </InspectorCard>
+    </div>
+
     <div class="workbench-grid">
       <article class="panel workbench-api-panel">
-        <PanelHeader label={wb.apiMap} title={`${numberText(report.apiMap.surfaces.length)} ${wb.surfaceUnit}`} icon={Workflow} />
+        <PanelHeader title={`${numberText(report.apiMap.surfaces.length)} ${wb.surfaceUnit}`} icon={Workflow} />
         <div class="workbench-surface-list">
           {#each report.apiMap.surfaces as surface}
             <div class="workbench-surface-row">
@@ -310,7 +408,7 @@
       </article>
 
       <article class="panel">
-        <PanelHeader label={wb.benchmark} title={benchmark ? wb.benchmarkTitle : benchmarkStatus.reason} icon={BarChart3} />
+        <PanelHeader title={benchmark ? wb.benchmarkTitle : benchmarkStatus.reason} icon={BarChart3} />
         {#if benchmark}
           <div class="workbench-metric-grid">
             <div><span>{wb.fixtures}</span><strong>{benchmark.passedFixtures}/{benchmark.totalFixtures}</strong></div>
@@ -344,108 +442,6 @@
         {:else}
           <div class="panel-action-error">{benchmarkStatus.reason}</div>
         {/if}
-      </article>
-    </div>
-
-    <div class="workbench-grid lower-grid">
-      <article class="panel">
-        <PanelHeader label={wb.recall} title={wb.recallTitle} icon={GitBranch} />
-        <div class="workbench-metric-grid">
-          <div><span>{wb.memoryPoints}</span><strong>{report.recallInspector.graphNodes}</strong></div>
-          <div><span>{wb.memoryLinks}</span><strong>{report.recallInspector.graphEdges}</strong></div>
-          <div><span>{wb.skillHits}</span><strong>{report.recallInspector.proceduralDeliveryReports}</strong></div>
-        </div>
-        <KvStack items={recallRows()} />
-        {#if report.recallInspector.graphFailures.length > 0}
-          <div class="chips">{#each report.recallInspector.graphFailures as failure}<span>{plainToken(failure)}</span>{/each}</div>
-        {/if}
-      </article>
-
-      <article class="panel">
-        <PanelHeader label={localLabel("Facet", "Facet")} title={localLabel("索引诊断", "Index diagnostics")} icon={Tags} />
-        <div class="workbench-metric-grid">
-          <div><span>{localLabel("Exact docs", "Exact docs")}</span><strong>{report.facetInspector.exactFacetDocCount}</strong></div>
-          <div><span>{localLabel("Expanded docs", "Expanded docs")}</span><strong>{report.facetInspector.expandedFacetDocCount}</strong></div>
-          <div><span>{localLabel("Render growth", "Render growth")}</span><strong>{report.facetInspector.renderGrowth}</strong></div>
-        </div>
-        <KvStack items={facetRows()} />
-        {#if report.facetInspector.failures.length > 0}
-          <div class="chips">{#each report.facetInspector.failures as failure}<span>{plainToken(failure)}</span>{/each}</div>
-        {:else}
-          <div class="skill-empty">{wb.emptyFailures}</div>
-        {/if}
-        {#if report.facetInspector.auditMarkdownPreview}
-          <pre class="workbench-audit-preview">{report.facetInspector.auditMarkdownPreview}</pre>
-        {/if}
-      </article>
-
-      <article class="panel">
-        <PanelHeader label={wb.projection} title={wb.projectionTitle} icon={Activity} />
-        <KvStack items={projectionRows()} />
-        <div class="workbench-metric-grid">
-          <div><span>{wb.citations}</span><strong>{report.projectionInspector.evidenceRefs}</strong></div>
-          <div><span>{wb.lengthControl}</span><strong>{report.projectionInspector.budgetDecisions}</strong></div>
-          <div><span>{wb.filtered}</span><strong>{report.projectionInspector.droppedCandidates}</strong></div>
-        </div>
-        {#if report.projectionInspector.unsupportedClaims.length > 0}
-          <div class="chips">{#each report.projectionInspector.unsupportedClaims as claim}<span>{plainToken(claim)}</span>{/each}</div>
-        {:else}
-          <div class="skill-empty">{wb.emptyFailures}</div>
-        {/if}
-      </article>
-
-      <article class="panel">
-        <PanelHeader label={wb.procedural} title={wb.proceduralTitle} icon={DatabaseZap} />
-        <div class="workbench-metric-grid">
-          <div><span>{wb.skills}</span><strong>{report.proceduralEvolution.totalSkills}</strong></div>
-          <div><span>{wb.activeSkills}</span><strong>{report.proceduralEvolution.activeSkills}</strong></div>
-          <div><span>{wb.runtimeLearned}</span><strong>{report.proceduralEvolution.runtimeLearned}</strong></div>
-        </div>
-        {#if report.proceduralEvolution.topSkills.length > 0}
-          <div class="workbench-surface-list">
-            {#each report.proceduralEvolution.topSkills as skill}
-              <div class="workbench-surface-row">
-                <div>
-                  <strong>{skill.title}</strong>
-                  <small>{skill.topic || wb.noTopic}</small>
-                </div>
-                <span class={`badge ${skill.status}`}>{statusLabel(t, skill.status)}</span>
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <div class="skill-empty">{wb.noSkills}</div>
-        {/if}
-      </article>
-
-      <article class="panel">
-        <PanelHeader label={wb.archive} title={wb.archiveTitle} icon={ShieldCheck} />
-        <KvStack items={archiveRows()} />
-        {#if report.archiveRestore.archiveRoot}
-          <div class="workbench-fingerprint">
-            <span>{wb.closureSha256}</span>
-            <code>{shortSha256(report.archiveRestore.archiveRoot.closure_sha256)}</code>
-          </div>
-        {:else}
-          <div class="skill-empty">{plainToken(report.archiveRestore.status.reason)}</div>
-        {/if}
-      </article>
-
-      <article class="panel workbench-soul-panel">
-        <PanelHeader label={wb.soul} title={wb.soulTitle} icon={ShieldCheck} />
-        <KvStack items={soulRows()} />
-        <section class="workbench-detail-section">
-          <h4>{wb.hygiene}</h4>
-          <p>{plainToken(report.soulHealth.hygieneSummary)}</p>
-        </section>
-        <section class="workbench-detail-section">
-          <h4>{wb.safeActions}</h4>
-          {#if report.soulHealth.safeActions.length > 0}
-            <div class="chips">{#each report.soulHealth.safeActions as action}<span>{plainToken(action)}</span>{/each}</div>
-          {:else}
-            <p>{wb.none}</p>
-          {/if}
-        </section>
       </article>
     </div>
   {/if}

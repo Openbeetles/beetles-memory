@@ -19,7 +19,7 @@
 
 <div class="settings-grid">
   <section class="panel account-panel">
-    <PanelHeader label={t.account.panel} title={t.account.title} icon={KeyRound} />
+    <PanelHeader title={t.account.title} icon={KeyRound} />
     <div class="runtime-summary">
       {#each accountFields as row}
         <div><span>{row.label}</span><strong>{row.value}</strong></div>
@@ -31,7 +31,7 @@
     </div>
   </section>
   <section class="panel">
-    <PanelHeader label={t.systemSettings.panel} title={t.systemSettings.title} icon={Settings} />
+    <PanelHeader title={t.systemSettings.title} icon={Settings} />
     <div class="settings-row">
       <span class="settings-row-label"><Languages size={13} />{t.systemSettings.langLabel}</span>
       <select class="lang-select" value={lang} onchange={(event) => onLangChange((event.currentTarget as HTMLSelectElement).value as Lang)} aria-label={t.systemSettings.langLabel}>

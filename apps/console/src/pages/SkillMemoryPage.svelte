@@ -3,15 +3,16 @@
   import { ConsoleApiResponseError } from "../api";
   import SkillRetireModal from "../components/SkillRetireModal.svelte";
   import SkillEditorModal from "../components/SkillEditorModal.svelte";
+  import StatusBadge from "../components/StatusBadge.svelte";
   import { editSkill, fetchSkill, retireSkill, setSkillEnabled } from "../lib/console-api";
   import type { ConsoleCopy } from "../lib/i18n";
   import type {
     ConsoleApiSkillDetail,
     ConsoleApiSkillList,
     ConsoleApiSkillSummary,
-    Lang,
     SkillForm,
     SkillModal,
+    SkillStatusFilter,
   } from "../lib/types";
   import {
     citationsText,
@@ -22,7 +23,6 @@
 
   let {
     t,
-    lang,
     skillReport,
     skills,
     backendConnected,
@@ -30,7 +30,6 @@
     onBackendDisconnected,
   }: {
     t: ConsoleCopy;
-    lang: Lang;
     skillReport: ConsoleApiSkillList | null;
     skills: ConsoleApiSkillSummary[];
     backendConnected: boolean;
@@ -39,12 +38,12 @@
   } = $props();
 
   let selectedSkillOwnerId: string | null = $state(null);
-  let selectedSkill: ConsoleApiSkillDetail | null = $state(null);
+  let selectedSkill = $state<ConsoleApiSkillDetail | null>(null);
   let skillModal: SkillModal = $state(null);
   let skillForm: SkillForm = $state({ title: "", topic: "", summary: "", procedure: "", citations: "" });
   let skillError = $state("");
   let skillSearch = $state("");
-  let skillStatusFilter: "all" | "active" | "disabled" | "retired" = $state("all");
+  let skillStatusFilter: SkillStatusFilter = $state("all");
   let selectingSkillOwnerId: string | null = $state(null);
   let skillFormSubmitting = $state(false);
   let skillToggleBusyOwnerId: string | null = $state(null);
@@ -55,6 +54,7 @@
   const skillOperationBusy = $derived(
     selectingSkillOwnerId !== null || skillFormSubmitting || skillToggleBusyOwnerId !== null || skillRetiring,
   );
+  const skillFilters: SkillStatusFilter[] = ["all", "active", "disabled", "retired"];
 
   $effect(() => {
     if (selectedSkillOwnerId && !skills.some((skill) => skill.ownerId === selectedSkillOwnerId)) {
@@ -66,6 +66,32 @@
   function resetSkillForm() {
     skillForm = { title: "", topic: "", summary: "", procedure: "", citations: "" };
     skillError = "";
+  }
+
+  function skillFilterCount(filter: SkillStatusFilter): number {
+    if (filter === "all") return skillReport?.total ?? skills.length;
+    if (filter === "active") return skillReport?.active ?? 0;
+    if (filter === "disabled") return skillReport?.disabled ?? 0;
+    return skills.filter((skill) => skill.status === "retired").length;
+  }
+
+  function selectSkillFilter(filter: SkillStatusFilter) {
+    skillStatusFilter = filter;
+  }
+
+  function handleSkillFilterKeydown(event: KeyboardEvent, filter: SkillStatusFilter) {
+    const currentIndex = skillFilters.indexOf(filter);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % skillFilters.length;
+    else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + skillFilters.length) % skillFilters.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = skillFilters.length - 1;
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    const nextFilter = skillFilters[nextIndex];
+    selectSkillFilter(nextFilter);
+    document.getElementById(`skill-filter-${nextFilter}`)?.focus();
   }
 
   function setSkillFormField(field: keyof SkillForm, value: string) {
@@ -129,12 +155,12 @@
     const summary = skillForm.summary.trim();
     const procedure = skillForm.procedure.trim();
     if (!title || !topic || !summary || !procedure) {
-      skillError = lang === "zh-CN" ? "标题、主题、摘要和过程都不能为空" : "Title, topic, summary, and procedure are required";
+      skillError = t.skillsPanel.requiredFieldsError;
       return;
     }
     const locator = selectedSkill?.summary.locator;
     if (!locator) {
-      skillError = lang === "zh-CN" ? "请选择一个运行时技能" : "Select a runtime skill first";
+      skillError = t.skillsPanel.selectFirstError;
       return;
     }
     skillFormSubmitting = true;
@@ -197,40 +223,43 @@
 </script>
 
 <div class="skill-top panel">
-  <div class="panel-title">
-    <div>
-      <p class="panel-label">{t.skillsPanel.label}</p>
-      <h3>{t.skillsPanel.title}</h3>
+  <div class="skill-filter-bar">
+    <div class="skill-lifecycle" role="tablist" aria-label={t.skillsPanel.label}>
+      {#each skillFilters as filter}
+        <button
+          id={`skill-filter-${filter}`}
+          type="button"
+          role="tab"
+          aria-selected={skillStatusFilter === filter}
+          aria-controls="skill-list-panel"
+          tabindex={skillStatusFilter === filter ? 0 : -1}
+          class:active={skillStatusFilter === filter}
+          onclick={() => selectSkillFilter(filter)}
+          onkeydown={(event) => handleSkillFilterKeydown(event, filter)}
+        >
+          <span>{t.skillsPanel[filter]}</span><strong>{skillFilterCount(filter)}</strong>
+        </button>
+      {/each}
     </div>
-  </div>
-  <div class="skill-stats">
-    <div><span>{t.skillsPanel.total}</span><strong>{skillReport?.total ?? 0}</strong></div>
-    <div><span>{t.skillsPanel.active}</span><strong>{skillReport?.active ?? 0}</strong></div>
-    <div><span>{t.skillsPanel.disabled}</span><strong>{skillReport?.disabled ?? 0}</strong></div>
-    <div><span>{t.skillsPanel.runtimeLearned}</span><strong>{skillReport?.runtimeLearned ?? 0}</strong></div>
+    <div class="skill-learned-chip" title={t.skillsPanel.runtimeLearned}>
+      <span>{t.skillsPanel.runtimeLearned}</span>
+      <strong>{skillReport?.runtimeLearned ?? 0}</strong>
+    </div>
   </div>
   <div class="skill-toolbar">
     <div class="skill-search">
       <span class="skill-search-icon-wrap"><Search size={13} /></span>
-      <input value={skillSearch} placeholder={t.skillsPanel.search} oninput={(event) => (skillSearch = (event.currentTarget as HTMLInputElement).value)} />
-    </div>
-    <div class="skill-filters">
-      <select value={skillStatusFilter} onchange={(event) => (skillStatusFilter = (event.currentTarget as HTMLSelectElement).value as typeof skillStatusFilter)}>
-        <option value="all">{t.skillsPanel.all}</option>
-        <option value="active">{t.skillsPanel.active}</option>
-        <option value="disabled">{t.skillsPanel.disabled}</option>
-        <option value="retired">{t.skillsPanel.retired}</option>
-      </select>
+      <input aria-label={t.skillsPanel.search} value={skillSearch} placeholder={t.skillsPanel.search} oninput={(event) => (skillSearch = (event.currentTarget as HTMLInputElement).value)} />
     </div>
   </div>
 </div>
 
 {#if skillError && skillModal === null}
-  <p class="panel-action-error">{skillError}</p>
+  <p class="panel-action-error" role="alert">{skillError}</p>
 {/if}
 
 <div class="skill-layout">
-  <article class="panel skill-list-panel">
+  <div id="skill-list-panel" role="tabpanel" aria-labelledby={`skill-filter-${skillStatusFilter}`} class="panel skill-list-panel">
     <div class="skill-list">
       {#if filteredSkills.length === 0}
         <div class="skill-empty">{t.skillsPanel.empty}</div>
@@ -249,7 +278,7 @@
             </span>
             <span class="skill-row-meta">
               {#if selectingSkillOwnerId === skill.ownerId}<LoaderCircle class="spin-icon" size={12} />{/if}
-              <span class={`badge ${skill.enabled ? skill.status : "disabled"}`}>{skill.enabled ? statusLabel(t, skill.status) : statusLabel(t, "disabled")}</span>
+              <StatusBadge {t} status={skill.enabled ? skill.status : "disabled"} />
               <span>{t.skillsPanel.quality}: {skillQuality(skill)}</span>
               <span>{t.skillsPanel.uses}: {skill.useCount}</span>
             </span>
@@ -257,15 +286,12 @@
         {/each}
       {/if}
     </div>
-  </article>
+  </div>
 
   <article class="panel skill-detail-panel">
     {#if selectedSkill && selectedSkillSummary}
       <div class="panel-title">
-        <div>
-          <p class="panel-label">{t.skillsPanel.runtimeLearned}</p>
-          <h3>{selectedSkillSummary.title}</h3>
-        </div>
+        <h3>{selectedSkillSummary.title}</h3>
         <div class="panel-title-actions">
           <button class="ghost-button" type="button" onclick={() => void toggleSkillEnabled(selectedSkillSummary)} disabled={!backendConnected || skillOperationBusy}>
             {#if skillToggleBusyOwnerId === selectedSkillSummary.ownerId}<LoaderCircle class="spin-icon" size={13} />{/if}

@@ -1,13 +1,18 @@
 <script lang="ts">
-  import type { Component } from "svelte";
+  import type { IconComponent } from "../lib/types";
 
-  let { label, title, icon: Icon }: { label: string; title: string; icon: Component } = $props();
+  let {
+    title,
+    icon: Icon = undefined,
+  }: {
+    title: string;
+    icon?: IconComponent;
+  } = $props();
 </script>
 
 <div class="panel-title">
-  <div>
-    <span class="panel-label">{label}</span>
-    <h3>{title}</h3>
-  </div>
-  <Icon size={13} />
+  <h3>{title}</h3>
+  {#if Icon}
+    <Icon size={14} />
+  {/if}
 </div>
