@@ -56,18 +56,20 @@ fn recovery_snapshot(
     source: &MemoryStoreHandle,
     memory_space_id: &str,
     subject_id: &str,
+    chat_id: &str,
 ) -> ContinuitySnapshot {
     let long_term_memory = source
         .replay_harness()
-        .scoped_long_term_memory_read_store(memory_space_id, "agent:agent-main")
+        .memory_space_long_term_memory_read_store(memory_space_id)
         .expect("recovery source store")
         .list(usize::MAX)
         .expect("recovery source entries");
     ContinuitySnapshot {
-        version: 5,
+        version: 6,
         exported_at: 1_800_000_000,
         mode: ContinuitySnapshotMode::FullRestore,
-        chat_id: "chat-1".to_string(),
+        memory_space_id: memory_space_id.to_string(),
+        chat_id: chat_id.to_string(),
         subject_id: subject_id.to_string(),
         manifest: ContinuitySnapshotManifest::default(),
         summary_text: None,
@@ -486,6 +488,7 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
         &source_platform,
         "space:owner-default",
         &default_agent_subject_id("agent-main"),
+        "chat-target",
     );
 
     let target_platform = empty_store_platform(support::host_test_profile());
@@ -517,7 +520,6 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
         "llm.gateway",
         "chat-target",
     );
-
     let report = runtime
         .recover(MemoryRecoverRequest {
             trigger: RuntimeLifecycleTrigger::BootRecovery,
@@ -544,14 +546,15 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
     assert_eq!(
         target_platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("target owner store")
             .count()
             .expect("target owner count"),
         1
     );
-    let manifest_key = memory_facet_manifest_key("space:owner-default", runtime.subject_id())
-        .expect("target manifest key");
+    let manifest_key =
+        memory_facet_manifest_key(runtime.memory_space_id(), runtime.memory_space_id())
+            .expect("target manifest key");
     assert_eq!(
         target_platform
             .replay_harness()
@@ -572,6 +575,7 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
         &source_platform,
         "space:owner-default",
         &default_agent_subject_id("agent-main"),
+        "chat-target",
     );
 
     let event_log_max_items = 6;
@@ -642,14 +646,15 @@ fn runtime_recover_budget_failure_leaves_owner_facet_and_events_unchanged() {
     assert_eq!(
         target_platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("target owner store")
             .count()
             .expect("target owner count"),
         0
     );
-    let manifest_key = memory_facet_manifest_key("space:owner-default", runtime.subject_id())
-        .expect("target manifest key");
+    let manifest_key =
+        memory_facet_manifest_key(runtime.memory_space_id(), runtime.memory_space_id())
+            .expect("target manifest key");
     assert!(target_platform
         .replay_harness()
         .read_json_docs_by_keys(

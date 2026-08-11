@@ -900,6 +900,7 @@ pub struct MemoryGraphReadChainValidation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGraphPostImageClosure {
     pub memory_space_id: String,
+    pub long_term_owner_id: String,
     pub mounted_subject_id: String,
     pub allow_missing_before_owners: bool,
     pub validate_transition_successors: bool,
@@ -920,9 +921,11 @@ pub fn validate_memory_graph_post_image(
     closure: &MemoryGraphPostImageClosure,
 ) -> GovernedPostImageValidation {
     let memory_space_id = closure.memory_space_id.trim();
+    let long_term_owner_id = closure.long_term_owner_id.trim();
     let mounted_subject_id = closure.mounted_subject_id.trim();
     let mut failures = Vec::new();
-    if memory_space_id.is_empty() || mounted_subject_id.is_empty() {
+    if memory_space_id.is_empty() || long_term_owner_id.is_empty() || mounted_subject_id.is_empty()
+    {
         failures.push("memory_graph_post_image_scope_invalid".to_string());
         return GovernedPostImageValidation::from_failures(failures);
     }
@@ -960,7 +963,7 @@ pub fn validate_memory_graph_post_image(
         if image.after.is_none() && image.before.is_none() {
             continue;
         }
-        if !image.has_exact_physical_closure(memory_space_id, mounted_subject_id) {
+        if !image.has_exact_physical_closure(memory_space_id, long_term_owner_id) {
             failures.push("memory_graph_owner_physical_key_drift".to_string());
         }
         if closure.validate_transition_successors
@@ -1265,6 +1268,7 @@ fn memory_graph_before_image(closure: &MemoryGraphPostImageClosure) -> MemoryGra
         .collect::<BTreeSet<_>>();
     MemoryGraphPostImageClosure {
         memory_space_id: closure.memory_space_id.clone(),
+        long_term_owner_id: closure.long_term_owner_id.clone(),
         mounted_subject_id: closure.mounted_subject_id.clone(),
         allow_missing_before_owners: false,
         validate_transition_successors: false,

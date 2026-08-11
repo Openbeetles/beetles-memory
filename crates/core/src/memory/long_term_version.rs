@@ -15,19 +15,19 @@ use super::{
     GovernedUpdateLineageItem, LongTermControlOperation, LongTermMemoryConfidence,
     LongTermMemoryControlRevision, LongTermMemoryEntry, LongTermMemoryFreshness,
     LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, MemoryPrivacyClass, MemoryUpdateLineageReport,
+    LongTermMemoryStaleHint, MemoryPrivacyClass, MemorySpaceId, MemoryUpdateLineageReport,
     LONG_TERM_CONTROL_REVISION_NAMESPACE,
 };
 
-pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 1;
-const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v1";
-const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v1";
-const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v1";
-const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v1";
+pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 2;
+const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v2";
+const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v2";
+const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v2";
+const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v2";
 const LONG_TERM_VERSION_HEAD_CONTENT_DIGEST_DOMAIN: &str =
-    "long_term_version_head_content_digest_v1";
+    "long_term_version_head_content_digest_v2";
 const LONG_TERM_VERSION_SCOPE_CLOSURE_DIGEST_DOMAIN: &str =
-    "long_term_version_scope_closure_digest_v1";
+    "long_term_version_scope_closure_digest_v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LongTermVersionRetentionLease {
@@ -127,7 +127,7 @@ impl LongTermMemoryVersionOrigin {
 pub struct LongTermMemoryVersionMaterial {
     pub schema_version: u32,
     pub memory_space_id: String,
-    pub mounted_subject_id: String,
+    pub factual_owner_id: MemorySpaceId,
     pub owner_ref: GovernedMemoryOwnerRef,
     pub owner_revision: u64,
     pub governed_content: LongTermMemoryGovernedContent,
@@ -140,7 +140,7 @@ pub struct LongTermMemoryVersionMaterial {
 impl LongTermMemoryVersionMaterial {
     pub fn from_current_projection(
         memory_space_id: &str,
-        mounted_subject_id: &str,
+        factual_owner_id: &str,
         entry: &LongTermMemoryEntry,
         valid_from: u64,
         predecessor: Option<GovernedOwnerRevisionRef>,
@@ -153,7 +153,7 @@ impl LongTermMemoryVersionMaterial {
         let mut material = Self {
             schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
             memory_space_id: memory_space_id.to_string(),
-            mounted_subject_id: mounted_subject_id.to_string(),
+            factual_owner_id: factual_owner_id.to_string(),
             owner_ref,
             owner_revision: entry.owner_revision,
             governed_content: LongTermMemoryGovernedContent {
@@ -242,7 +242,7 @@ impl LongTermMemoryVersionMaterial {
         struct DigestInput<'a> {
             schema_version: u32,
             memory_space_id: &'a str,
-            mounted_subject_id: &'a str,
+            factual_owner_id: &'a str,
             owner_ref: &'a GovernedMemoryOwnerRef,
             owner_revision: u64,
             governed_content: &'a LongTermMemoryGovernedContent,
@@ -254,7 +254,7 @@ impl LongTermMemoryVersionMaterial {
         let bytes = serde_json::to_vec(&DigestInput {
             schema_version: self.schema_version,
             memory_space_id: &self.memory_space_id,
-            mounted_subject_id: &self.mounted_subject_id,
+            factual_owner_id: &self.factual_owner_id,
             owner_ref: &self.owner_ref,
             owner_revision: self.owner_revision,
             governed_content: &self.governed_content,
@@ -275,8 +275,9 @@ impl LongTermMemoryVersionMaterial {
         if self.schema_version != LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION
             || self.memory_space_id.trim().is_empty()
             || self.memory_space_id != self.memory_space_id.trim()
-            || self.mounted_subject_id.trim().is_empty()
-            || self.mounted_subject_id != self.mounted_subject_id.trim()
+            || self.factual_owner_id.trim().is_empty()
+            || self.factual_owner_id != self.factual_owner_id.trim()
+            || self.factual_owner_id != self.memory_space_id
             || self.owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm
             || !revision_ref.is_valid()
         {
@@ -319,7 +320,7 @@ impl LongTermMemoryVersionMaterial {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LongTermMemoryVersionCreateIntent {
     pub memory_space_id: String,
-    pub mounted_subject_id: String,
+    pub factual_owner_id: MemorySpaceId,
     pub projection: LongTermMemoryEntry,
     pub governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
     pub requested_at: u64,
@@ -338,8 +339,9 @@ pub fn bind_long_term_version_creation(
 ) -> Result<BoundLongTermVersionCreation> {
     if intent.memory_space_id.trim().is_empty()
         || intent.memory_space_id != intent.memory_space_id.trim()
-        || intent.mounted_subject_id.trim().is_empty()
-        || intent.mounted_subject_id != intent.mounted_subject_id.trim()
+        || intent.factual_owner_id.trim().is_empty()
+        || intent.factual_owner_id != intent.factual_owner_id.trim()
+        || intent.factual_owner_id != intent.memory_space_id
         || intent.projection.owner_revision != 1
         || lease.max_retained_revisions_per_owner() < 1
     {
@@ -351,7 +353,7 @@ pub fn bind_long_term_version_creation(
     let effective_at = intent.requested_at.max(intent.projection.updated_at).max(1);
     let material = LongTermMemoryVersionMaterial::from_current_projection(
         &intent.memory_space_id,
-        &intent.mounted_subject_id,
+        &intent.factual_owner_id,
         &intent.projection,
         effective_at,
         None,
@@ -360,7 +362,7 @@ pub fn bind_long_term_version_creation(
     let head = LongTermMemoryHeadManifest {
         schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
         memory_space_id: intent.memory_space_id,
-        mounted_subject_id: intent.mounted_subject_id,
+        factual_owner_id: intent.factual_owner_id,
         owner_ref: material.owner_ref.clone(),
         current_revision: material.owner_revision,
         retained_revision_digests: vec![LongTermMemoryRetainedRevisionDigest {
@@ -446,7 +448,7 @@ impl LongTermMemoryVersionMaterialImage {
     pub fn has_exact_physical_closure(
         &self,
         memory_space_id: &str,
-        mounted_subject_id: &str,
+        factual_owner_id: &str,
     ) -> bool {
         let sides = [
             (self.before_physical_key.as_deref(), self.before.as_ref()),
@@ -466,11 +468,11 @@ impl LongTermMemoryVersionMaterialImage {
                 return true;
             };
             material.memory_space_id == memory_space_id
-                && material.mounted_subject_id == mounted_subject_id
+                && material.factual_owner_id == factual_owner_id
                 && material.validate_contract().accepted
                 && long_term_version_material_key(
                     memory_space_id,
-                    mounted_subject_id,
+                    factual_owner_id,
                     &material.owner_ref,
                     material.owner_revision,
                 )
@@ -524,7 +526,7 @@ impl GovernedOwnerTransition {
                 failures.extend(successor.validate_contract().failures);
                 if successor.owner_revision_ref() != *successor_ref
                     || successor.memory_space_id != predecessor_material.memory_space_id
-                    || successor.mounted_subject_id != predecessor_material.mounted_subject_id
+                    || successor.factual_owner_id != predecessor_material.factual_owner_id
                     || successor.origin.predecessor.as_ref() != Some(&self.predecessor)
                     || successor.origin.valid_from != self.terminated_at
                 {
@@ -583,7 +585,7 @@ pub struct LongTermMemoryRetainedRevisionDigest {
 pub struct LongTermMemoryHeadManifest {
     pub schema_version: u32,
     pub memory_space_id: String,
-    pub mounted_subject_id: String,
+    pub factual_owner_id: MemorySpaceId,
     pub owner_ref: GovernedMemoryOwnerRef,
     pub current_revision: u64,
     pub retained_revision_digests: Vec<LongTermMemoryRetainedRevisionDigest>,
@@ -606,8 +608,9 @@ impl LongTermMemoryHeadManifest {
         if self.schema_version != LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION
             || self.memory_space_id.trim().is_empty()
             || self.memory_space_id != self.memory_space_id.trim()
-            || self.mounted_subject_id.trim().is_empty()
-            || self.mounted_subject_id != self.mounted_subject_id.trim()
+            || self.factual_owner_id.trim().is_empty()
+            || self.factual_owner_id != self.factual_owner_id.trim()
+            || self.factual_owner_id != self.memory_space_id
             || self.owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm
             || !self.owner_ref.is_valid()
             || self.current_revision == 0
@@ -660,7 +663,7 @@ pub fn validate_long_term_version_head_closure(
 ) -> GovernedContractValidation {
     validate_scope_closure(
         &manifest.memory_space_id,
-        &manifest.mounted_subject_id,
+        &manifest.factual_owner_id,
         std::slice::from_ref(manifest),
         materials,
         transitions,
@@ -741,7 +744,7 @@ pub fn project_current_long_term_recall_lifecycle_facts(
     if owner_materials.iter().any(|material| {
         !material.validate_contract().accepted
             || material.memory_space_id != projection.material.memory_space_id
-            || material.mounted_subject_id != projection.material.mounted_subject_id
+            || material.factual_owner_id != projection.material.factual_owner_id
             || material.owner_ref != projection.material.owner_ref
     }) {
         return Err(Error::config(
@@ -752,7 +755,7 @@ pub fn project_current_long_term_recall_lifecycle_facts(
     if control_revisions.iter().any(|revision| {
         revision.validate_contract().is_err()
             || revision.memory_space_id != projection.material.memory_space_id
-            || revision.mounted_subject_id != projection.material.mounted_subject_id
+            || revision.factual_owner_id != projection.material.factual_owner_id
             || revision.transition.predecessor.owner_ref != projection.material.owner_ref
     }) {
         return Err(Error::config(
@@ -1211,11 +1214,11 @@ fn validate_long_term_recall_scope_binding(
     max_retained_revisions_per_owner: usize,
 ) -> Result<()> {
     let canonical_scope_key =
-        long_term_version_scope_manifest_key(&head.memory_space_id, &head.mounted_subject_id)?;
+        long_term_version_scope_manifest_key(&head.memory_space_id, &head.factual_owner_id)?;
     if scope_manifest.schema_version != LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION
         || scope_manifest.physical_key != canonical_scope_key
         || scope_manifest.memory_space_id != head.memory_space_id
-        || scope_manifest.mounted_subject_id != head.mounted_subject_id
+        || scope_manifest.factual_owner_id != head.factual_owner_id
         || scope_manifest.manifest_revision == 0
         || scope_manifest.head_count != scope_manifest.head_bindings.len() as u64
         || scope_manifest.transition_count != scope_manifest.transition_bindings.len() as u64
@@ -1283,7 +1286,7 @@ fn validate_long_term_recall_scope_binding(
             .filter(|binding| &binding.predecessor == predecessor)
             .collect::<Vec<_>>();
         if revision.memory_space_id != head.memory_space_id
-            || revision.mounted_subject_id != head.mounted_subject_id
+            || revision.factual_owner_id != head.factual_owner_id
             || exact_binding.len() != 1
             || exact_binding[0].control_revision_physical_key != canonical_control_key
             || exact_binding[0].control_revision_content_digest != revision.content_digest
@@ -1323,7 +1326,7 @@ fn validate_long_term_recall_scope_binding(
             != expected_dependency_owners
         || dependency_materials.iter().any(|material| {
             material.memory_space_id != head.memory_space_id
-                || material.mounted_subject_id != head.mounted_subject_id
+                || material.factual_owner_id != head.factual_owner_id
                 || material.owner_ref == head.owner_ref
         })
     {
@@ -1348,7 +1351,7 @@ fn validate_long_term_recall_scope_binding(
             .filter(|binding| binding.owner_ref == material.owner_ref)
             .collect::<Vec<_>>();
         if dependency_head.memory_space_id != head.memory_space_id
-            || dependency_head.mounted_subject_id != head.mounted_subject_id
+            || dependency_head.factual_owner_id != head.factual_owner_id
             || dependency_head.retained_revision_digests.len() > max_retained_revisions_per_owner
             || exact_binding.len() != 1
             || exact_binding[0] != &LongTermMemoryVersionHeadBinding::from_head(dependency_head)?
@@ -1557,7 +1560,7 @@ impl LongTermMemoryVersionHeadBinding {
             owner_ref: head.owner_ref.clone(),
             head_physical_key: long_term_version_head_key(
                 &head.memory_space_id,
-                &head.mounted_subject_id,
+                &head.factual_owner_id,
                 &head.owner_ref,
             )?,
             head_content_digest: head.canonical_content_digest()?,
@@ -1623,7 +1626,7 @@ pub struct LongTermMemoryVersionScopeManifest {
     pub schema_version: u32,
     pub physical_key: String,
     pub memory_space_id: String,
-    pub mounted_subject_id: String,
+    pub factual_owner_id: MemorySpaceId,
     pub manifest_revision: u64,
     pub head_bindings: Vec<LongTermMemoryVersionHeadBinding>,
     pub transition_bindings: Vec<LongTermMemoryVersionTransitionBinding>,
@@ -1637,7 +1640,7 @@ impl LongTermMemoryVersionScopeManifest {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         memory_space_id: &str,
-        mounted_subject_id: &str,
+        factual_owner_id: &str,
         manifest_revision: u64,
         heads: &[LongTermMemoryHeadManifest],
         materials: &[LongTermMemoryVersionMaterial],
@@ -1647,7 +1650,7 @@ impl LongTermMemoryVersionScopeManifest {
     ) -> Result<Self> {
         let validation = validate_scope_closure(
             memory_space_id,
-            mounted_subject_id,
+            factual_owner_id,
             heads,
             materials,
             transitions,
@@ -1708,12 +1711,9 @@ impl LongTermMemoryVersionScopeManifest {
 
         Ok(Self {
             schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
-            physical_key: long_term_version_scope_manifest_key(
-                memory_space_id,
-                mounted_subject_id,
-            )?,
+            physical_key: long_term_version_scope_manifest_key(memory_space_id, factual_owner_id)?,
             memory_space_id: memory_space_id.to_owned(),
-            mounted_subject_id: mounted_subject_id.to_owned(),
+            factual_owner_id: factual_owner_id.to_owned(),
             manifest_revision,
             head_bindings: head_bindings.clone(),
             transition_bindings: transition_bindings.clone(),
@@ -1722,7 +1722,7 @@ impl LongTermMemoryVersionScopeManifest {
             transition_count: bounded_count("transition_count", transitions.len())?,
             closure_digest: scope_closure_digest(
                 memory_space_id,
-                mounted_subject_id,
+                factual_owner_id,
                 manifest_revision,
                 heads,
                 materials,
@@ -1743,7 +1743,7 @@ impl LongTermMemoryVersionScopeManifest {
     ) -> GovernedContractValidation {
         let mut failures = validate_scope_closure(
             &self.memory_space_id,
-            &self.mounted_subject_id,
+            &self.factual_owner_id,
             heads,
             materials,
             transitions,
@@ -1752,7 +1752,7 @@ impl LongTermMemoryVersionScopeManifest {
         .failures;
         let expected = Self::build(
             &self.memory_space_id,
-            &self.mounted_subject_id,
+            &self.factual_owner_id,
             self.manifest_revision,
             heads,
             materials,
@@ -1769,7 +1769,7 @@ impl LongTermMemoryVersionScopeManifest {
 
 fn validate_scope_closure(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     heads: &[LongTermMemoryHeadManifest],
     materials: &[LongTermMemoryVersionMaterial],
     transitions: &[GovernedOwnerTransition],
@@ -1778,8 +1778,9 @@ fn validate_scope_closure(
     let mut failures = Vec::new();
     if memory_space_id.trim().is_empty()
         || memory_space_id != memory_space_id.trim()
-        || mounted_subject_id.trim().is_empty()
-        || mounted_subject_id != mounted_subject_id.trim()
+        || factual_owner_id.trim().is_empty()
+        || factual_owner_id != factual_owner_id.trim()
+        || factual_owner_id != memory_space_id
         || max_retained_revisions_per_owner == 0
     {
         failures.push(GovernedContractFailure::HeadManifestClosureMismatch);
@@ -1789,7 +1790,7 @@ fn validate_scope_closure(
     for head in heads {
         failures.extend(head.validate_contract().failures);
         if head.memory_space_id != memory_space_id
-            || head.mounted_subject_id != mounted_subject_id
+            || head.factual_owner_id != factual_owner_id
             || head.retained_revision_digests.len() > max_retained_revisions_per_owner
             || heads_by_owner
                 .insert(head.owner_ref.clone(), head)
@@ -1814,7 +1815,7 @@ fn validate_scope_closure(
         failures.extend(material.validate_contract().failures);
         let material_ref = material.owner_revision_ref();
         if material.memory_space_id != memory_space_id
-            || material.mounted_subject_id != mounted_subject_id
+            || material.factual_owner_id != factual_owner_id
             || materials_by_ref.insert(material_ref, material).is_some()
         {
             failures.push(GovernedContractFailure::HeadManifestClosureMismatch);
@@ -1912,7 +1913,7 @@ fn validate_scope_closure(
 #[allow(clippy::too_many_arguments)]
 fn scope_closure_digest(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     manifest_revision: u64,
     heads: &[LongTermMemoryHeadManifest],
     materials: &[LongTermMemoryVersionMaterial],
@@ -1941,7 +1942,7 @@ fn scope_closure_digest(
     canonical_transition_bindings.sort();
     let bytes = serde_json::to_vec(&(
         memory_space_id,
-        mounted_subject_id,
+        factual_owner_id,
         manifest_revision,
         canonical_heads,
         canonical_materials,
@@ -1983,23 +1984,18 @@ fn is_lowercase_sha256(value: &str) -> bool {
 
 pub fn long_term_version_material_key(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     owner_ref: &GovernedMemoryOwnerRef,
     owner_revision: u64,
 ) -> Result<String> {
-    validate_key_input(
-        memory_space_id,
-        mounted_subject_id,
-        owner_ref,
-        owner_revision,
-    )?;
+    validate_key_input(memory_space_id, factual_owner_id, owner_ref, owner_revision)?;
     Ok(format!(
         "p8-material:{}",
         domain_separated_sha256(
             LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN,
             &[
                 memory_space_id.as_bytes(),
-                mounted_subject_id.as_bytes(),
+                factual_owner_id.as_bytes(),
                 owner_ref.owner_plane.as_str().as_bytes(),
                 owner_ref.owner_id.as_bytes(),
                 &owner_revision.to_be_bytes(),
@@ -2010,17 +2006,17 @@ pub fn long_term_version_material_key(
 
 pub fn long_term_version_head_key(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     owner_ref: &GovernedMemoryOwnerRef,
 ) -> Result<String> {
-    validate_key_input(memory_space_id, mounted_subject_id, owner_ref, 1)?;
+    validate_key_input(memory_space_id, factual_owner_id, owner_ref, 1)?;
     Ok(format!(
         "p8-head:{}",
         domain_separated_sha256(
             LONG_TERM_VERSION_HEAD_KEY_DOMAIN,
             &[
                 memory_space_id.as_bytes(),
-                mounted_subject_id.as_bytes(),
+                factual_owner_id.as_bytes(),
                 owner_ref.owner_plane.as_str().as_bytes(),
                 owner_ref.owner_id.as_bytes(),
             ],
@@ -2030,25 +2026,25 @@ pub fn long_term_version_head_key(
 
 pub fn long_term_version_scope_manifest_key(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
 ) -> Result<String> {
-    validate_scope_key_input(memory_space_id, mounted_subject_id)?;
+    validate_scope_key_input(memory_space_id, factual_owner_id)?;
     Ok(format!(
         "long-term-version-scope:{}",
         domain_separated_sha256(
             LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN,
-            &[memory_space_id.as_bytes(), mounted_subject_id.as_bytes(),],
+            &[memory_space_id.as_bytes(), factual_owner_id.as_bytes(),],
         )
     ))
 }
 
 fn validate_key_input(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     owner_ref: &GovernedMemoryOwnerRef,
     owner_revision: u64,
 ) -> Result<()> {
-    validate_scope_key_input(memory_space_id, mounted_subject_id)?;
+    validate_scope_key_input(memory_space_id, factual_owner_id)?;
     if owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm
         || !owner_ref.is_valid()
         || owner_revision == 0
@@ -2061,15 +2057,15 @@ fn validate_key_input(
     Ok(())
 }
 
-fn validate_scope_key_input(memory_space_id: &str, mounted_subject_id: &str) -> Result<()> {
+fn validate_scope_key_input(memory_space_id: &str, factual_owner_id: &str) -> Result<()> {
     if memory_space_id.trim().is_empty()
         || memory_space_id != memory_space_id.trim()
-        || mounted_subject_id.trim().is_empty()
-        || mounted_subject_id != mounted_subject_id.trim()
+        || factual_owner_id.trim().is_empty()
+        || factual_owner_id != factual_owner_id.trim()
     {
         return Err(Error::config(
             "long_term_version_key",
-            "canonical memory space and mounted subject are required",
+            "canonical memory space and factual owner are required",
         ));
     }
     Ok(())

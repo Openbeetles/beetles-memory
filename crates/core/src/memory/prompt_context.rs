@@ -138,6 +138,7 @@ pub(crate) struct PromptProjectionGroups {
 #[derive(Clone, Copy)]
 pub struct InhabitedSubjectProjectionInput<'a> {
     pub context: &'a PromptMemoryContext,
+    pub mounted_subject_id: &'a str,
     pub now_secs: u64,
     pub platform: &'a str,
     pub device_identity: &'a str,
@@ -208,7 +209,8 @@ pub struct InhabitedSubjectDroppedCandidate {
 pub fn compile_inhabited_subject_projection(
     input: InhabitedSubjectProjectionInput<'_>,
 ) -> InhabitedSubjectProjection {
-    let relationship_scope = relationship_scope_id(input.channel, input.chat_id);
+    let relationship_scope =
+        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     let shell = compile_subject_shell(SubjectShellCompileInput {
         now_secs: input.now_secs,
         platform: input.platform,
@@ -1556,6 +1558,7 @@ fn render_memory_health_block(issues: &[String], max_len: usize) -> Option<Strin
 }
 
 pub struct PromptMemoryContextParams<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub current_channel: &'a str,
     pub user_query: &'a str,
@@ -1724,6 +1727,8 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
 
     #[derive(Default)]
     struct StubSessionStore {
@@ -1912,6 +1917,7 @@ mod tests {
 
         let projection = compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
             context: &context,
+            mounted_subject_id: "agent:test",
             now_secs: 42,
             platform: "server development runtime",
             device_identity: "owner-default",
@@ -1952,6 +1958,7 @@ mod tests {
 
         let projection = compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
             context: &context,
+            mounted_subject_id: "agent:test",
             now_secs: 42,
             platform: "server development runtime",
             device_identity: "owner-default",
@@ -2195,6 +2202,7 @@ mod tests {
     #[test]
     fn prompt_memory_records_unreadable_layers_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -2270,6 +2278,7 @@ mod tests {
     #[test]
     fn prompt_memory_records_unreadable_world_snapshot_commitments_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -2328,6 +2337,7 @@ mod tests {
     #[test]
     fn prompt_memory_records_unreadable_turn_continuity_layers_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -2480,6 +2490,7 @@ mod tests {
         };
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "你还记得我的咖啡偏好吗",
@@ -2541,6 +2552,7 @@ mod tests {
     #[test]
     fn stage_seed_marks_esp_compact_first_turn_graph() {
         let params = PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "你还记得我的咖啡偏好吗",
@@ -2624,6 +2636,7 @@ mod tests {
         let mental_privacy_store = CountingMentalPrivacyStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -2704,6 +2717,7 @@ mod tests {
         let turn_ledger_store = CountingTurnLedgerStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -2769,6 +2783,7 @@ mod tests {
         let turn_ledger_store = CountingTurnLedgerStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -2849,6 +2864,7 @@ mod tests {
         let mental_privacy_store = CountingMentalPrivacyStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -2935,6 +2951,7 @@ mod tests {
         };
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -3033,6 +3050,7 @@ mod tests {
         });
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -4791,6 +4809,7 @@ mod tests {
         )
         .unwrap();
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "嗯?",
@@ -5133,6 +5152,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "嗯?",
@@ -5325,6 +5345,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -5408,7 +5429,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_memory_uses_board_owned_private_garden_scope_and_renders_contract_summary() {
+    fn prompt_memory_uses_mounted_subject_private_garden_scope_and_renders_contract_summary() {
         let session_store = StubSessionStore::default();
         let archive_memory_store = StubMemoryStore::default();
         let summary_store = StubSessionSummaryStore::default();
@@ -5417,8 +5438,8 @@ mod tests {
         let execution_state_store = StubExecutionStateStore::default();
         let self_model_store = StubSelfModelStore {
             model: Mutex::new(Some(SelfModel {
-                continuity_anchor: "persistent board self".to_string(),
-                self_narrative: "我是独立的板级主体".to_string(),
+                continuity_anchor: "persistent mounted subject".to_string(),
+                self_narrative: "我是独立的测试主体".to_string(),
                 updated_at: 1,
                 ..SelfModel::default()
             })),
@@ -5435,10 +5456,10 @@ mod tests {
         let private_doc_store = StubPrivateDocStore::default();
         let private_garden_store = ScopedPrivateGardenStore {
             docs_by_scope: Mutex::new(BTreeMap::from([(
-                crate::memory::BOARD_SUBJECT_SCOPE_ID.to_string(),
+                TEST_SUBJECT_ID.to_string(),
                 vec![PrivateGardenDoc {
                     path: "journal/afterglow.md".to_string(),
-                    content: "这块花园属于板级主体，不属于当前用户".to_string(),
+                    content: "这块花园属于当前挂载测试主体，不属于其他主体".to_string(),
                     updated_at: 2,
                     revision: 1,
                 }],
@@ -5454,6 +5475,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: TEST_SUBJECT_ID,
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "说说你的私有花园",
@@ -5504,14 +5526,14 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("journal/afterglow.md"),
-            "prompt private_garden projection must load from board-owned scope"
+            "prompt private_garden projection must load from mounted-subject scope"
         );
         assert!(
             context
                 .self_state_text
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Private garden owner: board.self"),
+                .contains("Private garden owner: mounted subject"),
             "prompt self-state should carry deterministic ownership contract"
         );
         let scope_calls = private_garden_store
@@ -5520,10 +5542,8 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         assert!(
-            scope_calls
-                .iter()
-                .all(|scope| scope == crate::memory::BOARD_SUBJECT_SCOPE_ID),
-            "prompt memory should query private garden by board scope, got {scope_calls:?}"
+            scope_calls.iter().all(|scope| scope == TEST_SUBJECT_ID),
+            "prompt memory should query private garden by mounted subject, got {scope_calls:?}"
         );
     }
 
@@ -5567,6 +5587,7 @@ mod tests {
         let skill_storage = StubSkillStorage::default();
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -5650,6 +5671,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -5788,6 +5810,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -5916,7 +5939,7 @@ mod tests {
         let turn_ledger_store = StubTurnLedgerStore::default();
         turn_ledger_store
             .set(
-                &crate::memory::relationship_scope_id("chat_channel", "chat-1"),
+                &crate::memory::relationship_scope_id(TEST_SUBJECT_ID, "chat_channel", "chat-1"),
                 &TurnLedger {
                     req_id: "run-observation".to_string(),
                     status: TurnLedgerStatus::Answered,
@@ -5948,6 +5971,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -6090,6 +6114,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "按之前的 release patch 流程继续",
@@ -6202,6 +6227,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "把那次 network outage 的原始记录翻出来",
@@ -6468,6 +6494,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "继续",
@@ -6585,6 +6612,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "按之前的 release patch 流程继续",
@@ -6686,6 +6714,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "把那次 network outage 的原始记录翻出来",
@@ -6787,6 +6816,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
             user_query: "[profile.owner timezone]",

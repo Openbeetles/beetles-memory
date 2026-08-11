@@ -76,6 +76,25 @@ fn fixed_role_stdout_cannot_mint_production_gate_or_publication_evidence() {
     assert!(!supervisor_entry.contains("commit_harness_release"));
 }
 
+#[test]
+fn fixture_runner_and_operator_binaries_reach_only_fixture_scoped_session_entries() {
+    let runner = include_str!("../src/bin/bm-p8-quality-runner.rs");
+    let operator = include_str!("../src/bin/bm-p8-quality-operator.rs");
+    let quality = include_str!("../src/p8_quality/mod.rs");
+
+    assert!(runner.contains("try_run_fixture_runner_session_entry"));
+    assert!(operator.contains("try_run_fixture_operator_session_entry"));
+    assert!(!runner.contains("run_trusted_supervisor_parent_session"));
+    assert!(!operator.contains("run_trusted_supervisor_parent_session"));
+    let runner_session = quality
+        .split("fn run_fixture_runner_session")
+        .nth(1)
+        .and_then(|tail| tail.split("fn run_fixture_operator_session").next())
+        .expect("fixture runner session owner");
+    assert!(runner_session.contains("admit_supervisor_binding"));
+    assert!(!runner_session.contains("mint_for_supervisor"));
+}
+
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn parent_owned_trusted_entry_is_reachable_and_returns_typed_na_before_path_access() {

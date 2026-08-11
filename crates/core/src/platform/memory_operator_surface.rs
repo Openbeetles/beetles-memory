@@ -716,6 +716,7 @@ fn build_policy_view(
         .get(target.scope_id.as_str())?
         .and_then(|ledger| ledger.soul_feedback);
     let inspection = inspect_personality_governance(PersonalityGovernanceInspectionInput {
+        mounted_subject_id: subject_id,
         channel: target.channel.as_str(),
         chat_id: target.chat_id.as_str(),
         now_secs,

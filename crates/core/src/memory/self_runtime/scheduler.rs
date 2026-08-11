@@ -99,6 +99,7 @@ pub fn enqueue_self_runtime_post_reply(
     self_continuity_store: &dyn SelfContinuityStore,
     autonomy_strategy_store: &dyn AutonomyStrategyStore,
     self_authored_core_store: &dyn SelfAuthoredCoreStore,
+    mounted_subject_id: &str,
     profile: MemoryProfile,
     chat_id: &str,
     source_channel: &str,
@@ -147,7 +148,7 @@ pub fn enqueue_self_runtime_post_reply(
             return false;
         }
     }
-    let subject_id = board_subject_scope_id();
+    let subject_id = mounted_subject_id;
     let continuity = self_continuity_store.get(subject_id).ok().flatten();
     let strategy = autonomy_strategy_store.get(subject_id).ok().flatten();
     let has_self_authored_core = self_authored_core_store
@@ -482,6 +483,7 @@ pub fn self_runtime_tick(
     self_authored_core_store: &dyn SelfAuthoredCoreStore,
     relationship_portfolio_store: &dyn RelationshipPortfolioStore,
     relationship_topology_store: &dyn RelationshipTopologyStore,
+    mounted_subject_id: &str,
     profile: MemoryProfile,
     now_secs: u64,
 ) {
@@ -502,7 +504,7 @@ pub fn self_runtime_tick(
     let capability = memory_capability_profile(profile);
     let uptime_secs = crate::platform::time::uptime_secs();
     let mut enqueued = 0usize;
-    let subject_id = board_subject_scope_id();
+    let subject_id = mounted_subject_id;
     let continuity = match self_continuity_store.get(subject_id) {
         Ok(value) => value,
         Err(error) => {
@@ -618,6 +620,7 @@ pub fn self_runtime_tick(
     };
     let portfolio = match sync_relationship_portfolio(
         relationship_portfolio_store,
+        subject_id,
         topology.as_ref(),
         self_authored_core.as_ref(),
         now_secs,
@@ -651,6 +654,7 @@ pub fn self_runtime_tick(
             }
             let _ = touch_relationship_portfolio_selection(
                 relationship_portfolio_store,
+                subject_id,
                 target.scope_id.as_str(),
                 now_secs,
             );
@@ -837,6 +841,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
 
     #[test]
     fn idle_self_runtime_block_reason_reports_clock_unsynchronized_before_queueing() {
@@ -1227,6 +1233,7 @@ mod tests {
             &StubSelfAuthoredCoreStore,
             &StubRelationshipPortfolioStore,
             &StubRelationshipTopologyStore,
+            TEST_SUBJECT_ID,
             MemoryProfile::Standard,
             now_secs,
         );
@@ -1282,6 +1289,7 @@ mod tests {
             &StubSelfAuthoredCoreStore,
             &StubRelationshipPortfolioStore,
             &StubRelationshipTopologyStore,
+            TEST_SUBJECT_ID,
             MemoryProfile::Standard,
             now_secs,
         );
@@ -1317,6 +1325,7 @@ mod tests {
             &StubSelfContinuityStore::default(),
             &StubAutonomyStrategyStore::default(),
             &StubSelfAuthoredCoreStore,
+            TEST_SUBJECT_ID,
             MemoryProfile::Standard,
             "chat-a",
             "chat_channel",
@@ -1361,6 +1370,7 @@ mod tests {
             &StubSelfContinuityStore::default(),
             &StubAutonomyStrategyStore::default(),
             &StubSelfAuthoredCoreStore,
+            TEST_SUBJECT_ID,
             MemoryProfile::Embedded,
             "chat-a",
             "chat_channel",
@@ -1417,6 +1427,7 @@ mod tests {
             &continuity_store,
             &strategy_store,
             &PresentSelfAuthoredCoreStore,
+            TEST_SUBJECT_ID,
             MemoryProfile::Embedded,
             "chat-a",
             "chat_channel",
@@ -1505,6 +1516,7 @@ mod tests {
             &StubSelfContinuityStore::default(),
             &StubAutonomyStrategyStore::default(),
             &StubSelfAuthoredCoreStore,
+            TEST_SUBJECT_ID,
             MemoryProfile::Standard,
             "chat-a",
             "chat_channel",
@@ -1543,6 +1555,7 @@ mod tests {
             &StubSelfContinuityStore::default(),
             &StubAutonomyStrategyStore::default(),
             &StubSelfAuthoredCoreStore,
+            TEST_SUBJECT_ID,
             MemoryProfile::Standard,
             "chat-a",
             "chat_channel",

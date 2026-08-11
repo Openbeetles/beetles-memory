@@ -499,7 +499,7 @@ fn control_planner_returns_write_intent_without_mutating_read_stores() {
             },
             reason: "user_corrected_preference".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 1,
@@ -515,6 +515,30 @@ fn control_planner_returns_write_intent_without_mutating_read_stores() {
     assert!(control.tombstones.lock().unwrap().is_empty());
     assert!(control.policies.lock().unwrap().is_empty());
     assert!(control.audits.lock().unwrap().is_empty());
+}
+
+#[test]
+fn control_planner_rejects_subject_scoped_factual_owner() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let error = plan_long_term_memory_control_mutation(
+        &ReadOnlyLongTermView(&store),
+        &ReadOnlyControlView(&control),
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::Delete {
+                target: MemoryLongTermTarget::RecordId("missing-record".to_string()),
+            },
+            reason: "invalid_subject_owner".to_string(),
+            dry_run: false,
+            factual_owner_id: "agent:alpha".to_string(),
+            actor_subject_id: Some("agent:alpha".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 1,
+        },
+    )
+    .expect_err("subject-scoped factual owner must fail closed");
+
+    assert!(error.to_string().contains("factual owner"));
 }
 
 #[test]
@@ -641,7 +665,7 @@ fn correct_preserves_source_lineage_and_increments_owner_revision() {
             },
             reason: "user_corrected_preference".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 1,
@@ -703,7 +727,7 @@ fn unchanged_correct_stale_privacy_and_scope_are_noop_without_control_writes() {
                 operation,
                 reason: "same value".to_string(),
                 dry_run: false,
-                owner_subject_id: "subject-human".to_string(),
+                factual_owner_id: "space-user".to_string(),
                 actor_subject_id: Some("subject-human".to_string()),
                 memory_space_id: Some("space-user".to_string()),
                 now_secs: NOW_SECS + 1,
@@ -753,7 +777,7 @@ fn supersede_and_delete_create_tombstones_and_exclude_old_records() {
             },
             reason: "project_process_changed".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 2,
@@ -785,7 +809,7 @@ fn supersede_and_delete_create_tombstones_and_exclude_old_records() {
             },
             reason: "user_deleted_project_memory".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 3,
@@ -805,14 +829,18 @@ fn supersede_and_delete_create_tombstones_and_exclude_old_records() {
         &store,
         &control,
         LongTermMemoryControlDetailRequest {
-            target: MemoryLongTermTarget::RecordId(new_id),
+            target: MemoryLongTermTarget::RecordId(new_id.clone()),
             view: MemoryLongTermControlView::HostUi,
         },
     )
     .expect("deleted detail");
     assert!(deleted_detail.record.is_none());
     assert!(deleted_detail.revisions.is_empty());
-    assert!(deleted_detail.tombstone.is_none());
+    let tombstone = deleted_detail.tombstone.expect("shared owner tombstone");
+    assert_eq!(tombstone.record_id, new_id);
+    assert_eq!(tombstone.memory_space_id, "space-user");
+    assert_eq!(tombstone.factual_owner_id, "space-user");
+    assert_eq!(tombstone.actor_subject_id.as_deref(), Some("subject-human"));
     assert!(deleted_detail.transcript_refs.is_empty());
 }
 
@@ -843,7 +871,7 @@ fn forget_by_query_requires_preview_confirmation_before_destructive_change() {
             },
             reason: "user_requested_forget_person".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 4,
@@ -875,7 +903,7 @@ fn forget_by_query_requires_preview_confirmation_before_destructive_change() {
             },
             reason: "user_requested_forget_person".to_string(),
             dry_run: true,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 5,
@@ -927,7 +955,7 @@ fn forget_by_query_evidence_ref_narrows_bulk_target() {
             },
             reason: "preview_forget_only_second_evidence".to_string(),
             dry_run: true,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 6,
@@ -955,7 +983,7 @@ fn forget_by_query_evidence_ref_narrows_bulk_target() {
             },
             reason: "forget_only_second_evidence".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 7,
@@ -993,7 +1021,7 @@ fn change_scope_reports_subject_visibility_without_host_role_names() {
             },
             reason: "user_limited_subject_visibility".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 6,
@@ -1038,7 +1066,7 @@ fn privacy_transition_requires_the_explicit_control_operation() {
             },
             reason: "ordinary correction must not broaden visibility".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 8,
@@ -1065,7 +1093,7 @@ fn privacy_transition_requires_the_explicit_control_operation() {
             },
             reason: "owner explicitly approved public runtime visibility".to_string(),
             dry_run: false,
-            owner_subject_id: "subject-human".to_string(),
+            factual_owner_id: "space-user".to_string(),
             actor_subject_id: Some("subject-human".to_string()),
             memory_space_id: Some("space-user".to_string()),
             now_secs: NOW_SECS + 9,

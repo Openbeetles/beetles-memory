@@ -437,6 +437,61 @@ fn fixture_plan(purpose: P8QualityPurpose) -> P8QualityExperimentPlanV1 {
     .expect("fixture plan")
 }
 
+pub(super) fn fixture_plan_for_zero_origin_dataset(
+    purpose: P8QualityPurpose,
+    dataset: &super::execution_plan::P8ZeroOriginTinyDatasetManifestV1,
+) -> P8QualityExperimentPlanV1 {
+    let source = SourceFixture::new();
+    let questions = dataset
+        .ordered_questions()
+        .iter()
+        .map(|question| question.question_id().clone())
+        .collect::<Vec<_>>();
+    let policy = P8QualityHardPolicyV1::canonical();
+    let comparator_source = source.baseline_set();
+    let mut frozen = protocol(
+        &comparator_source,
+        &questions,
+        P8ExecutionMode::FixtureContract,
+    )
+    .frozen;
+    frozen.dataset = P8DatasetProtocolV1 {
+        dataset_identity_digest: dataset.dataset_identity_digest().clone(),
+        dataset_version_digest: dataset.dataset_version_digest().clone(),
+        dataset_license_digest: dataset.dataset_license_digest().clone(),
+        input_manifest_digest: dataset.input_manifest_digest().clone(),
+        ordered_question_rubric_gold_manifest_digest: dataset
+            .ordered_question_rubric_gold_manifest_digest()
+            .clone(),
+        ordered_question_ids_digest: dataset.ordered_question_ids_digest().clone(),
+    };
+    let protocol = P8EvaluationProtocolLockV1::build(frozen).expect("zero-origin protocol");
+    let source_set = match purpose {
+        P8QualityPurpose::BaselineEstablishment => comparator_source,
+        P8QualityPurpose::QualityCandidate => source.candidate_set(),
+    };
+    let closure = P8QualityTrialClosureV1::derive(purpose, questions, 2, 3).expect("closure");
+    let threshold = (purpose == P8QualityPurpose::QualityCandidate).then(|| threshold(&protocol));
+    let frozen_quality_policy = threshold.as_ref().map(|threshold| {
+        P8FrozenQualityPolicyV1::build(
+            protocol.protocol_digest().clone(),
+            threshold.threshold_digest().clone(),
+        )
+    });
+    P8QualityExperimentPlanV1::build(
+        purpose,
+        P8ExecutionMode::FixtureContract,
+        source_set,
+        policy,
+        protocol,
+        closure,
+        threshold,
+        frozen_quality_policy,
+        None,
+    )
+    .expect("zero-origin fixture plan")
+}
+
 fn valid_quality_envelopes() -> Vec<P8QualityArtifactEnvelopeV1> {
     let audit = P8P84RawSourceAuditManifestV1::materialized_from_cutover_audit();
     let anchor = P8P84SemanticSourceAnchorV1::build(&audit).expect("anchor");

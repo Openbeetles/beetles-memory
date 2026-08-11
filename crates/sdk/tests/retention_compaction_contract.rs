@@ -81,13 +81,13 @@ fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_mem
         .expect("seed long-term memory");
     let before_count = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .count()
         .expect("before count");
     let before = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(1)
         .expect("before owner")
@@ -102,7 +102,7 @@ fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_mem
 
     let after_count = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .count()
         .expect("after count");
@@ -114,7 +114,7 @@ fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_mem
     assert!(report.hygiene.factual_evidence_compacted >= 1);
     let after = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&before.id)
         .expect("after owner")

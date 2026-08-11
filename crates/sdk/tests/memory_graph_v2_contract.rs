@@ -130,7 +130,7 @@ fn seed_drafts(
         .expect("seed governed owners");
     platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list owners")
@@ -851,7 +851,7 @@ fn typed_head_and_material_revision_drift_fail_closed_in_recall_eval_and_project
             "head" => {
                 let key = long_term_version_head_key(
                     runtime.memory_space_id(),
-                    runtime.subject_id(),
+                    runtime.memory_space_id(),
                     &owner_ref,
                 )
                 .expect("head key");
@@ -881,7 +881,7 @@ fn typed_head_and_material_revision_drift_fail_closed_in_recall_eval_and_project
             "material" => {
                 let key = long_term_version_material_key(
                     runtime.memory_space_id(),
-                    runtime.subject_id(),
+                    runtime.memory_space_id(),
                     &owner_ref,
                     target.owner_revision,
                 )
@@ -1482,7 +1482,7 @@ fn candidate_and_extraction_owner_updates_cascade_graph_in_the_same_transaction(
         .expect("seed candidate owner");
     let candidate_owner = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("owners")

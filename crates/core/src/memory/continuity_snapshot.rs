@@ -8,19 +8,19 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 use super::{
-    board_subject_scope_id, plan_governed_shared_memory_in_space,
-    select_relationship_portfolio_targets, select_relationship_topology_targets,
-    CoreRevisionLedger, CoreRevisionLedgerStore, ExecutionState, ExecutionStateStore,
-    LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryReadStore,
-    LongTermMemoryStore, RelationshipConstitution, RelationshipConstitutionStore,
-    RelationshipPortfolio, RelationshipPortfolioSelectorInput, RelationshipPortfolioStore,
-    RelationshipSelectionTarget, RelationshipSelectorInput, RelationshipTopology,
-    RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore, SelfContinuity,
-    SelfContinuityStore, SelfModel, SelfModelStore, SessionStore, SessionSummaryStore,
-    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SharedMemoryWriteSource,
+    plan_governed_shared_memory_in_space, select_relationship_portfolio_targets,
+    select_relationship_topology_targets, CoreRevisionLedger, CoreRevisionLedgerStore,
+    ExecutionState, ExecutionStateStore, LongTermMemoryDraft, LongTermMemoryEntry,
+    LongTermMemoryKind, LongTermMemoryReadStore, LongTermMemoryStore, RelationshipConstitution,
+    RelationshipConstitutionStore, RelationshipPortfolio, RelationshipPortfolioSelectorInput,
+    RelationshipPortfolioStore, RelationshipSelectionTarget, RelationshipSelectorInput,
+    RelationshipTopology, RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore,
+    SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore, SessionStore,
+    SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome,
+    SharedMemoryWriteSource,
 };
 
-const CONTINUITY_SNAPSHOT_VERSION: u32 = 5;
+const CONTINUITY_SNAPSHOT_VERSION: u32 = 6;
 const BOOTSTRAP_MAX_FACTS: usize = 16;
 const FULL_RESTORE_MAX_FACTS: usize = 48;
 const PERSONALITY_GOVERNANCE_ACTIVE_WINDOW_SECS: u64 = 7 * 86_400;
@@ -78,10 +78,9 @@ pub struct ContinuitySnapshot {
     pub version: u32,
     pub exported_at: u64,
     pub mode: ContinuitySnapshotMode,
+    pub memory_space_id: String,
     pub chat_id: String,
-    #[serde(default)]
     pub subject_id: String,
-    #[serde(default)]
     pub manifest: ContinuitySnapshotManifest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_text: Option<String>,
@@ -292,11 +291,18 @@ pub fn coalesce_continuity_snapshot_import_plans(plans: &mut [ContinuitySnapshot
 
 pub(crate) fn export_continuity_snapshot(
     ctx: ContinuitySnapshotExportContext<'_>,
+    memory_space_id: &str,
     subject_id: &str,
     chat_id: &str,
     mode: ContinuitySnapshotMode,
     exported_at: u64,
 ) -> Result<ContinuitySnapshot> {
+    if memory_space_id.is_empty() || memory_space_id != memory_space_id.trim() {
+        return Err(Error::config(
+            "continuity_snapshot_scope_binding",
+            "memory_space_id must be a canonical non-empty value",
+        ));
+    }
     if subject_id.is_empty() || subject_id != subject_id.trim() {
         return Err(Error::config(
             "continuity_snapshot_subject_binding",
@@ -338,6 +344,7 @@ pub(crate) fn export_continuity_snapshot(
         version: CONTINUITY_SNAPSHOT_VERSION,
         exported_at,
         mode,
+        memory_space_id: memory_space_id.to_string(),
         chat_id: chat_id.to_string(),
         subject_id: subject_id.to_string(),
         manifest: ContinuitySnapshotManifest::default(),
@@ -365,7 +372,7 @@ pub fn plan_continuity_snapshot_import(
     mode: ContinuitySnapshotImportMode,
     governance_context: SharedFactWriteGovernanceContext,
 ) -> Result<ContinuitySnapshotImportPlan> {
-    validate_snapshot_subject_binding(snapshot, &governance_context.origin_subject_id)?;
+    validate_snapshot_scope_binding(snapshot, target_chat_id, &governance_context)?;
     let manifest = snapshot_manifest(snapshot);
     let target_subject_id = snapshot.subject_id.as_str();
     let selected = select_import_long_term_memory(snapshot, target_chat_id, mode);
@@ -698,20 +705,50 @@ pub fn plan_continuity_snapshot_import(
     })
 }
 
-fn validate_snapshot_subject_binding(
+fn validate_snapshot_scope_binding(
     snapshot: &ContinuitySnapshot,
-    mounted_subject_id: &str,
+    target_chat_id: &str,
+    governance_context: &SharedFactWriteGovernanceContext,
 ) -> Result<()> {
-    if mounted_subject_id.is_empty()
+    let mounted_subject_id = governance_context.origin_subject_id.as_str();
+    if snapshot.version != CONTINUITY_SNAPSHOT_VERSION
+        || governance_context.memory_space_id.is_empty()
+        || governance_context.memory_space_id != governance_context.memory_space_id.trim()
+        || snapshot.memory_space_id.is_empty()
+        || snapshot.memory_space_id != snapshot.memory_space_id.trim()
+        || snapshot.memory_space_id != governance_context.memory_space_id
+        || mounted_subject_id.is_empty()
         || mounted_subject_id != mounted_subject_id.trim()
         || snapshot.subject_id.is_empty()
         || snapshot.subject_id != snapshot.subject_id.trim()
         || snapshot.subject_id != mounted_subject_id
+        || snapshot.chat_id.is_empty()
+        || snapshot.chat_id != snapshot.chat_id.trim()
+        || target_chat_id.is_empty()
+        || target_chat_id != target_chat_id.trim()
+        || snapshot.chat_id != target_chat_id
     {
         return Err(Error::config(
-            "continuity_snapshot_subject_binding",
-            "snapshot subject must exactly match the mounted recovery subject",
+            "continuity_snapshot_scope_binding",
+            "snapshot memory space, subject and chat must exactly match the mounted recovery scope",
         ));
+    }
+    if let Some(constitution) = snapshot.relationship_constitution.as_ref() {
+        let expected = super::relationship_scope_id(
+            mounted_subject_id,
+            constitution.channel.as_str(),
+            constitution.chat_id.as_str(),
+        );
+        if constitution.chat_id != snapshot.chat_id
+            || constitution.scope_id != expected
+            || snapshot.manifest.relationship_scope_id.as_deref()
+                != Some(constitution.scope_id.as_str())
+        {
+            return Err(Error::config(
+                "continuity_snapshot_scope_binding",
+                "snapshot relationship constitution does not match its exact subject/chat scope",
+            ));
+        }
     }
     Ok(())
 }
@@ -741,7 +778,7 @@ pub(crate) fn import_continuity_snapshot(
         snapshot,
         mode,
         SharedFactWriteGovernanceContext::new(
-            "test-memory-space",
+            snapshot.memory_space_id.clone(),
             subject_id,
             subject_id,
             SharedMemoryWriteSource::SnapshotImport,
@@ -1466,6 +1503,8 @@ mod tests {
     };
     use std::sync::Mutex;
 
+    const TEST_SUBJECT_ID: &str = "agent:test";
+
     fn sample_entry(kind: LongTermMemoryKind, topic: &str) -> LongTermMemoryEntry {
         LongTermMemoryEntry {
             id: format!("{}:{}", kind.label(), topic),
@@ -1817,7 +1856,8 @@ mod tests {
                     entries: std::collections::HashMap::new(),
                 },
             },
-            board_subject_scope_id(),
+            "test-memory-space",
+            TEST_SUBJECT_ID,
             "chat-1",
             ContinuitySnapshotMode::Bootstrap,
             10,
@@ -1842,6 +1882,7 @@ mod tests {
             version: CONTINUITY_SNAPSHOT_VERSION,
             exported_at: 20,
             mode: ContinuitySnapshotMode::FullRestore,
+            memory_space_id: "space-a".to_string(),
             chat_id: "chat-old".to_string(),
             subject_id: "subject-other".to_string(),
             manifest: ContinuitySnapshotManifest::default(),
@@ -1868,7 +1909,7 @@ mod tests {
                 relationship_constitution_store: &StubRelationshipConstitutionStore::default(),
                 relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
             },
-            "chat-new",
+            "chat-old",
             &snapshot,
             ContinuitySnapshotImportMode::FullRestore,
             SharedFactWriteGovernanceContext::new(
@@ -1880,7 +1921,137 @@ mod tests {
         )
         .expect_err("cross-subject recovery snapshot must fail closed");
 
-        assert_eq!(error.stage(), "continuity_snapshot_subject_binding");
+        assert_eq!(error.stage(), "continuity_snapshot_scope_binding");
+        assert_eq!(
+            *long_term_store
+                .list_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
+        assert_eq!(
+            *summary_store
+                .read_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
+    }
+
+    #[test]
+    fn import_planning_rejects_cross_memory_space_before_store_reads() {
+        let long_term_store = StubLongTermMemoryStore::default();
+        let summary_store = StubSummaryStore::default();
+        let snapshot = ContinuitySnapshot {
+            version: CONTINUITY_SNAPSHOT_VERSION,
+            exported_at: 20,
+            mode: ContinuitySnapshotMode::FullRestore,
+            memory_space_id: "space-origin".to_string(),
+            chat_id: "chat-a".to_string(),
+            subject_id: "subject-mounted".to_string(),
+            manifest: ContinuitySnapshotManifest::default(),
+            summary_text: Some("must remain in the source space".to_string()),
+            summary_message_count: Some(1),
+            long_term_memory: Vec::new(),
+            self_model: None,
+            self_authored_core: None,
+            core_revision_ledger: None,
+            self_continuity: None,
+            relationship_portfolio: None,
+            relationship_constitution: None,
+            execution_state: None,
+        };
+
+        let error = plan_continuity_snapshot_import(
+            ContinuitySnapshotImportContext {
+                long_term_memory_store: &long_term_store,
+                session_summary_store: &summary_store,
+                execution_state_store: &StubExecutionStateStore::default(),
+                self_model_store: &StubSelfModelStore::default(),
+                self_authored_core_store: &StubSelfAuthoredCoreStore::default(),
+                core_revision_ledger_store: &StubCoreRevisionLedgerStore::default(),
+                self_continuity_store: &StubSelfContinuityStore::default(),
+                relationship_constitution_store: &StubRelationshipConstitutionStore::default(),
+                relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
+            },
+            "chat-a",
+            &snapshot,
+            ContinuitySnapshotImportMode::FullRestore,
+            SharedFactWriteGovernanceContext::new(
+                "space-target",
+                "subject-mounted",
+                "subject-mounted",
+                SharedMemoryWriteSource::SnapshotImport,
+            ),
+        )
+        .expect_err("restore must not import a snapshot into another memory space");
+
+        assert_eq!(error.stage(), "continuity_snapshot_scope_binding");
+        assert_eq!(
+            *long_term_store
+                .list_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
+        assert_eq!(
+            *summary_store
+                .read_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            0
+        );
+    }
+
+    #[test]
+    fn import_planning_rejects_cross_chat_scope_before_store_reads() {
+        let long_term_store = StubLongTermMemoryStore::default();
+        let summary_store = StubSummaryStore::default();
+        let snapshot = ContinuitySnapshot {
+            version: CONTINUITY_SNAPSHOT_VERSION,
+            exported_at: 20,
+            mode: ContinuitySnapshotMode::FullRestore,
+            memory_space_id: "space-a".to_string(),
+            chat_id: "chat-original".to_string(),
+            subject_id: "subject-mounted".to_string(),
+            manifest: ContinuitySnapshotManifest::default(),
+            summary_text: Some("must not be remapped".to_string()),
+            summary_message_count: Some(1),
+            long_term_memory: Vec::new(),
+            self_model: None,
+            self_authored_core: None,
+            core_revision_ledger: None,
+            self_continuity: None,
+            relationship_portfolio: None,
+            relationship_constitution: None,
+            execution_state: None,
+        };
+
+        let error = plan_continuity_snapshot_import(
+            ContinuitySnapshotImportContext {
+                long_term_memory_store: &long_term_store,
+                session_summary_store: &summary_store,
+                execution_state_store: &StubExecutionStateStore::default(),
+                self_model_store: &StubSelfModelStore::default(),
+                self_authored_core_store: &StubSelfAuthoredCoreStore::default(),
+                core_revision_ledger_store: &StubCoreRevisionLedgerStore::default(),
+                self_continuity_store: &StubSelfContinuityStore::default(),
+                relationship_constitution_store: &StubRelationshipConstitutionStore::default(),
+                relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
+            },
+            "chat-target",
+            &snapshot,
+            ContinuitySnapshotImportMode::FullRestore,
+            SharedFactWriteGovernanceContext::new(
+                "space-a",
+                "subject-mounted",
+                "subject-mounted",
+                SharedMemoryWriteSource::SnapshotImport,
+            ),
+        )
+        .expect_err("restore must not remap a snapshot onto another chat scope");
+
+        assert_eq!(error.stage(), "continuity_snapshot_scope_binding");
         assert_eq!(
             *long_term_store
                 .list_calls
@@ -1916,6 +2087,7 @@ mod tests {
                     entries: std::collections::HashMap::new(),
                 },
             },
+            "test-memory-space",
             " subject-mounted ",
             "chat-a",
             ContinuitySnapshotMode::FullRestore,
@@ -1950,13 +2122,19 @@ mod tests {
         let self_continuity_store = StubSelfContinuityStore::default();
         let relationship_constitution_store = StubRelationshipConstitutionStore::default();
         let relationship_portfolio_store = StubRelationshipPortfolioStore::default();
+        let relationship_scope_id =
+            crate::memory::relationship_scope_id(TEST_SUBJECT_ID, "chat_channel", "chat-1");
         let snapshot = ContinuitySnapshot {
             version: CONTINUITY_SNAPSHOT_VERSION,
             exported_at: 11,
             mode: ContinuitySnapshotMode::FullRestore,
+            memory_space_id: "test-memory-space".to_string(),
             chat_id: "chat-1".to_string(),
-            subject_id: board_subject_scope_id().to_string(),
-            manifest: ContinuitySnapshotManifest::default(),
+            subject_id: TEST_SUBJECT_ID.to_string(),
+            manifest: ContinuitySnapshotManifest {
+                relationship_scope_id: Some(relationship_scope_id.clone()),
+                ..ContinuitySnapshotManifest::default()
+            },
             summary_text: None,
             summary_message_count: None,
             long_term_memory: vec![sample_entry(LongTermMemoryKind::Profile, "owner_profile")],
@@ -1986,7 +2164,7 @@ mod tests {
                 entries: vec![CoreRevisionRecord {
                     based_on_revision: 0,
                     resulting_revision: 1,
-                    relationship_scope_id: "rel:chat_channel:chat-1".to_string(),
+                    relationship_scope_id: relationship_scope_id.clone(),
                     source_layers: vec!["self_model".to_string()],
                     outcome: CoreRevisionOutcome::Adopted,
                     evidence_summary: vec!["bootstrap".to_string()],
@@ -2022,7 +2200,7 @@ mod tests {
                 updated_at: 11,
             }),
             relationship_constitution: Some(RelationshipConstitution {
-                scope_id: "rel:chat_channel:chat-1".to_string(),
+                scope_id: relationship_scope_id.clone(),
                 channel: "chat_channel".to_string(),
                 chat_id: "chat-1".to_string(),
                 board_revision: 1,
@@ -2034,7 +2212,7 @@ mod tests {
             }),
             relationship_portfolio: Some(RelationshipPortfolio {
                 entries: vec![crate::memory::RelationshipPortfolioEntry {
-                    scope_id: "rel:chat_channel:chat-1".to_string(),
+                    scope_id: relationship_scope_id,
                     channel: "chat_channel".to_string(),
                     chat_id: "chat-1".to_string(),
                     governance_state: crate::memory::RelationshipGovernanceState::Maintain,
@@ -2073,7 +2251,7 @@ mod tests {
                 relationship_portfolio_store: &relationship_portfolio_store,
             },
             &store,
-            "chat-new",
+            "chat-1",
             &snapshot,
             ContinuitySnapshotImportMode::FullRestore,
         )
@@ -2114,8 +2292,9 @@ mod tests {
                 version: CONTINUITY_SNAPSHOT_VERSION,
                 exported_at: 20,
                 mode: ContinuitySnapshotMode::Bootstrap,
-                chat_id: "chat-old".to_string(),
-                subject_id: board_subject_scope_id().to_string(),
+                memory_space_id: "test-memory-space".to_string(),
+                chat_id: "chat-new".to_string(),
+                subject_id: TEST_SUBJECT_ID.to_string(),
                 manifest: ContinuitySnapshotManifest::default(),
                 summary_text: Some("stable summary".to_string()),
                 summary_message_count: Some(12),
@@ -2163,8 +2342,9 @@ mod tests {
                 version: CONTINUITY_SNAPSHOT_VERSION,
                 exported_at: 20,
                 mode: ContinuitySnapshotMode::Bootstrap,
-                chat_id: "chat-old".to_string(),
-                subject_id: board_subject_scope_id().to_string(),
+                memory_space_id: "test-memory-space".to_string(),
+                chat_id: "chat-new".to_string(),
+                subject_id: TEST_SUBJECT_ID.to_string(),
                 manifest: ContinuitySnapshotManifest::default(),
                 summary_text: Some("older snapshot summary".to_string()),
                 summary_message_count: Some(11),
@@ -2198,7 +2378,7 @@ mod tests {
         };
         let continuity_store = MultiSelfContinuityStore {
             entries: [(
-                board_subject_scope_id().to_string(),
+                TEST_SUBJECT_ID.to_string(),
                 SelfContinuity {
                     wake_anchor: String::new(),
                     current_self_state: String::new(),
@@ -2219,7 +2399,7 @@ mod tests {
         };
         let topology_store = StubRelationshipTopologyStore {
             entries: [(
-                board_subject_scope_id().to_string(),
+                TEST_SUBJECT_ID.to_string(),
                 RelationshipTopology {
                     entries: vec![crate::memory::RelationshipTopologyEntry {
                         scope_id: "rel:chat_channel:chat-recent".to_string(),
@@ -2255,7 +2435,7 @@ mod tests {
             }),
         };
         let selected = select_active_continuity_snapshot_chat_ids(
-            board_subject_scope_id(),
+            TEST_SUBJECT_ID,
             &session_store,
             &continuity_store,
             &portfolio_store,
@@ -2273,7 +2453,7 @@ mod tests {
 
     #[test]
     fn select_active_chat_ids_is_bound_to_requested_subject_in_both_directions() {
-        let board_subject_id = board_subject_scope_id();
+        let board_subject_id = TEST_SUBJECT_ID;
         let current_subject_id = "subject:current";
         let session_store = StubSessionStore {
             chat_ids: vec!["chat-board".to_string(), "chat-current".to_string()],

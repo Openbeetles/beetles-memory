@@ -6,9 +6,7 @@ use crate::util::truncate_content_to_max;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
-use super::{
-    board_subject_scope_id, RelationshipSelectionTarget, RelationshipTopology, SelfAuthoredCore,
-};
+use super::{RelationshipSelectionTarget, RelationshipTopology, SelfAuthoredCore};
 
 const RELATIONSHIP_PORTFOLIO_REASON_MAX_CHARS: usize = 120;
 const RELATIONSHIP_PORTFOLIO_RENDER_LIMIT: usize = 4;
@@ -160,11 +158,12 @@ pub enum RelationshipPortfolioSyncOutcome {
 
 pub fn sync_relationship_portfolio(
     store: &dyn RelationshipPortfolioStore,
+    mounted_subject_id: &str,
     topology: Option<&RelationshipTopology>,
     self_authored_core: Option<&SelfAuthoredCore>,
     now_secs: u64,
 ) -> Result<Option<RelationshipPortfolio>> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = mounted_subject_id;
     let existing = store.get(subject_id)?.unwrap_or_default();
     let mut next =
         derive_relationship_portfolio(topology, self_authored_core, now_secs, Some(&existing));
@@ -182,10 +181,11 @@ pub fn sync_relationship_portfolio(
 
 pub fn touch_relationship_portfolio_selection(
     store: &dyn RelationshipPortfolioStore,
+    mounted_subject_id: &str,
     scope_id: &str,
     now_secs: u64,
 ) -> Result<()> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = mounted_subject_id;
     let mut portfolio = match store.get(subject_id)? {
         Some(portfolio) => portfolio,
         None => return Ok(()),
@@ -552,10 +552,16 @@ mod tests {
     };
     use crate::error::Result;
     use crate::memory::{
-        board_subject_scope_id, RelationshipTopology, RelationshipTopologyEntry, SelfAuthoredCore,
+        relationship_scope_id, RelationshipTopology, RelationshipTopologyEntry, SelfAuthoredCore,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
+
+    fn test_relationship_scope_id(channel: &str, chat_id: &str) -> String {
+        relationship_scope_id(TEST_SUBJECT_ID, channel, chat_id)
+    }
 
     #[derive(Default)]
     struct StubRelationshipPortfolioStore {
@@ -592,7 +598,7 @@ mod tests {
     fn stable_topology() -> RelationshipTopology {
         RelationshipTopology {
             entries: vec![RelationshipTopologyEntry {
-                scope_id: "rel:qq:stable".to_string(),
+                scope_id: test_relationship_scope_id("qq", "stable"),
                 channel: "qq".to_string(),
                 chat_id: "stable".to_string(),
                 relation_maturity: 80,
@@ -617,6 +623,7 @@ mod tests {
         let store = StubRelationshipPortfolioStore::default();
         let portfolio = sync_relationship_portfolio(
             &store,
+            TEST_SUBJECT_ID,
             Some(&stable_topology()),
             Some(&SelfAuthoredCore {
                 identity_anchor: "board".to_string(),
@@ -627,7 +634,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let entry = portfolio.entry_for_scope("rel:qq:stable").unwrap();
+        let entry = portfolio
+            .entry_for_scope(&test_relationship_scope_id("qq", "stable"))
+            .unwrap();
         assert_eq!(
             entry.governance_state,
             RelationshipGovernanceState::Maintain
@@ -641,7 +650,7 @@ mod tests {
         let store = StubRelationshipPortfolioStore::default();
         let topology = RelationshipTopology {
             entries: vec![RelationshipTopologyEntry {
-                scope_id: "rel:qq:strained".to_string(),
+                scope_id: test_relationship_scope_id("qq", "strained"),
                 channel: "qq".to_string(),
                 chat_id: "strained".to_string(),
                 trust_level: 18,
@@ -655,10 +664,13 @@ mod tests {
             }],
             updated_at: 600,
         };
-        let portfolio = sync_relationship_portfolio(&store, Some(&topology), None, 600)
-            .unwrap()
+        let portfolio =
+            sync_relationship_portfolio(&store, TEST_SUBJECT_ID, Some(&topology), None, 600)
+                .unwrap()
+                .unwrap();
+        let entry = portfolio
+            .entry_for_scope(&test_relationship_scope_id("qq", "strained"))
             .unwrap();
-        let entry = portfolio.entry_for_scope("rel:qq:strained").unwrap();
         assert_eq!(
             entry.governance_state,
             RelationshipGovernanceState::CoolDown
@@ -675,7 +687,7 @@ mod tests {
         let portfolio = RelationshipPortfolio {
             entries: vec![
                 super::RelationshipPortfolioEntry {
-                    scope_id: "rel:qq:a".to_string(),
+                    scope_id: test_relationship_scope_id("qq", "a"),
                     channel: "qq".to_string(),
                     chat_id: "a".to_string(),
                     governance_state: RelationshipGovernanceState::Maintain,
@@ -689,7 +701,7 @@ mod tests {
                     next_review_at: 10_000,
                 },
                 super::RelationshipPortfolioEntry {
-                    scope_id: "rel:qq:b".to_string(),
+                    scope_id: test_relationship_scope_id("qq", "b"),
                     channel: "qq".to_string(),
                     chat_id: "b".to_string(),
                     governance_state: RelationshipGovernanceState::Repair,
@@ -721,12 +733,13 @@ mod tests {
     #[test]
     fn touch_selection_updates_review_window() {
         let store = StubRelationshipPortfolioStore::default();
+        let scope_id = test_relationship_scope_id("qq", "a");
         store
             .set(
-                board_subject_scope_id(),
+                TEST_SUBJECT_ID,
                 &RelationshipPortfolio {
                     entries: vec![super::RelationshipPortfolioEntry {
-                        scope_id: "rel:qq:a".to_string(),
+                        scope_id: scope_id.clone(),
                         channel: "qq".to_string(),
                         chat_id: "a".to_string(),
                         governance_state: RelationshipGovernanceState::Repair,
@@ -743,19 +756,20 @@ mod tests {
                 },
             )
             .unwrap();
-        touch_relationship_portfolio_selection(&store, "rel:qq:a", 100).unwrap();
-        let portfolio = store.get(board_subject_scope_id()).unwrap().unwrap();
-        let entry = portfolio.entry_for_scope("rel:qq:a").unwrap();
+        touch_relationship_portfolio_selection(&store, TEST_SUBJECT_ID, &scope_id, 100).unwrap();
+        let portfolio = store.get(TEST_SUBJECT_ID).unwrap().unwrap();
+        let entry = portfolio.entry_for_scope(&scope_id).unwrap();
         assert_eq!(entry.last_selected_at, 100);
         assert!(entry.next_review_at > 100);
     }
 
     #[test]
     fn render_block_marks_current_entry() {
+        let scope_id = test_relationship_scope_id("qq", "a");
         let block = render_relationship_portfolio_block(
             &RelationshipPortfolio {
                 entries: vec![super::RelationshipPortfolioEntry {
-                    scope_id: "rel:qq:a".to_string(),
+                    scope_id: scope_id.clone(),
                     channel: "qq".to_string(),
                     chat_id: "a".to_string(),
                     governance_state: RelationshipGovernanceState::Maintain,
@@ -771,7 +785,7 @@ mod tests {
                 updated_at: 10,
             },
             20,
-            Some("rel:qq:a"),
+            Some(&scope_id),
             512,
         )
         .unwrap();

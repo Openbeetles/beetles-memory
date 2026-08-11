@@ -1,10 +1,15 @@
 mod support;
 
+use bm_core::memory::{
+    LongTermMemoryConfidence, LongTermMemoryFreshness, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, SharedMemoryWriteReason,
+};
 use bm_sdk::{
-    default_memory_space_id, LongTermMemoryKind, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryIdentity, MemoryPrivacyClass, MemoryRuntime, MemoryScope,
-    MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteRequest,
+    default_agent_subject_id, default_memory_space_id, LongTermMemoryDraft, LongTermMemoryKind,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryIdentity, MemoryPrivacyClass,
+    MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, SubjectDescriptor, SubjectRegistry,
 };
 
 use support::empty_store_platform;
@@ -61,6 +66,45 @@ fn accepted_procedural_candidate(id: &str, body: &str) -> MemoryWriteCandidate {
             reason: "llm_confirmed_procedural_candidate".to_string(),
         }),
     }
+}
+
+fn conflicting_shared_fact(content: &str) -> LongTermMemoryDraft {
+    LongTermMemoryDraft {
+        kind: LongTermMemoryKind::Fact,
+        topic: "multi_subject_release_owner".to_string(),
+        content: content.to_string(),
+        keywords: vec!["multi-subject".to_string(), "release-owner".to_string()],
+        privacy: MemoryPrivacyClass::PublicRuntime,
+        source_chat_id: Some("shared-fact-source".to_string()),
+        source_type: Some(LongTermMemorySourceType::Conversation),
+        source_scope: Some(LongTermMemorySourceScope::User),
+        confidence: Some(LongTermMemoryConfidence::High),
+        freshness: Some(LongTermMemoryFreshness::Stable),
+        stale_hint: Some(LongTermMemoryStaleHint::None),
+        supporting_citations: vec!["shared-fact-source:turn-7".to_string()],
+        canonical_entities: Vec::new(),
+        evidence_count: Some(1),
+        observed_at: Some(1_800_000_000),
+        last_confirmed_at: Some(1_800_000_000),
+        source_revision: Some(7),
+    }
+}
+
+fn write_shared_fact(
+    runtime: &MemoryRuntime,
+    draft: LongTermMemoryDraft,
+) -> bm_sdk::MemoryWriteReport {
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![draft],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+        })
+        .expect("shared fact write")
 }
 
 #[test]
@@ -283,4 +327,65 @@ fn candidate_write_rejects_duplicate_durable_owner_identity_before_commit() {
 
     assert_eq!(error.stage(), "memory_facet_index_plan");
     assert!(error.to_string().contains("duplicate"));
+}
+
+#[test]
+fn conflicting_subject_submissions_share_one_memory_space_fact_owner() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let mut registry =
+        SubjectRegistry::single_agent_default("owner-shared", "agent-a").expect("registry");
+    registry
+        .upsert_subject(SubjectDescriptor::agent_persona(
+            default_agent_subject_id("agent-b"),
+            "Agent B",
+        ))
+        .expect("agent-b subject");
+
+    let runtime_a = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-a", "owner-shared").expect("identity a"))
+        .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope a"))
+        .store(platform.clone())
+        .subject_registry(registry.clone())
+        .build()
+        .expect("runtime a");
+    let runtime_b = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-b", "owner-shared").expect("identity b"))
+        .scope(MemoryScope::new("sdk.direct", "chat-b").expect("scope b"))
+        .store(platform)
+        .subject_registry(registry)
+        .build()
+        .expect("runtime b");
+
+    let first = write_shared_fact(
+        &runtime_a,
+        conflicting_shared_fact("The release owner is Agent A."),
+    );
+    assert!(first.accepted, "{first:#?}");
+    assert_eq!(first.changed, 1, "{first:#?}");
+
+    let conflicting = write_shared_fact(
+        &runtime_b,
+        conflicting_shared_fact("The release owner is Agent B."),
+    );
+    assert_eq!(conflicting.changed, 0, "{conflicting:#?}");
+
+    let governance = conflicting
+        .shared_fact_governance
+        .expect("shared fact governance report");
+    assert_eq!(
+        governance.memory_space_id,
+        default_memory_space_id("owner-shared")
+    );
+    assert_eq!(
+        governance.origin_subject_id.as_deref(),
+        Some(default_agent_subject_id("agent-b").as_str())
+    );
+    assert_eq!(governance.accepted, 0, "{governance:#?}");
+    assert_eq!(governance.rejected, 1, "{governance:#?}");
+    assert_eq!(governance.reports.len(), 1, "{governance:#?}");
+    assert_eq!(
+        governance.reports[0].reason,
+        SharedMemoryWriteReason::SourceRevisionConflict
+    );
 }

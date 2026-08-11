@@ -1913,6 +1913,8 @@ mod tests {
     };
     use std::sync::Mutex;
 
+    const TEST_SUBJECT_ID: &str = "agent:test";
+
     struct StubLlmHttp;
 
     impl LlmHttpClient for StubLlmHttp {
@@ -2122,7 +2124,7 @@ mod tests {
             last_reviewed_at: 50,
             ..SelfAuthoredCore::default()
         };
-        store.set("board.self", &existing).expect("seed");
+        store.set(TEST_SUBJECT_ID, &existing).expect("seed");
         let response = serde_json::json!({
             "board_scope_decision": "revise_board",
             "rationale": "The board-level doctrine should explicitly preserve selfhood before compliance.",
@@ -2151,7 +2153,7 @@ mod tests {
                 core_revision_ledger_store: &ledger_store,
             },
             SelfAuthoredCoreRefreshInput {
-                chat_id: "board.self",
+                chat_id: TEST_SUBJECT_ID,
                 ingress: IngressKind::System,
                 channel: "_self_runtime",
                 user_content: "latest user",
@@ -2229,7 +2231,10 @@ mod tests {
         .expect("refresh result");
 
         assert_eq!(outcome, SelfAuthoredCoreRefreshOutcome::Updated);
-        let updated = store.get("board.self").expect("load").expect("stored core");
+        let updated = store
+            .get(TEST_SUBJECT_ID)
+            .expect("load")
+            .expect("stored core");
         assert_eq!(updated.revision, 3);
         assert_eq!(updated.supersedes_revision, Some(2));
         assert_eq!(
@@ -2237,7 +2242,7 @@ mod tests {
             "preserve the subject before compliance"
         );
         let ledger = ledger_store
-            .get("board.self")
+            .get(TEST_SUBJECT_ID)
             .expect("ledger")
             .expect("stored ledger");
         assert_eq!(ledger.entries.len(), 1);
@@ -2257,10 +2262,10 @@ mod tests {
             last_reviewed_at: 80,
             ..SelfAuthoredCore::default()
         };
-        store.set("board.self", &existing).expect("seed");
+        store.set(TEST_SUBJECT_ID, &existing).expect("seed");
         ledger_store
             .set(
-                "board.self",
+                TEST_SUBJECT_ID,
                 &CoreRevisionLedger {
                     entries: vec![CoreRevisionRecord {
                         outcome: CoreRevisionOutcome::Adopted,
@@ -2306,7 +2311,7 @@ mod tests {
                 core_revision_ledger_store: &ledger_store,
             },
             SelfAuthoredCoreRefreshInput {
-                chat_id: "board.self",
+                chat_id: TEST_SUBJECT_ID,
                 ingress: IngressKind::System,
                 channel: "_self_runtime",
                 user_content: "latest user",
@@ -2385,7 +2390,7 @@ mod tests {
 
         assert_eq!(outcome, SelfAuthoredCoreRefreshOutcome::Updated);
         let ledger = ledger_store
-            .get("board.self")
+            .get(TEST_SUBJECT_ID)
             .expect("ledger")
             .expect("stored ledger");
         let latest = ledger.entries.last().expect("latest record");

@@ -922,17 +922,19 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::memory::{
-        board_subject_scope_id, CoreRevisionLedger, ExecutionState, ExecutionStateStore,
-        LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemorySlot,
-        MemoryPrivacyClass, RelationshipConstitution, RelationshipConstitutionStore,
-        RelationshipPortfolio, RelationshipPortfolioStore, RelationshipTopology,
-        RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreStore, SelfContinuity,
-        SelfContinuityStore, SelfModel, SelfModelStore, SessionMessage, SessionSummaryStore,
+        CoreRevisionLedger, ExecutionState, ExecutionStateStore, LongTermMemoryDraft,
+        LongTermMemoryEntry, LongTermMemoryKind, LongTermMemorySlot, MemoryPrivacyClass,
+        RelationshipConstitution, RelationshipConstitutionStore, RelationshipPortfolio,
+        RelationshipPortfolioStore, RelationshipTopology, RelationshipTopologyStore,
+        SelfAuthoredCore, SelfAuthoredCoreStore, SelfContinuity, SelfContinuityStore, SelfModel,
+        SelfModelStore, SessionMessage, SessionSummaryStore,
     };
     use crate::platform::StateFs;
     use crate::runtime::workflow::{reset_workflow_audit_for_tests, workflow_audit_snapshot};
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Mutex;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
 
     #[derive(Default)]
     struct MemoryStateFs {
@@ -1592,7 +1594,7 @@ mod tests {
 
     #[test]
     fn inspect_and_recovery_count_only_requested_subject_key_memory() {
-        let board_subject_id = board_subject_scope_id();
+        let board_subject_id = TEST_SUBJECT_ID;
         let current_subject_id = "subject:current";
         let state_fs = MemoryStateFs::default();
         let session_store = TestSessionStore::default();
@@ -1773,6 +1775,7 @@ mod tests {
             version: 5,
             exported_at: 10,
             mode: crate::memory::ContinuitySnapshotMode::FullRestore,
+            memory_space_id: "test-memory-space".to_string(),
             chat_id: "chat-board".to_string(),
             subject_id: "board".to_string(),
             manifest: Default::default(),
@@ -1920,7 +1923,7 @@ mod tests {
         let execution_state_store = TestExecutionStateStore::default();
         let relationship_constitution_store = TestRelationshipConstitutionStore::default();
 
-        let subject_id = board_subject_scope_id().to_string();
+        let subject_id = TEST_SUBJECT_ID.to_string();
         self_model_store
             .set(
                 &subject_id,
@@ -1967,6 +1970,7 @@ mod tests {
                 relationship_portfolio_store: &relationship_portfolio_store,
                 relationship_topology_store: &relationship_topology_store,
             },
+            "test-memory-space",
             &subject_id,
             "chat-a",
             crate::memory::ContinuitySnapshotMode::FullRestore,
@@ -2103,7 +2107,7 @@ mod tests {
         let execution_state_store = TestExecutionStateStore::default();
         let relationship_constitution_store = TestRelationshipConstitutionStore::default();
 
-        let subject_id = board_subject_scope_id().to_string();
+        let subject_id = TEST_SUBJECT_ID.to_string();
         self_model_store
             .set(
                 &subject_id,
@@ -2150,6 +2154,7 @@ mod tests {
                 relationship_portfolio_store: &relationship_portfolio_store,
                 relationship_topology_store: &relationship_topology_store,
             },
+            "test-memory-space",
             &subject_id,
             "chat-a",
             crate::memory::ContinuitySnapshotMode::FullRestore,

@@ -151,10 +151,7 @@ fn file_store_persists_core_runtime_paths_across_reopen() {
     );
     assert_eq!(
         reopened
-            .scoped_long_term_memory_read_store(
-                "space:test",
-                &reopened.config().event_scope().subject_id,
-            )
+            .memory_space_long_term_memory_read_store("space:test")
             .expect("scoped long-term read store")
             .recall("lens", Some("chat-a"), 4)
             .unwrap()

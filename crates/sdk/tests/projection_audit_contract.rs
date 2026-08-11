@@ -3,12 +3,13 @@
 mod support;
 
 use bm_core::memory::{
-    board_subject_scope_id, relationship_scope_id, RelationshipConstitution,
-    RelationshipConstitutionAlignment, RelationshipGovernanceState, SelfAuthoredCore,
-    SelfContinuity,
+    relationship_scope_id, RelationshipConstitution, RelationshipConstitutionAlignment,
+    RelationshipGovernanceState, SelfAuthoredCore, SelfContinuity,
 };
 use bm_core::platform::Platform as _;
-use bm_sdk::{MemoryProjectionRequest, PressureLevel, RuntimeLifecycleModeInput};
+use bm_sdk::{
+    default_agent_subject_id, MemoryProjectionRequest, PressureLevel, RuntimeLifecycleModeInput,
+};
 
 use support::{empty_store_platform, seeded_store_platform, test_runtime_with_scope};
 
@@ -16,13 +17,14 @@ use support::{empty_store_platform, seeded_store_platform, test_runtime_with_sco
 fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
     let profile = support::host_test_profile();
     let platform = seeded_store_platform(profile);
+    let mounted_subject_id = default_agent_subject_id("agent-main");
     platform
         .replay_harness()
         .self_authored_core_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &SelfAuthoredCore {
-                identity_anchor: "board-level inhabited subject".to_string(),
+                identity_anchor: "mounted inhabited subject".to_string(),
                 default_response_mode: "work-first direct reply".to_string(),
                 default_task_scope: "complete the user task".to_string(),
                 default_initiative_posture: "continue without theatrical drift".to_string(),
@@ -35,16 +37,16 @@ fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
         .replay_harness()
         .self_continuity_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &SelfContinuity {
-                wake_anchor: "wake as the same inhabited board subject".to_string(),
+                wake_anchor: "wake as the same mounted subject".to_string(),
                 continuity_bridge: "carry release work forward from governed memory".to_string(),
                 task_posture: "do the requested engineering work first".to_string(),
                 ..SelfContinuity::default()
             },
         )
         .expect("seed self continuity");
-    let relationship_id = relationship_scope_id("sdk.direct", "chat-a");
+    let relationship_id = relationship_scope_id(&mounted_subject_id, "sdk.direct", "chat-a");
     platform
         .replay_harness()
         .relationship_constitution_store()
@@ -65,7 +67,7 @@ fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
     assert!(platform
         .replay_harness()
         .self_authored_core_store()
-        .get(board_subject_scope_id())
+        .get(&mounted_subject_id)
         .expect("read seeded core")
         .is_some());
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "chat-a");

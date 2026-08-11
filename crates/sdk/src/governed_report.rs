@@ -179,6 +179,14 @@ impl RecallOperationAuthoritySafeViewV1 {
         self.profile
     }
 
+    pub fn capability_catalog_identity(&self) -> &str {
+        &self.capability_catalog_identity
+    }
+
+    pub fn budget_report_identity(&self) -> &str {
+        &self.budget_report_identity
+    }
+
     pub fn governed_budget_ceilings(&self) -> &GovernedRecallBudgetSafeCeilingsV1 {
         &self.governed_budget_ceilings
     }

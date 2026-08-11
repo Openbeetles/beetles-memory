@@ -47,6 +47,7 @@ pub struct PostReplyMemoryMaintenanceContext<'a> {
 }
 
 pub struct PostReplyMemoryMaintenanceInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -136,6 +137,7 @@ fn collect_maintenance_baseline(
         .map(|state| {
             should_refresh_execution_state(
                 ExecutionStateRefreshInput {
+                    mounted_subject_id: input.mounted_subject_id,
                     chat_id: input.chat_id,
                     ingress: input.ingress,
                     channel: input.channel,
@@ -233,6 +235,7 @@ fn run_shared_maintenance_passes(
                 turn_ledger_store: ctx.turn_ledger_store,
             },
             ExecutionStateRefreshInput {
+                mounted_subject_id: input.mounted_subject_id,
                 chat_id: input.chat_id,
                 ingress: input.ingress,
                 channel: input.channel,
@@ -549,6 +552,8 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
 
     #[derive(Default)]
     struct StubSessionStore {
@@ -1206,6 +1211,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1283,6 +1289,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1368,6 +1375,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1454,6 +1462,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1620,6 +1629,7 @@ mod tests {
                 task_learning_store: &task_learning_store,
             },
             PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1748,6 +1758,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             &PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1863,6 +1874,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             &PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1997,6 +2009,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             &PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -2175,10 +2188,15 @@ mod tests {
         let turn_ledger_store = StubTurnLedgerStore;
         let skill_storage = StubSkillStorage::default();
         private_garden_store
-            .write("chat-1", "journal/promoted.md", "已经足够稳定，准备上提", 1)
+            .write(
+                TEST_SUBJECT_ID,
+                "journal/promoted.md",
+                "已经足够稳定，准备上提",
+                1,
+            )
             .unwrap();
         private_garden_store
-            .write("chat-1", "scratch/stale.md", "旧草稿", 1)
+            .write(TEST_SUBJECT_ID, "scratch/stale.md", "旧草稿", 1)
             .unwrap();
         let mut http = DummyHttpClient;
 
@@ -2201,6 +2219,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -2225,11 +2244,11 @@ mod tests {
             Ok(ExecutionStateRefreshOutcome::Updated)
         ));
         assert!(private_garden_store
-            .read("chat-1", "journal/promoted.md")
+            .read(TEST_SUBJECT_ID, "journal/promoted.md")
             .unwrap()
             .is_some());
         assert!(private_garden_store
-            .read("chat-1", "scratch/stale.md")
+            .read(TEST_SUBJECT_ID, "scratch/stale.md")
             .unwrap()
             .is_some());
     }
@@ -2288,6 +2307,7 @@ mod tests {
                 task_learning_store: &StubTaskLearningStore::default(),
             },
             PostReplyMemoryMaintenanceInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -2376,6 +2396,7 @@ mod tests {
                     task_learning_store: &StubTaskLearningStore::default(),
                 },
                 PostReplyMemoryMaintenanceInput {
+                    mounted_subject_id: TEST_SUBJECT_ID,
                     chat_id: "chat-1",
                     ingress: IngressKind::User,
                     channel: "chat_channel",

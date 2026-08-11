@@ -119,37 +119,37 @@ test -f crates/sdk/tests/projection_no_soul_mutation_contract.rs
 ! rg -n "RoleKey|RoleMemoryLane" crates/core/src crates/sdk/src
 ! rg -n "boss_user|ceo_agent|finance_director_agent|warehouse_manager_agent|CEO|BOSS|财务总监|仓库管理员" crates/core/src crates/sdk/src
 rg -Fq "Multi-Subject Memory Space 当前设计真源" dev-docs/README.md
-rg -Fq "W0.5 Multi-Subject Memory Space 合同" dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "W0.5 Multi-Subject Memory Space 合同" dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq 'shared factual plane 属于 `MemorySpace`' dev-docs/multi-subject-memory-space-plan.md
 rg -Fq "Single Agent 最小入口" dev-docs/multi-subject-memory-space-plan.md
-rg -Fq "single-agent default registry 已闭合" dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "single-agent default registry 已闭合" dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq "Soul Non-Regression 红线" dev-docs/multi-subject-memory-space-plan.md
-rg -Fq "soul non-regression 已闭合首版" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq '`SubjectRegistry` / host metadata / seat binding 不能替代 soul kernel' dev-docs/sdk-host-integration-readiness-plan.md
+rg -Fq "soul non-regression 已闭合首版" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq '`SubjectRegistry` / host metadata / seat binding 不能替代 soul kernel' dev-docs/archive/sdk-host-integration-readiness-plan.md
 rg -Fq "主体投影不能直接修改 soul core" dev-docs/soul-and-subject-memory-boundary.md
 rg -Fq "graph private soul redaction fixture" dev-docs/multi-subject-memory-space-plan.md
-rg -Fq "quickstart 手写 registry 或关系图" dev-docs/sdk-host-integration-readiness-plan.md
-rg -Fq "不得出现 Beetle Agent 官方 CBD 角色名" dev-docs/sdk-host-integration-readiness-plan.md
-rg -Fq "W1 MemoryBenchmarkReport + fixture matrix + script gate + baseline 已落地" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W2 Soul Kernel 2.0 发布闸已由 SoulKernelBenchmarkJudgeReport + core builders + fixture semantic contract 闭合" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W3 Subject Projection 2.0 发布闸已由 SubjectProjectionBenchmarkJudgeReport + SDK projection report + Gateway audit contract 闭合" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W2-W9 next-gen contract matrix + gate report builders 已落地" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4-W8 builders 已通过 SDK public surface 暴露" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W3 SubjectProjectionReport 已由 MemoryRuntime::project() 返回" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4 GraphRecallRerankReport 已由 MemoryRuntime::recall() 返回" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4 graph expansion budget" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4 production recall index" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4 external noisy wall summary/operator contract" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4 external noisy stage/index/W4.1 diagnostics" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W4ExternalNoisyW41Diagnostics" dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs crates/replay/src/lib.rs
-rg -Fq "w4_external_noisy_wall_w4_1_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs crates/replay/src/bin/bm-w4-external-noisy-wall.rs
-rg -Fq "w4_1_diagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs
-rg -Fq "召回质量优化" dev-docs/next-gen-soul-memory-roadmap.md dev-docs/README.md
+rg -Fq "quickstart 手写 registry 或关系图" dev-docs/archive/sdk-host-integration-readiness-plan.md
+rg -Fq "不得出现 Beetle Agent 官方 CBD 角色名" dev-docs/archive/sdk-host-integration-readiness-plan.md
+rg -Fq "W1 MemoryBenchmarkReport + fixture matrix + script gate + baseline 已落地" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W2 Soul Kernel 2.0 发布闸已由 SoulKernelBenchmarkJudgeReport + core builders + fixture semantic contract 闭合" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W3 Subject Projection 2.0 发布闸已由 SubjectProjectionBenchmarkJudgeReport + SDK projection report + Gateway audit contract 闭合" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W2-W9 next-gen contract matrix + gate report builders 已落地" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W4-W8 builders 已通过 SDK public surface 暴露" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W3 SubjectProjectionReport 已由 MemoryRuntime::project() 返回" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W4 GraphRecallRerankReport 已由 MemoryRuntime::recall() 返回" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W4 graph expansion budget" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W4 production recall index" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W4 external noisy wall summary/operator contract" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W4 external noisy stage/index/W4.1 diagnostics" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W4ExternalNoisyW41Diagnostics" dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs crates/replay/src/lib.rs
+rg -Fq "w4_external_noisy_wall_w4_1_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs crates/replay/src/bin/bm-w4-external-noisy-wall.rs
+rg -Fq "w4_1_diagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs
+rg -Fq "召回质量优化" dev-docs/archive/next-gen-soul-memory-roadmap.md dev-docs/README.md
 rg -Fq "W4.1 Recall Quality Optimization" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "W4.3 Evidence Source Safety Pass" dev-docs/temporal-memory-graph-plan.md
-require_in_all "governed-memory-facet-index-plan.md" dev-docs/README.md dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+require_in_all "governed-memory-facet-index-plan.md" dev-docs/README.md dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq "Governed Memory Facet Index / Hybrid Graph Retrieval Implementation Plan" dev-docs/governed-memory-facet-index-plan.md
-require_in_all "Evidence-Governed Hybrid Facet Graph Retrieval" dev-docs/governed-memory-facet-index-plan.md dev-docs/README.md dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+require_in_all "Evidence-Governed Hybrid Facet Graph Retrieval" dev-docs/governed-memory-facet-index-plan.md dev-docs/README.md dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq "exact_facets" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "expanded_facets" dev-docs/governed-memory-facet-index-plan.md
 require_in_all "StructuredFacetParser" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
@@ -164,7 +164,7 @@ require_in_all "RankFusionReport" dev-docs/governed-memory-facet-index-plan.md d
 require_in_all "CoverageSelectionReport" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
 require_in_all "GraphFacetPropagation" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md
 rg -Fq "fallback_full_scan=false" dev-docs/governed-memory-facet-index-plan.md
-require_in_all "regex/substring" dev-docs/governed-memory-facet-index-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+require_in_all "regex/substring" dev-docs/governed-memory-facet-index-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq "上桌硬闸" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "FacetReportView" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "FacetIndexRebuildReport" dev-docs/governed-memory-facet-index-plan.md
@@ -220,18 +220,18 @@ rg -Fq "external_noisy_wall_reports_facet_stage_diagnostics" dev-docs/governed-m
 rg -Fq "external_noisy_wall_requires_facet_ablation_and_no_render_growth" dev-docs/governed-memory-facet-index-plan.md
 rg -Fq "quality net" dev-docs/temporal-memory-graph-plan.md || rg -Fq "质量净提升" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "candidate pool split" dev-docs/temporal-memory-graph-plan.md
-rg -Fq "memory-owned hybrid source retrieval" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "query-aware graph expansion" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "memory-owned hybrid source retrieval" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "query-aware graph expansion" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq "graph_anchor_candidates" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "source_candidate_ids" dev-docs/temporal-memory-graph-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
 rg -Fq "graph_anchor_candidate_ids" dev-docs/temporal-memory-graph-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
 rg -Fq "fallback_recall_candidates_are_query_scored_before_recency" crates/core/src/memory/long_term.rs
-rg -Fq "external runner temporal graph anchor binding" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "memory_graph_index_source_anchor_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "external runner temporal graph anchor binding" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "memory_graph_index_source_anchor_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq "write_chunks_creates_indexed_eval_recall_path" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md
-rg -Fq "full external noisy wall" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "check_w4_external_noisy_wall_operator: ok" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq -- "--shard-total" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "full external noisy wall" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "check_w4_external_noisy_wall_operator: ok" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq -- "--shard-total" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
 rg -Fq "repeated_external_eval_source_maps_distinct_chunk_topics_without_anchor_collision" dev-docs/temporal-memory-graph-plan.md
 rg -Fq "temporal_memory_graph_scores_distinct_external_eval_sources_as_multi_evidence_groups" dev-docs/temporal-memory-graph-plan.md crates/core/tests/next_gen_contract.rs
 rg -Fq "source_authority_recognizes_archive_locator_citations" dev-docs/temporal-memory-graph-plan.md crates/core/src/memory/long_term.rs
@@ -239,10 +239,10 @@ rg -Fq "w4_external_noisy_summary_with_provenance" dev-docs/temporal-memory-grap
 rg -Fq "w4_external_noisy_wall_stage_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 rg -Fq "W4ExternalNoisyIndexDiagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/src/lib.rs
 rg -Fq "w4_external_noisy_wall_index_diagnostics_missing" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
-rg -Fq "shards_valid" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs
-rg -Fq "index_no_full_scan" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
-rg -Fq "w4_external_noisy_wall_shards_invalid" dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
-rg -Fq "w4_external_noisy_wall_index_full_scan_detected" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
+rg -Fq "shards_valid" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs
+rg -Fq "index_no_full_scan" dev-docs/governed-memory-facet-index-plan.md dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
+rg -Fq "w4_external_noisy_wall_shards_invalid" dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
+rg -Fq "w4_external_noisy_wall_index_full_scan_detected" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay/src/bench.rs scripts/check_w4_external_noisy_wall_operator.sh
 rg -Fq "w4_external_noisy_wall_stage_attribution_not_proven" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 rg -Fq "w4_external_noisy_wall_index_effect_not_proven" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs
 rg -Fq "W4ExternalNoisyFacetAblationDiagnostics" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/replay/src/bench.rs crates/replay/src/lib.rs
@@ -257,22 +257,22 @@ rg -Fq "w4_external_noisy_wall_passes_only_when_improvement_has_stage_and_index_
 rg -Fq "bm-w4-external-noisy-wall" dev-docs/temporal-memory-graph-plan.md crates/replay/src/bin/bm-w4-external-noisy-wall.rs scripts/check_w4_external_noisy_wall_operator.sh
 rg -Fq "check_w4_external_noisy_wall_operator" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md scripts/check_w4_external_noisy_wall_operator.sh
 rg -Fq -- "--merge-suite" dev-docs/temporal-memory-graph-plan.md
-rg -Fq "MemoryGraphRecallIndexReport" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
-rg -Fq "large_persistent_graph_index_report_explains_anchor_and_expansion_coverage" dev-docs/next-gen-soul-memory-roadmap.md crates/sdk/tests/eval_recall_contract.rs
-rg -Fq "persistent_graph_recall_fails_closed_when_loaded_graph_exceeds_profile_budget" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "MemoryGraphRecallIndexReport" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs
+rg -Fq "large_persistent_graph_index_report_explains_anchor_and_expansion_coverage" dev-docs/archive/next-gen-soul-memory-roadmap.md crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "persistent_graph_recall_fails_closed_when_loaded_graph_exceeds_profile_budget" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/sdk/tests/eval_recall_contract.rs
 rg -Fq "read_json_docs_by_keys" dev-docs/temporal-memory-graph-plan.md dev-docs/replay-sandbox-plan.md crates/sdk/src/store_internal/platform.rs crates/sdk/src/runtime.rs
-rg -Fq "memory_graph_nodes_loaded_budget_exceeded" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md dev-docs/replay-sandbox-plan.md crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
-rg -Fq "memory_graph_edges_loaded_budget_exceeded" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md dev-docs/replay-sandbox-plan.md crates/sdk/src/runtime.rs
-rg -Fq "memory_graph_backlinks_loaded_budget_exceeded" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md dev-docs/replay-sandbox-plan.md crates/sdk/src/runtime.rs
-rg -Fq "filtered_node_count" dev-docs/next-gen-soul-memory-roadmap.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "memory_graph_nodes_loaded_budget_exceeded" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md dev-docs/replay-sandbox-plan.md crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
+rg -Fq "memory_graph_edges_loaded_budget_exceeded" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md dev-docs/replay-sandbox-plan.md crates/sdk/src/runtime.rs
+rg -Fq "memory_graph_backlinks_loaded_budget_exceeded" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md dev-docs/replay-sandbox-plan.md crates/sdk/src/runtime.rs
+rg -Fq "filtered_node_count" dev-docs/archive/next-gen-soul-memory-roadmap.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
 rg -Fq "unmatched_source_anchor_ids" dev-docs/temporal-memory-graph-plan.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/tests/eval_recall_contract.rs
 rg -Fq "memory_graph_indexes" dev-docs/temporal-memory-graph-plan.md crates/sdk/src/runtime.rs crates/sdk/src/store_internal/platform.rs
-rg -Fq "RuntimeBudgetReport.graph_expansion_budget" dev-docs/temporal-memory-graph-plan.md dev-docs/runtime-budget-refactor-plan.md dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "GraphRecallExpansionBudget" dev-docs/temporal-memory-graph-plan.md dev-docs/next-gen-soul-memory-roadmap.md crates/core/src/memory/next_gen_contract.rs crates/sdk/src/lib.rs
-rg -Fq "W4 TemporalMemoryGraphGateReport 已由 MemoryRuntime::recall() 返回" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W5 ProceduralMemoryPromotionReport 已由 MemoryRuntime::write() 返回" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W7 VaultMigrationPreflight 已由 MemoryRuntime/preview_memory_space_migration() 返回" dev-docs/next-gen-soul-memory-roadmap.md
-rg -Fq "W9 Workbench API map + runtime report + Console 页面已由 EntryRuntime/HTTP console/apps/console 暴露" dev-docs/next-gen-soul-memory-roadmap.md
+rg -Fq "RuntimeBudgetReport.graph_expansion_budget" dev-docs/temporal-memory-graph-plan.md dev-docs/runtime-budget-refactor-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "GraphRecallExpansionBudget" dev-docs/temporal-memory-graph-plan.md dev-docs/archive/next-gen-soul-memory-roadmap.md crates/core/src/memory/next_gen_contract.rs crates/sdk/src/lib.rs
+rg -Fq "W4 TemporalMemoryGraphGateReport 已由 MemoryRuntime::recall() 返回" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W5 ProceduralMemoryPromotionReport 已由 MemoryRuntime::write() 返回" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W7 VaultMigrationPreflight 已由 MemoryRuntime/preview_memory_space_migration() 返回" dev-docs/archive/next-gen-soul-memory-roadmap.md
+rg -Fq "W9 Workbench API map + runtime report + Console 页面已由 EntryRuntime/HTTP console/apps/console 暴露" dev-docs/archive/next-gen-soul-memory-roadmap.md
 
 # P7 production delivery hardening: owner, privacy, exact index, final projection and operator truth.
 require_in_all "GovernedLongTermMemoryReadView" dev-docs/long-term-memory-control-surface-plan.md dev-docs/governed-memory-facet-index-plan.md crates/sdk/src/runtime.rs

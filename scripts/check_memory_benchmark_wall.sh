@@ -128,7 +128,7 @@ needles=(
 )
 
 for needle in "${needles[@]}"; do
-  rg -q "$needle" dev-docs/next-gen-soul-memory-roadmap.md crates/replay scripts fixtures/memory-benchmark-wall
+  rg -q "$needle" dev-docs/archive/next-gen-soul-memory-roadmap.md crates/replay scripts fixtures/memory-benchmark-wall
 done
 
 operator_needles=(

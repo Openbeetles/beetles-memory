@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bm_core::memory::{
     GovernedOwnerTermination, GovernedRecallEligibilityReason, LongTermMemoryControlRevision,
@@ -88,8 +88,15 @@ pub(crate) struct P8SemanticLongTermCounterfactualInput {
     owner_group_ref: P8SemanticSafeCandidateRef,
     predecessor: Option<P8SemanticSafeCandidateRef>,
     predecessor_reason: Option<GovernedRecallEligibilityReason>,
+    predecessor_provider_content: Option<String>,
     successor: Option<P8SemanticSafeCandidateRef>,
+    provider_content: String,
 }
+
+#[cfg(feature = "nonproduction-replay-harness")]
+pub(crate) struct P8ProviderSafeMaterialBundle(
+    pub(crate) Vec<(P8SemanticSafeCandidateRef, String)>,
+);
 
 impl P8SemanticLongTermCounterfactualInput {
     pub(crate) fn from_retained_materials(
@@ -105,6 +112,16 @@ impl P8SemanticLongTermCounterfactualInput {
                 "retained counterfactual inputs exceed the request-pinned validity budget",
             ));
         }
+        let provider_content_by_revision = retained
+            .iter()
+            .filter(|(material, _)| material.privacy_class.projection_content_allowed())
+            .map(|(material, _)| {
+                (
+                    material.owner_revision_ref(),
+                    material.governed_content.content.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         retained
             .into_iter()
             .filter(|(material, _)| material.privacy_class.projection_content_allowed())
@@ -124,6 +141,12 @@ impl P8SemanticLongTermCounterfactualInput {
                         GovernedRecallEligibilityReason::Superseded
                     }
                 });
+                let predecessor_provider_content = material
+                    .origin
+                    .predecessor
+                    .as_ref()
+                    .and_then(|predecessor| provider_content_by_revision.get(predecessor))
+                    .cloned();
                 let successor = control
                     .as_ref()
                     .and_then(|value| value.transition.successor.as_ref())
@@ -169,11 +192,45 @@ impl P8SemanticLongTermCounterfactualInput {
                     )),
                     predecessor,
                     predecessor_reason,
+                    predecessor_provider_content,
                     successor,
+                    provider_content: material.governed_content.content,
                 })
             })
             .collect()
     }
+
+    pub(crate) fn provider_safe_material(&self) -> P8ProviderSafeMaterialBundle {
+        let mut materials = vec![(
+            self.binding.candidate_ref.clone(),
+            self.provider_content.clone(),
+        )];
+        if let Some((predecessor, content)) = self
+            .predecessor
+            .as_ref()
+            .zip(self.predecessor_provider_content.as_ref())
+        {
+            materials.push((predecessor.clone(), content.clone()));
+        }
+        P8ProviderSafeMaterialBundle(materials)
+    }
+}
+
+#[cfg(feature = "nonproduction-replay-harness")]
+pub(crate) fn p8_procedural_provider_safe_material(
+    candidate_ref: &str,
+    provider_content: String,
+) -> crate::Result<P8ProviderSafeMaterialBundle> {
+    let bytes = serde_json::to_vec(&("procedural", candidate_ref))
+        .map_err(|error| crate::Error::config("p8_provider_safe_projection", error.to_string()))?;
+    Ok(P8ProviderSafeMaterialBundle(vec![(
+        P8SemanticSafeCandidateRef(prefixed_digest(
+            SAFE_CANDIDATE_PREFIX,
+            "beetle_memory_p8_semantic_safe_candidate_v1",
+            &[bytes.as_slice()],
+        )),
+        provider_content,
+    )]))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -672,6 +729,10 @@ impl P8SemanticNegativeProofReceipt {
         ))
     }
 
+    pub fn receipt_ref(&self) -> &P8SemanticNegativeProofRef {
+        &self.receipt_ref
+    }
+
     fn is_valid_for(
         &self,
         key: P8SemanticOffRunKey,
@@ -919,6 +980,9 @@ pub struct P8SemanticOffRunReport {
     materialization_count: u64,
     observations: Vec<P8SemanticOffRunObservation>,
     report_digest: P8SemanticOffRunReportDigest,
+    #[serde(skip)]
+    provider_safe_projection_aliases:
+        BTreeMap<P8SemanticSafeCandidateRef, P8SemanticSafeCandidateRef>,
 }
 
 impl P8SemanticOffRunReport {
@@ -1014,6 +1078,8 @@ impl P8SemanticOffRunReport {
         long_term_counterfactual_inputs: Vec<P8SemanticLongTermCounterfactualInput>,
         execution_authority: P8NoExecutionCounterfactualAuthority,
     ) -> Self {
+        let provider_safe_projection_aliases =
+            provider_safe_projection_aliases(&long_term_counterfactual_inputs);
         let authority_ref = baseline
             .payload()
             .public_report()
@@ -1048,9 +1114,16 @@ impl P8SemanticOffRunReport {
                 "beetle_memory_p8_semantic_off_run_report_v1",
                 &[b"uninitialized"],
             )),
+            provider_safe_projection_aliases,
         };
         report.report_digest = report.derived_report_digest();
         report
+    }
+
+    fn provider_safe_projection_aliases(
+        &self,
+    ) -> &BTreeMap<P8SemanticSafeCandidateRef, P8SemanticSafeCandidateRef> {
+        &self.provider_safe_projection_aliases
     }
 
     fn derived_report_digest(&self) -> P8SemanticOffRunReportDigest {
@@ -1071,6 +1144,924 @@ impl P8SemanticOffRunReport {
         ))
     }
 }
+
+#[cfg(feature = "nonproduction-replay-harness")]
+mod semantic_closure_v2 {
+    use super::*;
+
+    const PROVIDER_SAFE_PROJECTION_PREFIX: &str = "p8_provider_safe_projection_v2:sha256:";
+    const PROVIDER_SAFE_PROJECTION_RECEIPT_PREFIX: &str =
+        "p8_provider_safe_projection_receipt_v2:sha256:";
+    const SEMANTIC_CLOSURE_EXECUTION_RECEIPT_PREFIX: &str =
+        "p8_semantic_closure_execution_v2:sha256:";
+    const NEGATIVE_ONLY_PROOF_V2_PREFIX: &str = "p8_semantic_negative_only_proof_v2:sha256:";
+
+    pub const P8_SEMANTIC_CLOSURE_EXECUTION_V2_SCHEMA: &str =
+        "beetle-memory.p8.semantic-closure-execution.v2";
+    pub const P8_PROVIDER_SAFE_PROJECTION_RECEIPT_V2_SCHEMA: &str =
+        "beetle-memory.p8.provider-safe-projection-receipt.v2";
+    pub const P8_SEMANTIC_NEGATIVE_ONLY_PROOF_V2_SCHEMA: &str =
+        "beetle-memory.p8.semantic-negative-only-proof.v2";
+
+    p8_opaque_ref!(
+        P8ProviderSafeProjectionDigestV2,
+        PROVIDER_SAFE_PROJECTION_PREFIX
+    );
+    p8_opaque_ref!(
+        P8ProviderSafeProjectionReceiptDigestV2,
+        PROVIDER_SAFE_PROJECTION_RECEIPT_PREFIX
+    );
+    p8_opaque_ref!(
+        P8SemanticClosureExecutionReceiptDigestV2,
+        SEMANTIC_CLOSURE_EXECUTION_RECEIPT_PREFIX
+    );
+    p8_opaque_ref!(
+        P8SemanticNegativeOnlyProofDigestV2,
+        NEGATIVE_ONLY_PROOF_V2_PREFIX
+    );
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum P8SameClosureSafeCounterfactualV1 {
+        TemporalValidity,
+        UpdateLineage,
+        ObsoleteSuppression,
+        ProceduralEvidence,
+        DynamicState,
+    }
+
+    impl P8SameClosureSafeCounterfactualV1 {
+        pub const ALL: [Self; 5] = [
+            Self::TemporalValidity,
+            Self::UpdateLineage,
+            Self::ObsoleteSuppression,
+            Self::ProceduralEvidence,
+            Self::DynamicState,
+        ];
+
+        const fn off_run_key(self) -> P8SemanticOffRunKey {
+            match self {
+                Self::TemporalValidity => P8SemanticOffRunKey::TemporalValidityGateOff,
+                Self::UpdateLineage => P8SemanticOffRunKey::UpdateLineageOff,
+                Self::ObsoleteSuppression => P8SemanticOffRunKey::ObsoleteSuppressionOff,
+                Self::ProceduralEvidence => P8SemanticOffRunKey::ProceduralWorkflowEvidenceOff,
+                Self::DynamicState => P8SemanticOffRunKey::DynamicStateConsolidationOff,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum P8SemanticNegativeOnlyProofKindV2 {
+        InvalidatedSuppression,
+        ForgettingSuppression,
+        EnvironmentPremise,
+    }
+
+    impl P8SemanticNegativeOnlyProofKindV2 {
+        pub const ALL: [Self; 3] = [
+            Self::InvalidatedSuppression,
+            Self::ForgettingSuppression,
+            Self::EnvironmentPremise,
+        ];
+
+        const fn off_run_key(self) -> P8SemanticOffRunKey {
+            match self {
+                Self::InvalidatedSuppression => {
+                    P8SemanticOffRunKey::InvalidatedSuppressionNegativeOff
+                }
+                Self::ForgettingSuppression => {
+                    P8SemanticOffRunKey::ForgettingSuppressionNegativeOff
+                }
+                Self::EnvironmentPremise => P8SemanticOffRunKey::EnvironmentPremiseGateOff,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum P8ProviderSafeProjectionKindV2 {
+        Baseline,
+        SameClosureSafeCounterfactual(P8SameClosureSafeCounterfactualV1),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct P8ProviderSafeProjectionReceiptV2 {
+        schema: String,
+        kind: P8ProviderSafeProjectionKindV2,
+        authority_ref: RecallOperationAuthorityRef,
+        store_snapshot_receipt: RecallStoreSnapshotReceiptRef,
+        off_run_digest: Option<P8SemanticOffRunDigest>,
+        projection_digest: P8ProviderSafeProjectionDigestV2,
+        rendered_chars: usize,
+        receipt_digest: P8ProviderSafeProjectionReceiptDigestV2,
+    }
+
+    impl P8ProviderSafeProjectionReceiptV2 {
+        pub const fn counterfactual(&self) -> Option<P8SameClosureSafeCounterfactualV1> {
+            match self.kind {
+                P8ProviderSafeProjectionKindV2::Baseline => None,
+                P8ProviderSafeProjectionKindV2::SameClosureSafeCounterfactual(value) => Some(value),
+            }
+        }
+
+        pub fn projection_digest(&self) -> &P8ProviderSafeProjectionDigestV2 {
+            &self.projection_digest
+        }
+
+        pub fn authority_ref(&self) -> &RecallOperationAuthorityRef {
+            &self.authority_ref
+        }
+
+        pub fn store_snapshot_receipt(&self) -> &RecallStoreSnapshotReceiptRef {
+            &self.store_snapshot_receipt
+        }
+
+        pub fn off_run_digest(&self) -> Option<&P8SemanticOffRunDigest> {
+            self.off_run_digest.as_ref()
+        }
+
+        pub const fn rendered_chars(&self) -> usize {
+            self.rendered_chars
+        }
+
+        pub fn receipt_digest(&self) -> &P8ProviderSafeProjectionReceiptDigestV2 {
+            &self.receipt_digest
+        }
+
+        fn build(
+            kind: P8ProviderSafeProjectionKindV2,
+            authority_ref: RecallOperationAuthorityRef,
+            store_snapshot_receipt: RecallStoreSnapshotReceiptRef,
+            off_run_digest: Option<P8SemanticOffRunDigest>,
+            payload: &[u8],
+        ) -> crate::Result<Self> {
+            let payload_text = std::str::from_utf8(payload).map_err(|_| {
+                crate::Error::config(
+                    "p8_provider_safe_projection",
+                    "provider-safe projection payload is not valid UTF-8",
+                )
+            })?;
+            let projection_digest = P8ProviderSafeProjectionDigestV2(prefixed_digest(
+                PROVIDER_SAFE_PROJECTION_PREFIX,
+                "beetle_memory_p8_provider_safe_projection_v2",
+                &[payload],
+            ));
+            let mut value = Self {
+                schema: P8_PROVIDER_SAFE_PROJECTION_RECEIPT_V2_SCHEMA.into(),
+                kind,
+                authority_ref,
+                store_snapshot_receipt,
+                off_run_digest,
+                projection_digest,
+                rendered_chars: payload_text.chars().count(),
+                receipt_digest: P8ProviderSafeProjectionReceiptDigestV2(prefixed_digest(
+                    PROVIDER_SAFE_PROJECTION_RECEIPT_PREFIX,
+                    "beetle_memory_p8_provider_safe_projection_receipt_v2",
+                    &[b"uninitialized"],
+                )),
+            };
+            value.receipt_digest = value.derived_receipt_digest();
+            Ok(value)
+        }
+
+        fn derived_receipt_digest(&self) -> P8ProviderSafeProjectionReceiptDigestV2 {
+            let bytes = serde_json::to_vec(&(
+                &self.schema,
+                self.kind,
+                &self.authority_ref,
+                &self.store_snapshot_receipt,
+                &self.off_run_digest,
+                &self.projection_digest,
+                self.rendered_chars,
+            ))
+            .expect("P8 provider-safe projection receipt serialization is infallible");
+            P8ProviderSafeProjectionReceiptDigestV2(prefixed_digest(
+                PROVIDER_SAFE_PROJECTION_RECEIPT_PREFIX,
+                "beetle_memory_p8_provider_safe_projection_receipt_v2",
+                &[bytes.as_slice()],
+            ))
+        }
+
+        fn is_valid(&self) -> bool {
+            self.schema == P8_PROVIDER_SAFE_PROJECTION_RECEIPT_V2_SCHEMA
+                && self.projection_digest.is_valid()
+                && self.receipt_digest.is_valid()
+                && self.receipt_digest == self.derived_receipt_digest()
+                && matches!(
+                    (self.kind, self.off_run_digest.as_ref()),
+                    (P8ProviderSafeProjectionKindV2::Baseline, None)
+                        | (
+                            P8ProviderSafeProjectionKindV2::SameClosureSafeCounterfactual(_),
+                            Some(_)
+                        )
+                )
+        }
+    }
+
+    pub struct P8ProviderSafeProjectionLeaseV2 {
+        receipt: P8ProviderSafeProjectionReceiptV2,
+        payload: Vec<u8>,
+        consumed: bool,
+    }
+
+    impl P8ProviderSafeProjectionLeaseV2 {
+        fn issue(
+            kind: P8ProviderSafeProjectionKindV2,
+            authority_ref: RecallOperationAuthorityRef,
+            store_snapshot_receipt: RecallStoreSnapshotReceiptRef,
+            off_run_digest: Option<P8SemanticOffRunDigest>,
+            payload: Vec<u8>,
+        ) -> crate::Result<Self> {
+            reject_forbidden_transient_payload(&payload)?;
+            let receipt = P8ProviderSafeProjectionReceiptV2::build(
+                kind,
+                authority_ref,
+                store_snapshot_receipt,
+                off_run_digest,
+                &payload,
+            )?;
+            Ok(Self {
+                receipt,
+                payload,
+                consumed: false,
+            })
+        }
+
+        fn receipt(&self) -> &P8ProviderSafeProjectionReceiptV2 {
+            &self.receipt
+        }
+
+        fn consume<R>(&mut self, consumer: impl FnOnce(&str) -> R) -> crate::Result<R> {
+            if self.consumed {
+                return Err(crate::Error::config(
+                    "p8_provider_safe_projection_lease",
+                    "provider-safe projection lease was already consumed",
+                ));
+            }
+            let payload = std::str::from_utf8(&self.payload).map_err(|_| {
+                crate::Error::config(
+                    "p8_provider_safe_projection_lease",
+                    "provider-safe projection payload is not valid UTF-8",
+                )
+            })?;
+            let result = consumer(payload);
+            clear_transient_payload(&mut self.payload);
+            self.consumed = true;
+            Ok(result)
+        }
+
+        fn is_valid(&self) -> bool {
+            if !self.receipt.is_valid() {
+                return false;
+            }
+            if self.consumed {
+                self.payload.is_empty()
+            } else {
+                std::str::from_utf8(&self.payload).is_ok_and(|payload| {
+                    payload.chars().count() == self.receipt.rendered_chars
+                        && P8ProviderSafeProjectionDigestV2(prefixed_digest(
+                            PROVIDER_SAFE_PROJECTION_PREFIX,
+                            "beetle_memory_p8_provider_safe_projection_v2",
+                            &[self.payload.as_slice()],
+                        )) == self.receipt.projection_digest
+                })
+            }
+        }
+    }
+
+    impl Drop for P8ProviderSafeProjectionLeaseV2 {
+        fn drop(&mut self) {
+            clear_transient_payload(&mut self.payload);
+            self.consumed = true;
+        }
+    }
+
+    fn clear_transient_payload(payload: &mut Vec<u8>) {
+        for byte in payload.iter_mut() {
+            // SAFETY: every byte belongs exclusively to this lease; volatile writes prevent the
+            // compiler from eliding the best-effort in-memory clearing before the allocation drops.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        payload.clear();
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct P8SemanticNegativeOnlyProofV2 {
+        schema: String,
+        kind: P8SemanticNegativeOnlyProofKindV2,
+        authority_ref: RecallOperationAuthorityRef,
+        store_snapshot_receipt: RecallStoreSnapshotReceiptRef,
+        off_run_digest: P8SemanticOffRunDigest,
+        applicable: bool,
+        underlying_negative_proof: Option<P8SemanticNegativeProofRef>,
+        provider_payload_count: u64,
+        proof_digest: P8SemanticNegativeOnlyProofDigestV2,
+    }
+
+    impl P8SemanticNegativeOnlyProofV2 {
+        pub const fn kind(&self) -> P8SemanticNegativeOnlyProofKindV2 {
+            self.kind
+        }
+
+        pub const fn applicable(&self) -> bool {
+            self.applicable
+        }
+
+        pub const fn provider_payload_count(&self) -> u64 {
+            self.provider_payload_count
+        }
+
+        pub fn authority_ref(&self) -> &RecallOperationAuthorityRef {
+            &self.authority_ref
+        }
+
+        pub fn store_snapshot_receipt(&self) -> &RecallStoreSnapshotReceiptRef {
+            &self.store_snapshot_receipt
+        }
+
+        pub fn off_run_digest(&self) -> &P8SemanticOffRunDigest {
+            &self.off_run_digest
+        }
+
+        pub fn proof_digest(&self) -> &P8SemanticNegativeOnlyProofDigestV2 {
+            &self.proof_digest
+        }
+
+        fn build(
+            kind: P8SemanticNegativeOnlyProofKindV2,
+            observation: &P8SemanticOffRunObservation,
+        ) -> Self {
+            let mut value = Self {
+                schema: P8_SEMANTIC_NEGATIVE_ONLY_PROOF_V2_SCHEMA.into(),
+                kind,
+                authority_ref: observation.authority_ref.clone(),
+                store_snapshot_receipt: observation.store_snapshot_receipt.clone(),
+                off_run_digest: observation.off_run_digest.clone(),
+                applicable: observation.applicable,
+                underlying_negative_proof: observation
+                    .negative_proof
+                    .as_ref()
+                    .map(|proof| proof.receipt_ref.clone()),
+                provider_payload_count: 0,
+                proof_digest: P8SemanticNegativeOnlyProofDigestV2(prefixed_digest(
+                    NEGATIVE_ONLY_PROOF_V2_PREFIX,
+                    "beetle_memory_p8_semantic_negative_only_proof_v2",
+                    &[b"uninitialized"],
+                )),
+            };
+            value.proof_digest = value.derived_proof_digest();
+            value
+        }
+
+        fn derived_proof_digest(&self) -> P8SemanticNegativeOnlyProofDigestV2 {
+            let bytes = serde_json::to_vec(&(
+                &self.schema,
+                self.kind,
+                &self.authority_ref,
+                &self.store_snapshot_receipt,
+                &self.off_run_digest,
+                self.applicable,
+                &self.underlying_negative_proof,
+                self.provider_payload_count,
+            ))
+            .expect("P8 negative-only proof serialization is infallible");
+            P8SemanticNegativeOnlyProofDigestV2(prefixed_digest(
+                NEGATIVE_ONLY_PROOF_V2_PREFIX,
+                "beetle_memory_p8_semantic_negative_only_proof_v2",
+                &[bytes.as_slice()],
+            ))
+        }
+
+        fn is_valid_for(&self, observation: &P8SemanticOffRunObservation) -> bool {
+            self.schema == P8_SEMANTIC_NEGATIVE_ONLY_PROOF_V2_SCHEMA
+                && self.kind.off_run_key() == observation.key
+                && self.authority_ref == observation.authority_ref
+                && self.store_snapshot_receipt == observation.store_snapshot_receipt
+                && self.off_run_digest == observation.off_run_digest
+                && self.applicable == observation.applicable
+                && self.provider_payload_count == 0
+                && self.underlying_negative_proof
+                    == observation
+                        .negative_proof
+                        .as_ref()
+                        .map(|proof| proof.receipt_ref.clone())
+                && self.proof_digest.is_valid()
+                && self.proof_digest == self.derived_proof_digest()
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct P8SemanticClosureExecutionReceiptV2 {
+        schema: String,
+        authority_ref: RecallOperationAuthorityRef,
+        store_snapshot_receipt: RecallStoreSnapshotReceiptRef,
+        profile: bm_core::feature_gate::ProfileId,
+        capability_catalog_identity: String,
+        budget_report_identity: String,
+        off_run_report_digest: P8SemanticOffRunReportDigest,
+        materialization_count: u64,
+        baseline_projection_receipt: P8ProviderSafeProjectionReceiptDigestV2,
+        safe_counterfactual_projection_receipts: Vec<P8ProviderSafeProjectionReceiptDigestV2>,
+        negative_only_proofs: Vec<P8SemanticNegativeOnlyProofDigestV2>,
+        receipt_digest: P8SemanticClosureExecutionReceiptDigestV2,
+    }
+
+    impl P8SemanticClosureExecutionReceiptV2 {
+        pub fn authority_ref(&self) -> &RecallOperationAuthorityRef {
+            &self.authority_ref
+        }
+
+        pub fn store_snapshot_receipt(&self) -> &RecallStoreSnapshotReceiptRef {
+            &self.store_snapshot_receipt
+        }
+
+        pub const fn profile(&self) -> bm_core::feature_gate::ProfileId {
+            self.profile
+        }
+
+        pub fn capability_catalog_identity(&self) -> &str {
+            &self.capability_catalog_identity
+        }
+
+        pub fn budget_report_identity(&self) -> &str {
+            &self.budget_report_identity
+        }
+
+        pub fn off_run_report_digest(&self) -> &P8SemanticOffRunReportDigest {
+            &self.off_run_report_digest
+        }
+
+        pub const fn materialization_count(&self) -> u64 {
+            self.materialization_count
+        }
+
+        pub fn receipt_digest(&self) -> &P8SemanticClosureExecutionReceiptDigestV2 {
+            &self.receipt_digest
+        }
+
+        fn derived_receipt_digest(&self) -> P8SemanticClosureExecutionReceiptDigestV2 {
+            let bytes = serde_json::to_vec(&(
+                &self.schema,
+                &self.authority_ref,
+                &self.store_snapshot_receipt,
+                self.profile,
+                &self.capability_catalog_identity,
+                &self.budget_report_identity,
+                &self.off_run_report_digest,
+                self.materialization_count,
+                &self.baseline_projection_receipt,
+                &self.safe_counterfactual_projection_receipts,
+                &self.negative_only_proofs,
+            ))
+            .expect("P8 semantic closure V2 receipt serialization is infallible");
+            P8SemanticClosureExecutionReceiptDigestV2(prefixed_digest(
+                SEMANTIC_CLOSURE_EXECUTION_RECEIPT_PREFIX,
+                "beetle_memory_p8_semantic_closure_execution_v2",
+                &[bytes.as_slice()],
+            ))
+        }
+
+        fn is_valid(&self) -> bool {
+            self.schema == P8_SEMANTIC_CLOSURE_EXECUTION_V2_SCHEMA
+                && self.materialization_count == 1
+                && self.safe_counterfactual_projection_receipts.len()
+                    == P8SameClosureSafeCounterfactualV1::ALL.len()
+                && self.negative_only_proofs.len() == P8SemanticNegativeOnlyProofKindV2::ALL.len()
+                && self.receipt_digest.is_valid()
+                && self.receipt_digest == self.derived_receipt_digest()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum P8SemanticClosureExecutionV2Failure {
+        OffRunInvalid,
+        ProjectionLeaseInvalid,
+        NegativeProofInvalid,
+        ReceiptInvalid,
+    }
+
+    pub struct P8SemanticClosureExecutionV2 {
+        receipt: P8SemanticClosureExecutionReceiptV2,
+        off_run_report: P8SemanticOffRunReport,
+        baseline_projection: P8ProviderSafeProjectionLeaseV2,
+        safe_counterfactual_projections: Vec<(
+            P8SameClosureSafeCounterfactualV1,
+            P8ProviderSafeProjectionLeaseV2,
+        )>,
+        negative_only_proofs: Vec<P8SemanticNegativeOnlyProofV2>,
+    }
+
+    impl P8SemanticClosureExecutionV2 {
+        pub(crate) fn from_single_production_closure(
+            off_run_report: P8SemanticOffRunReport,
+            provider_safe_material_bundles: Vec<P8ProviderSafeMaterialBundle>,
+        ) -> crate::Result<Self> {
+            let failures = off_run_report.validate_contract();
+            if !failures.is_empty() {
+                return Err(crate::Error::config(
+                    "p8_semantic_closure_execution_v2",
+                    format!("off-run report is not one exact production closure: {failures:?}"),
+                ));
+            }
+            let mut provider_safe_materials = provider_safe_material_bundles
+                .into_iter()
+                .flat_map(|bundle| bundle.0)
+                .collect::<Vec<_>>();
+            provider_safe_materials.sort();
+            for duplicate in provider_safe_materials.windows(2) {
+                if duplicate[0].0 == duplicate[1].0 && duplicate[0].1 != duplicate[1].1 {
+                    return Err(crate::Error::config(
+                        "p8_provider_safe_projection",
+                        "provider-safe projection material ref has conflicting content",
+                    ));
+                }
+            }
+            provider_safe_materials.dedup();
+            let authority = off_run_report
+                .baseline()
+                .payload()
+                .public_report()
+                .authority();
+            let authority_ref = off_run_report.authority_ref().clone();
+            let store_snapshot_receipt = off_run_report.store_snapshot_receipt().clone();
+            let baseline_bindings = off_run_report
+                .observations()
+                .first()
+                .map(P8SemanticOffRunObservation::baseline_bindings)
+                .unwrap_or_default();
+            let baseline_payload = provider_safe_projection_payload(
+                None,
+                baseline_bindings,
+                baseline_bindings,
+                &provider_safe_materials,
+                off_run_report.provider_safe_projection_aliases(),
+            )?;
+            let baseline_projection = P8ProviderSafeProjectionLeaseV2::issue(
+                P8ProviderSafeProjectionKindV2::Baseline,
+                authority_ref.clone(),
+                store_snapshot_receipt.clone(),
+                None,
+                baseline_payload,
+            )?;
+
+            let mut safe_counterfactual_projections = Vec::with_capacity(5);
+            for counterfactual in P8SameClosureSafeCounterfactualV1::ALL {
+                let observation = off_run_report
+                    .observations()
+                    .iter()
+                    .find(|observation| observation.key() == counterfactual.off_run_key())
+                    .ok_or_else(|| {
+                        crate::Error::config(
+                            "p8_semantic_closure_execution_v2",
+                            "safe counterfactual observation is missing",
+                        )
+                    })?;
+                let payload = provider_safe_projection_payload(
+                    Some(counterfactual),
+                    baseline_bindings,
+                    observation.off_run_bindings(),
+                    &provider_safe_materials,
+                    off_run_report.provider_safe_projection_aliases(),
+                )?;
+                safe_counterfactual_projections.push((
+                    counterfactual,
+                    P8ProviderSafeProjectionLeaseV2::issue(
+                        P8ProviderSafeProjectionKindV2::SameClosureSafeCounterfactual(
+                            counterfactual,
+                        ),
+                        authority_ref.clone(),
+                        store_snapshot_receipt.clone(),
+                        Some(observation.off_run_digest().clone()),
+                        payload,
+                    )?,
+                ));
+            }
+
+            let mut negative_only_proofs = Vec::with_capacity(3);
+            for kind in P8SemanticNegativeOnlyProofKindV2::ALL {
+                let observation = off_run_report
+                    .observations()
+                    .iter()
+                    .find(|observation| observation.key() == kind.off_run_key())
+                    .ok_or_else(|| {
+                        crate::Error::config(
+                            "p8_semantic_closure_execution_v2",
+                            "negative-only observation is missing",
+                        )
+                    })?;
+                negative_only_proofs.push(P8SemanticNegativeOnlyProofV2::build(kind, observation));
+            }
+
+            let mut receipt = P8SemanticClosureExecutionReceiptV2 {
+                schema: P8_SEMANTIC_CLOSURE_EXECUTION_V2_SCHEMA.into(),
+                authority_ref,
+                store_snapshot_receipt,
+                profile: authority.profile(),
+                capability_catalog_identity: authority.capability_catalog_identity().into(),
+                budget_report_identity: authority.budget_report_identity().into(),
+                off_run_report_digest: off_run_report.report_digest().clone(),
+                materialization_count: off_run_report.materialization_count(),
+                baseline_projection_receipt: baseline_projection.receipt().receipt_digest().clone(),
+                safe_counterfactual_projection_receipts: safe_counterfactual_projections
+                    .iter()
+                    .map(|(_, lease)| lease.receipt().receipt_digest().clone())
+                    .collect(),
+                negative_only_proofs: negative_only_proofs
+                    .iter()
+                    .map(|proof| proof.proof_digest.clone())
+                    .collect(),
+                receipt_digest: P8SemanticClosureExecutionReceiptDigestV2(prefixed_digest(
+                    SEMANTIC_CLOSURE_EXECUTION_RECEIPT_PREFIX,
+                    "beetle_memory_p8_semantic_closure_execution_v2",
+                    &[b"uninitialized"],
+                )),
+            };
+            receipt.receipt_digest = receipt.derived_receipt_digest();
+            let execution = Self {
+                receipt,
+                off_run_report,
+                baseline_projection,
+                safe_counterfactual_projections,
+                negative_only_proofs,
+            };
+            let failures = execution.validate_contract();
+            if failures.is_empty() {
+                Ok(execution)
+            } else {
+                Err(crate::Error::config(
+                    "p8_semantic_closure_execution_v2",
+                    format!("V2 execution failed exact closure: {failures:?}"),
+                ))
+            }
+        }
+
+        pub fn receipt(&self) -> &P8SemanticClosureExecutionReceiptV2 {
+            &self.receipt
+        }
+
+        pub fn off_run_report(&self) -> &P8SemanticOffRunReport {
+            &self.off_run_report
+        }
+
+        pub fn baseline_projection_receipt(&self) -> &P8ProviderSafeProjectionReceiptV2 {
+            self.baseline_projection.receipt()
+        }
+
+        pub fn safe_counterfactual_projection_receipts(
+            &self,
+        ) -> Vec<&P8ProviderSafeProjectionReceiptV2> {
+            self.safe_counterfactual_projections
+                .iter()
+                .map(|(_, lease)| lease.receipt())
+                .collect()
+        }
+
+        pub fn negative_only_proofs(&self) -> &[P8SemanticNegativeOnlyProofV2] {
+            &self.negative_only_proofs
+        }
+
+        pub fn consume_baseline_provider_safe_projection<R>(
+            &mut self,
+            consumer: impl FnOnce(&str) -> R,
+        ) -> crate::Result<R> {
+            self.baseline_projection.consume(consumer)
+        }
+
+        pub fn consume_same_closure_provider_safe_projection<R>(
+            &mut self,
+            counterfactual: P8SameClosureSafeCounterfactualV1,
+            consumer: impl FnOnce(&str) -> R,
+        ) -> crate::Result<R> {
+            self.safe_counterfactual_projections
+                .iter_mut()
+                .find(|(kind, _)| *kind == counterfactual)
+                .ok_or_else(|| {
+                    crate::Error::config(
+                        "p8_provider_safe_projection_lease",
+                        "same-closure safe counterfactual lease is missing",
+                    )
+                })?
+                .1
+                .consume(consumer)
+        }
+
+        pub fn validate_contract(&self) -> Vec<P8SemanticClosureExecutionV2Failure> {
+            let mut failures = Vec::new();
+            if !self.off_run_report.validate_contract().is_empty() {
+                failures.push(P8SemanticClosureExecutionV2Failure::OffRunInvalid);
+            }
+            if !self.baseline_projection.is_valid()
+                || self.safe_counterfactual_projections.len()
+                    != P8SameClosureSafeCounterfactualV1::ALL.len()
+                || self
+                    .safe_counterfactual_projections
+                    .iter()
+                    .zip(P8SameClosureSafeCounterfactualV1::ALL)
+                    .any(|((kind, lease), expected)| *kind != expected || !lease.is_valid())
+            {
+                failures.push(P8SemanticClosureExecutionV2Failure::ProjectionLeaseInvalid);
+            }
+            if self.negative_only_proofs.len() != P8SemanticNegativeOnlyProofKindV2::ALL.len()
+                || self
+                    .negative_only_proofs
+                    .iter()
+                    .zip(
+                        P8SemanticNegativeOnlyProofKindV2::ALL
+                            .into_iter()
+                            .filter_map(|kind| {
+                                self.off_run_report
+                                    .observations()
+                                    .iter()
+                                    .find(|observation| observation.key() == kind.off_run_key())
+                            }),
+                    )
+                    .any(|(proof, observation)| !proof.is_valid_for(observation))
+            {
+                failures.push(P8SemanticClosureExecutionV2Failure::NegativeProofInvalid);
+            }
+            if !self.receipt.is_valid()
+                || self.receipt.authority_ref != *self.off_run_report.authority_ref()
+                || self.receipt.store_snapshot_receipt
+                    != *self.off_run_report.store_snapshot_receipt()
+                || self.receipt.off_run_report_digest != *self.off_run_report.report_digest()
+                || self.receipt.baseline_projection_receipt
+                    != *self.baseline_projection.receipt().receipt_digest()
+                || self.receipt.safe_counterfactual_projection_receipts
+                    != self
+                        .safe_counterfactual_projections
+                        .iter()
+                        .map(|(_, lease)| lease.receipt().receipt_digest().clone())
+                        .collect::<Vec<_>>()
+                || self.receipt.negative_only_proofs
+                    != self
+                        .negative_only_proofs
+                        .iter()
+                        .map(|proof| proof.proof_digest.clone())
+                        .collect::<Vec<_>>()
+            {
+                failures.push(P8SemanticClosureExecutionV2Failure::ReceiptInvalid);
+            }
+            failures.sort();
+            failures.dedup();
+            failures
+        }
+    }
+
+    #[derive(Serialize)]
+    struct ProviderSafeProjectionPayload<'a> {
+        schema: &'static str,
+        counterfactual: Option<P8SameClosureSafeCounterfactualV1>,
+        bindings: Vec<&'a P8SemanticSafeCandidateBinding>,
+        materials: Vec<ProviderSafeProjectionMaterial<'a>>,
+    }
+
+    #[derive(Serialize)]
+    struct ProviderSafeProjectionMaterial<'a> {
+        candidate_ref: &'a P8SemanticSafeCandidateRef,
+        candidate_kind: P8SemanticSafeCandidateKind,
+        content: &'a str,
+    }
+
+    fn provider_safe_projection_payload(
+        counterfactual: Option<P8SameClosureSafeCounterfactualV1>,
+        baseline_bindings: &[P8SemanticSafeCandidateBinding],
+        bindings: &[P8SemanticSafeCandidateBinding],
+        provider_safe_materials: &[(P8SemanticSafeCandidateRef, String)],
+        provider_safe_projection_aliases: &BTreeMap<
+            P8SemanticSafeCandidateRef,
+            P8SemanticSafeCandidateRef,
+        >,
+    ) -> crate::Result<Vec<u8>> {
+        if bindings_have_private_delivery(bindings) {
+            return Err(crate::Error::config(
+                "p8_provider_safe_projection",
+                "private or suppressed material cannot enter provider-safe projection",
+            ));
+        }
+        let baseline_rendered = baseline_bindings
+            .iter()
+            .filter(|binding| binding.rendered)
+            .map(|binding| &binding.candidate_ref)
+            .collect::<BTreeSet<_>>();
+        let projected = bindings
+            .iter()
+            .filter(|binding| {
+                binding.selected
+                    && (counterfactual.is_some()
+                        || baseline_rendered.contains(&binding.candidate_ref))
+            })
+            .collect::<Vec<_>>();
+        let material_by_ref = provider_safe_materials
+            .iter()
+            .map(|(candidate_ref, content)| (candidate_ref, content.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        if material_by_ref.len() != provider_safe_materials.len() {
+            return Err(crate::Error::config(
+                "p8_provider_safe_projection",
+                "provider-safe projection material refs are not unique",
+            ));
+        }
+        let materials = projected
+            .iter()
+            .map(|binding| {
+                let material_ref = provider_safe_projection_aliases
+                    .get(&binding.candidate_ref)
+                    .unwrap_or(&binding.candidate_ref);
+                let content = material_by_ref.get(material_ref).ok_or_else(|| {
+                    crate::Error::config(
+                        "p8_provider_safe_projection",
+                        "selected provider-safe projection binding is missing material",
+                    )
+                })?;
+                Ok(ProviderSafeProjectionMaterial {
+                    candidate_ref: &binding.candidate_ref,
+                    candidate_kind: binding.candidate_kind,
+                    content,
+                })
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        serde_json::to_vec(&ProviderSafeProjectionPayload {
+            schema: "beetle-memory.p8.provider-safe-projection-payload.v2",
+            counterfactual,
+            bindings: projected,
+            materials,
+        })
+        .map_err(|error| crate::Error::config("p8_provider_safe_projection", error.to_string()))
+    }
+
+    fn bindings_have_private_delivery(bindings: &[P8SemanticSafeCandidateBinding]) -> bool {
+        bindings.iter().any(|binding| {
+            (binding.selected || binding.rendered)
+                && binding
+                    .suppression_reasons
+                    .iter()
+                    .any(|reason| matches!(reason, GovernedRecallEligibilityReason::PrivacyBlocked))
+        })
+    }
+
+    fn reject_forbidden_transient_payload(payload: &[u8]) -> crate::Result<()> {
+        const FORBIDDEN: [&[u8]; 7] = [
+            b"private-owner-sentinel",
+            b"private-space-sentinel",
+            b"private-subject-sentinel",
+            b"raw-procedure-sentinel",
+            b"raw-soul-sentinel",
+            b"credential-sentinel",
+            b"path-sentinel",
+        ];
+        if FORBIDDEN.iter().any(|sentinel| {
+            payload
+                .windows(sentinel.len())
+                .any(|window| window == *sentinel)
+        }) {
+            return Err(crate::Error::config(
+                "p8_provider_safe_projection",
+                "provider-safe projection contains forbidden raw material",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn selected_binding_without_provider_safe_material_fails_closed() {
+            let candidate_ref =
+                P8SemanticSafeCandidateRef(format!("{SAFE_CANDIDATE_PREFIX}{}", "a".repeat(64)));
+            let selected_binding = P8SemanticSafeCandidateBinding {
+                candidate_ref,
+                candidate_kind: P8SemanticSafeCandidateKind::GovernedMemory,
+                primary_reason: None,
+                suppression_reasons: Vec::new(),
+                selected: true,
+                rendered: false,
+            };
+
+            let result = provider_safe_projection_payload(
+                Some(P8SameClosureSafeCounterfactualV1::TemporalValidity),
+                &[],
+                &[selected_binding],
+                &[],
+                &BTreeMap::new(),
+            );
+
+            assert!(
+                result.is_err(),
+                "selected provider-safe binding without material must fail closed"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "nonproduction-replay-harness")]
+pub use semantic_closure_v2::*;
 
 struct P8ObservationBuildContext<'a> {
     baseline: &'a GovernedRecallOperatorReportV1,
@@ -1352,6 +2343,79 @@ fn build_observation(
     }
 }
 
+fn provider_safe_projection_aliases(
+    inputs: &[P8SemanticLongTermCounterfactualInput],
+) -> BTreeMap<P8SemanticSafeCandidateRef, P8SemanticSafeCandidateRef> {
+    let mut aliases = BTreeMap::new();
+    for input in inputs
+        .iter()
+        .filter(|input| input.predecessor.is_some() || input.successor.is_some())
+    {
+        aliases.insert(
+            lineage_counterfactual_candidate_ref(P8SemanticOffRunKey::UpdateLineageOff, input),
+            input.binding.candidate_ref.clone(),
+        );
+        aliases.insert(
+            dynamic_counterfactual_candidate_ref(
+                P8SemanticOffRunKey::DynamicStateConsolidationOff,
+                input,
+            ),
+            input.binding.candidate_ref.clone(),
+        );
+    }
+    aliases
+}
+
+fn lineage_counterfactual_candidate_ref(
+    key: P8SemanticOffRunKey,
+    input: &P8SemanticLongTermCounterfactualInput,
+) -> P8SemanticSafeCandidateRef {
+    let bytes = serde_json::to_vec(&(
+        key,
+        &input.binding.candidate_ref,
+        &input.predecessor,
+        &input.successor,
+    ))
+    .expect("P8 lineage counterfactual serialization is infallible");
+    P8SemanticSafeCandidateRef(prefixed_digest(
+        SAFE_CANDIDATE_PREFIX,
+        "beetle_memory_p8_lineage_counterfactual_safe_candidate_v1",
+        &[bytes.as_slice()],
+    ))
+}
+
+fn invalidated_counterfactual_candidate_ref(
+    key: P8SemanticOffRunKey,
+    input: &P8SemanticLongTermCounterfactualInput,
+) -> P8SemanticSafeCandidateRef {
+    let bytes = serde_json::to_vec(&(key, &input.binding.candidate_ref))
+        .expect("P8 invalidated counterfactual serialization is infallible");
+    P8SemanticSafeCandidateRef(prefixed_digest(
+        SAFE_CANDIDATE_PREFIX,
+        "beetle_memory_p8_invalidated_counterfactual_safe_candidate_v1",
+        &[bytes.as_slice()],
+    ))
+}
+
+fn dynamic_counterfactual_candidate_ref(
+    key: P8SemanticOffRunKey,
+    input: &P8SemanticLongTermCounterfactualInput,
+) -> P8SemanticSafeCandidateRef {
+    let bytes = serde_json::to_vec(&(
+        key,
+        &input.owner_group_ref,
+        &input.binding.candidate_ref,
+        &input.predecessor,
+        &input.successor,
+    ))
+    .expect("P8 dynamic counterfactual serialization is infallible");
+    P8SemanticSafeCandidateRef(prefixed_digest(
+        SAFE_CANDIDATE_PREFIX,
+        "beetle_memory_p8_dynamic_counterfactual_safe_candidate_v1",
+        &[bytes.as_slice()],
+    ))
+}
+
 fn safe_counterfactual_bindings(
     key: P8SemanticOffRunKey,
     inputs: &[P8SemanticLongTermCounterfactualInput],
@@ -1363,18 +2427,7 @@ fn safe_counterfactual_bindings(
             .filter(|input| input.predecessor.is_some() || input.successor.is_some())
             .map(|input| {
                 let mut binding = input.binding.clone();
-                let bytes = serde_json::to_vec(&(
-                    key,
-                    &binding.candidate_ref,
-                    &input.predecessor,
-                    &input.successor,
-                ))
-                .expect("P8 lineage counterfactual serialization is infallible");
-                binding.candidate_ref = P8SemanticSafeCandidateRef(prefixed_digest(
-                    SAFE_CANDIDATE_PREFIX,
-                    "beetle_memory_p8_lineage_counterfactual_safe_candidate_v1",
-                    &[bytes.as_slice()],
-                ));
+                binding.candidate_ref = lineage_counterfactual_candidate_ref(key, input);
                 binding.rendered = false;
                 binding
             })
@@ -1420,13 +2473,7 @@ fn safe_counterfactual_bindings(
             })
             .map(|input| {
                 let mut binding = input.binding.clone();
-                let bytes = serde_json::to_vec(&(key, &binding.candidate_ref))
-                    .expect("P8 invalidated counterfactual serialization is infallible");
-                binding.candidate_ref = P8SemanticSafeCandidateRef(prefixed_digest(
-                    SAFE_CANDIDATE_PREFIX,
-                    "beetle_memory_p8_invalidated_counterfactual_safe_candidate_v1",
-                    &[bytes.as_slice()],
-                ));
+                binding.candidate_ref = invalidated_counterfactual_candidate_ref(key, input);
                 disable_only_suppression_reasons(
                     &mut binding,
                     &[GovernedRecallEligibilityReason::Invalidated],
@@ -1438,20 +2485,8 @@ fn safe_counterfactual_bindings(
             .into_iter()
             .filter(|input| input.predecessor.is_some() || input.successor.is_some())
             .map(|input| {
-                let bytes = serde_json::to_vec(&(
-                    key,
-                    &input.owner_group_ref,
-                    &input.binding.candidate_ref,
-                    &input.predecessor,
-                    &input.successor,
-                ))
-                .expect("P8 dynamic counterfactual serialization is infallible");
                 let mut binding = input.binding.clone();
-                binding.candidate_ref = P8SemanticSafeCandidateRef(prefixed_digest(
-                    SAFE_CANDIDATE_PREFIX,
-                    "beetle_memory_p8_dynamic_counterfactual_safe_candidate_v1",
-                    &[bytes.as_slice()],
-                ));
+                binding.candidate_ref = dynamic_counterfactual_candidate_ref(key, input);
                 binding.rendered = false;
                 binding
             })
@@ -1570,7 +2605,9 @@ mod tests {
                 owner_group_ref: safe_ref('b'),
                 predecessor: Some(safe_ref('c')),
                 predecessor_reason: Some(GovernedRecallEligibilityReason::Obsolete),
+                predecessor_provider_content: None,
                 successor: None,
+                provider_content: "safe provider content".into(),
             };
             for key in [
                 P8SemanticOffRunKey::UpdateLineageOff,

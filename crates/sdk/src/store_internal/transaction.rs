@@ -1527,16 +1527,17 @@ pub(crate) fn json_document_matches_scoped_projection(
     let Some(mounted_subject_id) = scope.mounted_subject_id() else {
         return false;
     };
+    let long_term_owner_id = scope.memory_space_id.as_str();
     match namespace {
         LONG_TERM_VERSION_MATERIAL_NAMESPACE => serde_json::from_value::<
             LongTermMemoryVersionMaterial,
         >(value.clone())
         .is_ok_and(|material| {
             material.memory_space_id == scope.memory_space_id
-                && material.mounted_subject_id == mounted_subject_id
+                && material.factual_owner_id == long_term_owner_id
                 && long_term_version_material_key(
                     &material.memory_space_id,
-                    &material.mounted_subject_id,
+                    &material.factual_owner_id,
                     &material.owner_ref,
                     material.owner_revision,
                 )
@@ -1545,10 +1546,10 @@ pub(crate) fn json_document_matches_scoped_projection(
         LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
             serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone()).is_ok_and(|head| {
                 head.memory_space_id == scope.memory_space_id
-                    && head.mounted_subject_id == mounted_subject_id
+                    && head.factual_owner_id == long_term_owner_id
                     && long_term_version_head_key(
                         &head.memory_space_id,
-                        &head.mounted_subject_id,
+                        &head.factual_owner_id,
                         &head.owner_ref,
                     )
                     .is_ok_and(|expected| expected == key)
@@ -1559,11 +1560,11 @@ pub(crate) fn json_document_matches_scoped_projection(
         >(value.clone())
         .is_ok_and(|manifest| {
             manifest.memory_space_id == scope.memory_space_id
-                && manifest.mounted_subject_id == mounted_subject_id
+                && manifest.factual_owner_id == long_term_owner_id
                 && manifest.physical_key == key
                 && long_term_version_scope_manifest_key(
                     &manifest.memory_space_id,
-                    &manifest.mounted_subject_id,
+                    &manifest.factual_owner_id,
                 )
                 .is_ok_and(|expected| expected == key)
         }),
@@ -1594,8 +1595,8 @@ pub(crate) fn json_document_matches_scoped_projection(
             value.get("memory_space_id").and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
                 && value.get("mounted_subject_id").and_then(Value::as_str)
-                    == Some(mounted_subject_id)
-                && control_plane_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)
+                    == Some(long_term_owner_id)
+                && control_plane_scope_manifest_key(&scope.memory_space_id, long_term_owner_id)
                     .is_ok_and(|expected| expected == key)
         }
         "memory_graph_nodes"
@@ -1615,22 +1616,33 @@ pub(crate) fn json_document_matches_scoped_projection(
                 && value.get("mounted_subject_id").and_then(Value::as_str)
                     == Some(mounted_subject_id)
         }
-        "memory_facet_indexes" => {
-            value.get("memory_space_id").and_then(Value::as_str)
-                == Some(scope.memory_space_id.as_str())
-                && value
-                    .get("subject_ids")
-                    .and_then(Value::as_array)
-                    .is_some_and(|subjects| {
-                        subjects
-                            .iter()
-                            .any(|subject| subject.as_str() == Some(mounted_subject_id))
-                    })
-        }
+        "memory_facet_indexes" => serde_json::from_value::<MemoryFacetIndexDoc>(value.clone())
+            .is_ok_and(|facet| {
+                let owner_scope_id = match facet.owner_ref.owner_plane {
+                    GovernedMemoryOwnerPlane::LongTerm => long_term_owner_id,
+                    GovernedMemoryOwnerPlane::EvidenceDocument => mounted_subject_id,
+                    _ => return false,
+                };
+                facet.memory_space_id == scope.memory_space_id
+                    && facet
+                        .subject_ids
+                        .iter()
+                        .any(|subject| subject == owner_scope_id)
+                    && scoped_memory_facet_owner_storage_key(
+                        &facet.memory_space_id,
+                        owner_scope_id,
+                        &facet.owner_ref,
+                    )
+                    .is_ok_and(|expected| expected == key)
+            }),
         MEMORY_FACET_POSTING_NAMESPACE => {
             value.get("memory_space_id").and_then(Value::as_str)
                 == Some(scope.memory_space_id.as_str())
-                && value.get("subject_id").and_then(Value::as_str) == Some(mounted_subject_id)
+                && matches!(
+                    value.get("subject_id").and_then(Value::as_str),
+                    Some(subject_id)
+                        if subject_id == mounted_subject_id || subject_id == long_term_owner_id
+                )
         }
         "conversation_transcript_alias"
         | "conversation_transcript_attr"
@@ -2143,6 +2155,7 @@ pub(crate) fn scoped_projection_root_addresses(
     let Some(mounted_subject_id) = scope.mounted_subject_id() else {
         return Ok(addresses.into_iter().collect());
     };
+    let long_term_owner_id = scope.memory_space_id.as_str();
     let long_term_selected = namespaces.contains(LONG_TERM_VERSION_MATERIAL_NAMESPACE)
         || namespaces.contains(LONG_TERM_HEAD_MANIFEST_NAMESPACE)
         || namespaces.contains(LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE);
@@ -2158,7 +2171,7 @@ pub(crate) fn scoped_projection_root_addresses(
         }
         addresses.insert((
             LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
-            long_term_version_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)?,
+            long_term_version_scope_manifest_key(&scope.memory_space_id, long_term_owner_id)?,
         ));
     }
     if namespaces.contains("archive_recall_manifests") {
@@ -2174,11 +2187,13 @@ pub(crate) fn scoped_projection_root_addresses(
         ));
     }
     if namespaces.contains(MEMORY_FACET_POSTING_NAMESPACE) {
-        addresses.insert((
-            MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-            memory_facet_manifest_key(&scope.memory_space_id, mounted_subject_id)
-                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?,
-        ));
+        for facet_scope_id in [long_term_owner_id, mounted_subject_id] {
+            addresses.insert((
+                MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                memory_facet_manifest_key(&scope.memory_space_id, facet_scope_id)
+                    .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?,
+            ));
+        }
     }
     if namespaces.contains("memory_graph_manifests") {
         addresses.insert((
@@ -2198,7 +2213,7 @@ pub(crate) fn scoped_projection_root_addresses(
     if namespaces.contains(CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE) {
         addresses.insert((
             CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
-            control_plane_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)?,
+            control_plane_scope_manifest_key(&scope.memory_space_id, long_term_owner_id)?,
         ));
     }
     Ok(addresses.into_iter().collect())
@@ -2268,12 +2283,7 @@ fn scoped_manifest_dependency_addresses(
     for ((namespace, key), value) in scoped_json {
         match namespace.as_str() {
             LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE => {
-                let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
-                    Error::config(
-                        "store_scoped_projection",
-                        "long-term scope manifests require a subject physical owner",
-                    )
-                })?;
+                let long_term_owner_id = scope.memory_space_id.as_str();
                 let manifest =
                     serde_json::from_value::<LongTermMemoryVersionScopeManifest>(value.clone())
                         .map_err(|error| {
@@ -2284,10 +2294,10 @@ fn scoped_manifest_dependency_addresses(
                         })?;
                 if manifest.physical_key != *key
                     || manifest.memory_space_id != scope.memory_space_id
-                    || manifest.mounted_subject_id != mounted_subject_id
+                    || manifest.factual_owner_id != long_term_owner_id
                     || long_term_version_scope_manifest_key(
                         &manifest.memory_space_id,
-                        &manifest.mounted_subject_id,
+                        &manifest.factual_owner_id,
                     )? != *key
                 {
                     return Err(Error::config(
@@ -2313,12 +2323,7 @@ fn scoped_manifest_dependency_addresses(
                 }
             }
             LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
-                let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
-                    Error::config(
-                        "store_scoped_projection",
-                        "long-term head manifests require a subject physical owner",
-                    )
-                })?;
+                let long_term_owner_id = scope.memory_space_id.as_str();
                 let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
                     .map_err(|error| {
                         Error::config(
@@ -2327,10 +2332,10 @@ fn scoped_manifest_dependency_addresses(
                         )
                     })?;
                 if head.memory_space_id != scope.memory_space_id
-                    || head.mounted_subject_id != mounted_subject_id
+                    || head.factual_owner_id != long_term_owner_id
                     || long_term_version_head_key(
                         &head.memory_space_id,
-                        &head.mounted_subject_id,
+                        &head.factual_owner_id,
                         &head.owner_ref,
                     )? != *key
                 {
@@ -2345,7 +2350,7 @@ fn scoped_manifest_dependency_addresses(
                             LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                             long_term_version_material_key(
                                 &head.memory_space_id,
-                                &head.mounted_subject_id,
+                                &head.factual_owner_id,
                                 &head.owner_ref,
                                 retained.owner_revision,
                             )?,
@@ -2391,6 +2396,23 @@ fn scoped_manifest_dependency_addresses(
                             format!("facet manifest: {error}"),
                         )
                     })?;
+                let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
+                    Error::config(
+                        "store_scoped_projection",
+                        "facet manifests require a mounted subject projection",
+                    )
+                })?;
+                if manifest.memory_space_id != scope.memory_space_id
+                    || (manifest.subject_id != scope.memory_space_id
+                        && manifest.subject_id != mounted_subject_id)
+                    || !memory_facet_manifest_key(&manifest.memory_space_id, &manifest.subject_id)
+                        .is_ok_and(|expected| expected == *key)
+                {
+                    return Err(Error::config(
+                        "store_scoped_projection",
+                        "facet manifest differs from the exact MemorySpace or mounted-subject lane",
+                    ));
+                }
                 for posting in manifest.posting_revisions {
                     addresses.insert((
                         MEMORY_FACET_POSTING_NAMESPACE.to_string(),
@@ -2399,16 +2421,27 @@ fn scoped_manifest_dependency_addresses(
                 }
                 if namespaces.contains("memory_facet_indexes") {
                     for owner in manifest.owner_versions {
+                        let expected_scope_id = match owner.owner_ref.owner_plane {
+                            GovernedMemoryOwnerPlane::LongTerm => scope.memory_space_id.as_str(),
+                            GovernedMemoryOwnerPlane::EvidenceDocument => mounted_subject_id,
+                            _ => {
+                                return Err(Error::config(
+                                    "store_scoped_projection",
+                                    "facet manifest contains an unsupported owner plane",
+                                ))
+                            }
+                        };
+                        if manifest.subject_id != expected_scope_id {
+                            return Err(Error::config(
+                                "store_scoped_projection",
+                                "facet manifest owner plane differs from its canonical owner lane",
+                            ));
+                        }
                         addresses.insert((
                             "memory_facet_indexes".to_string(),
                             scoped_memory_facet_owner_storage_key(
                                 &scope.memory_space_id,
-                                scope.mounted_subject_id().ok_or_else(|| {
-                                    Error::config(
-                                        "store_scoped_projection",
-                                        "facet manifests require a subject physical owner",
-                                    )
-                                })?,
+                                expected_scope_id,
                                 &owner.owner_ref,
                             )
                             .map_err(|error| {
@@ -2483,14 +2516,9 @@ fn scoped_manifest_dependency_addresses(
                     )
                 })?;
                 manifest.validate(usize::MAX)?;
-                let mounted_subject_id = scope.mounted_subject_id().ok_or_else(|| {
-                    Error::config(
-                        "store_scoped_projection",
-                        "control-plane manifests require a subject physical owner",
-                    )
-                })?;
+                let long_term_owner_id = scope.memory_space_id.as_str();
                 if manifest.memory_space_id != scope.memory_space_id
-                    || manifest.mounted_subject_id != mounted_subject_id
+                    || manifest.mounted_subject_id != long_term_owner_id
                 {
                     return Err(Error::config(
                         "store_scoped_projection",
@@ -2806,7 +2834,7 @@ pub(crate) fn validate_scoped_control_plane_documents(
         .filter(|(namespace, _)| control_namespaces.contains(namespace.as_str()))
         .cloned()
         .collect::<BTreeSet<_>>();
-    let Some(mounted_subject_id) = scope.mounted_subject_id() else {
+    if scope.mounted_subject_id().is_none() {
         if actual_addresses.is_empty()
             && !json
                 .keys()
@@ -2816,11 +2844,11 @@ pub(crate) fn validate_scoped_control_plane_documents(
         }
         return Err(Error::config(
             "control_plane_scope_manifest",
-            "control-plane documents require a subject physical owner",
+            "control-plane documents require a subject projection",
         ));
-    };
-    let manifest_key =
-        control_plane_scope_manifest_key(&scope.memory_space_id, mounted_subject_id)?;
+    }
+    let control_owner_id = scope.memory_space_id.as_str();
+    let manifest_key = control_plane_scope_manifest_key(&scope.memory_space_id, control_owner_id)?;
     let manifest_value = json.get(&(
         CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
         manifest_key.clone(),
@@ -2831,7 +2859,7 @@ pub(crate) fn validate_scoped_control_plane_documents(
         }
         return Err(Error::config(
             "control_plane_scope_manifest",
-            "control-plane documents require their exact subject scope manifest",
+            "control-plane documents require their exact MemorySpace scope manifest",
         ));
     };
     if json
@@ -2856,7 +2884,7 @@ pub(crate) fn validate_scoped_control_plane_documents(
     manifest.validate(max_entries)?;
     if manifest.physical_key != manifest_key
         || manifest.memory_space_id != scope.memory_space_id
-        || manifest.mounted_subject_id != mounted_subject_id
+        || manifest.mounted_subject_id != control_owner_id
     {
         return Err(Error::config(
             "control_plane_scope_manifest",
@@ -2950,9 +2978,10 @@ pub(crate) fn scoped_long_term_addresses_from_facet_docs(
     scope: &crate::StoreScopedProjectionScope,
 ) -> Result<Vec<(String, String)>> {
     let mut addresses = BTreeSet::new();
-    let Some(mounted_subject_id) = scope.mounted_subject_id() else {
+    if scope.mounted_subject_id().is_none() {
         return Ok(Vec::new());
-    };
+    }
+    let long_term_owner_id = scope.memory_space_id.as_str();
     for ((namespace, key), value) in scoped_json {
         if namespace != "memory_facet_indexes"
             || !json_document_matches_scoped_projection(namespace, key, value, scope)
@@ -2968,7 +2997,7 @@ pub(crate) fn scoped_long_term_addresses_from_facet_docs(
             })?;
         let expected_key = bm_core::memory::scoped_memory_facet_owner_storage_key(
             &scope.memory_space_id,
-            mounted_subject_id,
+            long_term_owner_id,
             &facet.owner_ref,
         )
         .map_err(|error| {
@@ -2982,7 +3011,7 @@ pub(crate) fn scoped_long_term_addresses_from_facet_docs(
             || !facet
                 .subject_ids
                 .iter()
-                .any(|subject| subject == mounted_subject_id)
+                .any(|subject| subject == long_term_owner_id)
             || key != &expected_key
         {
             return Err(Error::config(
@@ -3567,7 +3596,7 @@ mod tests {
             schema_version: bm_core::memory::LONG_TERM_CONTROL_SCHEMA_VERSION,
             revision_id: "revision-b".to_string(),
             memory_space_id: memory_space_id.to_string(),
-            mounted_subject_id: "subject-b".to_string(),
+            factual_owner_id: "subject-b".to_string(),
             operation: bm_core::memory::LongTermControlOperation::Correct,
             transition: bm_core::memory::GovernedOwnerTransition {
                 predecessor: bm_core::memory::GovernedOwnerRevisionRef::try_new(
@@ -3614,7 +3643,7 @@ mod tests {
         )
         .expect("manifest entry");
         let manifest =
-            ControlPlaneScopeManifest::build(1, memory_space_id, mounted_subject_id, [entry], 8)
+            ControlPlaneScopeManifest::build(1, memory_space_id, memory_space_id, [entry], 8)
                 .expect("manifest");
         let mut json = BTreeMap::from([(
             (
@@ -3667,7 +3696,7 @@ mod tests {
                 (
                     crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
                         .to_string(),
-                    bm_core::memory::long_term_version_scope_manifest_key("space-a", "subject-a")
+                    bm_core::memory::long_term_version_scope_manifest_key("space-a", "space-a")
                         .expect("long-term root"),
                 ),
                 (
@@ -3762,16 +3791,16 @@ mod tests {
             "memory-a",
         );
         let long_term_root_key =
-            bm_core::memory::long_term_version_scope_manifest_key("space-a", "subject-a")
+            bm_core::memory::long_term_version_scope_manifest_key("space-a", "space-a")
                 .expect("long-term root key");
         let long_term_head_key =
-            bm_core::memory::long_term_version_head_key("space-a", "subject-a", &long_term_owner)
+            bm_core::memory::long_term_version_head_key("space-a", "space-a", &long_term_owner)
                 .expect("long-term head key");
         let long_term_root = bm_core::memory::LongTermMemoryVersionScopeManifest {
             schema_version: bm_core::memory::LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
             physical_key: long_term_root_key.clone(),
             memory_space_id: "space-a".to_string(),
-            mounted_subject_id: "subject-a".to_string(),
+            factual_owner_id: "space-a".to_string(),
             manifest_revision: 1,
             head_bindings: vec![bm_core::memory::LongTermMemoryVersionHeadBinding {
                 owner_ref: long_term_owner.clone(),
@@ -3788,7 +3817,7 @@ mod tests {
         let long_term_head = bm_core::memory::LongTermMemoryHeadManifest {
             schema_version: bm_core::memory::LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
             memory_space_id: "space-a".to_string(),
-            mounted_subject_id: "subject-a".to_string(),
+            factual_owner_id: "space-a".to_string(),
             owner_ref: long_term_owner.clone(),
             current_revision: 1,
             retained_revision_digests: vec![
@@ -3836,7 +3865,7 @@ mod tests {
             LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
             bm_core::memory::long_term_version_material_key(
                 "space-a",
-                "subject-a",
+                "space-a",
                 &long_term_owner,
                 1,
             )

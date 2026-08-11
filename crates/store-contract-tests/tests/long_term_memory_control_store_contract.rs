@@ -161,7 +161,7 @@ fn seed_control_store(handle: &MemoryStoreHandle) -> ControlFixture {
             operation: MemoryGovernancePolicyMutation::Suppress {
                 selector: MemoryGovernanceSelector {
                     memory_space_id: Some(MEMORY_SPACE_ID.to_string()),
-                    subject_id: Some(MOUNTED_SUBJECT_ID.to_string()),
+                    subject_id: Some(MEMORY_SPACE_ID.to_string()),
                     kind: Some(LongTermMemoryKind::Preference),
                     topic_pattern: Some("temporary-*".to_string()),
                     source_chat_id: None,
@@ -178,7 +178,7 @@ fn seed_control_store(handle: &MemoryStoreHandle) -> ControlFixture {
 
     let control = handle
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(MEMORY_SPACE_ID)
+        .memory_space_long_term_memory_control_read_store(MEMORY_SPACE_ID)
         .expect("scoped control read store");
     let revisions = control
         .list_long_term_control_revisions(&owner_id, 10)
@@ -187,7 +187,7 @@ fn seed_control_store(handle: &MemoryStoreHandle) -> ControlFixture {
     assert!(revisions.iter().all(|revision| {
         revision.transition.predecessor.owner_ref.owner_id == owner_id
             && revision.memory_space_id == MEMORY_SPACE_ID
-            && revision.mounted_subject_id == MOUNTED_SUBJECT_ID
+            && revision.factual_owner_id == MEMORY_SPACE_ID
     }));
     let tombstone = control
         .get_long_term_control_tombstone(&owner_id)
@@ -231,7 +231,7 @@ fn store_platform_persists_long_term_control_metadata_and_events() {
     let fixture = seed_control_store(&handle);
     let control = handle
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(MEMORY_SPACE_ID)
+        .memory_space_long_term_memory_control_read_store(MEMORY_SPACE_ID)
         .expect("scoped control read store");
 
     assert_eq!(
@@ -273,11 +273,11 @@ fn scoped_control_events_expose_logical_ids_not_physical_storage_keys() {
     let fixture = seed_control_store(&handle);
     let control = handle
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(MEMORY_SPACE_ID)
+        .memory_space_long_term_memory_control_read_store(MEMORY_SPACE_ID)
         .expect("scoped control read store");
     let other_space = handle
         .replay_harness()
-        .scoped_long_term_memory_control_read_store("space:other")
+        .memory_space_long_term_memory_control_read_store("space:other")
         .expect("other scoped control read store");
 
     assert_eq!(
@@ -356,7 +356,7 @@ fn snapshot_export_import_preserves_long_term_control_namespaces() {
         .expect("import snapshot");
     let control = target
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(MEMORY_SPACE_ID)
+        .memory_space_long_term_memory_control_read_store(MEMORY_SPACE_ID)
         .expect("scoped control read store");
 
     assert_eq!(

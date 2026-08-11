@@ -68,13 +68,13 @@ fn owner_entry(id: &str, owner_revision: u64) -> LongTermMemoryEntry {
 
 fn version_material(
     entry: &LongTermMemoryEntry,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     valid_from: u64,
     predecessor: Option<GovernedOwnerRevisionRef>,
 ) -> LongTermMemoryVersionMaterial {
     LongTermMemoryVersionMaterial::from_current_projection(
         SPACE,
-        mounted_subject_id,
+        factual_owner_id,
         entry,
         valid_from,
         predecessor,
@@ -85,12 +85,12 @@ fn version_material(
 
 fn created_material_image(
     entry: &LongTermMemoryEntry,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
 ) -> LongTermMemoryVersionMaterialImage {
-    let material = version_material(entry, mounted_subject_id, entry.updated_at, None);
+    let material = version_material(entry, factual_owner_id, entry.updated_at, None);
     let key = long_term_version_material_key(
         SPACE,
-        mounted_subject_id,
+        factual_owner_id,
         &material.owner_ref,
         material.owner_revision,
     )
@@ -152,8 +152,9 @@ fn facet_closure() -> MemoryFacetPostImageClosure {
 
     MemoryFacetPostImageClosure {
         memory_space_id: SPACE.to_string(),
+        long_term_owner_id: SPACE.to_string(),
         mounted_subject_id: SUBJECT.to_string(),
-        long_term_owners: vec![created_material_image(&owner, SUBJECT)],
+        long_term_owners: vec![created_material_image(&owner, SPACE)],
         evidence_document_owners: Vec::new(),
         facet_owners: vec![GovernedDocumentImage::created(
             scoped_memory_facet_owner_storage_key(SPACE, SUBJECT, &facet.owner_ref)
@@ -213,6 +214,7 @@ fn facet_post_image_accepts_complete_last_owner_scope_deletion() {
     let created = facet_closure();
     let deleted = MemoryFacetPostImageClosure {
         memory_space_id: created.memory_space_id,
+        long_term_owner_id: created.long_term_owner_id,
         mounted_subject_id: created.mounted_subject_id,
         long_term_owners: created
             .long_term_owners
@@ -363,8 +365,9 @@ fn mixed_plane_facet_closure() -> MemoryFacetPostImageClosure {
 
     MemoryFacetPostImageClosure {
         memory_space_id: SPACE.to_string(),
+        long_term_owner_id: SPACE.to_string(),
         mounted_subject_id: SUBJECT.to_string(),
-        long_term_owners: vec![created_material_image(&long_term_owner, SUBJECT)],
+        long_term_owners: vec![created_material_image(&long_term_owner, SPACE)],
         evidence_document_owners: vec![GovernedDocumentImage::created(
             scoped_governed_evidence_document_key(SPACE, shared_id).expect("evidence key"),
             evidence_owner,
@@ -468,6 +471,7 @@ fn graph_closure_for_owner(
 
     MemoryGraphPostImageClosure {
         memory_space_id: SPACE.to_string(),
+        long_term_owner_id: SPACE.to_string(),
         mounted_subject_id: SUBJECT.to_string(),
         allow_missing_before_owners: false,
         validate_transition_successors: true,
@@ -558,7 +562,7 @@ fn graph_closure(generation: u64) -> MemoryGraphPostImageClosure {
         "ltm:p7",
         GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "ltm:p7"),
         1,
-        vec![created_material_image(&owner_entry("ltm:p7", 1), SUBJECT)],
+        vec![created_material_image(&owner_entry("ltm:p7", 1), SPACE)],
         Vec::new(),
     )
 }
@@ -725,6 +729,7 @@ fn graph_post_image_accepts_complete_scope_deletion() {
     let created = graph_closure(1);
     let deleted = MemoryGraphPostImageClosure {
         memory_space_id: created.memory_space_id,
+        long_term_owner_id: created.long_term_owner_id,
         mounted_subject_id: created.mounted_subject_id,
         allow_missing_before_owners: false,
         validate_transition_successors: true,
@@ -781,10 +786,10 @@ fn control_closure() -> LongTermControlPostImageClosure {
     after_owner.source_revision = Some(2);
     after_owner.updated_at = 20;
     after_owner.observed_at = 20;
-    let before_material = version_material(&before_owner, "subject:p7", 10, None);
+    let before_material = version_material(&before_owner, SPACE, 10, None);
     let after_material = version_material(
         &after_owner,
-        "subject:p7",
+        SPACE,
         20,
         Some(before_material.owner_revision_ref()),
     );
@@ -794,7 +799,7 @@ fn control_closure() -> LongTermControlPostImageClosure {
         &before_owner,
         Some(&after_owner),
         "corrected",
-        "subject:p7".to_string(),
+        SPACE.to_string(),
         Some("governor:p7".to_string()),
         SPACE,
         20,
@@ -830,10 +835,10 @@ fn control_closure() -> LongTermControlPostImageClosure {
                 .expect("revision")
                 .transition
                 .clone(),
-            mounted_subject_id: "subject:p7".to_string(),
+            factual_owner_id: SPACE.to_string(),
         }],
         "corrected",
-        "subject:p7".to_string(),
+        SPACE.to_string(),
         Some("governor:p7".to_string()),
         SPACE,
         20,
@@ -842,12 +847,12 @@ fn control_closure() -> LongTermControlPostImageClosure {
         transaction_id: "tx:p7".to_string(),
         operation: LongTermControlOperation::Correct,
         memory_space_id: SPACE.to_string(),
-        owner_subject_id: "subject:p7".to_string(),
+        factual_owner_id: SPACE.to_string(),
         actor_subject_id: Some("governor:p7".to_string()),
         owner_records: vec![LongTermMemoryVersionMaterialImage::updated(
             long_term_version_material_key(
                 SPACE,
-                "subject:p7",
+                SPACE,
                 &before_material.owner_ref,
                 before_material.owner_revision,
             )
@@ -855,7 +860,7 @@ fn control_closure() -> LongTermControlPostImageClosure {
             before_material,
             long_term_version_material_key(
                 SPACE,
-                "subject:p7",
+                SPACE,
                 &after_material.owner_ref,
                 after_material.owner_revision,
             )
@@ -903,7 +908,7 @@ fn control_post_image_binds_typed_audit_effect_operation_version_and_physical_ke
         .push(ControlEffectRef::Tombstone {
             tombstone_id: "tombstone:forged".to_string(),
             record_id: "ltm:forged".to_string(),
-            owner_subject_id: "subject:p7".to_string(),
+            factual_owner_id: SPACE.to_string(),
             owner_revision: 1,
             source_revision: Some(1),
         });
@@ -970,7 +975,7 @@ fn control_post_image_rejects_forged_owner_revision_jump() {
     owner_image.after_physical_key = Some(
         long_term_version_material_key(
             SPACE,
-            "subject:p7",
+            SPACE,
             &after_owner.owner_ref,
             after_owner.owner_revision,
         )
@@ -988,7 +993,7 @@ fn control_post_image_rejects_forged_owner_revision_jump() {
     closure.audits[0].after.as_mut().expect("audit").effects = vec![ControlEffectRef::Revision {
         revision_id: revision.revision_id,
         transition: revision.transition,
-        mounted_subject_id: "subject:p7".to_string(),
+        factual_owner_id: SPACE.to_string(),
     }];
 
     let validation = validate_long_term_control_post_image(&closure);

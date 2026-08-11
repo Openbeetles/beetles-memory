@@ -624,7 +624,7 @@ fn reject_forbidden_raw_material(bytes: &[u8]) -> Result<(), Vec<P8ArtifactContr
 }
 
 pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
-    use bm_core::memory::{board_subject_scope_id, SelfAuthoredCore};
+    use bm_core::memory::SelfAuthoredCore;
     use bm_core::platform::Platform as _;
     use bm_sdk::{
         default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryIdentity,
@@ -744,6 +744,7 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     let runtime = build_runtime(platform.clone(), "owner-default", None)?;
+    let mounted_subject_id = runtime.subject_id().to_string();
     let private_procedure = "p8-private-runtime-skill-procedure-sentinel";
     let soul_procedure = "p8-soul-runtime-skill-procedure-sentinel";
     let cross_scope_procedure = "p8-cross-scope-runtime-skill-procedure-sentinel";
@@ -777,7 +778,7 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
         .replay_harness()
         .self_authored_core_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &SelfAuthoredCore {
                 identity_anchor: "p8 gate stable soul".into(),
                 default_response_mode: "direct".into(),
@@ -790,7 +791,7 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
         .replay_harness()
         .private_garden_store()
         .write(
-            "chat-a",
+            &mounted_subject_id,
             "p8-gate-private.md",
             "p8-gate-private-store-sentinel",
             1_780_000_000,
@@ -799,17 +800,17 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
     let before_core = platform
         .replay_harness()
         .self_authored_core_store()
-        .get(board_subject_scope_id())
+        .get(&mounted_subject_id)
         .map_err(|error| error.to_string())?;
     let before_private = platform
         .replay_harness()
         .private_garden_store()
-        .list("chat-a", 16)
+        .list(&mounted_subject_id, 16)
         .map_err(|error| error.to_string())?;
     let before_ledger = platform
         .replay_harness()
         .core_revision_ledger_store()
-        .get(board_subject_scope_id())
+        .get(&mounted_subject_id)
         .map_err(|error| error.to_string())?;
 
     assert_safe_surfaces(&project(&runtime)?, &[private_procedure, soul_procedure])?;
@@ -821,17 +822,17 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
     let after_core = platform
         .replay_harness()
         .self_authored_core_store()
-        .get(board_subject_scope_id())
+        .get(&mounted_subject_id)
         .map_err(|error| error.to_string())?;
     let after_private = platform
         .replay_harness()
         .private_garden_store()
-        .list("chat-a", 16)
+        .list(&mounted_subject_id, 16)
         .map_err(|error| error.to_string())?;
     let after_ledger = platform
         .replay_harness()
         .core_revision_ledger_store()
-        .get(board_subject_scope_id())
+        .get(&mounted_subject_id)
         .map_err(|error| error.to_string())?;
     if before_core != after_core || before_private != after_private || before_ledger != after_ledger
     {

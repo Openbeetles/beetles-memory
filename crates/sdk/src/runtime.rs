@@ -3215,7 +3215,7 @@ impl MemoryRuntime {
             operation: request.operation,
             reason: request.reason,
             dry_run: request.dry_run,
-            owner_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
+            factual_owner_id: self.config.memory_space_id.clone(),
             actor_subject_id: Some(self.config.scoped_runtime.actor_subject_id.clone()),
             memory_space_id: Some(self.config.memory_space_id.clone()),
             now_secs: self.config.clock.now_secs(),
@@ -4437,7 +4437,7 @@ impl MemoryRuntime {
                             next_bindings.insert(document.physical_key.clone(), binding);
                             let facet = build_governed_evidence_document_facet_index_doc(
                                 &document,
-                                self.governed_facet_index_subject_ids(),
+                                self.governed_subject_facet_index_subject_ids(),
                                 1,
                             )
                             .map_err(|error| {
@@ -4515,7 +4515,7 @@ impl MemoryRuntime {
                             next_bindings.insert(document.physical_key.clone(), binding);
                             let facet = build_governed_evidence_document_facet_index_doc(
                                 &document,
-                                self.governed_facet_index_subject_ids(),
+                                self.governed_subject_facet_index_subject_ids(),
                                 1,
                             )
                             .map_err(|error| {
@@ -4652,7 +4652,10 @@ impl MemoryRuntime {
             record_key: next_manifest.physical_key,
         });
 
-        let facet_plan = self.plan_governed_owner_facet_index_changes(facet_changes)?;
+        let facet_plan = self.plan_governed_owner_facet_index_changes(
+            facet_changes,
+            self.config.scoped_runtime.mounted_subject_id.as_str(),
+        )?;
         let graph_plan = self.plan_evidence_document_graph_changes(&owner_changes)?;
         let mut planned = MemoryStoreMutationPlan {
             mutations: owner_mutations,
@@ -4808,7 +4811,7 @@ impl MemoryRuntime {
             planning_store.stage_entries(&plan.accepted_entries)?;
             let owner_plan = planning_store.into_plan(
                 &self.config.memory_space_id,
-                &self.config.scoped_runtime.mounted_subject_id,
+                &self.config.memory_space_id,
                 self.config.store_platform.as_ref().ok_or_else(|| {
                     Error::config("long_term_version_plan", "store platform is required")
                 })?,
@@ -4929,6 +4932,7 @@ impl MemoryRuntime {
         );
         bind_control_audit_transaction_id(&mut mutations, &transaction_id)?;
         self.append_graph_owner_cascade_mutations(&mut mutations, &mut preconditions)?;
+        self.append_graph_owner_closure_preconditions(&mutations, &mut preconditions)?;
         mutations.push(StoreMutation::AppendEvent {
             event: Box::new(self.planned_lifecycle_store_event(
                 &transaction_id,
@@ -5047,12 +5051,19 @@ impl MemoryRuntime {
         }
     }
 
-    fn governed_facet_index_subject_ids(&self) -> Vec<String> {
-        let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
-        if mounted_subject_id.is_empty() {
-            Vec::new()
+    fn governed_subject_facet_index_subject_ids(&self) -> Vec<String> {
+        vec![self.config.scoped_runtime.mounted_subject_id.clone()]
+    }
+
+    fn governed_long_term_facet_index_subject_ids(&self) -> Vec<String> {
+        vec![self.config.memory_space_id.clone()]
+    }
+
+    fn governed_facet_owner_scope_id<'a>(&'a self, owner_ref: &GovernedMemoryOwnerRef) -> &'a str {
+        if owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm {
+            self.config.memory_space_id.as_str()
         } else {
-            vec![mounted_subject_id.to_string()]
+            self.config.scoped_runtime.mounted_subject_id.as_str()
         }
     }
 
@@ -5071,7 +5082,7 @@ impl MemoryRuntime {
                 );
                 scoped_memory_facet_owner_storage_key(
                     &self.config.memory_space_id,
-                    &self.config.scoped_runtime.mounted_subject_id,
+                    &self.config.memory_space_id,
                     &owner_ref,
                 )
                 .map_err(|error| Error::config("memory_facet_index_read", error.to_string()))
@@ -5143,7 +5154,7 @@ impl MemoryRuntime {
             }
             let key = scoped_memory_facet_owner_storage_key(
                 &self.config.memory_space_id,
-                &self.config.scoped_runtime.mounted_subject_id,
+                &self.config.memory_space_id,
                 owner_ref,
             )
             .map_err(|error| Error::config("memory_facet_index_read", error.to_string()))?;
@@ -5338,7 +5349,7 @@ impl MemoryRuntime {
         entry: &LongTermMemoryEntry,
         facet: &MemoryFacetIndexDoc,
     ) -> bool {
-        let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
+        let factual_owner_id = self.config.memory_space_id.trim();
         entry.privacy.projection_content_allowed()
             && facet.owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm
             && facet.owner_ref.owner_id == entry.id
@@ -5347,11 +5358,11 @@ impl MemoryRuntime {
             && facet.memory_space_id == self.config.memory_space_id
             && facet.privacy == entry.privacy
             && facet.owner_revision == entry.owner_revision
-            && !mounted_subject_id.is_empty()
+            && !factual_owner_id.is_empty()
             && facet
                 .subject_ids
                 .iter()
-                .any(|subject_id| subject_id == mounted_subject_id)
+                .any(|subject_id| subject_id == factual_owner_id)
     }
 
     fn evidence_document_visible_to_runtime(&self, document: &GovernedEvidenceDocument) -> bool {
@@ -5422,7 +5433,7 @@ impl MemoryRuntime {
         build_long_term_memory_facet_index_doc(
             entry,
             self.config.memory_space_id.clone(),
-            self.governed_facet_index_subject_ids(),
+            self.governed_long_term_facet_index_subject_ids(),
             1,
         )
         .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))
@@ -5431,6 +5442,7 @@ impl MemoryRuntime {
     fn plan_governed_owner_facet_index_changes(
         &self,
         mut changes: BTreeMap<GovernedMemoryOwnerRef, Option<MemoryFacetIndexDoc>>,
+        facet_scope_id: &str,
     ) -> Result<MemoryStoreMutationPlan> {
         if changes.is_empty() {
             return Ok(MemoryStoreMutationPlan::default());
@@ -5440,7 +5452,7 @@ impl MemoryRuntime {
         for (owner_ref, doc) in &changes {
             let key = scoped_memory_facet_owner_storage_key(
                 &self.config.memory_space_id,
-                &self.config.scoped_runtime.mounted_subject_id,
+                facet_scope_id,
                 owner_ref,
             )
             .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
@@ -5473,7 +5485,7 @@ impl MemoryRuntime {
             .map(|owner_ref| {
                 scoped_memory_facet_owner_storage_key(
                     &self.config.memory_space_id,
-                    &self.config.scoped_runtime.mounted_subject_id,
+                    facet_scope_id,
                     owner_ref,
                 )
                 .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))
@@ -5490,6 +5502,53 @@ impl MemoryRuntime {
                 MEMORY_FACET_INDEX_NAMESPACE,
                 key,
                 previous_raw_by_key.get(key).cloned(),
+            ));
+        }
+        for owner_ref in changes
+            .keys()
+            .filter(|owner_ref| owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm)
+        {
+            let head_key = long_term_version_head_key(
+                &self.config.memory_space_id,
+                &self.config.memory_space_id,
+                owner_ref,
+            )?;
+            let head_value = store_platform
+                .read_json_docs_by_keys(
+                    crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                    std::slice::from_ref(&head_key),
+                )?
+                .into_iter()
+                .next()
+                .map(|doc| doc.value);
+            preconditions.push(json_precondition(
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                &head_key,
+                head_value.clone(),
+            ));
+            let Some(head_value) = head_value else {
+                continue;
+            };
+            let head = serde_json::from_value::<LongTermMemoryHeadManifest>(head_value)
+                .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
+            let material_key = long_term_version_material_key(
+                &self.config.memory_space_id,
+                &self.config.memory_space_id,
+                owner_ref,
+                head.current_revision,
+            )?;
+            let material_value = store_platform
+                .read_json_docs_by_keys(
+                    crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                    std::slice::from_ref(&material_key),
+                )?
+                .into_iter()
+                .next()
+                .map(|doc| doc.value);
+            preconditions.push(json_precondition(
+                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                &material_key,
+                material_value,
             ));
         }
         let previous_docs = previous_raw_docs
@@ -5512,7 +5571,7 @@ impl MemoryRuntime {
         for (owner_ref, doc) in &changes {
             let key = scoped_memory_facet_owner_storage_key(
                 &self.config.memory_space_id,
-                &self.config.scoped_runtime.mounted_subject_id,
+                facet_scope_id,
                 owner_ref,
             )
             .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
@@ -5536,7 +5595,7 @@ impl MemoryRuntime {
                 }),
             }
         }
-        let subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
+        let subject_id = facet_scope_id.trim();
         let manifest_key = memory_facet_manifest_key(&self.config.memory_space_id, subject_id)
             .map_err(|error| Error::config("memory_facet_manifest_plan", error.to_string()))?;
         let manifest_raw = store_platform
@@ -5756,6 +5815,77 @@ impl MemoryRuntime {
                 record_key: manifest_key,
             });
         }
+        for owner_ref in manifest
+            .owner_versions
+            .iter()
+            .map(|owner| &owner.owner_ref)
+            .filter(|owner_ref| !changes.contains_key(*owner_ref))
+        {
+            let facet_key = scoped_memory_facet_owner_storage_key(
+                &self.config.memory_space_id,
+                facet_scope_id,
+                owner_ref,
+            )
+            .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
+            let facet_value = store_platform
+                .read_json_docs_by_keys(
+                    MEMORY_FACET_INDEX_NAMESPACE,
+                    std::slice::from_ref(&facet_key),
+                )?
+                .into_iter()
+                .next()
+                .map(|doc| doc.value);
+            preconditions.push(json_precondition(
+                MEMORY_FACET_INDEX_NAMESPACE,
+                &facet_key,
+                facet_value,
+            ));
+            if owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm {
+                continue;
+            }
+            let head_key = long_term_version_head_key(
+                &self.config.memory_space_id,
+                &self.config.memory_space_id,
+                owner_ref,
+            )?;
+            let head_value = store_platform
+                .read_json_docs_by_keys(
+                    crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                    std::slice::from_ref(&head_key),
+                )?
+                .into_iter()
+                .next()
+                .map(|doc| doc.value);
+            preconditions.push(json_precondition(
+                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                &head_key,
+                head_value.clone(),
+            ));
+            let Some(head_value) = head_value else {
+                continue;
+            };
+            let head = serde_json::from_value::<LongTermMemoryHeadManifest>(head_value)
+                .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
+            let material_key = long_term_version_material_key(
+                &self.config.memory_space_id,
+                &self.config.memory_space_id,
+                owner_ref,
+                head.current_revision,
+            )?;
+            let material_value = store_platform
+                .read_json_docs_by_keys(
+                    crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                    std::slice::from_ref(&material_key),
+                )?
+                .into_iter()
+                .next()
+                .map(|doc| doc.value);
+            preconditions.push(json_precondition(
+                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                &material_key,
+                material_value,
+            ));
+        }
         let mut normalized_preconditions = Vec::new();
         merge_json_preconditions(&mut normalized_preconditions, preconditions)?;
         Ok(MemoryStoreMutationPlan {
@@ -5782,7 +5912,7 @@ impl MemoryRuntime {
                 ));
             }
         }
-        self.plan_governed_owner_facet_index_changes(changes)
+        self.plan_governed_owner_facet_index_changes(changes, self.config.memory_space_id.as_str())
     }
 
     fn plan_long_term_facet_index_mutations_for_store_mutations(
@@ -5865,7 +5995,7 @@ impl MemoryRuntime {
                 _ => {}
             }
         }
-        self.plan_governed_owner_facet_index_changes(changes)
+        self.plan_governed_owner_facet_index_changes(changes, self.config.memory_space_id.as_str())
     }
 
     fn ensure_transcript_lifecycle_has_facet_impact_or_fails_closed(
@@ -5950,184 +6080,157 @@ impl MemoryRuntime {
             );
         }
 
-        let subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
-        let manifest_key = match memory_facet_manifest_key(&self.config.memory_space_id, subject_id)
-        {
-            Ok(key) => key,
-            Err(error) => {
-                return passthrough(
-                    unavailable_memory_facet_index_report(
-                        source_candidate_ids,
-                        "memory_facet_manifest_scope_invalid",
-                    ),
-                    vec![error.to_string()],
-                );
-            }
-        };
-        let manifest = match read_view.json_docs_by_keys(
-            MEMORY_FACET_POSTING_NAMESPACE,
-            std::slice::from_ref(&manifest_key),
-        ) {
-            Ok(docs) => docs
-                .into_iter()
-                .next()
-                .and_then(|doc| serde_json::from_value::<MemoryFacetIndexManifest>(doc.value).ok()),
-            Err(error) => {
-                return passthrough(
-                    unavailable_memory_facet_index_report(
-                        source_candidate_ids,
-                        "memory_facet_manifest_read_failed",
-                    ),
-                    vec![format!(
-                        "memory_facet_manifest_read_failed:{}",
-                        error.stage()
-                    )],
-                );
-            }
-        };
-        let Some(manifest) = manifest else {
-            return passthrough(
-                unavailable_memory_facet_index_report(
-                    source_candidate_ids,
-                    "memory_facet_index_not_loaded",
-                ),
-                vec!["memory_facet_index_not_loaded".to_string()],
-            );
-        };
-        if let Err(error) =
-            validate_memory_facet_manifest(&self.config.memory_space_id, subject_id, &manifest)
-        {
-            return passthrough(
-                unavailable_memory_facet_index_report(
-                    source_candidate_ids,
-                    "memory_facet_manifest_contract_mismatch",
-                ),
-                vec![error.to_string()],
-            );
+        struct FacetRecallLane {
+            scope_id: String,
+            owner_plane: GovernedMemoryOwnerPlane,
+            visible_subject_ids: Vec<String>,
+            manifest: MemoryFacetIndexManifest,
+            postings: Vec<MemoryFacetPostingDoc>,
         }
 
-        let posting_keys = match query_facets
-            .iter()
-            .map(|facet| memory_facet_posting_key(&self.config.memory_space_id, subject_id, facet))
-            .collect::<std::result::Result<Vec<_>, _>>()
-        {
-            Ok(keys) => keys,
-            Err(error) => {
-                return passthrough(
-                    unavailable_memory_facet_index_report(
-                        source_candidate_ids,
-                        "memory_facet_posting_scope_invalid",
-                    ),
-                    vec![error.to_string()],
-                );
-            }
-        };
-        let posting_docs =
-            match read_view.json_docs_by_keys(MEMORY_FACET_POSTING_NAMESPACE, &posting_keys) {
-                Ok(docs) => docs,
+        let lane_specs = [
+            (
+                self.config.memory_space_id.as_str(),
+                GovernedMemoryOwnerPlane::LongTerm,
+                self.governed_long_term_facet_index_subject_ids(),
+            ),
+            (
+                self.config.scoped_runtime.mounted_subject_id.as_str(),
+                GovernedMemoryOwnerPlane::EvidenceDocument,
+                self.governed_subject_facet_index_subject_ids(),
+            ),
+        ];
+        let mut lanes = Vec::new();
+        let mut owner_refs = BTreeSet::new();
+        let mut posting_key_lookup_count = 0_usize;
+        let mut manifest_matched_posting_count = 0_usize;
+        let mut posting_doc_read_count = 0_usize;
+        let mut manifest_owner_doc_count = 0_usize;
+        let mut manifest_posting_doc_count = 0_usize;
+        let mut manifest_integrity_verified = true;
+        let mut failures = Vec::new();
+        let mut revisions = Vec::new();
+
+        for (scope_id, owner_plane, visible_subject_ids) in lane_specs {
+            let manifest_key =
+                match memory_facet_manifest_key(&self.config.memory_space_id, scope_id) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        return passthrough(
+                            unavailable_memory_facet_index_report(
+                                source_candidate_ids,
+                                "memory_facet_manifest_scope_invalid",
+                            ),
+                            vec![error.to_string()],
+                        );
+                    }
+                };
+            let manifest = match read_view.json_docs_by_keys(
+                MEMORY_FACET_POSTING_NAMESPACE,
+                std::slice::from_ref(&manifest_key),
+            ) {
+                Ok(docs) => docs.into_iter().next().and_then(|doc| {
+                    serde_json::from_value::<MemoryFacetIndexManifest>(doc.value).ok()
+                }),
                 Err(error) => {
                     return passthrough(
                         unavailable_memory_facet_index_report(
                             source_candidate_ids,
-                            "memory_facet_posting_read_failed",
+                            "memory_facet_manifest_read_failed",
                         ),
                         vec![format!(
-                            "memory_facet_posting_read_failed:{}",
+                            "memory_facet_manifest_read_failed:{}",
                             error.stage()
                         )],
                     );
                 }
             };
-        let posting_key_lookup_count = posting_keys.len();
-        let expected_posting_keys = posting_keys
-            .iter()
-            .filter(|posting_key| {
-                manifest
-                    .posting_revisions
-                    .iter()
-                    .any(|membership| membership.posting_key == posting_key.as_str())
-            })
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let manifest_matched_posting_count = expected_posting_keys.len();
-        let returned_posting_keys = posting_docs
-            .iter()
-            .map(|doc| doc.key.clone())
-            .collect::<BTreeSet<_>>();
-        let posting_doc_read_count = posting_docs.len();
-        let mut manifest_integrity_verified = true;
-        let mut failures = Vec::new();
-        if returned_posting_keys != expected_posting_keys
-            || posting_doc_read_count != manifest_matched_posting_count
-        {
-            let failure = "memory_facet_posting_manifest_read_contract_mismatch".to_string();
-            return passthrough(
-                MemoryFacetRecallIndexReport {
-                    owner: "bm-sdk::MemoryRuntime".to_string(),
-                    used: false,
-                    report_only: true,
-                    fallback_full_scan: false,
-                    source_candidate_count: source_candidate_ids.len(),
-                    matched_source_candidate_count: 0,
-                    posting_key_lookup_count,
-                    manifest_matched_posting_count,
-                    posting_doc_read_count,
-                    owner_key_lookup_count: 0,
-                    owner_doc_read_count: 0,
-                    exact_facet_match_count: 0,
-                    expanded_facet_match_count: 0,
-                    exact_facet_candidate_ids: Vec::new(),
-                    expanded_facet_candidate_ids: Vec::new(),
-                    manifest_owner_doc_count: manifest.owner_doc_count,
-                    manifest_posting_doc_count: manifest.posting_doc_count,
-                    manifest_integrity_verified: false,
-                    index_revision: Some(manifest.revision.to_string()),
-                    render_growth: 0,
-                    failures: vec![failure.clone()],
-                },
-                vec![failure],
-            );
-        }
-        if manifest_matched_posting_count == 0 {
-            return passthrough(
-                MemoryFacetRecallIndexReport {
-                    owner: "bm-sdk::MemoryRuntime".to_string(),
-                    used: true,
-                    report_only: false,
-                    fallback_full_scan: false,
-                    source_candidate_count: source_candidate_ids.len(),
-                    matched_source_candidate_count: 0,
-                    posting_key_lookup_count,
-                    manifest_matched_posting_count,
-                    posting_doc_read_count,
-                    owner_key_lookup_count: 0,
-                    owner_doc_read_count: 0,
-                    exact_facet_match_count: 0,
-                    expanded_facet_match_count: 0,
-                    exact_facet_candidate_ids: Vec::new(),
-                    expanded_facet_candidate_ids: Vec::new(),
-                    manifest_owner_doc_count: manifest.owner_doc_count,
-                    manifest_posting_doc_count: manifest.posting_doc_count,
-                    manifest_integrity_verified: true,
-                    index_revision: Some(manifest.revision.to_string()),
-                    render_growth: 0,
-                    failures: Vec::new(),
-                },
-                Vec::new(),
-            );
-        }
-        if posting_doc_read_count > manifest.posting_doc_count {
-            manifest_integrity_verified = false;
-            failures.push("memory_facet_manifest_posting_count_underflow".to_string());
-        }
-        let mut owner_refs = BTreeSet::new();
-        let mut validated_postings = Vec::new();
-        for posting_doc in posting_docs {
-            match serde_json::from_value::<MemoryFacetPostingDoc>(posting_doc.value) {
-                Ok(posting) => {
-                    match validate_memory_facet_posting(
+            let Some(manifest) = manifest else { continue };
+            if let Err(error) =
+                validate_memory_facet_manifest(&self.config.memory_space_id, scope_id, &manifest)
+            {
+                return passthrough(
+                    unavailable_memory_facet_index_report(
+                        source_candidate_ids,
+                        "memory_facet_manifest_contract_mismatch",
+                    ),
+                    vec![error.to_string()],
+                );
+            }
+            let posting_keys = match query_facets
+                .iter()
+                .map(|facet| {
+                    memory_facet_posting_key(&self.config.memory_space_id, scope_id, facet)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+            {
+                Ok(keys) => keys,
+                Err(error) => {
+                    return passthrough(
+                        unavailable_memory_facet_index_report(
+                            source_candidate_ids,
+                            "memory_facet_posting_scope_invalid",
+                        ),
+                        vec![error.to_string()],
+                    );
+                }
+            };
+            let posting_docs =
+                match read_view.json_docs_by_keys(MEMORY_FACET_POSTING_NAMESPACE, &posting_keys) {
+                    Ok(docs) => docs,
+                    Err(error) => {
+                        return passthrough(
+                            unavailable_memory_facet_index_report(
+                                source_candidate_ids,
+                                "memory_facet_posting_read_failed",
+                            ),
+                            vec![format!(
+                                "memory_facet_posting_read_failed:{}",
+                                error.stage()
+                            )],
+                        );
+                    }
+                };
+            let expected_posting_keys = posting_keys
+                .iter()
+                .filter(|posting_key| {
+                    manifest
+                        .posting_revisions
+                        .iter()
+                        .any(|membership| membership.posting_key == posting_key.as_str())
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let returned_posting_keys = posting_docs
+                .iter()
+                .map(|doc| doc.key.clone())
+                .collect::<BTreeSet<_>>();
+            posting_key_lookup_count = posting_key_lookup_count.saturating_add(posting_keys.len());
+            manifest_matched_posting_count =
+                manifest_matched_posting_count.saturating_add(expected_posting_keys.len());
+            posting_doc_read_count = posting_doc_read_count.saturating_add(posting_docs.len());
+            manifest_owner_doc_count =
+                manifest_owner_doc_count.saturating_add(manifest.owner_doc_count);
+            manifest_posting_doc_count =
+                manifest_posting_doc_count.saturating_add(manifest.posting_doc_count);
+            revisions.push(manifest.revision.to_string());
+            if returned_posting_keys != expected_posting_keys
+                || posting_docs.len() != expected_posting_keys.len()
+            {
+                manifest_integrity_verified = false;
+                failures.push("memory_facet_posting_manifest_read_contract_mismatch".to_string());
+                continue;
+            }
+            if posting_docs.len() > manifest.posting_doc_count {
+                manifest_integrity_verified = false;
+                failures.push("memory_facet_manifest_posting_count_underflow".to_string());
+            }
+            let mut postings = Vec::new();
+            for posting_doc in posting_docs {
+                match serde_json::from_value::<MemoryFacetPostingDoc>(posting_doc.value) {
+                    Ok(posting) => match validate_memory_facet_posting(
                         &self.config.memory_space_id,
-                        subject_id,
+                        scope_id,
                         &manifest,
                         &posting,
                     ) {
@@ -6137,15 +6240,11 @@ impl MemoryRuntime {
                                     .owner_versions
                                     .iter()
                                     .filter(|membership| {
-                                        matches!(
-                                            membership.owner_ref.owner_plane,
-                                            GovernedMemoryOwnerPlane::LongTerm
-                                                | GovernedMemoryOwnerPlane::EvidenceDocument
-                                        )
+                                        membership.owner_ref.owner_plane == owner_plane
                                     })
                                     .map(|membership| membership.owner_ref.clone()),
                             );
-                            validated_postings.push(posting);
+                            postings.push(posting);
                         }
                         Ok(()) => {
                             manifest_integrity_verified = false;
@@ -6155,22 +6254,38 @@ impl MemoryRuntime {
                             manifest_integrity_verified = false;
                             failures.push(error.to_string());
                         }
+                    },
+                    Err(error) => {
+                        manifest_integrity_verified = false;
+                        failures.push(format!(
+                            "memory_facet_posting_decode_failed:{}:{error}",
+                            posting_doc.key
+                        ));
                     }
                 }
-                Err(error) => {
-                    manifest_integrity_verified = false;
-                    failures.push(format!(
-                        "memory_facet_posting_decode_failed:{}:{error}",
-                        posting_doc.key
-                    ));
-                }
             }
+            lanes.push(FacetRecallLane {
+                scope_id: scope_id.to_string(),
+                owner_plane,
+                visible_subject_ids,
+                manifest,
+                postings,
+            });
+        }
+        if lanes.is_empty() {
+            return passthrough(
+                unavailable_memory_facet_index_report(
+                    source_candidate_ids,
+                    "memory_facet_index_not_loaded",
+                ),
+                vec!["memory_facet_index_not_loaded".to_string()],
+            );
         }
         let max_docs = runtime_budget.facet_recall_budget.max_facet_index_docs_read;
         let doc_limit = max_docs.max(1);
         let doc_count = owner_refs.len();
         let owner_key_lookup_count = doc_count;
-        if doc_count > manifest.owner_doc_count {
+        if doc_count > manifest_owner_doc_count {
             manifest_integrity_verified = false;
             failures.push("memory_facet_manifest_owner_count_underflow".to_string());
         }
@@ -6192,10 +6307,10 @@ impl MemoryRuntime {
                     expanded_facet_match_count: 0,
                     exact_facet_candidate_ids: Vec::new(),
                     expanded_facet_candidate_ids: Vec::new(),
-                    manifest_owner_doc_count: manifest.owner_doc_count,
-                    manifest_posting_doc_count: manifest.posting_doc_count,
+                    manifest_owner_doc_count,
+                    manifest_posting_doc_count,
                     manifest_integrity_verified: false,
-                    index_revision: Some(manifest.revision.to_string()),
+                    index_revision: revisions.last().cloned(),
                     render_growth: 0,
                     failures: vec!["memory_facet_governed_owner_read_budget_exceeded".to_string()],
                 },
@@ -6224,10 +6339,10 @@ impl MemoryRuntime {
                     expanded_facet_match_count: 0,
                     exact_facet_candidate_ids: Vec::new(),
                     expanded_facet_candidate_ids: Vec::new(),
-                    manifest_owner_doc_count: manifest.owner_doc_count,
-                    manifest_posting_doc_count: manifest.posting_doc_count,
+                    manifest_owner_doc_count,
+                    manifest_posting_doc_count,
                     manifest_integrity_verified: false,
-                    index_revision: Some(manifest.revision.to_string()),
+                    index_revision: revisions.last().cloned(),
                     render_growth: 0,
                     failures: failures.clone(),
                 },
@@ -6240,7 +6355,7 @@ impl MemoryRuntime {
             .map(|owner_ref| {
                 scoped_memory_facet_owner_storage_key(
                     &self.config.memory_space_id,
-                    &self.config.scoped_runtime.mounted_subject_id,
+                    self.governed_facet_owner_scope_id(owner_ref),
                     owner_ref,
                 )
                 .map_err(|error| error.to_string())
@@ -6299,10 +6414,10 @@ impl MemoryRuntime {
                     expanded_facet_match_count: 0,
                     exact_facet_candidate_ids: Vec::new(),
                     expanded_facet_candidate_ids: Vec::new(),
-                    manifest_owner_doc_count: manifest.owner_doc_count,
-                    manifest_posting_doc_count: manifest.posting_doc_count,
+                    manifest_owner_doc_count,
+                    manifest_posting_doc_count,
                     manifest_integrity_verified: false,
-                    index_revision: Some(manifest.revision.to_string()),
+                    index_revision: revisions.last().cloned(),
                     render_growth: 0,
                     failures: failures.clone(),
                 },
@@ -6322,16 +6437,23 @@ impl MemoryRuntime {
                 }
             }
         }
-        let subject_ids = self.governed_facet_index_subject_ids();
         let mut candidates = BTreeMap::<String, FacetRecallCandidate>::new();
         let mut exact_candidate_ids = Vec::new();
         let mut expanded_candidate_ids = Vec::new();
         let mut exact_doc_count = 0_usize;
         let mut expanded_doc_count = 0_usize;
-        let mut revisions = Vec::new();
 
         for doc in decoded_docs {
-            let matching_postings = validated_postings
+            let Some(lane) = lanes
+                .iter()
+                .find(|lane| lane.owner_plane == doc.owner_ref.owner_plane)
+            else {
+                manifest_integrity_verified = false;
+                failures.push("memory_facet_owner_lane_missing".to_string());
+                continue;
+            };
+            let matching_postings = lane
+                .postings
                 .iter()
                 .filter(|posting| {
                     posting
@@ -6344,8 +6466,8 @@ impl MemoryRuntime {
                 || matching_postings.iter().any(|posting| {
                     validate_memory_facet_read_chain(
                         &self.config.memory_space_id,
-                        subject_id,
-                        &manifest,
+                        &lane.scope_id,
+                        &lane.manifest,
                         posting,
                         &doc,
                     )
@@ -6378,7 +6500,7 @@ impl MemoryRuntime {
                     &doc,
                     entry,
                     &self.config.memory_space_id,
-                    &subject_ids,
+                    &lane.visible_subject_ids,
                 ),
                 GovernedRecallOwnerMaterial::EvidenceDocument(document) => {
                     self.evidence_document_matches_governed_facet(document, &doc)
@@ -6496,13 +6618,10 @@ impl MemoryRuntime {
             expanded_facet_match_count: expanded_doc_count,
             exact_facet_candidate_ids: exact_candidate_ids.clone(),
             expanded_facet_candidate_ids: expanded_candidate_ids.clone(),
-            manifest_owner_doc_count: manifest.owner_doc_count,
-            manifest_posting_doc_count: manifest.posting_doc_count,
+            manifest_owner_doc_count,
+            manifest_posting_doc_count,
             manifest_integrity_verified,
-            index_revision: revisions
-                .last()
-                .cloned()
-                .or_else(|| Some(manifest.revision.to_string())),
+            index_revision: revisions.last().cloned(),
             render_growth: 0,
             failures,
         };
@@ -6672,7 +6791,7 @@ impl MemoryRuntime {
                 }
                 match scoped_memory_facet_owner_storage_key(
                     &self.config.memory_space_id,
-                    &self.config.scoped_runtime.mounted_subject_id,
+                    self.governed_facet_owner_scope_id(owner_ref),
                     owner_ref,
                 ) {
                     Ok(key) => Some(key),
@@ -7389,6 +7508,7 @@ impl MemoryRuntime {
         let lifecycle_report =
             lifecycle.finish_success(self.config.clock.now_secs(), changed, summary);
         self.append_graph_owner_cascade_mutations(&mut plan.mutations, &mut plan.preconditions)?;
+        self.append_graph_owner_closure_preconditions(&plan.mutations, &mut plan.preconditions)?;
         plan.mutations.push(StoreMutation::AppendEvent {
             event: Box::new(self.planned_lifecycle_store_event(
                 &transaction_id,
@@ -7457,6 +7577,7 @@ impl MemoryRuntime {
         );
         bind_control_audit_transaction_id(&mut plan.mutations, &transaction_id)?;
         self.append_graph_owner_cascade_mutations(&mut plan.mutations, &mut plan.preconditions)?;
+        self.append_graph_owner_closure_preconditions(&plan.mutations, &mut plan.preconditions)?;
         let runtime_budget = self.runtime_budget();
         store_platform.commit_governed_memory_transaction_with_runtime_budget_at(
             StoreMutationBatch {
@@ -7636,6 +7757,133 @@ impl MemoryRuntime {
         Ok(())
     }
 
+    fn append_graph_owner_closure_preconditions(
+        &self,
+        mutations: &[StoreMutation],
+        preconditions: &mut Vec<StoreJsonPrecondition>,
+    ) -> Result<()> {
+        let mut owner_refs = BTreeSet::new();
+        for mutation in mutations {
+            let StoreMutation::PutJson {
+                namespace, value, ..
+            } = mutation
+            else {
+                continue;
+            };
+            if namespace == MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE {
+                let membership = serde_json::from_value::<MemoryGraphNodeMembership>(value.clone())
+                    .map_err(|error| {
+                        Error::config("memory_graph_owner_precondition", error.to_string())
+                    })?;
+                owner_refs.insert(membership.owner_ref);
+            }
+        }
+        for precondition in preconditions.iter() {
+            let StoreJsonPrecondition::Exact {
+                namespace, value, ..
+            } = precondition
+            else {
+                continue;
+            };
+            if namespace == MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE {
+                let membership = serde_json::from_value::<MemoryGraphNodeMembership>(value.clone())
+                    .map_err(|error| {
+                        Error::config("memory_graph_owner_precondition", error.to_string())
+                    })?;
+                owner_refs.insert(membership.owner_ref);
+            }
+        }
+        if owner_refs.is_empty() {
+            return Ok(());
+        }
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_graph_owner_precondition",
+                "graph owner closure requires StorePlatform-backed runtime",
+            )
+        })?;
+        let mut owner_preconditions = Vec::new();
+        for owner_ref in owner_refs {
+            match owner_ref.owner_plane {
+                GovernedMemoryOwnerPlane::LongTerm => {
+                    let head_key = long_term_version_head_key(
+                        &self.config.memory_space_id,
+                        &self.config.memory_space_id,
+                        &owner_ref,
+                    )?;
+                    let head_value = store
+                        .read_json_docs_by_keys(
+                            crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                            std::slice::from_ref(&head_key),
+                        )?
+                        .into_iter()
+                        .next()
+                        .map(|doc| doc.value);
+                    owner_preconditions.push(json_precondition(
+                        crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+                        &head_key,
+                        head_value.clone(),
+                    ));
+                    let Some(head_value) = head_value else {
+                        continue;
+                    };
+                    let head = serde_json::from_value::<LongTermMemoryHeadManifest>(head_value)
+                        .map_err(|error| {
+                            Error::config("memory_graph_owner_precondition", error.to_string())
+                        })?;
+                    let material_key = long_term_version_material_key(
+                        &self.config.memory_space_id,
+                        &self.config.memory_space_id,
+                        &owner_ref,
+                        head.current_revision,
+                    )?;
+                    let material_value = store
+                        .read_json_docs_by_keys(
+                            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                            std::slice::from_ref(&material_key),
+                        )?
+                        .into_iter()
+                        .next()
+                        .map(|doc| doc.value);
+                    owner_preconditions.push(json_precondition(
+                        crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                        &material_key,
+                        material_value,
+                    ));
+                }
+                GovernedMemoryOwnerPlane::EvidenceDocument => {
+                    let key = scoped_governed_evidence_document_key(
+                        &self.config.memory_space_id,
+                        &owner_ref.owner_id,
+                    )?;
+                    let value = store
+                        .read_json_docs_by_keys(
+                            GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+                            std::slice::from_ref(&key),
+                        )?
+                        .into_iter()
+                        .next()
+                        .map(|doc| doc.value);
+                    owner_preconditions.push(json_precondition(
+                        GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+                        &key,
+                        value,
+                    ));
+                }
+                _ => {
+                    return Err(Error::config(
+                        "memory_graph_owner_precondition",
+                        format!(
+                            "unsupported governed graph owner plane {}",
+                            owner_ref.owner_plane.as_str()
+                        ),
+                    ));
+                }
+            }
+        }
+        merge_json_preconditions(preconditions, owner_preconditions)
+    }
+
     fn run_long_term_memory_refresh_transactional(
         &self,
         http: &mut (dyn LlmHttpClient + '_),
@@ -7704,7 +7952,7 @@ impl MemoryRuntime {
                 planning_long_term.stage_entries(&apply_report.accepted_entries)?;
                 let long_term_plan = planning_long_term.into_plan(
                     &self.config.memory_space_id,
-                    &self.config.scoped_runtime.mounted_subject_id,
+                    &self.config.memory_space_id,
                     self.config.store_platform.as_ref().ok_or_else(|| {
                         Error::config("long_term_version_plan", "store platform is required")
                     })?,
@@ -7836,7 +8084,7 @@ impl MemoryRuntime {
         };
         let owner_plan = planning_store.into_plan(
             &self.config.memory_space_id,
-            &self.config.scoped_runtime.mounted_subject_id,
+            &self.config.memory_space_id,
             self.config.store_platform.as_ref().ok_or_else(|| {
                 Error::config("long_term_version_plan", "store platform is required")
             })?,
@@ -7950,7 +8198,7 @@ impl MemoryRuntime {
                     base: &governed_store,
                     control_base: control_store.as_ref(),
                     memory_space_id: &self.config.memory_space_id,
-                    mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                    factual_owner_id: &self.config.memory_space_id,
                     expected_actor_subject_id: &self.config.scoped_runtime.actor_subject_id,
                     store_platform: self.config.store_platform.as_ref().ok_or_else(|| {
                         Error::config("long_term_version_plan", "store platform is required")
@@ -8386,14 +8634,15 @@ impl MemoryRuntime {
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
-    pub fn p8_semantic_off_run(
+    pub fn p8_semantic_closure_execution_v2(
         &self,
         request: crate::P8SemanticOffRunRequest,
-    ) -> Result<crate::P8SemanticOffRunReport> {
+    ) -> Result<crate::P8SemanticClosureExecutionV2> {
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
-            return self
-                .execute_with_runtime_budget_lease(&lease, || self.p8_semantic_off_run(request));
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.p8_semantic_closure_execution_v2(request)
+            });
         }
         let (recall, forgetting_pre_operation) = request.into_parts();
         let closure = self.production_recall_closure(
@@ -8401,6 +8650,29 @@ impl MemoryRuntime {
             RecallReadPurpose::Query,
             RuntimeLifecycleTrigger::SdkCall,
         )?;
+        let mut provider_safe_materials = closure
+            .long_term
+            .p8_counterfactual_inputs
+            .iter()
+            .map(crate::P8SemanticLongTermCounterfactualInput::provider_safe_material)
+            .collect::<Vec<_>>();
+        for item in &closure.procedural {
+            if item
+                .report
+                .drop_reasons
+                .contains(&RuntimeSkillDeliveryDropReason::PrivacyBlocked)
+            {
+                continue;
+            }
+            let Some(material) = item.material.as_ref() else {
+                continue;
+            };
+            provider_safe_materials.push(crate::p8_procedural_provider_safe_material(
+                runtime_skill_projection_candidate_ref(&item.plan)?.as_str(),
+                render_runtime_skill_provider_content(material.provider_content()),
+            )?);
+        }
+        provider_safe_materials.sort_by(|left, right| left.0.cmp(&right.0));
         let long_term_counterfactual_inputs = closure.long_term.p8_counterfactual_inputs;
         let baseline = closure
             .report
@@ -8415,11 +8687,23 @@ impl MemoryRuntime {
         let failures = report.validate_contract();
         if !failures.is_empty() {
             return Err(Error::config(
-                "p8_semantic_off_run",
+                "p8_semantic_closure_execution_v2",
                 format!("safe off-run report failed exact closure: {failures:?}"),
             ));
         }
-        Ok(report)
+        crate::P8SemanticClosureExecutionV2::from_single_production_closure(
+            report,
+            provider_safe_materials,
+        )
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn p8_semantic_off_run(
+        &self,
+        request: crate::P8SemanticOffRunRequest,
+    ) -> Result<crate::P8SemanticOffRunReport> {
+        let execution = self.p8_semantic_closure_execution_v2(request)?;
+        Ok(execution.off_run_report().clone())
     }
 
     fn materialize_production_recall_read_view(
@@ -8458,7 +8742,7 @@ impl MemoryRuntime {
         ) {
             context.materialize_long_term_historical_scope(
                 memory_space_id,
-                mounted_subject_id,
+                memory_space_id,
                 governed_state_budget.max_retained_long_term_revisions_per_owner,
                 governed_state_budget.max_validity_joins,
                 governed_state_budget.max_as_of_candidates,
@@ -9131,7 +9415,7 @@ impl MemoryRuntime {
         for head in heads {
             context.materialize_long_term_owner_closure(
                 &self.config.memory_space_id,
-                &self.config.scoped_runtime.mounted_subject_id,
+                &self.config.memory_space_id,
                 &head.owner_ref,
                 budget.max_retained_long_term_revisions_per_owner,
                 budget.max_validity_joins,
@@ -9167,21 +9451,48 @@ impl MemoryRuntime {
         if query_facets.is_empty() {
             return Ok(());
         }
+        let shared_owner_count = self.materialize_facet_recall_scope(
+            context,
+            query_facets,
+            self.config.memory_space_id.as_str(),
+            GovernedMemoryOwnerPlane::LongTerm,
+            max_owner_docs,
+            runtime_budget,
+        )?;
+        self.materialize_facet_recall_scope(
+            context,
+            query_facets,
+            self.config.scoped_runtime.mounted_subject_id.as_str(),
+            GovernedMemoryOwnerPlane::EvidenceDocument,
+            max_owner_docs.saturating_sub(shared_owner_count),
+            runtime_budget,
+        )?;
+        Ok(())
+    }
+
+    fn materialize_facet_recall_scope(
+        &self,
+        context: &mut RecallImmutableReadContext<'_>,
+        query_facets: &[QueryFacet],
+        facet_scope_id: &str,
+        owner_plane: GovernedMemoryOwnerPlane,
+        max_owner_docs: usize,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<usize> {
         let memory_space_id = self.config.memory_space_id.as_str();
-        let subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
-        let manifest_key = memory_facet_manifest_key(memory_space_id, subject_id)
+        let manifest_key = memory_facet_manifest_key(memory_space_id, facet_scope_id)
             .map_err(|error| Error::config("production_recall_materialize", error.to_string()))?;
         let Some(manifest) = context
             .read_json::<MemoryFacetIndexManifest>(MEMORY_FACET_POSTING_NAMESPACE, &manifest_key)?
         else {
-            return Ok(());
+            return Ok(0);
         };
-        if validate_memory_facet_manifest(memory_space_id, subject_id, &manifest).is_err() {
-            return Ok(());
+        if validate_memory_facet_manifest(memory_space_id, facet_scope_id, &manifest).is_err() {
+            return Ok(0);
         }
         let posting_keys = query_facets
             .iter()
-            .map(|facet| memory_facet_posting_key(memory_space_id, subject_id, facet))
+            .map(|facet| memory_facet_posting_key(memory_space_id, facet_scope_id, facet))
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|error| Error::config("production_recall_materialize", error.to_string()))?;
         let posting_reads = context.read_json_values(
@@ -9207,7 +9518,7 @@ impl MemoryRuntime {
                 posting_chain_valid = false;
                 continue;
             };
-            if validate_memory_facet_posting(memory_space_id, subject_id, &manifest, &posting)
+            if validate_memory_facet_posting(memory_space_id, facet_scope_id, &manifest, &posting)
                 .is_err()
             {
                 posting_chain_valid = false;
@@ -9217,23 +9528,20 @@ impl MemoryRuntime {
                 posting_chain_valid = false;
                 continue;
             }
-            owner_refs.extend(
-                posting
-                    .owner_versions
-                    .into_iter()
-                    .map(|owner| owner.owner_ref),
-            );
+            owner_refs.extend(posting.owner_versions.into_iter().filter_map(|owner| {
+                (owner.owner_ref.owner_plane == owner_plane).then_some(owner.owner_ref)
+            }));
         }
         if !posting_chain_valid {
-            return Ok(());
+            return Ok(0);
         }
-        if owner_refs.len() > max_owner_docs.max(1) {
-            return Ok(());
+        if owner_refs.len() > max_owner_docs {
+            return Ok(0);
         }
         let owner_keys = owner_refs
             .iter()
             .map(|owner_ref| {
-                scoped_memory_facet_owner_storage_key(memory_space_id, subject_id, owner_ref)
+                scoped_memory_facet_owner_storage_key(memory_space_id, facet_scope_id, owner_ref)
                     .map(|key| (MEMORY_FACET_INDEX_NAMESPACE.to_string(), key))
                     .map_err(|error| {
                         Error::config("production_recall_materialize", error.to_string())
@@ -9244,7 +9552,7 @@ impl MemoryRuntime {
         for owner_ref in &owner_refs {
             self.materialize_recall_owner(context, owner_ref, runtime_budget)?;
         }
-        Ok(())
+        Ok(owner_refs.len())
     }
 
     fn materialize_graph_recall_closure(
@@ -9334,28 +9642,45 @@ impl MemoryRuntime {
                 }))
                 .collect::<Vec<_>>(),
         )?;
-        let graph_owner_facet_keys = node_memberships
-            .iter()
-            .map(|membership| {
-                scoped_memory_facet_owner_storage_key(
-                    memory_space_id,
-                    subject_id,
-                    &membership.owner_ref,
-                )
-                .map(|key| (MEMORY_FACET_INDEX_NAMESPACE.to_string(), key))
-                .map_err(|error| Error::config("production_recall_materialize", error.to_string()))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let facet_manifest_key = memory_facet_manifest_key(memory_space_id, subject_id)
-            .map_err(|error| Error::config("production_recall_materialize", error.to_string()))?;
-        let facet_manifest = context.read_json::<MemoryFacetIndexManifest>(
-            MEMORY_FACET_POSTING_NAMESPACE,
-            &facet_manifest_key,
-        )?;
         let mut proven_owner_refs = BTreeSet::new();
-        if let Some(facet_manifest) = facet_manifest.filter(|manifest| {
-            validate_memory_facet_manifest(memory_space_id, subject_id, manifest).is_ok()
-        }) {
+        for (facet_scope_id, owner_plane) in [
+            (memory_space_id, GovernedMemoryOwnerPlane::LongTerm),
+            (subject_id, GovernedMemoryOwnerPlane::EvidenceDocument),
+        ] {
+            let scoped_memberships = node_memberships
+                .iter()
+                .filter(|membership| membership.owner_ref.owner_plane == owner_plane)
+                .collect::<Vec<_>>();
+            if scoped_memberships.is_empty() {
+                continue;
+            }
+            let facet_manifest_key = memory_facet_manifest_key(memory_space_id, facet_scope_id)
+                .map_err(|error| {
+                    Error::config("production_recall_materialize", error.to_string())
+                })?;
+            let facet_manifest = context.read_json::<MemoryFacetIndexManifest>(
+                MEMORY_FACET_POSTING_NAMESPACE,
+                &facet_manifest_key,
+            )?;
+            let Some(facet_manifest) = facet_manifest.filter(|manifest| {
+                validate_memory_facet_manifest(memory_space_id, facet_scope_id, manifest).is_ok()
+            }) else {
+                continue;
+            };
+            let graph_owner_facet_keys = scoped_memberships
+                .iter()
+                .map(|membership| {
+                    scoped_memory_facet_owner_storage_key(
+                        memory_space_id,
+                        facet_scope_id,
+                        &membership.owner_ref,
+                    )
+                    .map(|key| (MEMORY_FACET_INDEX_NAMESPACE.to_string(), key))
+                    .map_err(|error| {
+                        Error::config("production_recall_materialize", error.to_string())
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
             for ((_, _), value) in context.read_json_values_transient(&graph_owner_facet_keys)? {
                 let Some(value) = value else { continue };
                 let Ok(owner) = serde_json::from_value::<MemoryFacetIndexDoc>(value) else {
@@ -9372,7 +9697,7 @@ impl MemoryRuntime {
                     && owner
                         .subject_ids
                         .iter()
-                        .any(|mounted| mounted == subject_id)
+                        .any(|mounted| mounted == facet_scope_id)
                     && owner.status == MemoryFacetStatus::Active
                     && owner.owner_revision == version.owner_revision
                     && owner.facet_index_revision == version.facet_index_revision
@@ -9398,11 +9723,10 @@ impl MemoryRuntime {
         match owner_ref.owner_plane {
             GovernedMemoryOwnerPlane::LongTerm => {
                 let memory_space_id = self.config.memory_space_id.as_str();
-                let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.as_str();
                 let governed_state_budget = runtime_budget.governed_state_budget;
                 context.materialize_long_term_owner_closure(
                     memory_space_id,
-                    mounted_subject_id,
+                    memory_space_id,
                     owner_ref,
                     governed_state_budget.max_retained_long_term_revisions_per_owner,
                     governed_state_budget.max_validity_joins,
@@ -11897,6 +12221,7 @@ impl MemoryRuntime {
         let inhabited_subject_projection =
             compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
                 context: &context,
+                mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
                 now_secs: authority.operation_time,
                 platform: runtime_awareness_profile_label(self.config.profile),
                 device_identity: self.config.subject_id.as_str(),
@@ -12177,6 +12502,7 @@ impl MemoryRuntime {
             self.config.privacy_policy.private_plane_projection_allowed
                 && lifecycle.admission.private_depth_allowed;
         load_prompt_memory_context(PromptMemoryContextParams {
+            mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
             chat_id: &self.config.scope.chat_id,
             current_channel: &self.config.scope.channel,
             user_query: &request.user_query,
@@ -12316,6 +12642,7 @@ impl MemoryRuntime {
             task_learning_store: task_learning_store.as_ref(),
         };
         let input = PostReplyMemoryMaintenanceInput {
+            mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
             chat_id: &self.config.scope.chat_id,
             ingress: request.ingress,
             channel: &self.config.scope.channel,
@@ -12368,7 +12695,7 @@ impl MemoryRuntime {
         ];
         let mut mutation_plan = planning_long_term.into_plan(
             &self.config.memory_space_id,
-            &self.config.scoped_runtime.mounted_subject_id,
+            &self.config.memory_space_id,
             self.config.store_platform.as_ref().ok_or_else(|| {
                 Error::config("long_term_version_plan", "store platform is required")
             })?,
@@ -12585,6 +12912,7 @@ impl MemoryRuntime {
                 private_garden_store: &planning_private_garden_store,
             },
             PrivateGardenGovernanceInput {
+                mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
                 chat_id: &self.config.scope.chat_id,
                 ingress: turn_ingress,
                 channel: &turn_channel,
@@ -12905,7 +13233,7 @@ impl MemoryRuntime {
             LongTermMemoryStore::count(&planning_long_term).unwrap_or(before_count);
         let mut mutation_plan = planning_long_term.into_plan(
             &self.config.memory_space_id,
-            &self.config.scoped_runtime.mounted_subject_id,
+            &self.config.memory_space_id,
             self.config.store_platform.as_ref().ok_or_else(|| {
                 Error::config("long_term_version_plan", "store platform is required")
             })?,
@@ -13550,7 +13878,7 @@ impl MemoryRuntime {
 
         let mut mutation_plan = planning_long_term.into_plan(
             &self.config.memory_space_id,
-            &self.config.scoped_runtime.mounted_subject_id,
+            &self.config.memory_space_id,
             self.config.store_platform.as_ref().ok_or_else(|| {
                 Error::config("long_term_version_plan", "store platform is required")
             })?,
@@ -21229,7 +21557,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
     fn into_plan(
         self,
         memory_space_id: &str,
-        mounted_subject_id: &str,
+        factual_owner_id: &str,
         store_platform: &StorePlatform,
         max_retained_revisions_per_owner: usize,
     ) -> Result<MemoryStoreMutationPlan> {
@@ -21248,7 +21576,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
             .complete_snapshot_read
             .into_inner()
             .map_err(|_| Error::config("long_term_control_plan", "snapshot marker poisoned"))?;
-        let scope_key = long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)?;
+        let scope_key = long_term_version_scope_manifest_key(memory_space_id, factual_owner_id)?;
         let scope_docs = store_platform.read_json_docs_by_keys(
             crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
             std::slice::from_ref(&scope_key),
@@ -21297,7 +21625,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                 head.retained_revision_digests.iter().map(|retained| {
                     long_term_version_material_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &head.owner_ref,
                         retained.owner_revision,
                     )
@@ -21451,7 +21779,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     let bound_creation = bm_core::memory::bind_long_term_version_creation(
                         bm_core::memory::LongTermMemoryVersionCreateIntent {
                             memory_space_id: memory_space_id.to_string(),
-                            mounted_subject_id: mounted_subject_id.to_string(),
+                            factual_owner_id: factual_owner_id.to_string(),
                             requested_at: entry.updated_at,
                             projection: entry,
                             governed_evidence_refs: Vec::new(),
@@ -21463,14 +21791,14 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     let material = bound_creation.material;
                     let material_key = long_term_version_material_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &material.owner_ref,
                         material.owner_revision,
                     )?;
                     let head = bound_creation.head;
                     let head_key = long_term_version_head_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &head.owner_ref,
                     )?;
                     if heads
@@ -21581,7 +21909,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                         }
                         let bound = transition.bind_version(
                             memory_space_id,
-                            mounted_subject_id,
+                            factual_owner_id,
                             &before,
                             Some(&after),
                             &predecessor_head,
@@ -21616,18 +21944,18 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                         )?;
                         let successor_material_key = long_term_version_material_key(
                             memory_space_id,
-                            mounted_subject_id,
+                            factual_owner_id,
                             &successor_ref,
                             successor.owner_revision,
                         )?;
                         let predecessor_head_key = long_term_version_head_key(
                             memory_space_id,
-                            mounted_subject_id,
+                            factual_owner_id,
                             &predecessor_ref,
                         )?;
                         let successor_head_key = long_term_version_head_key(
                             memory_space_id,
-                            mounted_subject_id,
+                            factual_owner_id,
                             &successor_ref,
                         )?;
                         plan.preconditions.push(json_precondition(
@@ -21661,7 +21989,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                             schema_version:
                                 bm_core::memory::LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
                             memory_space_id: memory_space_id.to_string(),
-                            mounted_subject_id: mounted_subject_id.to_string(),
+                            factual_owner_id: factual_owner_id.to_string(),
                             owner_ref: successor_ref,
                             current_revision: successor.owner_revision,
                             retained_revision_digests: vec![LongTermMemoryRetainedRevisionDigest {
@@ -21786,7 +22114,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     }
                     let bound = transition.bind_version(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &before,
                         Some(&after),
                         &previous_head,
@@ -21821,13 +22149,13 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     )?;
                     let successor_key = long_term_version_material_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &successor.owner_ref,
                         successor.owner_revision,
                     )?;
                     let head_key = long_term_version_head_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &previous_head.owner_ref,
                     )?;
                     plan.preconditions.push(json_precondition(
@@ -21945,7 +22273,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     }
                     let bound = transition.bind_version(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &before,
                         None,
                         &previous_head,
@@ -21992,7 +22320,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     {
                         let head_key = long_term_version_head_key(
                             memory_space_id,
-                            mounted_subject_id,
+                            factual_owner_id,
                             &owner_ref,
                         )?;
                         plan.preconditions.push(json_precondition(
@@ -22047,7 +22375,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                     for material in &owner_materials {
                         let material_key = long_term_version_material_key(
                             memory_space_id,
-                            mounted_subject_id,
+                            factual_owner_id,
                             &material.owner_ref,
                             material.owner_revision,
                         )?;
@@ -22073,11 +22401,8 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                             record_key: before.id.clone(),
                         });
                     }
-                    let head_key = long_term_version_head_key(
-                        memory_space_id,
-                        mounted_subject_id,
-                        &owner_ref,
-                    )?;
+                    let head_key =
+                        long_term_version_head_key(memory_space_id, factual_owner_id, &owner_ref)?;
                     plan.preconditions.push(json_precondition(
                         crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
                         &head_key,
@@ -22142,7 +22467,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
         }
         let next_scope = LongTermMemoryVersionScopeManifest::build(
             memory_space_id,
-            mounted_subject_id,
+            factual_owner_id,
             previous_scope
                 .as_ref()
                 .map(|scope| {
@@ -22167,7 +22492,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
         plan.mutations.push(planned_json_put(
             crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
             scope_key,
-            format!("{memory_space_id}:{mounted_subject_id}"),
+            format!("{memory_space_id}:{factual_owner_id}"),
             &next_scope,
             MemoryStoreEventKind::MemoryWrite,
         )?);
@@ -22383,7 +22708,7 @@ struct LongTermOwnerPlanningContext<'a> {
     base: &'a dyn LongTermMemoryReadStore,
     control_base: &'a dyn LongTermMemoryControlReadStore,
     memory_space_id: &'a str,
-    mounted_subject_id: &'a str,
+    factual_owner_id: &'a str,
     expected_actor_subject_id: &'a str,
     store_platform: &'a StorePlatform,
     max_retained_revisions_per_owner: usize,
@@ -22398,7 +22723,7 @@ fn plan_owner_writes(
         base,
         control_base,
         memory_space_id,
-        mounted_subject_id,
+        factual_owner_id,
         expected_actor_subject_id,
         store_platform,
         max_retained_revisions_per_owner,
@@ -22529,7 +22854,7 @@ fn plan_owner_writes(
     };
     let mut plan = planning_store.into_plan(
         memory_space_id,
-        mounted_subject_id,
+        factual_owner_id,
         store_platform,
         max_retained_revisions_per_owner,
     )?;
@@ -23169,14 +23494,14 @@ impl<'a> PlanningPrivateGardenStore<'a> {
 }
 
 impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
-    fn list(&self, chat_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
+    fn list(&self, mounted_subject_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
         let mut records = self
             .base
-            .list(chat_id, usize::MAX)?
+            .list(mounted_subject_id, usize::MAX)?
             .into_iter()
             .map(|record| (record.path.clone(), record))
             .collect::<BTreeMap<_, _>>();
-        let prefix = private_garden_storage_key_prefix(chat_id);
+        let prefix = private_garden_storage_key_prefix(mounted_subject_id);
         for (key, value) in self
             .changes
             .lock()
@@ -23202,9 +23527,9 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
         Ok(rows)
     }
 
-    fn read(&self, chat_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
+    fn read(&self, mounted_subject_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
         let path = normalize_private_garden_doc_path(doc_path)?;
-        let key = private_garden_storage_key(chat_id, &path);
+        let key = private_garden_storage_key(mounted_subject_id, &path);
         if let Some(value) = self
             .changes
             .lock()
@@ -23214,12 +23539,12 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
         {
             return Ok(value);
         }
-        self.base.read(chat_id, &path)
+        self.base.read(mounted_subject_id, &path)
     }
 
     fn write(
         &self,
-        chat_id: &str,
+        mounted_subject_id: &str,
         doc_path: &str,
         content: &str,
         now_secs: u64,
@@ -23235,7 +23560,7 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
             ));
         }
         let path = normalize_private_garden_doc_path(doc_path)?;
-        let revision = PrivateGardenStore::read(self, chat_id, &path)?
+        let revision = PrivateGardenStore::read(self, mounted_subject_id, &path)?
             .map(|doc| doc.revision.saturating_add(1))
             .unwrap_or(1);
         let doc = PrivateGardenDoc {
@@ -23248,7 +23573,7 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert(
-                private_garden_storage_key(chat_id, &path),
+                private_garden_storage_key(mounted_subject_id, &path),
                 Some(doc.clone()),
             );
         Ok(private_garden_doc_record(&doc))
@@ -23256,33 +23581,33 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
 
     fn move_doc(
         &self,
-        chat_id: &str,
+        mounted_subject_id: &str,
         from_path: &str,
         to_path: &str,
         now_secs: u64,
     ) -> Result<Option<PrivateGardenDocRecord>> {
         let from = normalize_private_garden_doc_path(from_path)?;
         let to = normalize_private_garden_doc_path(to_path)?;
-        let Some(doc) = PrivateGardenStore::read(self, chat_id, &from)? else {
+        let Some(doc) = PrivateGardenStore::read(self, mounted_subject_id, &from)? else {
             return Ok(None);
         };
-        PrivateGardenStore::delete(self, chat_id, &from)?;
+        PrivateGardenStore::delete(self, mounted_subject_id, &from)?;
         Ok(Some(PrivateGardenStore::write(
             self,
-            chat_id,
+            mounted_subject_id,
             &to,
             &doc.content,
             now_secs,
         )?))
     }
 
-    fn delete(&self, chat_id: &str, doc_path: &str) -> Result<bool> {
+    fn delete(&self, mounted_subject_id: &str, doc_path: &str) -> Result<bool> {
         let path = normalize_private_garden_doc_path(doc_path)?;
-        if PrivateGardenStore::read(self, chat_id, &path)?.is_some() {
+        if PrivateGardenStore::read(self, mounted_subject_id, &path)?.is_some() {
             self.changes
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .insert(private_garden_storage_key(chat_id, &path), None);
+                .insert(private_garden_storage_key(mounted_subject_id, &path), None);
             Ok(true)
         } else {
             Ok(false)
@@ -23290,12 +23615,15 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
     }
 }
 
-fn private_garden_storage_key_prefix(chat_id: &str) -> String {
-    format!("{chat_id}::")
+fn private_garden_storage_key_prefix(mounted_subject_id: &str) -> String {
+    format!("{mounted_subject_id}::")
 }
 
-fn private_garden_storage_key(chat_id: &str, doc_path: &str) -> String {
-    format!("{}{doc_path}", private_garden_storage_key_prefix(chat_id))
+fn private_garden_storage_key(mounted_subject_id: &str, doc_path: &str) -> String {
+    format!(
+        "{}{doc_path}",
+        private_garden_storage_key_prefix(mounted_subject_id)
+    )
 }
 
 fn private_garden_doc_record(doc: &PrivateGardenDoc) -> PrivateGardenDocRecord {
@@ -23751,6 +24079,7 @@ impl MemoryRuntimeBuilder {
                 actor_subject_id: requested_subject_id.clone(),
                 agent_id: identity.agent_id.clone(),
                 relationship_scope: Some(relationship_scope(
+                    &requested_subject_id,
                     &scope.channel,
                     &scope.chat_id,
                     Some(scope.conversation_id_or_chat_id().to_string()),
@@ -23853,13 +24182,10 @@ impl MemoryRuntimeBuilder {
                 .map_err(|error| Error::config(error.stage(), error.to_string()))?;
         }
         let long_term_memory_read_store = store_platform
-            .scoped_long_term_memory_read_store(
-                &memory_space_id,
-                &scoped_runtime.mounted_subject_id,
-            )
+            .memory_space_long_term_memory_read_store(&memory_space_id)
             .map_err(|error| Error::config(error.stage(), error.to_string()))?;
         let long_term_memory_control_store = store_platform
-            .scoped_long_term_memory_control_read_store(&memory_space_id)
+            .memory_space_long_term_memory_control_read_store(&memory_space_id)
             .map_err(|error| Error::config(error.stage(), error.to_string()))?;
         let config = MemoryRuntimeConfig {
             identity,
@@ -24637,10 +24963,16 @@ mod recall_immutable_session_observer_tests {
             &mut blob_addresses,
         );
 
-        let facet_manifest_key =
-            memory_facet_manifest_key(memory_space_id, mounted_subject_id).expect("facet root key");
+        let long_term_owner_id = memory_space_id;
+        let facet_manifest_key = memory_facet_manifest_key(memory_space_id, long_term_owner_id)
+            .expect("long-term facet root key");
         let mut owner_refs_to_materialize = BTreeSet::new();
         if !query_facets.is_empty() {
+            json_addresses.insert((
+                MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                memory_facet_manifest_key(memory_space_id, mounted_subject_id)
+                    .expect("subject facet root key"),
+            ));
             json_addresses.insert((
                 MEMORY_FACET_POSTING_NAMESPACE.to_string(),
                 facet_manifest_key.clone(),
@@ -24650,7 +24982,7 @@ mod recall_immutable_session_observer_tests {
                 MEMORY_FACET_POSTING_NAMESPACE,
                 &facet_manifest_key,
             );
-            validate_memory_facet_manifest(memory_space_id, mounted_subject_id, &facet_manifest)
+            validate_memory_facet_manifest(memory_space_id, long_term_owner_id, &facet_manifest)
                 .expect("fixture facet manifest");
             let manifest_posting_keys = facet_manifest
                 .posting_revisions
@@ -24660,7 +24992,7 @@ mod recall_immutable_session_observer_tests {
             let mut posting_chain_valid = true;
             for query_facet in query_facets {
                 let posting_key =
-                    memory_facet_posting_key(memory_space_id, mounted_subject_id, query_facet)
+                    memory_facet_posting_key(memory_space_id, long_term_owner_id, query_facet)
                         .expect("fixture facet posting key");
                 json_addresses.insert((
                     MEMORY_FACET_POSTING_NAMESPACE.to_string(),
@@ -24681,7 +25013,7 @@ mod recall_immutable_session_observer_tests {
                     || posting.posting_key != posting_key
                     || validate_memory_facet_posting(
                         memory_space_id,
-                        mounted_subject_id,
+                        long_term_owner_id,
                         &facet_manifest,
                         &posting,
                     )
@@ -24705,7 +25037,7 @@ mod recall_immutable_session_observer_tests {
             for owner_ref in &owner_refs_to_materialize {
                 let owner_key = scoped_memory_facet_owner_storage_key(
                     memory_space_id,
-                    mounted_subject_id,
+                    long_term_owner_id,
                     owner_ref,
                 )
                 .expect("fixture facet owner key");
@@ -24805,12 +25137,12 @@ mod recall_immutable_session_observer_tests {
                 MEMORY_FACET_POSTING_NAMESPACE,
                 &facet_manifest_key,
             );
-            validate_memory_facet_manifest(memory_space_id, mounted_subject_id, &facet_manifest)
+            validate_memory_facet_manifest(memory_space_id, long_term_owner_id, &facet_manifest)
                 .expect("fixture facet manifest");
             for membership in &node_memberships {
                 let owner_key = scoped_memory_facet_owner_storage_key(
                     memory_space_id,
-                    mounted_subject_id,
+                    long_term_owner_id,
                     &membership.owner_ref,
                 )
                 .expect("fixture graph facet owner key");
@@ -24830,7 +25162,7 @@ mod recall_immutable_session_observer_tests {
                     && owner
                         .subject_ids
                         .iter()
-                        .any(|subject_id| subject_id == mounted_subject_id)
+                        .any(|subject_id| subject_id == long_term_owner_id)
                     && owner.status == MemoryFacetStatus::Active
                     && owner.owner_revision == version.owner_revision
                     && owner.facet_index_revision == version.facet_index_revision
@@ -24841,7 +25173,7 @@ mod recall_immutable_session_observer_tests {
         }
 
         let long_term_scope_key =
-            long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)
+            long_term_version_scope_manifest_key(memory_space_id, long_term_owner_id)
                 .expect("long-term fixture root key");
         for owner_ref in owner_refs_to_materialize {
             assert_eq!(
@@ -24877,7 +25209,7 @@ mod recall_immutable_session_observer_tests {
                     crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                     long_term_version_material_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        long_term_owner_id,
                         &owner_ref,
                         retained.owner_revision,
                     )
@@ -24899,13 +25231,13 @@ mod recall_immutable_session_observer_tests {
     fn expected_historical_long_term_addresses(
         json_docs: &[StoreSnapshotJsonDoc],
         memory_space_id: &str,
-        mounted_subject_id: &str,
+        long_term_owner_id: &str,
     ) -> BTreeSet<(String, String)> {
         let docs = json_docs
             .iter()
             .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
             .collect::<BTreeMap<_, _>>();
-        let root_key = long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)
+        let root_key = long_term_version_scope_manifest_key(memory_space_id, long_term_owner_id)
             .expect("historical long-term root key");
         let root_address = (
             crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
@@ -24932,7 +25264,7 @@ mod recall_immutable_session_observer_tests {
                     crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                     long_term_version_material_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        long_term_owner_id,
                         &binding.owner_ref,
                         retained.owner_revision,
                     )
@@ -25045,7 +25377,7 @@ mod recall_immutable_session_observer_tests {
         assert!(cross_space_write.accepted);
         assert_eq!(cross_space_write.changed, 1);
         let owner = platform
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("long-term store")
             .list(8)
             .expect("owners")
@@ -25262,19 +25594,23 @@ mod recall_immutable_session_observer_tests {
         for required in [
             (
                 crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
-                long_term_version_scope_manifest_key("space:owner-default", "agent:agent-main")
+                long_term_version_scope_manifest_key("space:owner-default", "space:owner-default")
                     .expect("scope manifest key"),
             ),
             (
                 crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
-                long_term_version_head_key("space:owner-default", "agent:agent-main", &owner_ref)
-                    .expect("head key"),
+                long_term_version_head_key(
+                    "space:owner-default",
+                    "space:owner-default",
+                    &owner_ref,
+                )
+                .expect("head key"),
             ),
             (
                 crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                 long_term_version_material_key(
                     "space:owner-default",
-                    "agent:agent-main",
+                    "space:owner-default",
                     &owner_ref,
                     owner.owner_revision,
                 )
@@ -25282,14 +25618,14 @@ mod recall_immutable_session_observer_tests {
             ),
             (
                 MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                memory_facet_manifest_key("space:owner-default", "agent:agent-main")
+                memory_facet_manifest_key("space:owner-default", "space:owner-default")
                     .expect("facet manifest key"),
             ),
             (
                 MEMORY_FACET_INDEX_NAMESPACE.to_string(),
                 scoped_memory_facet_owner_storage_key(
                     "space:owner-default",
-                    "agent:agent-main",
+                    "space:owner-default",
                     &owner_ref,
                 )
                 .expect("facet owner key"),
@@ -25589,7 +25925,7 @@ mod recall_immutable_session_observer_tests {
             })
             .expect("seed predecessor");
         let predecessor = platform
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("long-term store")
             .list(8)
             .expect("owners")
@@ -25664,7 +26000,7 @@ mod recall_immutable_session_observer_tests {
         let expected_json_addresses = expected_historical_long_term_addresses(
             &historical_docs,
             "space:owner-default",
-            "agent:agent-main",
+            "space:owner-default",
         );
 
         let observer = Arc::new(ObservedStoreEngine::new(platform.engine_for_test()));
@@ -26130,7 +26466,7 @@ mod projection_budget_truncation_tests {
                 GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner.id.clone());
             let facet_owner_key = scoped_memory_facet_owner_storage_key(
                 &runtime.config.memory_space_id,
-                &runtime.config.scoped_runtime.mounted_subject_id,
+                &runtime.config.memory_space_id,
                 &owner_ref,
             )
             .expect("facet owner key");
@@ -26252,7 +26588,7 @@ mod concurrent_memory_plan_tests {
             },
             reason: "concurrent correction".to_string(),
             dry_run: false,
-            owner_subject_id: first.config.scoped_runtime.mounted_subject_id.clone(),
+            factual_owner_id: first.config.memory_space_id.clone(),
             actor_subject_id: Some(first.config.scoped_runtime.actor_subject_id.clone()),
             memory_space_id: Some(first.config.memory_space_id.clone()),
             now_secs: 1_900_000_001,
@@ -26381,7 +26717,7 @@ mod concurrent_memory_plan_tests {
         let operation = || MemoryGovernancePolicyMutation::Suppress {
             selector: MemoryGovernanceSelector {
                 memory_space_id: Some(first.config.memory_space_id.clone()),
-                subject_id: Some(first.config.subject_id.clone()),
+                subject_id: Some(first.config.memory_space_id.clone()),
                 kind: Some(LongTermMemoryKind::Preference),
                 topic_pattern: Some("concurrent-policy-*".to_string()),
                 source_chat_id: None,

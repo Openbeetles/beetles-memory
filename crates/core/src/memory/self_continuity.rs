@@ -10,7 +10,6 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use super::{
-    board_subject_scope_id,
     llm_json::{get_object_text, parse_llm_json_payload, LlmJsonPayload},
     memory_policy, render_execution_state_block, render_inner_life_block,
     render_internal_memory_topology_block, render_private_doc_workspace_block,
@@ -78,6 +77,7 @@ pub(crate) fn estimate_self_continuity_chars(continuity: &SelfContinuity) -> usi
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelfContinuityRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -217,7 +217,7 @@ pub fn run_self_continuity_refresh(
     input: SelfContinuityRefreshInput<'_>,
     profile: MemoryProfile,
 ) -> Result<SelfContinuityRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     let existing = ctx.self_continuity_store.get(subject_id)?;
     let summary_text = ctx
         .session_summary_store
@@ -266,7 +266,7 @@ pub(crate) fn run_self_continuity_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<SelfContinuityRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     if !decision_override.unwrap_or_else(|| {
         should_refresh_self_continuity(input, existing_continuity.is_some(), profile)
     }) {

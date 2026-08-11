@@ -1324,7 +1324,7 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
     assert_eq!(report.semantic_governance.accepted_count, 1);
     let entries = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store(runtime.memory_space_id(), runtime.subject_id())
+        .memory_space_long_term_memory_read_store(runtime.memory_space_id())
         .expect("scoped long-term read store")
         .list(10)
         .unwrap();
@@ -1489,15 +1489,18 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
             &key,
             &DerivedMemoryRef {
                 plane: DerivedMemoryPlane::PrivateGarden,
-                store_key: "private_garden:board.self::journal/export-check.md".to_string(),
-                subject_id: Some("subject-default".to_string()),
+                store_key: format!(
+                    "private_garden:{}::journal/export-check.md",
+                    runtime.subject_id()
+                ),
+                subject_id: Some(runtime.subject_id().to_string()),
                 source: TranscriptEvidenceRef {
                     memory_space_id: runtime.memory_space_id().to_string(),
                     channel_id: "llm.gateway".to_string(),
                     conversation_id: "conversation-a".to_string(),
                     turn_id: turn_id.clone(),
                     message_id: None,
-                    subject_id: Some("subject-default".to_string()),
+                    subject_id: Some(runtime.subject_id().to_string()),
                     authority: Some(MemoryEvidenceAuthority::PrivateGardenInternal),
                 },
                 created_at: 1_800_000_000,
@@ -1622,7 +1625,10 @@ fn private_garden_self_work_records_private_garden_derived_refs_without_raw_cont
         .expect("private garden self-work should be linked to transcript evidence");
     assert_eq!(
         private_ref.store_key,
-        "private_garden:board.self::journal/qingchuan.md"
+        format!(
+            "private_garden:{}::journal/qingchuan.md",
+            runtime.subject_id()
+        )
     );
     assert_eq!(private_ref.source.turn_id, turn_id);
     assert!(private_ref.source.message_id.is_none());

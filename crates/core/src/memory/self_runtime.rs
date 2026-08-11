@@ -48,7 +48,7 @@ use self::state::{
 };
 
 use super::{
-    autonomy_idle_interval_secs, board_subject_scope_id, build_archive_evidence_block,
+    autonomy_idle_interval_secs, build_archive_evidence_block,
     build_felt_significance_refresh_input, build_inner_conflict_refresh_input, build_self_state,
     build_temperament_continuity_refresh_input, build_world_snapshot_from_commitments,
     compile_subject_shell, compute_core_revision_governance_digest, decide_self_runtime_authority,
@@ -58,7 +58,7 @@ use super::{
         LlmJsonPayload,
     },
     load_recent_persona_evidence, load_world_snapshot_reminders, load_world_snapshot_tasks,
-    memory_capability_profile, memory_policy, private_garden_scope_id, relationship_scope_id,
+    memory_capability_profile, memory_policy, relationship_scope_id,
     render_autonomy_strategy_block, render_core_revision_governance_block,
     render_execution_state_block, render_internal_memory_topology_block,
     render_mental_privacy_boundary_block, render_persistent_self_authored_core_block,
@@ -205,6 +205,7 @@ pub struct SelfRuntimeDecision {
 }
 
 pub struct SelfRuntimeContext<'a> {
+    pub mounted_subject_id: &'a str,
     pub memory_system_kind: crate::memory::MemorySystemKind,
     pub session_store: &'a dyn SessionStore,
     pub memory_store: &'a dyn MemoryStore,
@@ -532,7 +533,7 @@ fn refresh_world_and_autonomy(
     profile: MemoryProfile,
     state: &LoadedSelfRuntimeState,
 ) -> Box<SelfRuntimeRefreshPrelude> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = ctx.mounted_subject_id;
     let relationship_id = state.active_relationship_scope_id.as_str();
     let ingress = self_runtime_ingress(payload.trigger);
     let world_policy = memory_policy(profile).world_sense;
@@ -545,6 +546,7 @@ fn refresh_world_and_autonomy(
         || (payload.trigger == SelfRuntimeTrigger::PostReply
             && world_policy.should_refresh(
                 WorldSenseRefreshInput {
+                    mounted_subject_id: ctx.mounted_subject_id,
                     chat_id,
                     ingress,
                     channel: &state.active_relationship_channel,
@@ -575,6 +577,7 @@ fn refresh_world_and_autonomy(
             task_store: ctx.task_store,
         },
         WorldSenseRefreshInput {
+            mounted_subject_id: ctx.mounted_subject_id,
             chat_id,
             ingress,
             channel: &state.active_relationship_channel,
@@ -606,6 +609,7 @@ fn refresh_world_and_autonomy(
         || (payload.trigger == SelfRuntimeTrigger::PostReply
             && autonomy_policy.should_refresh(
                 AutonomyStrategyRefreshInput {
+                    mounted_subject_id: ctx.mounted_subject_id,
                     chat_id,
                     ingress,
                     channel: &state.active_relationship_channel,
@@ -639,6 +643,7 @@ fn refresh_world_and_autonomy(
             autonomy_strategy_store: ctx.autonomy_strategy_store,
         },
         AutonomyStrategyRefreshInput {
+            mounted_subject_id: ctx.mounted_subject_id,
             chat_id,
             ingress,
             channel: &state.active_relationship_channel,
@@ -700,11 +705,12 @@ fn execute_self_runtime_actions(
 ) -> Box<SelfRuntimeActionResults> {
     let profile = ctx.memory_system_kind.memory_profile();
     let authority_plan = decide_self_runtime_authority(ctx.memory_system_kind);
-    let subject_id = board_subject_scope_id();
+    let subject_id = ctx.mounted_subject_id;
     let relationship_id = state.active_relationship_scope_id.as_str();
     let boundary_signal = detect_boundary_flush_signal(payload, state, prelude);
     let personality_governance_inspection =
         inspect_personality_governance(PersonalityGovernanceInspectionInput {
+            mounted_subject_id: ctx.mounted_subject_id,
             channel: &state.active_relationship_channel,
             chat_id,
             now_secs: payload.now_secs,
@@ -879,6 +885,7 @@ fn execute_self_runtime_actions(
                 inner_life_store: ctx.inner_life_store,
             },
             InnerLifeRefreshInput {
+                mounted_subject_id: ctx.mounted_subject_id,
                 chat_id,
                 ingress: IngressKind::System,
                 channel: SELF_RUNTIME_CHANNEL,
@@ -966,6 +973,7 @@ fn execute_self_runtime_actions(
                 private_doc_store: ctx.private_doc_store,
             },
             PrivateDocWorkspaceRefreshInput {
+                mounted_subject_id: ctx.mounted_subject_id,
                 chat_id,
                 ingress: IngressKind::System,
                 channel: SELF_RUNTIME_CHANNEL,
@@ -1016,6 +1024,7 @@ fn execute_self_runtime_actions(
                 private_garden_store: ctx.private_garden_store,
             },
             PrivateGardenGovernanceInput {
+                mounted_subject_id: ctx.mounted_subject_id,
                 chat_id,
                 ingress: IngressKind::System,
                 channel: SELF_RUNTIME_CHANNEL,
@@ -1045,7 +1054,7 @@ fn execute_self_runtime_actions(
     refreshed_private_garden_docs = ctx
         .private_garden_store
         .list(
-            private_garden_scope_id(),
+            ctx.mounted_subject_id,
             self_runtime_private_garden_doc_limit(profile),
         )
         .unwrap_or(refreshed_private_garden_docs);
@@ -1089,6 +1098,7 @@ fn execute_self_runtime_actions(
                 self_model_store: ctx.self_model_store,
             },
             SelfModelRefreshInput {
+                mounted_subject_id: ctx.mounted_subject_id,
                 chat_id,
                 ingress: IngressKind::System,
                 channel: SELF_RUNTIME_CHANNEL,
@@ -1165,6 +1175,7 @@ fn execute_self_runtime_actions(
                 self_continuity_store: ctx.self_continuity_store,
             },
             SelfContinuityRefreshInput {
+                mounted_subject_id: ctx.mounted_subject_id,
                 chat_id,
                 ingress: IngressKind::System,
                 channel: SELF_RUNTIME_CHANNEL,
@@ -1244,6 +1255,7 @@ fn execute_self_runtime_actions(
                 outer_voice_store: ctx.outer_voice_store,
             },
             BoundaryPersonaRefreshInput {
+                mounted_subject_id: ctx.mounted_subject_id,
                 channel: &state.active_relationship_channel,
                 chat_id,
                 trigger,
@@ -1322,6 +1334,7 @@ fn execute_self_runtime_actions(
                 outer_voice_store: ctx.outer_voice_store,
             },
             OuterVoiceRefreshInput {
+                mounted_subject_id: ctx.mounted_subject_id,
                 chat_id,
                 ingress: IngressKind::System,
                 channel: &state.active_relationship_channel,
@@ -2308,7 +2321,7 @@ pub fn run_self_runtime(
 
     let touch_self_continuity_result = touch_self_continuity_runtime(
         ctx.self_continuity_store,
-        board_subject_scope_id(),
+        ctx.mounted_subject_id,
         payload.now_secs,
         payload.trigger == SelfRuntimeTrigger::PostReply,
         true,
@@ -2334,13 +2347,13 @@ pub fn run_self_runtime(
     let portfolio_after = sync_self_runtime_relationship_portfolio(&ctx, payload.now_secs);
     let latest_self_authored_core = ctx
         .self_authored_core_store
-        .get(board_subject_scope_id())
+        .get(ctx.mounted_subject_id)
         .ok()
         .flatten()
         .or(state.self_authored_core.clone());
     let latest_relationship_topology = ctx
         .relationship_topology_store
-        .get(board_subject_scope_id())
+        .get(ctx.mounted_subject_id)
         .ok()
         .flatten()
         .or(state.relationship_topology.clone());

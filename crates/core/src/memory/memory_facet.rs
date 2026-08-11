@@ -549,6 +549,7 @@ pub struct MemoryFacetIndexManifest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryFacetPostImageClosure {
     pub memory_space_id: String,
+    pub long_term_owner_id: String,
     pub mounted_subject_id: String,
     pub long_term_owners: Vec<LongTermMemoryVersionMaterialImage>,
     pub evidence_document_owners: Vec<GovernedDocumentImage<GovernedEvidenceDocument>>,
@@ -567,6 +568,7 @@ pub fn validate_memory_facet_post_image(
     closure: &MemoryFacetPostImageClosure,
 ) -> GovernedPostImageValidation {
     let memory_space_id = closure.memory_space_id.trim();
+    let long_term_owner_id = closure.long_term_owner_id.trim();
     let subject_id = closure.mounted_subject_id.trim();
     let mut failures = Vec::new();
     if validate_memory_facet_scope(memory_space_id, subject_id).is_err() {
@@ -576,7 +578,7 @@ pub fn validate_memory_facet_post_image(
 
     let mut owners = BTreeMap::new();
     for image in &closure.long_term_owners {
-        if !image.has_exact_physical_closure(memory_space_id, subject_id) {
+        if !image.has_exact_physical_closure(memory_space_id, long_term_owner_id) {
             failures.push("memory_facet_owner_physical_key_drift".to_string());
         }
         if image.before != image.after

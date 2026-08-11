@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
 use super::{
-    board_subject_scope_id, relationship_scope_id, turn_ledger_observed_at_ms, MentalPrivacyState,
-    OuterVoice, RecentPersonaEvidence, TurnLedger, WorldSense,
+    relationship_scope_id, turn_ledger_observed_at_ms, MentalPrivacyState, OuterVoice,
+    RecentPersonaEvidence, TurnLedger, WorldSense,
 };
 
 const RELATIONSHIP_TEXT_MAX_CHARS: usize = 120;
@@ -109,6 +109,7 @@ impl RelationshipTopologyEntry {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelationshipTopologyUpsertInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub now_secs: u64,
@@ -156,8 +157,8 @@ pub fn upsert_relationship_topology_entry(
     if channel.is_empty() || chat_id.is_empty() {
         return Ok(RelationshipTopologyRefreshOutcome::Skipped);
     }
-    let scope_id = relationship_scope_id(channel.as_str(), chat_id.as_str());
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
+    let scope_id = relationship_scope_id(subject_id, channel.as_str(), chat_id.as_str());
     let mut topology = store.get(subject_id)?.unwrap_or_default();
     let next_entry = build_relationship_topology_entry(
         topology
@@ -623,13 +624,19 @@ mod tests {
     };
     use crate::error::Result;
     use crate::memory::{
-        board_subject_scope_id, BoundaryDisclosureStyle, BoundaryPersonaPosture,
+        relationship_scope_id, BoundaryDisclosureStyle, BoundaryPersonaPosture,
         BoundaryPersonaState, MentalPrivacyState, OuterVoice, RecentPersonaEvidence,
         RelationalBoundaryState, TurnLedger, TurnLedgerStatus, TurnPersonaDisclosureLedger,
         TurnPersonaLedger, TurnPersonaPriorityLedger, WorldSense,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
+
+    fn test_relationship_scope_id(channel: &str, chat_id: &str) -> String {
+        relationship_scope_id(TEST_SUBJECT_ID, channel, chat_id)
+    }
 
     #[derive(Default)]
     struct StubRelationshipTopologyStore {
@@ -690,6 +697,7 @@ mod tests {
         let outcome = upsert_relationship_topology_entry(
             &store,
             RelationshipTopologyUpsertInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 channel: "qq",
                 chat_id: "c1",
                 now_secs: 60,
@@ -735,7 +743,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome, RelationshipTopologyRefreshOutcome::Updated);
-        let topology = store.get(board_subject_scope_id()).unwrap().unwrap();
+        let topology = store.get(TEST_SUBJECT_ID).unwrap().unwrap();
         assert_eq!(topology.entries.len(), 1);
         let entry = &topology.entries[0];
         assert_eq!(entry.channel, "qq");
@@ -755,7 +763,7 @@ mod tests {
         let topology = RelationshipTopology {
             entries: vec![
                 RelationshipTopologyEntry {
-                    scope_id: "rel:a:1".to_string(),
+                    scope_id: test_relationship_scope_id("a", "1"),
                     channel: "a".to_string(),
                     chat_id: "1".to_string(),
                     last_user_turn_at: 100,
@@ -767,7 +775,7 @@ mod tests {
                     ..RelationshipTopologyEntry::default()
                 },
                 RelationshipTopologyEntry {
-                    scope_id: "rel:b:2".to_string(),
+                    scope_id: test_relationship_scope_id("b", "2"),
                     channel: "b".to_string(),
                     chat_id: "2".to_string(),
                     last_user_turn_at: 96,
@@ -803,7 +811,7 @@ mod tests {
     fn selector_respects_runtime_cooldown_for_same_relation() {
         let topology = RelationshipTopology {
             entries: vec![RelationshipTopologyEntry {
-                scope_id: "rel:qq:c1".to_string(),
+                scope_id: test_relationship_scope_id("qq", "c1"),
                 channel: "qq".to_string(),
                 chat_id: "c1".to_string(),
                 last_user_turn_at: 100,
@@ -828,9 +836,10 @@ mod tests {
 
     #[test]
     fn render_relationship_topology_block_mentions_top_relations() {
+        let scope_id = test_relationship_scope_id("qq", "c1");
         let topology = RelationshipTopology {
             entries: vec![RelationshipTopologyEntry {
-                scope_id: "rel:qq:c1".to_string(),
+                scope_id: scope_id.clone(),
                 channel: "qq".to_string(),
                 chat_id: "c1".to_string(),
                 last_user_turn_at: 100,
@@ -840,7 +849,7 @@ mod tests {
             updated_at: 100,
         };
         let block =
-            render_relationship_topology_block(&topology, 100, Some("rel:qq:c1"), 480).unwrap();
+            render_relationship_topology_block(&topology, 100, Some(&scope_id), 480).unwrap();
         assert!(block.contains("Relationship Topology"));
         assert!(block.contains("qq:c1"));
         assert!(block.contains("current"));

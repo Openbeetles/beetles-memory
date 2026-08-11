@@ -148,7 +148,7 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
     seed_governed_long_term(&runtime, vec![private, public]);
     let raw_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(10)
         .expect("list long-term owner records");
@@ -317,7 +317,7 @@ fn persistent_graph_recall_drops_ownerless_private_like_nodes_and_dependents() {
     );
     let visible_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list visible owner")
@@ -454,7 +454,7 @@ fn governed_read_filters_private_records_before_source_recall_limit() {
     seed_governed_long_term(&runtime, drafts);
     let observed_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(96)
         .expect("list records");
@@ -615,7 +615,7 @@ fn evidence_locator_fragments_never_count_as_typed_exact_facet_matches() {
     );
     let owner_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(10)
         .expect("list long-term records")
@@ -666,7 +666,7 @@ fn facet_recall_fails_closed_when_manifest_counts_are_corrupt() {
     );
     let manifest_key = memory_facet_manifest_key(
         source_runtime.memory_space_id(),
-        source_runtime.subject_id(),
+        source_runtime.memory_space_id(),
     )
     .expect("facet manifest key");
     let mut snapshot = source_platform
@@ -716,7 +716,7 @@ fn facet_recall_fails_closed_for_independent_owner_and_facet_version_drift() {
     );
     let manifest_key = memory_facet_manifest_key(
         source_runtime.memory_space_id(),
-        source_runtime.subject_id(),
+        source_runtime.memory_space_id(),
     )
     .expect("facet manifest key");
 
@@ -763,7 +763,7 @@ fn facet_recall_fails_closed_for_independent_owner_and_facet_version_drift() {
 }
 
 #[test]
-fn facet_recall_reports_verified_zero_hit_when_query_posting_is_absent_from_manifest() {
+fn facet_recall_reports_fail_closed_zero_hit_when_query_posting_is_absent_from_manifest() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform, profile);
@@ -793,9 +793,14 @@ fn facet_recall_reports_verified_zero_hit_when_query_posting_is_absent_from_mani
     assert_eq!(report.facet_index_report.posting_doc_read_count, 0);
     assert_eq!(report.facet_index_report.owner_key_lookup_count, 0);
     assert_eq!(report.facet_index_report.owner_doc_read_count, 0);
-    assert!(report.facet_index_report.used);
-    assert!(!report.facet_index_report.report_only);
-    assert!(report.facet_index_report.manifest_integrity_verified);
+    assert!(!report.facet_index_report.used);
+    assert!(report.facet_index_report.report_only);
+    assert!(!report.facet_index_report.manifest_integrity_verified);
+    assert!(report
+        .facet_index_report
+        .failures
+        .iter()
+        .any(|failure| failure == "memory_facet_governed_owner_read_empty"));
     assert!(!report
         .facet_index_report
         .failures
@@ -817,7 +822,7 @@ fn facet_recall_fails_closed_when_manifest_posting_document_is_missing() {
     seed_governed_long_term(&source_runtime, vec![draft]);
     let manifest_key = memory_facet_manifest_key(
         source_runtime.memory_space_id(),
-        source_runtime.subject_id(),
+        source_runtime.memory_space_id(),
     )
     .expect("facet manifest key");
     let mut snapshot = source_platform
@@ -882,7 +887,7 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
     seed_governed_long_term(&runtime, vec![temporal_owner, text_owner]);
     let records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", runtime.subject_id())
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("typed temporal owners");
@@ -992,7 +997,7 @@ fn production_typed_entity_facet_hits_a_governed_owner() {
     seed_governed_long_term(&runtime, vec![draft]);
     let owner_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("typed entity owner")
@@ -1203,7 +1208,7 @@ fn eval_recall_reports_production_selection_render_loss_ledger() {
     );
     let entries = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(10)
         .expect("list multi-gold long-term memory");
@@ -1694,7 +1699,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
     seed_governed_long_term(&runtime, vec![anchor, manifest]);
     let records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list graph owners");
@@ -1774,7 +1779,7 @@ fn persistent_graph_write_expands_default_and_eval_recall_without_render_growth(
     assert!(graph_write.gate_failures.is_empty());
     assert!(platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store after graph write")
         .get(&manifest_id)
         .expect("read manifest owner after graph write")
@@ -2008,19 +2013,19 @@ fn persistent_graph_storage_is_isolated_by_memory_space_and_subject() {
     );
     let owner_a_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-a", runtime_a.subject_id())
+        .memory_space_long_term_memory_read_store("space:owner-a")
         .expect("scoped long-term read store")
         .list(10)
         .expect("owner-a graph owner records");
     let owner_b_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-a", runtime_b.subject_id())
+        .memory_space_long_term_memory_read_store("space:owner-a")
         .expect("subject-b scoped long-term read store")
         .list(10)
         .expect("owner-b graph owner records");
     let owner_c_records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-c", runtime_c.subject_id())
+        .memory_space_long_term_memory_read_store("space:owner-c")
         .expect("scoped long-term read store")
         .list(10)
         .expect("owner-c graph owner records");
@@ -2192,7 +2197,7 @@ fn eval_recall_reports_w41_diagnostics_without_expanding_prompt_pool() {
     seed_governed_long_term(&runtime, vec![anchor, manifest]);
     let records = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list graph owners");
@@ -2563,7 +2568,7 @@ fn eval_recall_uses_wider_hybrid_graph_anchor_pool_without_render_growth() {
     let runtime = test_runtime(platform.clone(), support::host_test_profile());
     let store = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term read store");
 
     let topics = [
@@ -2999,7 +3004,7 @@ fn facet_recall_expands_graph_anchor_pool_without_render_growth() {
 }
 
 #[test]
-fn facet_recall_respects_privacy_scope_and_profile_budget() {
+fn facet_recall_respects_memory_space_shared_owner_and_profile_budget() {
     let profile = support::host_test_profile();
     let mut budget = empty_store_platform(profile).runtime_budget();
     budget.facet_recall_budget.max_facet_anchor_candidates = 1;
@@ -3104,24 +3109,30 @@ fn facet_recall_respects_privacy_scope_and_profile_budget() {
         })
         .expect("beta eval recall");
 
-    assert!(!beta.facet_index_report.used);
-    assert!(beta
+    assert!(
+        beta.facet_index_report.used,
+        "{:#?}",
+        beta.facet_index_report
+    );
+    assert!(!beta
         .facet_index_report
         .failures
         .iter()
         .any(|failure| failure == "memory_facet_index_not_loaded"));
+    assert!(beta.facet_index_report.exact_facet_candidate_ids.len() <= 1);
+    assert!(beta.facet_index_report.expanded_facet_candidate_ids.len() <= 1);
     assert_eq!(
-        beta.facet_index_report.exact_facet_candidate_ids,
-        Vec::<String>::new()
+        beta.eval_candidate_pool
+            .iter()
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        alpha
+            .eval_candidate_pool
+            .iter()
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect::<BTreeSet<_>>()
     );
-    assert_eq!(
-        beta.facet_index_report.expanded_facet_candidate_ids,
-        Vec::<String>::new()
-    );
-    assert!(!beta.eval_candidate_pool.iter().any(|candidate| candidate
-        .evidence_refs
-        .iter()
-        .any(|evidence| evidence.starts_with("external_eval:facet-budget-alpha"))));
+    assert!(beta.privacy_report.passed, "{:#?}", beta.privacy_report);
 }
 
 #[test]
@@ -3815,7 +3826,7 @@ fn zero_gold_is_typed_not_applicable_without_ablation_blockers() {
 }
 
 #[test]
-fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
+fn facet_recall_exposes_memory_space_shared_fact_without_privacy_failure() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let alpha_runtime = test_runtime_with_scope_and_subject(
@@ -3833,7 +3844,7 @@ fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![long_term_draft(
                     "facet/hidden/alpha-only",
-                    "Alpha-only hidden metadata must stay out of beta facet recall.",
+                    "Memory-space shared evidence must remain visible across mounted subjects.",
                     "external_eval:facet-hidden-alpha",
                 )],
                 deletes: Vec::new(),
@@ -3868,25 +3879,23 @@ fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
         })
         .expect("beta eval recall");
 
-    assert!(!beta.facet_index_report.used);
-    assert!(beta
+    assert!(
+        beta.facet_index_report.used,
+        "{:#?}",
+        beta.facet_index_report
+    );
+    assert!(!beta
         .facet_index_report
         .failures
         .iter()
         .any(|failure| failure == "memory_facet_index_not_loaded"));
-    assert_eq!(
-        beta.facet_index_report.exact_facet_candidate_ids,
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        beta.facet_index_report.expanded_facet_candidate_ids,
-        Vec::<String>::new()
-    );
-    assert!(!beta.rank_fusion_report.used);
-    assert!(!beta.coverage_selection_report.used);
+    assert_eq!(beta.eval_candidate_pool.len(), 1, "{beta:#?}");
+    assert!(beta.rank_fusion_report.used);
+    assert!(beta.coverage_selection_report.used);
+    assert!(beta.privacy_report.passed, "{:#?}", beta.privacy_report);
     assert_eq!(beta.ablation_report.method, "sdk_eval_recall_off_run_v1");
     assert!(
-        !beta.ablation_report.delivery_contribution_proven,
+        beta.ablation_report.delivery_contribution_proven,
         "{:#?}",
         beta.ablation_report
     );
@@ -3903,7 +3912,7 @@ fn facet_recall_blocks_cross_subject_expanded_metadata_leakage() {
 }
 
 #[test]
-fn delegated_actor_is_not_added_to_shared_memory_owner_subjects() {
+fn delegated_actor_attribution_preserves_memory_space_shared_fact_visibility() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let actor_subject_id = default_agent_subject_id("agent-actor");
@@ -3915,13 +3924,32 @@ fn delegated_actor_is_not_added_to_shared_memory_owner_subjects() {
         &actor_subject_id,
         "delegated-write",
     );
-    seed_governed_long_term(
-        &delegated_runtime,
-        vec![long_term_draft(
-            "delegated owner evidence",
-            "Delegated writes remain owned by the mounted subject, not the acting subject.",
-            "external_eval:delegated-owner",
-        )],
+    let write = delegated_runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: bm_sdk::ParsedLongTermMemoryExtraction {
+                upserts: vec![long_term_draft(
+                    "delegated owner evidence",
+                    "Delegated shared facts remain governed by the memory space while preserving actor attribution.",
+                    "external_eval:delegated-owner",
+                )],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed delegated shared fact");
+    let governance = write
+        .shared_fact_governance
+        .expect("delegated shared fact governance");
+    assert_eq!(governance.owner_layer, "memory_space");
+    assert_eq!(
+        governance.origin_subject_id.as_deref(),
+        Some(mounted_subject_id.as_str())
+    );
+    assert_eq!(
+        governance.actor_subject_id.as_deref(),
+        Some(actor_subject_id.as_str())
     );
 
     let mounted_runtime = test_runtime_with_scope_and_subject(
@@ -3961,12 +3989,19 @@ fn delegated_actor_is_not_added_to_shared_memory_owner_subjects() {
         .expect("actor subject recall");
 
     assert!(!mounted.delivery_report.rendered_capsules.is_empty());
-    assert!(actor.delivery_report.rendered_capsules.is_empty());
-    assert!(actor
-        .working
-        .long_term_memory_text
-        .as_deref()
-        .is_none_or(|text| !text.contains("Delegated writes remain owned")));
+    assert!(!actor.delivery_report.rendered_capsules.is_empty());
+    assert_eq!(
+        actor.delivery_report.rendered_capsules[0].owner_ref,
+        mounted.delivery_report.rendered_capsules[0].owner_ref
+    );
+    assert_eq!(
+        actor.delivery_report.rendered_capsules[0].content,
+        mounted.delivery_report.rendered_capsules[0].content
+    );
+    assert_eq!(
+        actor.delivery_report.rendered_capsules[0].canonical_evidence_groups,
+        mounted.delivery_report.rendered_capsules[0].canonical_evidence_groups
+    );
 }
 
 #[test]

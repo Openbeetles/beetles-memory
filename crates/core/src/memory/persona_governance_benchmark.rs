@@ -39,6 +39,7 @@ pub fn run_persona_governance_replay_case(
 ) -> PersonaGovernanceReplayResult {
     let evidence = derive_recent_persona_evidence(&case.recent_turns, 12);
     let inspection = inspect_personality_governance(PersonalityGovernanceInspectionInput {
+        mounted_subject_id: "agent:persona-governance-benchmark",
         channel: case.channel,
         chat_id: case.chat_id,
         now_secs: case.now_secs,

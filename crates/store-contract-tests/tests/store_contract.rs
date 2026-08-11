@@ -18,12 +18,11 @@ fn scoped_long_term_store_isolates_identical_logical_owners_by_memory_space() {
         .unwrap(),
     )
     .unwrap();
-    let mounted_subject_id = platform.config().event_scope().subject_id.as_str();
     let space_a = platform
-        .scoped_long_term_memory_read_store("space:a", mounted_subject_id)
+        .memory_space_long_term_memory_read_store("space:a")
         .expect("space:a store");
     let space_b = platform
-        .scoped_long_term_memory_read_store("space:b", mounted_subject_id)
+        .memory_space_long_term_memory_read_store("space:b")
         .expect("space:b store");
     let draft = |content: &str| LongTermMemoryDraft {
         kind: LongTermMemoryKind::Project,
@@ -155,10 +154,7 @@ fn in_memory_store_platform_covers_core_runtime_paths() {
     };
     seed_scoped_long_term(&platform, "space:test", &long_term_draft, 100);
     let long_term = platform
-        .scoped_long_term_memory_read_store(
-            "space:test",
-            &platform.config().event_scope().subject_id,
-        )
+        .memory_space_long_term_memory_read_store("space:test")
         .expect("scoped long-term read store");
     assert_eq!(long_term.count().unwrap(), 1);
     assert_eq!(

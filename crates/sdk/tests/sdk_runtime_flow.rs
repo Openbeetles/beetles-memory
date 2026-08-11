@@ -5,18 +5,17 @@ mod support;
 use std::sync::Arc;
 
 use bm_core::memory::{
-    board_subject_scope_id, private_garden_scope_id, GovernedMemoryOwnerPlane,
-    GovernedMemoryOwnerRef, GovernedOwnerRevisionRef, InnerLife, PrivateDocEntry,
-    PrivateDocWorkspace, SelfContinuity, SelfModel,
+    GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef, InnerLife,
+    PrivateDocEntry, PrivateDocWorkspace, SelfContinuity, SelfModel,
 };
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    IngressKind, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
-    MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest, NoopMemoryAuditSink,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillPremiseObservation, RuntimeSkillReuseOutcome,
-    RuntimeSkillWrite, RuntimeSkillWriteSource,
+    default_agent_subject_id, IngressKind, MemoryAuditSink, MemoryClock, MemoryIdentity,
+    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest,
+    NoopMemoryAuditSink, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillPremiseObservation,
+    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 
 use support::{
@@ -1046,11 +1045,12 @@ fn runtime_maintain_and_inspect_return_structured_reports() {
 #[test]
 fn runtime_projection_includes_private_planes_when_policy_allows_it() {
     let platform = empty_store_platform(support::host_test_profile());
+    let mounted_subject_id = default_agent_subject_id("agent-main");
     platform
         .replay_harness()
         .private_doc_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &PrivateDocWorkspace {
                 inner_journal: Some(PrivateDocEntry {
                     content: "private workspace release note".to_string(),
@@ -1065,7 +1065,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
         .replay_harness()
         .private_garden_store()
         .write(
-            private_garden_scope_id(),
+            &mounted_subject_id,
             "diary/release.md",
             "private garden release note",
             1_800_000_000,
@@ -1075,7 +1075,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
         .replay_harness()
         .self_model_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &SelfModel {
                 continuity_anchor: "private self model release anchor".to_string(),
                 attachment_style: "steady".to_string(),
@@ -1184,11 +1184,12 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
 #[test]
 fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
     let platform = empty_store_platform(support::host_test_profile());
+    let mounted_subject_id = default_agent_subject_id("agent-main");
     platform
         .replay_harness()
         .self_model_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &SelfModel {
                 continuity_anchor: "denied private self model anchor".to_string(),
                 private_notes: "denied private self model note".to_string(),
@@ -1200,7 +1201,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         .replay_harness()
         .self_continuity_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &SelfContinuity {
                 wake_anchor: "denied private self continuity anchor".to_string(),
                 current_self_state: "denied private self continuity state".to_string(),
@@ -1212,7 +1213,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         .replay_harness()
         .inner_life_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &InnerLife {
                 internal_monologue: "denied private inner monologue".to_string(),
                 private_journal: "denied private inner journal".to_string(),
@@ -1224,7 +1225,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         .replay_harness()
         .private_doc_store()
         .set(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &PrivateDocWorkspace {
                 inner_journal: Some(PrivateDocEntry {
                     content: "denied private workspace note".to_string(),
@@ -1239,7 +1240,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
         .replay_harness()
         .private_garden_store()
         .write(
-            private_garden_scope_id(),
+            &mounted_subject_id,
             "diary/denied.md",
             "denied private garden note",
             1_800_000_000,

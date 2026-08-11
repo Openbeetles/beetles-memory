@@ -106,6 +106,7 @@ pub trait ExecutionStateStore: Send + Sync {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecutionStateRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -368,7 +369,11 @@ pub(crate) fn run_execution_state_refresh_with_state(
     };
     let recent_observation = ctx
         .turn_ledger_store
-        .get(&relationship_scope_id(input.channel, input.chat_id))?
+        .get(&relationship_scope_id(
+            input.mounted_subject_id,
+            input.channel,
+            input.chat_id,
+        ))?
         .and_then(|ledger| ledger.observation);
     let refresh_input = build_execution_state_refresh_input(
         existing_state.as_ref(),
@@ -1154,6 +1159,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    const TEST_SUBJECT_ID: &str = "agent:test";
+
     #[test]
     fn parse_execution_state_response_coerces_nested_fields() {
         let raw = json!({
@@ -1656,6 +1663,7 @@ mod tests {
                 turn_ledger_store: &turn_ledger_store,
             },
             ExecutionStateRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1708,6 +1716,7 @@ mod tests {
                 turn_ledger_store: &turn_ledger_store,
             },
             ExecutionStateRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1768,6 +1777,7 @@ mod tests {
                 turn_ledger_store: &turn_ledger_store,
             },
             ExecutionStateRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1826,6 +1836,7 @@ mod tests {
                 turn_ledger_store: &turn_ledger_store,
             },
             ExecutionStateRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -2059,7 +2070,7 @@ mod tests {
         let turn_ledger_store = StubTurnLedgerStore::default();
         turn_ledger_store
             .set(
-                &relationship_scope_id("chat_channel", "chat-1"),
+                &relationship_scope_id(TEST_SUBJECT_ID, "chat_channel", "chat-1"),
                 &TurnLedger {
                     req_id: "run-execution".to_string(),
                     observation: Some(TurnObservationLedger {
@@ -2103,6 +2114,7 @@ mod tests {
                 turn_ledger_store: &turn_ledger_store,
             },
             ExecutionStateRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "chat-1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",

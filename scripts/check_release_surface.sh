@@ -60,7 +60,7 @@ required_docs=(
   "docs/zh-CN/release-checklist.md"
   "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
-  "dev-docs/production-hardening-audit-plan.md"
+  "dev-docs/archive/production-hardening-audit-plan.md"
   "dev-docs/release-surface-plan.md"
   "dev-docs/agent-tool-experience-registry-plan.md"
 )
@@ -206,7 +206,7 @@ done
 if rg -n \
   '当前仍是 whole-space snapshot|当前迁移粒度仍是 whole-space snapshot|migration apply 仍需真实 subject key / scope remap|facet_migration_remap_required_fails_closed|memory_space_migration_fails_closed_when_snapshot_contains_facet_index' \
   dev-docs/README.md \
-  dev-docs/sdk-host-integration-readiness-plan.md \
+  dev-docs/archive/sdk-host-integration-readiness-plan.md \
   dev-docs/governed-memory-facet-index-plan.md \
   dev-docs/multi-subject-memory-space-plan.md \
   scripts/check_memory_write_transaction_contract.sh; then

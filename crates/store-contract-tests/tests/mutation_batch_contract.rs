@@ -61,7 +61,7 @@ fn transaction_budget(event_log_max_items: usize) -> StoreRuntimeBudget {
 fn typed_control_revision(
     revision_id: &str,
     record_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
 ) -> LongTermMemoryControlRevision {
     let owner_ref =
         GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, record_id.to_string());
@@ -78,7 +78,7 @@ fn typed_control_revision(
         schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
         revision_id: revision_id.to_string(),
         memory_space_id: "system".to_string(),
-        mounted_subject_id: mounted_subject_id.to_string(),
+        factual_owner_id: factual_owner_id.to_string(),
         operation: LongTermControlOperation::Correct,
         invalidation_reason_code: None,
         transition,
@@ -155,7 +155,7 @@ fn graph_owner() -> LongTermMemoryEntry {
 
 fn typed_long_term_scope_docs(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     owners: Vec<LongTermMemoryEntry>,
 ) -> Vec<StoreSnapshotJsonDoc> {
     let lease = LongTermVersionRetentionLease::try_new(1).expect("retention lease");
@@ -167,7 +167,7 @@ fn typed_long_term_scope_docs(
         let facet = build_long_term_memory_facet_index_doc(
             &owner,
             memory_space_id,
-            vec![mounted_subject_id.to_string()],
+            vec![factual_owner_id.to_string()],
             owner.owner_revision,
         )
         .expect("build typed long-term facet owner");
@@ -177,7 +177,7 @@ fn typed_long_term_scope_docs(
             facet_index_revision: facet.facet_index_revision,
         };
         for posting_key in facet
-            .posting_keys_for_subject(mounted_subject_id)
+            .posting_keys_for_subject(factual_owner_id)
             .expect("build typed long-term facet postings")
         {
             posting_owners
@@ -190,7 +190,7 @@ fn typed_long_term_scope_docs(
         let creation = bind_long_term_version_creation(
             LongTermMemoryVersionCreateIntent {
                 memory_space_id: memory_space_id.to_string(),
-                mounted_subject_id: mounted_subject_id.to_string(),
+                factual_owner_id: factual_owner_id.to_string(),
                 projection: owner,
                 governed_evidence_refs: Vec::new(),
                 requested_at,
@@ -203,7 +203,7 @@ fn typed_long_term_scope_docs(
     }
     let root = LongTermMemoryVersionScopeManifest::build(
         memory_space_id,
-        mounted_subject_id,
+        factual_owner_id,
         1,
         &heads,
         &materials,
@@ -219,7 +219,7 @@ fn typed_long_term_scope_docs(
             MemoryFacetPostingDoc {
                 schema_version: MEMORY_FACET_SCHEMA_VERSION,
                 memory_space_id: memory_space_id.to_string(),
-                subject_id: mounted_subject_id.to_string(),
+                subject_id: factual_owner_id.to_string(),
                 posting_key,
                 revision: 1,
                 owner_versions,
@@ -238,7 +238,7 @@ fn typed_long_term_scope_docs(
     let facet_manifest = MemoryFacetIndexManifest {
         schema_version: MEMORY_FACET_SCHEMA_VERSION,
         memory_space_id: memory_space_id.to_string(),
-        subject_id: mounted_subject_id.to_string(),
+        subject_id: factual_owner_id.to_string(),
         owner_doc_count: facets.len(),
         posting_doc_count: postings.len(),
         revision: 1,
@@ -259,7 +259,7 @@ fn typed_long_term_scope_docs(
             namespace: LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
             key: long_term_version_material_key(
                 memory_space_id,
-                mounted_subject_id,
+                factual_owner_id,
                 &material.owner_ref,
                 material.owner_revision,
             )
@@ -270,7 +270,7 @@ fn typed_long_term_scope_docs(
     docs.extend(heads.iter().map(|head| {
         StoreSnapshotJsonDoc {
             namespace: LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
-            key: long_term_version_head_key(memory_space_id, mounted_subject_id, &head.owner_ref)
+            key: long_term_version_head_key(memory_space_id, factual_owner_id, &head.owner_ref)
                 .expect("head key"),
             value: serde_json::to_value(head).expect("serialize head"),
         }
@@ -285,7 +285,7 @@ fn typed_long_term_scope_docs(
             namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
             key: scoped_memory_facet_owner_storage_key(
                 memory_space_id,
-                mounted_subject_id,
+                factual_owner_id,
                 &facet.owner_ref,
             )
             .expect("facet owner key"),
@@ -299,7 +299,7 @@ fn typed_long_term_scope_docs(
     }));
     docs.push(StoreSnapshotJsonDoc {
         namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-        key: memory_facet_manifest_key(memory_space_id, mounted_subject_id)
+        key: memory_facet_manifest_key(memory_space_id, factual_owner_id)
             .expect("facet manifest key"),
         value: serde_json::to_value(facet_manifest).expect("serialize facet manifest"),
     });
@@ -308,10 +308,10 @@ fn typed_long_term_scope_docs(
 
 fn typed_long_term_scope_docs_without_facets(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     owners: Vec<LongTermMemoryEntry>,
 ) -> Vec<StoreSnapshotJsonDoc> {
-    typed_long_term_scope_docs(memory_space_id, mounted_subject_id, owners)
+    typed_long_term_scope_docs(memory_space_id, factual_owner_id, owners)
         .into_iter()
         .filter(|doc| {
             doc.namespace != MEMORY_FACET_INDEX_NAMESPACE
@@ -1150,11 +1150,9 @@ fn typed_graph_transaction_rejects_a_cross_scope_document_delete_atomically() {
         "system",
         vec![graph_owner_for("owner:graph")],
     ));
-    snapshot.json_docs.extend(typed_long_term_scope_docs(
-        "space:b",
-        "subject:b",
-        vec![graph_owner_for("owner:graph:b")],
-    ));
+    let scope_b_owner_docs =
+        typed_long_term_scope_docs("space:b", "space:b", vec![graph_owner_for("owner:graph:b")]);
+    snapshot.json_docs.extend(scope_b_owner_docs.clone());
     platform
         .import_store_snapshot(&snapshot)
         .expect("seed graph owners");
@@ -1182,10 +1180,18 @@ fn typed_graph_transaction_rejects_a_cross_scope_document_delete_atomically() {
             .with_subject("subject:b"),
         mutations: scope_b_mutations.clone(),
     };
+    let mut scope_b_preconditions = absent_json_preconditions(&scope_b_batch);
+    scope_b_preconditions.extend(scope_b_owner_docs.iter().map(|doc| {
+        StoreJsonPrecondition::Exact {
+            namespace: doc.namespace.clone(),
+            key: doc.key.clone(),
+            value: doc.value.clone(),
+        }
+    }));
     platform
         .commit_governed_memory_transaction_with_preconditions(
             scope_b_batch.clone(),
-            &absent_json_preconditions(&scope_b_batch),
+            &scope_b_preconditions,
         )
         .expect("seed scope B graph");
 
@@ -2593,7 +2599,7 @@ fn long_term_control_namespaces_require_read_set_preconditions() {
                         last_source_revision: Some(1),
                         previous_digest: "a".repeat(64),
                         reason: "precondition contract".to_string(),
-                        owner_subject_id: "system".to_string(),
+                        factual_owner_id: "system".to_string(),
                         actor_subject_id: None,
                         memory_space_id: "system".to_string(),
                         created_at: 1,
@@ -2743,7 +2749,7 @@ fn governed_transaction_rejects_mismatched_control_audit_binding() {
         vec![ControlEffectRef::Revision {
             revision_id: "other-revision".to_string(),
             transition: other_revision.transition,
-            mounted_subject_id: "system".to_string(),
+            factual_owner_id: "system".to_string(),
         }],
         "test",
         "system".to_string(),

@@ -6,19 +6,13 @@ use bm_sdk::{
     MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermTarget,
     MemoryPrivacyClass, MemoryRuntime, MemoryScope, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, ProfileId, RuntimeLifecycleModeInput, SubjectRegistry,
+    ParsedLongTermMemoryExtraction, RuntimeLifecycleModeInput, SubjectRegistry,
     SubjectRelationshipGraph, SubjectScopedRuntime,
 };
 
 #[test]
-fn desktop_embedded_detail_returns_scoped_human_tombstone_by_record_id() {
+fn public_detail_returns_memory_space_scoped_human_tombstone_by_record_id() {
     let profile = support::host_test_profile();
-    assert!(matches!(
-        profile,
-        ProfileId::DesktopMacosEmbeddedSdk
-            | ProfileId::DesktopLinuxEmbeddedSdk
-            | ProfileId::DesktopWindowsEmbeddedSdk
-    ));
     let platform = support::empty_store_platform(profile);
     let human_subject_id = primary_human_subject_id("owner-default");
     let subject_registry =
@@ -118,7 +112,7 @@ fn desktop_embedded_detail_returns_scoped_human_tombstone_by_record_id() {
             tombstone.actor_subject_id.as_deref(),
             Some(human_subject_id.as_str())
         );
-        assert_eq!(tombstone.owner_subject_id, human_subject_id);
+        assert_eq!(tombstone.factual_owner_id, runtime.memory_space_id());
         assert_eq!(tombstone.memory_space_id, runtime.memory_space_id());
     }
 
@@ -130,15 +124,21 @@ fn desktop_embedded_detail_returns_scoped_human_tombstone_by_record_id() {
         "other-subject-control",
         &other_subject,
     );
-    let cross_subject = other_subject_runtime
+    let same_space_other_subject = other_subject_runtime
         .get_long_term_memory(MemoryLongTermDetailRequest {
             target: MemoryLongTermTarget::RecordId(record_id.clone()),
             view: MemoryLongTermControlView::Operator,
         })
-        .expect("cross-subject detail remains a safe empty report");
-    assert!(cross_subject.record.is_none());
-    assert!(cross_subject.revisions.is_empty());
-    assert!(cross_subject.tombstone.is_none());
+        .expect("same MemorySpace subject reads the shared governed tombstone");
+    assert!(same_space_other_subject.record.is_none());
+    assert!(!same_space_other_subject.revisions.is_empty());
+    assert_eq!(
+        same_space_other_subject
+            .tombstone
+            .expect("same-space shared tombstone")
+            .record_id,
+        record_id
+    );
 
     let other_owner_subject = default_agent_subject_id("agent-other");
     let other_space_runtime = support::test_runtime_with_identity_scope_and_subject(

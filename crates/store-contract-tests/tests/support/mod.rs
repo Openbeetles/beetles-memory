@@ -216,10 +216,7 @@ pub fn seed_scoped_long_term(
     assert!(report.accepted);
     assert_eq!(report.changed, 1);
     let entries = platform
-        .scoped_long_term_memory_read_store(
-            memory_space_id,
-            &platform.config().event_scope().subject_id,
-        )
+        .memory_space_long_term_memory_read_store(memory_space_id)
         .expect("scoped long-term read store")
         .list(usize::MAX)
         .expect("list seeded long-term owners");

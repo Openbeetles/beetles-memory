@@ -12,7 +12,11 @@ use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
+mod artifact_publisher;
+mod execution_plan;
+mod operator;
 mod policy_anchor;
+mod runner_execution;
 mod source_publisher;
 mod source_release;
 mod trusted_execution;
@@ -29,6 +33,214 @@ use super::p8_semantic::{
     P8TaskKind, P8TemporalCorpusSlice,
 };
 use bm_core::feature_gate::ProfileId;
+
+const P8_FIXTURE_RUNNER_SESSION_ARG: &str = "--p8-quality-fixture-runner-session";
+const P8_FIXTURE_OPERATOR_SESSION_ARG: &str = "--p8-quality-fixture-operator-session";
+
+/// Mints the one-shot fixture generation bytes owned by the caller acting as supervisor.
+/// The runner accepts only these immutable bytes and never selects its own run identity.
+#[doc(hidden)]
+pub fn mint_fixture_supervisor_run_generation_binding(
+    supervisor_session_receipt: &[u8],
+    generation_ordinal: u64,
+    fresh_nonce: [u8; 32],
+) -> std::io::Result<Vec<u8>> {
+    if supervisor_session_receipt.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "fixture supervisor session receipt is empty",
+        ));
+    }
+    let generation = execution_plan::P8SupervisorOwnedRunGeneration::mint_for_supervisor(
+        P8QualityDigest::derive(
+            "p8_fixture_supervisor_session_receipt_v1",
+            &supervisor_session_receipt,
+        ),
+        generation_ordinal,
+        fresh_nonce,
+    )
+    .map_err(|failure| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{failure:?}"))
+    })?;
+    generation
+        .serialized_binding()
+        .map_err(|_| std::io::Error::other("serialize fixture supervisor generation"))
+}
+
+/// Runs the local fixture-only runner entry. This path is deliberately outside trusted release
+/// evidence: it accepts explicit local paths, always emits FixtureContract artifacts, and can
+/// never mint a trusted lease or release-eligible decision.
+#[doc(hidden)]
+pub fn try_run_fixture_runner_session_entry() -> Option<std::io::Result<()>> {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let (root, experiment_path, generation_path, stage_name, final_name, threshold_path) =
+        match args.as_slice() {
+            [arg, root, experiment_path, generation_path, stage_name, final_name]
+                if arg == std::ffi::OsStr::new(P8_FIXTURE_RUNNER_SESSION_ARG) =>
+            {
+                (
+                    root,
+                    experiment_path,
+                    generation_path,
+                    stage_name,
+                    final_name,
+                    None,
+                )
+            }
+            [arg, root, experiment_path, generation_path, stage_name, final_name, threshold_path]
+                if arg == std::ffi::OsStr::new(P8_FIXTURE_RUNNER_SESSION_ARG) =>
+            {
+                (
+                    root,
+                    experiment_path,
+                    generation_path,
+                    stage_name,
+                    final_name,
+                    Some(threshold_path),
+                )
+            }
+            [arg, ..] if arg == std::ffi::OsStr::new(P8_FIXTURE_RUNNER_SESSION_ARG) => {
+                return Some(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "P8 fixture runner session arguments are not exact",
+                )));
+            }
+            _ => return None,
+        };
+    Some(run_fixture_runner_session(
+        PathBuf::from(root),
+        PathBuf::from(experiment_path),
+        PathBuf::from(generation_path),
+        stage_name,
+        final_name,
+        threshold_path.map(PathBuf::from),
+    ))
+}
+
+/// Runs the local fixture-only independent operator entry and atomically publishes its report.
+#[doc(hidden)]
+pub fn try_run_fixture_operator_session_entry() -> Option<std::io::Result<()>> {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let (root, runner_final_name, operator_stage_name, operator_final_name) = match args.as_slice()
+    {
+        [arg, root, runner_final_name, operator_stage_name, operator_final_name]
+            if arg == std::ffi::OsStr::new(P8_FIXTURE_OPERATOR_SESSION_ARG) =>
+        {
+            (
+                root,
+                runner_final_name,
+                operator_stage_name,
+                operator_final_name,
+            )
+        }
+        [arg, ..] if arg == std::ffi::OsStr::new(P8_FIXTURE_OPERATOR_SESSION_ARG) => {
+            return Some(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "P8 fixture operator session arguments are not exact",
+            )));
+        }
+        _ => return None,
+    };
+    Some(run_fixture_operator_session(
+        PathBuf::from(root),
+        runner_final_name,
+        operator_stage_name,
+        operator_final_name,
+    ))
+}
+
+fn run_fixture_runner_session(
+    root: PathBuf,
+    experiment_path: PathBuf,
+    generation_path: PathBuf,
+    stage_name: &std::ffi::OsStr,
+    final_name: &std::ffi::OsStr,
+    threshold_path: Option<PathBuf>,
+) -> std::io::Result<()> {
+    let stage_name = stage_name
+        .to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid stage"))?;
+    let final_name = final_name
+        .to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid final"))?;
+    let root = std::fs::canonicalize(root)?;
+    let retained = crate::retained_artifact_fs::RetainedArtifactDirectory::open_root(&root)?;
+    let experiment_bytes = std::fs::read(experiment_path)?;
+    reject_p8_quality_raw_sentinels(&experiment_bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid experiment"))?;
+    let experiment: P8QualityExperimentPlanV1 = deserialize_p8_quality_artifact(&experiment_bytes)
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid experiment plan")
+        })?;
+    if !experiment.validate_contract().is_empty()
+        || experiment.execution_mode != P8ExecutionMode::FixtureContract
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "P8 fixture runner requires a valid FixtureContract experiment",
+        ));
+    }
+    let dataset = execution_plan::admit_zero_origin_tiny_dataset_manifest(include_bytes!(
+        "../../fixtures/p8-quality-tiny/manifest.json"
+    ))
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid tiny dataset"))?;
+    let source_questions = execution_plan::admit_zero_origin_tiny_dataset_questions(
+        include_bytes!("../../fixtures/p8-quality-tiny/questions.jsonl"),
+        &dataset,
+    )
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid tiny questions"))?;
+    let generation_bytes = std::fs::read(generation_path)?;
+    let generation =
+        execution_plan::P8SupervisorOwnedRunGeneration::admit_supervisor_binding(&generation_bytes)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid supervisor run generation",
+                )
+            })?;
+    let execution =
+        execution_plan::P8QualityExecutionPlanV1::derive(&experiment, &dataset, generation)
+            .map_err(|failures| std::io::Error::other(format!("{failures:?}")))?;
+    let receipts =
+        runner_execution::execute_real_fixture_receipt_set(&execution, &dataset, &source_questions)
+            .map_err(|failure| std::io::Error::other(format!("{failure:?}")))?;
+    let threshold_bytes = threshold_path.map(std::fs::read).transpose()?;
+    let files = runner_execution::build_real_fixture_runner_bundle_files(
+        &experiment,
+        &execution,
+        &dataset,
+        &receipts,
+        threshold_bytes.as_deref(),
+    )?;
+    artifact_publisher::publish_quality_runner_bundle_no_replace(
+        &retained, stage_name, final_name, &execution, files,
+    )?;
+    println!("P8_FIXTURE_RUNNER_OK");
+    Ok(())
+}
+
+fn run_fixture_operator_session(
+    root: PathBuf,
+    runner_final_name: &std::ffi::OsStr,
+    operator_stage_name: &std::ffi::OsStr,
+    operator_final_name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    fn name(value: &std::ffi::OsStr) -> std::io::Result<&str> {
+        value.to_str().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid bundle name")
+        })
+    }
+    let root = std::fs::canonicalize(root)?;
+    let retained = crate::retained_artifact_fs::RetainedArtifactDirectory::open_root(&root)?;
+    operator::publish_fixture_operator_report_from_retained_runner_bundle(
+        &retained,
+        name(runner_final_name)?,
+        name(operator_stage_name)?,
+        name(operator_final_name)?,
+    )?;
+    println!("P8_FIXTURE_OPERATOR_OK");
+    Ok(())
+}
 
 #[doc(hidden)]
 pub fn try_run_trusted_supervisor_session_entry() -> Option<std::io::Result<()>> {
@@ -241,7 +453,7 @@ const P8_POST_IMAGE_VALIDATOR_FINGERPRINT: &str = env!("BM_P8_POST_IMAGE_VALIDAT
 const P8_REPLAY_VALIDATOR_FINGERPRINT: &str = env!("BM_P8_VERIFIER_SOURCE_FINGERPRINT");
 const P8_VALIDATOR_SOURCE_ATTESTATION: &str = env!("BM_P8_VALIDATOR_SOURCE_ATTESTATION");
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum P8QualityContractFailure {
     SchemaMismatch,
     DigestInvalid,
@@ -278,6 +490,10 @@ pub(crate) enum P8QualityContractFailure {
     NonceMismatch,
     CommitPermitMissing,
     PublicationStateMismatch,
+    ReceiptChainMismatch,
+    JoinOrderMismatch,
+    RawMaterialPresent,
+    ArtifactSetMismatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -561,6 +777,31 @@ p8_quality_domain_ref!(
     P8QuestionLatencyReceiptRef,
     "p8_question_latency_receipt:sha256:",
     "p8_question_latency_receipt_v1"
+);
+p8_quality_domain_ref!(
+    P8ClosedProcessReceiptRef,
+    "p8_closed_process_receipt:sha256:",
+    "p8_closed_process_receipt_v1"
+);
+p8_quality_domain_ref!(
+    P8ReaderExecutionReceiptRef,
+    "p8_reader_execution_receipt:sha256:",
+    "p8_reader_execution_receipt_v1"
+);
+p8_quality_domain_ref!(
+    P8QualityShardManifestRef,
+    "p8_quality_shard_manifest:sha256:",
+    "p8_quality_shard_manifest_v1"
+);
+p8_quality_domain_ref!(
+    P8QualityArtifactBundleRef,
+    "p8_quality_artifact_bundle:sha256:",
+    "p8_quality_artifact_bundle_v1"
+);
+p8_quality_domain_ref!(
+    P8CompletedTrialReceiptRef,
+    "p8_completed_trial_receipt:sha256:",
+    "p8_completed_trial_receipt_v1"
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

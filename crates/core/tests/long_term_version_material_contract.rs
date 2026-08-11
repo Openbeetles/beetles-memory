@@ -22,7 +22,7 @@ use bm_core::memory::{
 };
 
 const MEMORY_SPACE_ID: &str = "space-1";
-const MOUNTED_SUBJECT_ID: &str = "subject-1";
+const FACTUAL_OWNER_ID: &str = "space-1";
 const OWNER_ID: &str = "state-1";
 
 fn owner_ref() -> GovernedMemoryOwnerRef {
@@ -50,7 +50,7 @@ fn material(
     let mut material = LongTermMemoryVersionMaterial {
         schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
         memory_space_id: MEMORY_SPACE_ID.into(),
-        mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+        factual_owner_id: FACTUAL_OWNER_ID.into(),
         owner_ref: owner_ref(),
         owner_revision,
         governed_content: LongTermMemoryGovernedContent {
@@ -114,7 +114,7 @@ fn control_revision(
         schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
         revision_id: revision_id.into(),
         memory_space_id: MEMORY_SPACE_ID.into(),
-        mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+        factual_owner_id: FACTUAL_OWNER_ID.into(),
         operation,
         invalidation_reason_code: None,
         transition,
@@ -133,6 +133,17 @@ fn control_revision(
         .expect("control revision digest");
     revision.validate_contract().expect("control revision");
     revision
+}
+
+#[test]
+fn shared_fact_material_rejects_a_subject_scoped_factual_owner() {
+    let mut invalid = material(1, 10, None, "shared fact");
+    invalid.factual_owner_id = "agent:alpha".to_string();
+    invalid.content_digest = invalid
+        .canonical_content_digest()
+        .expect("digest for invalid owner fixture");
+
+    assert!(!invalid.validate_contract().accepted);
 }
 
 fn exact_transition_binding(
@@ -173,7 +184,7 @@ fn head(
     LongTermMemoryHeadManifest {
         schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
         memory_space_id: MEMORY_SPACE_ID.into(),
-        mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+        factual_owner_id: FACTUAL_OWNER_ID.into(),
         owner_ref: owner_ref(),
         current_revision,
         retained_revision_digests: materials
@@ -251,7 +262,7 @@ fn historical_authority_binds_exact_scope_material_control_and_complete_lineage(
     let head = head(&materials, 2, None);
     let scope = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         7,
         std::slice::from_ref(&head),
         &materials,
@@ -370,7 +381,7 @@ fn historical_authority_rejects_privacy_drift_and_corrected_model_revival() {
     let privacy_head = head(&privacy_materials, 2, None);
     let privacy_scope = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         8,
         std::slice::from_ref(&privacy_head),
         &privacy_materials,
@@ -409,7 +420,7 @@ fn historical_authority_rejects_privacy_drift_and_corrected_model_revival() {
     let corrected_head = head(&corrected_materials, 2, None);
     let corrected_scope = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         9,
         std::slice::from_ref(&corrected_head),
         &corrected_materials,
@@ -512,7 +523,7 @@ fn governed_current_eligibility_is_derived_from_exact_long_term_owner_control() 
     let active_head = head(std::slice::from_ref(&active), 1, None);
     let active_scope = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         1,
         std::slice::from_ref(&active_head),
         std::slice::from_ref(&active),
@@ -592,7 +603,7 @@ fn governed_current_authority_accepts_exact_cross_owner_supersede_dependency() {
         schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
         revision_id: "supersede-state-1-r1".into(),
         memory_space_id: MEMORY_SPACE_ID.into(),
-        mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+        factual_owner_id: FACTUAL_OWNER_ID.into(),
         operation: LongTermControlOperation::Supersede,
         invalidation_reason_code: None,
         transition: transition.clone(),
@@ -626,7 +637,7 @@ fn governed_current_authority_accepts_exact_cross_owner_supersede_dependency() {
     let successor_head = LongTermMemoryHeadManifest {
         schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
         memory_space_id: MEMORY_SPACE_ID.into(),
-        mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+        factual_owner_id: FACTUAL_OWNER_ID.into(),
         owner_ref: successor.owner_ref.clone(),
         current_revision: 1,
         retained_revision_digests: vec![LongTermMemoryRetainedRevisionDigest {
@@ -638,7 +649,7 @@ fn governed_current_authority_accepts_exact_cross_owner_supersede_dependency() {
     };
     let scope = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         2,
         &[predecessor_head.clone(), successor_head.clone()],
         &[predecessor.clone(), successor.clone()],
@@ -984,7 +995,7 @@ fn scope_manifest_requires_exact_heads_materials_and_transitions() {
     let head = head(&[first.clone(), second.clone()], 2, None);
     let manifest = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         1,
         std::slice::from_ref(&head),
         &[first.clone(), second.clone()],
@@ -1024,7 +1035,7 @@ fn scope_manifest_rejects_an_extra_unreferenced_material() {
     let head = head(std::slice::from_ref(&retained), 1, None);
     let manifest = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         1,
         std::slice::from_ref(&head),
         std::slice::from_ref(&retained),
@@ -1071,7 +1082,7 @@ fn head_and_scope_manifest_enforce_profile_retention_bound() {
     );
     assert!(LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         1,
         std::slice::from_ref(&head),
         &[first, second],
@@ -1097,7 +1108,7 @@ fn scope_manifest_is_a_known_key_root_for_heads_and_existing_control_records() {
 
     let manifest = LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         1,
         std::slice::from_ref(&head),
         &[first, second],
@@ -1109,14 +1120,14 @@ fn scope_manifest_is_a_known_key_root_for_heads_and_existing_control_records() {
 
     assert_eq!(
         manifest.physical_key,
-        long_term_version_scope_manifest_key(MEMORY_SPACE_ID, MOUNTED_SUBJECT_ID)
+        long_term_version_scope_manifest_key(MEMORY_SPACE_ID, FACTUAL_OWNER_ID)
             .expect("scope manifest key")
     );
     assert_eq!(manifest.head_bindings.len(), 1);
     assert_eq!(manifest.head_bindings[0].owner_ref, owner_ref());
     assert_eq!(
         manifest.head_bindings[0].head_physical_key,
-        long_term_version_head_key(MEMORY_SPACE_ID, MOUNTED_SUBJECT_ID, &owner_ref())
+        long_term_version_head_key(MEMORY_SPACE_ID, FACTUAL_OWNER_ID, &owner_ref())
             .expect("head key")
     );
     assert_eq!(
@@ -1165,7 +1176,7 @@ fn scope_manifest_rejects_missing_or_extra_control_transition_binding() {
 
     assert!(LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         1,
         std::slice::from_ref(&head),
         &[first.clone(), second.clone()],
@@ -1184,7 +1195,7 @@ fn scope_manifest_rejects_missing_or_extra_control_transition_binding() {
     .expect("syntactically canonical extra binding");
     assert!(LongTermMemoryVersionScopeManifest::build(
         MEMORY_SPACE_ID,
-        MOUNTED_SUBJECT_ID,
+        FACTUAL_OWNER_ID,
         1,
         std::slice::from_ref(&head),
         &[first, second],
@@ -1196,18 +1207,17 @@ fn scope_manifest_rejects_missing_or_extra_control_transition_binding() {
 }
 
 #[test]
-fn long_term_version_keys_bind_space_subject_owner_and_revision() {
+fn long_term_version_keys_bind_space_factual_owner_and_revision() {
     let owner = owner_ref();
-    let material_1 = long_term_version_material_key(MEMORY_SPACE_ID, MOUNTED_SUBJECT_ID, &owner, 1)
-        .expect("key");
-    let material_2 = long_term_version_material_key(MEMORY_SPACE_ID, MOUNTED_SUBJECT_ID, &owner, 2)
-        .expect("key");
+    let material_1 =
+        long_term_version_material_key(MEMORY_SPACE_ID, FACTUAL_OWNER_ID, &owner, 1).expect("key");
+    let material_2 =
+        long_term_version_material_key(MEMORY_SPACE_ID, FACTUAL_OWNER_ID, &owner, 2).expect("key");
     let other_subject =
         long_term_version_material_key(MEMORY_SPACE_ID, "subject-2", &owner, 1).expect("key");
-    let head =
-        long_term_version_head_key(MEMORY_SPACE_ID, MOUNTED_SUBJECT_ID, &owner).expect("key");
+    let head = long_term_version_head_key(MEMORY_SPACE_ID, FACTUAL_OWNER_ID, &owner).expect("key");
     let scope =
-        long_term_version_scope_manifest_key(MEMORY_SPACE_ID, MOUNTED_SUBJECT_ID).expect("key");
+        long_term_version_scope_manifest_key(MEMORY_SPACE_ID, FACTUAL_OWNER_ID).expect("key");
     let other_scope =
         long_term_version_scope_manifest_key(MEMORY_SPACE_ID, "subject-2").expect("key");
     assert_ne!(material_1, material_2);

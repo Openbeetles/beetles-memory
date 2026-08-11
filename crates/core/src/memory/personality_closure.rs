@@ -130,6 +130,7 @@ pub struct PersonalityRuntimeGovernanceGate {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PersonalityGovernanceInspectionInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub now_secs: u64,
@@ -143,7 +144,8 @@ pub struct PersonalityGovernanceInspectionInput<'a> {
 pub fn inspect_personality_governance(
     input: PersonalityGovernanceInspectionInput<'_>,
 ) -> PersonalityGovernanceInspection {
-    let relationship_scope_id = relationship_scope_id(input.channel, input.chat_id);
+    let relationship_scope_id =
+        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     let core_revision_governance = compute_core_revision_governance_digest(
         input.core_revision_ledger,
         input
@@ -190,7 +192,7 @@ pub fn inspect_personality_governance(
         input.recent_persona_evidence,
     );
     let provisional = PersonalityGovernanceInspection {
-        subject_id: super::board_subject_scope_id().to_string(),
+        subject_id: input.mounted_subject_id.to_string(),
         relationship_scope_id,
         core_revision_governance,
         core_revision_timeline,

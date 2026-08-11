@@ -21,9 +21,10 @@ use bm_sdk::{
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
     MemoryLongTermMutationRequest, MemoryLongTermSelector, MemoryLongTermTarget,
     MemoryPrivacyClass, MemoryRecallRequest, MemoryRecallTemporalOperation, MemoryStoreHandle,
-    MemoryWriteRequest, P8SemanticOffRunExecutionMode, P8SemanticOffRunFeatureState,
-    P8SemanticOffRunKey, P8SemanticOffRunRequest, P8SemanticSafeCandidateKind,
-    ParsedLongTermMemoryExtraction, RuntimeLifecycleModeInput, StoreBackendConfig,
+    MemoryWriteRequest, P8SameClosureSafeCounterfactualV1, P8SemanticNegativeOnlyProofKindV2,
+    P8SemanticOffRunExecutionMode, P8SemanticOffRunFeatureState, P8SemanticOffRunKey,
+    P8SemanticOffRunRequest, P8SemanticSafeCandidateKind, ParsedLongTermMemoryExtraction,
+    RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 #[cfg(feature = "sqlite-store")]
 use bm_sdk::{
@@ -120,6 +121,91 @@ fn p8_report(
 
 fn p8_current_report(runtime: &bm_sdk::MemoryRuntime) -> bm_sdk::P8SemanticOffRunReport {
     p8_report(runtime, MemoryRecallTemporalOperation::Current)
+}
+
+#[test]
+fn p8_semantic_closure_v2_owns_exact_projection_leases_and_negative_proofs() {
+    let profile = host_test_profile();
+    let runtime = test_runtime(seeded_store_platform(profile), profile);
+    let mut execution = runtime
+        .p8_semantic_closure_execution_v2(P8SemanticOffRunRequest::new(MemoryRecallRequest {
+            query: "release safety artifact manifest".into(),
+            limit: 10,
+            structured_query_facets: Vec::new(),
+            tool_registry_refs: Vec::new(),
+            temporal_operation: MemoryRecallTemporalOperation::Current,
+        }))
+        .expect("one SDK-owned semantic closure execution");
+
+    assert!(execution.validate_contract().is_empty());
+    assert_eq!(execution.off_run_report().materialization_count(), 1);
+    assert!(execution.baseline_projection_receipt().rendered_chars() > 0);
+    let projection_receipt_json = serde_json::to_string(execution.baseline_projection_receipt())
+        .expect("provider-safe projection receipt JSON");
+    assert!(
+        projection_receipt_json.contains("beetle-memory.p8.provider-safe-projection-receipt.v2")
+    );
+    assert!(projection_receipt_json.contains("p8_provider_safe_projection_receipt_v2:sha256:"));
+    assert_eq!(
+        execution
+            .safe_counterfactual_projection_receipts()
+            .iter()
+            .map(|receipt| receipt.counterfactual().expect("counterfactual receipt"))
+            .collect::<Vec<_>>(),
+        P8SameClosureSafeCounterfactualV1::ALL.to_vec()
+    );
+    assert_eq!(
+        execution
+            .negative_only_proofs()
+            .iter()
+            .map(|proof| proof.kind())
+            .collect::<Vec<_>>(),
+        P8SemanticNegativeOnlyProofKindV2::ALL.to_vec()
+    );
+
+    let safe_receipt_json = serde_json::to_string(execution.receipt()).expect("safe receipt JSON");
+    for forbidden in [
+        "private-release-sentinel",
+        "raw-procedure-sentinel",
+        "raw-soul-sentinel",
+        "credential-sentinel",
+        "\"payload\"",
+    ] {
+        assert!(
+            !safe_receipt_json.contains(forbidden),
+            "V2 receipt leaked forbidden material: {forbidden}"
+        );
+    }
+
+    let baseline_rendered_chars = execution.baseline_projection_receipt().rendered_chars();
+    let baseline_payload = execution
+        .consume_baseline_provider_safe_projection(|payload| payload.to_string())
+        .expect("consume baseline once");
+    assert_eq!(baseline_payload.chars().count(), baseline_rendered_chars);
+    assert!(baseline_payload.contains("Verify release artifacts before publishing."));
+    assert!(!baseline_payload.contains("private-release-sentinel"));
+    assert!(execution
+        .consume_baseline_provider_safe_projection(|_| ())
+        .is_err());
+
+    for counterfactual in P8SameClosureSafeCounterfactualV1::ALL {
+        let rendered_chars = execution
+            .safe_counterfactual_projection_receipts()
+            .into_iter()
+            .find(|receipt| receipt.counterfactual() == Some(counterfactual))
+            .expect("counterfactual receipt")
+            .rendered_chars();
+        let payload = execution
+            .consume_same_closure_provider_safe_projection(counterfactual, |payload| {
+                payload.to_string()
+            })
+            .expect("consume each safe counterfactual once");
+        assert_eq!(payload.chars().count(), rendered_chars);
+        assert!(!payload.contains("private-release-sentinel"));
+        assert!(execution
+            .consume_same_closure_provider_safe_projection(counterfactual, |_| ())
+            .is_err());
+    }
 }
 
 fn supersede_seeded_record(runtime: &bm_sdk::MemoryRuntime) -> bm_sdk::LongTermMemoryEntry {
@@ -603,6 +689,30 @@ fn p8_private_soul_and_operator_material_remain_suppressed_for_every_off_run() {
             assert!(!serde_json::to_string(&report)
                 .expect("safe P8 report JSON")
                 .contains("private-release-sentinel"));
+            let mut execution = runtime
+                .p8_semantic_closure_execution_v2(P8SemanticOffRunRequest::new(
+                    MemoryRecallRequest {
+                        query: "private release safety".into(),
+                        limit: 10,
+                        structured_query_facets: Vec::new(),
+                        tool_registry_refs: Vec::new(),
+                        temporal_operation,
+                    },
+                ))
+                .expect("private-safe V2 closure");
+            assert!(!serde_json::to_string(execution.receipt())
+                .expect("safe V2 receipt JSON")
+                .contains("private-release-sentinel"));
+            let baseline_payload = execution
+                .consume_baseline_provider_safe_projection(str::to_string)
+                .expect("consume private-safe baseline");
+            assert!(!baseline_payload.contains("private-release-sentinel"));
+            for counterfactual in P8SameClosureSafeCounterfactualV1::ALL {
+                let payload = execution
+                    .consume_same_closure_provider_safe_projection(counterfactual, str::to_string)
+                    .expect("consume private-safe counterfactual");
+                assert!(!payload.contains("private-release-sentinel"));
+            }
             for observation in report.observations() {
                 let private_baseline = observation
                     .baseline_bindings()
@@ -699,32 +809,21 @@ fn p8_private_soul_and_operator_material_remain_suppressed_for_every_off_run() {
 }
 
 #[test]
-fn p8_supersede_derives_obsolete_lineage_and_dynamic_counterfactuals_from_one_closure() {
+fn p8_supersede_fails_closed_when_selected_obsolete_material_is_not_retained() {
     let profile = host_test_profile();
     let runtime = test_runtime(seeded_store_platform(profile), profile);
     supersede_seeded_record(&runtime);
-    let report = p8_current_report(&runtime);
-    for key in [
-        P8SemanticOffRunKey::ObsoleteSuppressionOff,
-        P8SemanticOffRunKey::UpdateLineageOff,
-        P8SemanticOffRunKey::DynamicStateConsolidationOff,
-    ] {
-        let observation = report
-            .observations()
-            .iter()
-            .find(|observation| observation.key() == key)
-            .expect("causal observation");
-        assert!(
-            observation.applicable(),
-            "missing causal delta for {key:?}; baseline={}",
-            serde_json::to_string(report.baseline()).expect("safe baseline JSON")
-        );
-        assert!(observation.executed());
-        assert_ne!(
-            observation.baseline_bindings(),
-            observation.off_run_bindings()
-        );
-    }
+    let error = runtime
+        .p8_semantic_off_run(P8SemanticOffRunRequest::new(MemoryRecallRequest {
+            query: "release safety artifact manifest".into(),
+            limit: 10,
+            structured_query_facets: Vec::new(),
+            tool_registry_refs: Vec::new(),
+            temporal_operation: MemoryRecallTemporalOperation::Current,
+        }))
+        .expect_err("selected obsolete binding without retained material must fail closed");
+    assert!(format!("{error:?}")
+        .contains("selected provider-safe projection binding is missing material"));
 }
 
 #[test]

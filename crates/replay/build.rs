@@ -178,10 +178,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         &[root.join("Cargo.lock")],
         P8_LOCK_FINGERPRINT_CONTRACT,
     )?;
-    let toolchain_fingerprint = fingerprint_toolchain()?;
+    let (toolchain_fingerprint, fixture_rustc) = fingerprint_toolchain()?;
     println!("cargo:rustc-env=BM_P8_ROOT_MANIFEST_FINGERPRINT={root_manifest_fingerprint}");
     println!("cargo:rustc-env=BM_P8_LOCK_FINGERPRINT={lock_fingerprint}");
     println!("cargo:rustc-env=BM_P8_TOOLCHAIN_FINGERPRINT={toolchain_fingerprint}");
+    println!(
+        "cargo:rustc-env=BM_P8_FIXTURE_RUSTC={}",
+        fixture_rustc.display()
+    );
     let (
         p8_core_validator_fingerprint,
         p8_sdk_validator_fingerprint,
@@ -402,10 +406,26 @@ fn fingerprint_components(contract: &str, components: &[&str]) -> Result<String,
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn fingerprint_toolchain() -> Result<String, Box<dyn Error>> {
-    let rustc = env::var_os("RUSTC").ok_or("RUSTC is unavailable to bm-replay build")?;
+fn resolve_build_executable(value: &std::ffi::OsStr) -> Result<PathBuf, Box<dyn Error>> {
+    let path = PathBuf::from(value);
+    if path.components().count() > 1 || path.is_absolute() {
+        return Ok(fs::canonicalize(path)?);
+    }
+    for directory in env::split_paths(&env::var_os("PATH").ok_or("PATH is unavailable")?) {
+        let candidate = directory.join(&path);
+        if candidate.is_file() {
+            return Ok(fs::canonicalize(candidate)?);
+        }
+    }
+    Err("build executable is not resolvable through PATH".into())
+}
+
+fn fingerprint_toolchain() -> Result<(String, PathBuf), Box<dyn Error>> {
+    let rustc = resolve_build_executable(
+        &env::var_os("RUSTC").ok_or("RUSTC is unavailable to bm-replay build")?,
+    )?;
     let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable to bm-replay build")?;
-    let rustc_output = Command::new(rustc).arg("-Vv").output()?;
+    let rustc_output = Command::new(&rustc).arg("-Vv").output()?;
     let cargo_output = Command::new(cargo).arg("-Vv").output()?;
     if !rustc_output.status.success()
         || !rustc_output.stderr.is_empty()
@@ -419,7 +439,7 @@ fn fingerprint_toolchain() -> Result<String, Box<dyn Error>> {
     hash_fingerprint_field(&mut hasher, &rustc_output.stdout)?;
     hash_fingerprint_field(&mut hasher, &cargo_output.stdout)?;
     hash_fingerprint_field(&mut hasher, env::var("TARGET")?.as_bytes())?;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok((format!("{:x}", hasher.finalize()), rustc))
 }
 
 fn generate_p8_common_source_inventory(

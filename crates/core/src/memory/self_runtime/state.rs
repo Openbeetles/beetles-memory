@@ -65,7 +65,7 @@ pub(super) fn load_self_runtime_state(
     profile: MemoryProfile,
     authority_plan: SelfRuntimeAuthorityPlan,
 ) -> Box<LoadedSelfRuntimeState> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = ctx.mounted_subject_id;
     let relationship_governance_enabled = authority_plan.allows_relationship_governance();
     let mut load_health = SelfRuntimeLoadHealth::default();
     let summary_text = load_optional_store("session_summary", &mut load_health, || {
@@ -117,10 +117,8 @@ pub(super) fn load_self_runtime_state(
         .flatten();
     let private_garden_docs = if authority_plan.allow_direct_private_garden {
         load_list_store("private_garden_docs", &mut load_health, || {
-            ctx.private_garden_store.list(
-                private_garden_scope_id(),
-                self_runtime_private_garden_doc_limit(profile),
-            )
+            ctx.private_garden_store
+                .list(subject_id, self_runtime_private_garden_doc_limit(profile))
         })
     } else {
         Vec::new()
@@ -155,6 +153,7 @@ pub(super) fn load_self_runtime_state(
         .unwrap_or_default();
     let (active_relationship_scope_id, active_relationship_channel) =
         resolve_runtime_relationship_scope(
+            ctx.mounted_subject_id,
             chat_id,
             payload,
             self_continuity.as_ref(),
@@ -343,6 +342,7 @@ pub(super) fn load_self_runtime_state(
 }
 
 fn resolve_runtime_relationship_scope(
+    mounted_subject_id: &str,
     chat_id: &str,
     payload: &SelfRuntimeJobPayload,
     self_continuity: Option<&crate::memory::SelfContinuity>,
@@ -352,13 +352,13 @@ fn resolve_runtime_relationship_scope(
     let requested_channel = payload.source_channel.trim();
     if payload.trigger == SelfRuntimeTrigger::PostReply {
         return (
-            relationship_scope_id(requested_channel, chat_id),
+            relationship_scope_id(mounted_subject_id, requested_channel, chat_id),
             requested_channel.to_string(),
         );
     }
     if !requested_channel.is_empty() && requested_channel != "self_runtime_idle" {
         return (
-            relationship_scope_id(requested_channel, chat_id),
+            relationship_scope_id(mounted_subject_id, requested_channel, chat_id),
             requested_channel.to_string(),
         );
     }
@@ -379,10 +379,13 @@ fn resolve_runtime_relationship_scope(
             .then_some(continuity.last_user_channel.trim())
             .filter(|value| !value.is_empty())
     }) {
-        return (relationship_scope_id(channel, chat_id), channel.to_string());
+        return (
+            relationship_scope_id(mounted_subject_id, channel, chat_id),
+            channel.to_string(),
+        );
     }
     (
-        relationship_scope_id(requested_channel, chat_id),
+        relationship_scope_id(mounted_subject_id, requested_channel, chat_id),
         requested_channel.to_string(),
     )
 }
@@ -443,7 +446,8 @@ pub(super) fn sync_self_runtime_relationship_topology(
     if relationship_channel.is_empty() || chat_id.is_empty() {
         return;
     }
-    let relationship_id = relationship_scope_id(relationship_channel, chat_id);
+    let relationship_id =
+        relationship_scope_id(ctx.mounted_subject_id, relationship_channel, chat_id);
     let turn_ledger = match ctx.turn_ledger_store.get(&relationship_id) {
         Ok(value) => value,
         Err(error) => {
@@ -510,6 +514,7 @@ pub(super) fn sync_self_runtime_relationship_topology(
     if let Err(error) = upsert_relationship_topology_entry(
         ctx.relationship_topology_store,
         crate::memory::RelationshipTopologyUpsertInput {
+            mounted_subject_id: ctx.mounted_subject_id,
             channel: relationship_channel,
             chat_id,
             now_secs,
@@ -535,7 +540,7 @@ pub(super) fn sync_self_runtime_relationship_portfolio(
     ctx: &SelfRuntimeContext<'_>,
     now_secs: u64,
 ) -> Option<RelationshipPortfolio> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = ctx.mounted_subject_id;
     let relationship_topology = match ctx.relationship_topology_store.get(subject_id) {
         Ok(value) => value,
         Err(error) => {
@@ -576,6 +581,7 @@ pub(super) fn sync_self_runtime_relationship_portfolio(
     };
     match sync_relationship_portfolio(
         ctx.relationship_portfolio_store,
+        ctx.mounted_subject_id,
         relationship_topology.as_ref(),
         self_authored_core.as_ref(),
         now_secs,

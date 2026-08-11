@@ -5,10 +5,10 @@ use crate::bus::IngressKind;
 use crate::error::Result;
 
 use super::{
-    default_session_speaker_for_role, default_subject_id, synthesize_session_message_id,
-    ActorAttribution, CanonicalTurnTranscriptCommitReport, ConversationKey,
-    ConversationTranscriptStore, HostOpaqueRef, SessionMessage, SessionMessageRecord, SessionStore,
-    SubjectId, TranscriptCommitReport, TranscriptTurnRecord, MAX_SESSION_ENTRIES,
+    default_session_speaker_for_role, synthesize_session_message_id, ActorAttribution,
+    CanonicalTurnTranscriptCommitReport, ConversationKey, ConversationTranscriptStore,
+    HostOpaqueRef, SessionMessage, SessionMessageRecord, SessionStore, SubjectId,
+    TranscriptCommitReport, TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,7 +196,6 @@ pub struct ToolObservationDigest {
 pub struct CanonicalTurnDelta {
     pub turn_id: String,
     pub conversation: ConversationScope,
-    #[serde(default = "default_subject_id")]
     pub subject: SubjectId,
     pub delivery_status: MemoryTurnDeliveryStatus,
     pub source: MemoryTurnSource,

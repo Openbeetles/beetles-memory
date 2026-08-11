@@ -442,6 +442,7 @@ impl HarnessStores {
         participation_plan: PromptParticipationPlan,
     ) -> PromptMemoryContextParams<'a> {
         PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
             chat_id: CHAT_ID,
             current_channel: CHANNEL,
             user_query,
@@ -975,6 +976,7 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
             task_learning_store: &stores.task_learning,
         },
         PostReplyMemoryMaintenanceInput {
+            mounted_subject_id: "agent:replay-harness",
             chat_id: CHAT_ID,
             ingress: IngressKind::User,
             channel: CHANNEL,

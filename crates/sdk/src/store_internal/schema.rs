@@ -825,7 +825,7 @@ fn validate_store_json_value(
             if !material.validate_contract().accepted
                 || long_term_version_material_key(
                     &material.memory_space_id,
-                    &material.mounted_subject_id,
+                    &material.factual_owner_id,
                     &material.owner_ref,
                     material.owner_revision,
                 )
@@ -845,7 +845,7 @@ fn validate_store_json_value(
             if !head.validate_contract().accepted
                 || long_term_version_head_key(
                     &head.memory_space_id,
-                    &head.mounted_subject_id,
+                    &head.factual_owner_id,
                     &head.owner_ref,
                 )
                 .ok()
@@ -877,7 +877,7 @@ fn validate_store_json_value(
                 || !bindings_sorted
                 || long_term_version_scope_manifest_key(
                     &manifest.memory_space_id,
-                    &manifest.mounted_subject_id,
+                    &manifest.factual_owner_id,
                 )
                 .ok()
                 .as_deref()
@@ -1162,7 +1162,7 @@ fn validate_control_document(
                     "operation",
                     "effects",
                     "reason",
-                    "owner_subject_id",
+                    "factual_owner_id",
                     "created_at",
                 ],
                 &["actor_subject_id", "memory_space_id"],
@@ -1179,23 +1179,22 @@ fn validate_control_document(
             if audit.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
                 || !canonical_nonempty(&audit.transaction_id)
                 || !canonical_nonempty(&audit.reason)
-                || !canonical_nonempty(&audit.owner_subject_id)
+                || !canonical_nonempty(&audit.factual_owner_id)
+                || audit.factual_owner_id != memory_space_id
                 || audit.created_at == 0
                 || canonical.event_id != audit.event_id
                 || audit.effects.is_empty()
                 || audit.effects.windows(2).any(|pair| pair[0] >= pair[1])
                 || audit.effects.iter().any(|effect| match effect {
                     ControlEffectRef::Revision {
-                        mounted_subject_id, ..
+                        factual_owner_id, ..
                     }
                     | ControlEffectRef::Tombstone {
-                        owner_subject_id: mounted_subject_id,
-                        ..
+                        factual_owner_id, ..
                     }
                     | ControlEffectRef::Policy {
-                        owner_subject_id: mounted_subject_id,
-                        ..
-                    } => mounted_subject_id != &audit.owner_subject_id,
+                        factual_owner_id, ..
+                    } => factual_owner_id != &audit.factual_owner_id,
                 })
             {
                 return Err(invalid(

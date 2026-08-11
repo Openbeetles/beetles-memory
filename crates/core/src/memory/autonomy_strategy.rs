@@ -10,13 +10,13 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use super::{
-    board_subject_scope_id, build_self_state,
+    build_self_state,
     llm_json::{
         coerce_json_text, get_object_bool, get_object_text, get_object_u64, parse_llm_json_payload,
         LlmJsonPayload,
     },
-    memory_policy, private_garden_scope_id, relationship_scope_id, render_execution_state_block,
-    render_inner_life_block, render_private_doc_workspace_block, render_private_garden_block,
+    memory_policy, relationship_scope_id, render_execution_state_block, render_inner_life_block,
+    render_private_doc_workspace_block, render_private_garden_block,
     render_private_memory_boundary_block, render_self_continuity_block, render_self_model_block,
     render_self_state_block, render_shared_factual_plane_block, render_world_sense_block,
     render_world_snapshot_block, whole_record_lease_advanced, AutonomyStrategyPolicy,
@@ -105,6 +105,7 @@ pub(crate) fn estimate_autonomy_strategy_chars(strategy: &AutonomyStrategy) -> u
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AutonomyStrategyRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -244,8 +245,9 @@ pub fn run_autonomy_strategy_refresh(
     input: AutonomyStrategyRefreshInput<'_>,
     profile: MemoryProfile,
 ) -> Result<AutonomyStrategyRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
-    let relationship_id = relationship_scope_id(input.channel, input.chat_id);
+    let subject_id = input.mounted_subject_id;
+    let relationship_id =
+        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     let existing_strategy = ctx.autonomy_strategy_store.get(subject_id)?;
     let summary_text = ctx
         .session_summary_store
@@ -257,7 +259,7 @@ pub fn run_autonomy_strategy_refresh(
     let self_continuity = ctx.self_continuity_store.get(subject_id)?;
     let private_docs = ctx.private_doc_store.get(subject_id)?;
     let private_garden_docs = ctx.private_garden_store.list(
-        private_garden_scope_id(),
+        input.mounted_subject_id,
         autonomy_strategy_private_garden_doc_limit(profile),
     )?;
     let world_sense = ctx.world_sense_store.get(&relationship_id)?;
@@ -302,7 +304,7 @@ pub(crate) fn run_autonomy_strategy_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<AutonomyStrategyRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     if !decision_override.unwrap_or_else(|| {
         memory_policy(profile)
             .autonomy_strategy

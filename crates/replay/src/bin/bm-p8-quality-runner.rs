@@ -8,6 +8,9 @@ mod retained_artifact_fs;
 mod sealed_execution;
 
 fn main() {
+    if let Some(result) = bm_replay::p8_quality::try_run_fixture_runner_session_entry() {
+        p8_quality_process::exit_role_entry(result);
+    }
     p8_quality_process::exit_role_entry(p8_quality_process::run_role_entry(
         p8_quality_process::P8_QUALITY_RUNNER_SELF_TEST_STDOUT,
         false,

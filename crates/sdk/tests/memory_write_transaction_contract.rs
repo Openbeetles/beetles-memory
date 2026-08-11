@@ -167,13 +167,13 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
     assert_eq!(
         runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped owner store")
             .count()
             .expect("owner count"),
         1
     );
-    let manifest_key = memory_facet_manifest_key("space:owner-default", runtime.subject_id())
+    let manifest_key = memory_facet_manifest_key("space:owner-default", runtime.memory_space_id())
         .expect("manifest key");
     assert_eq!(
         platform
@@ -613,7 +613,7 @@ fn candidate_write_event_budget_rejects_without_partial_memory() {
         .expect("events before");
     let before_long_term_count = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .count()
         .expect("long-term before");
@@ -634,7 +634,7 @@ fn candidate_write_event_budget_rejects_without_partial_memory() {
     assert_eq!(
         runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term store")
             .count()
             .unwrap(),
@@ -698,7 +698,7 @@ fn candidate_write_success_reports_transaction_lineage() {
 
     let long_term_records = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list");
@@ -776,7 +776,7 @@ fn candidate_to_draft_to_entry_to_exact_entity_posting_to_typed_query_is_reachab
         .expect("typed entity candidate write");
     let entry = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -876,7 +876,7 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
     );
     let owner = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -915,7 +915,7 @@ fn same_content_candidate_reinforcement_unions_entity_aliases_and_evidence() {
 
     let owner = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -955,7 +955,7 @@ fn rejected_candidate_does_not_write_recallable_facet_index() {
     assert_eq!(
         runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term store")
             .count()
             .unwrap(),
@@ -1137,7 +1137,7 @@ fn long_term_extraction_event_budget_rejects_without_partial_memory() {
         .expect("events before");
     let before_long_term_count = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .count()
         .expect("long-term before");
@@ -1158,7 +1158,7 @@ fn long_term_extraction_event_budget_rejects_without_partial_memory() {
     assert_eq!(
         runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term store")
             .count()
             .unwrap(),
@@ -1209,7 +1209,7 @@ fn long_term_extraction_success_reports_transaction_lineage() {
 
     let long_term_records = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list");
@@ -1246,7 +1246,7 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
         .expect("seed extraction");
     let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1276,14 +1276,15 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
     assert_eq!(transaction.operation, "write.long_term_extraction");
     assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
         .is_none());
     assert_no_facet_index_doc_for_owner(&platform, &owner_id);
-    let manifest_key = memory_facet_manifest_key(runtime.memory_space_id(), runtime.subject_id())
-        .expect("facet manifest key");
+    let manifest_key =
+        memory_facet_manifest_key(runtime.memory_space_id(), runtime.memory_space_id())
+            .expect("facet manifest key");
     assert!(platform
         .replay_harness()
         .read_json_docs_by_keys(
@@ -1375,8 +1376,8 @@ fn long_term_extraction_delete_binds_the_scoped_human_actor_to_the_tombstone() {
         tombstone.actor_subject_id.as_deref(),
         Some(actor_subject_id.as_str())
     );
-    assert_eq!(tombstone.owner_subject_id, runtime.subject_id());
-    assert_ne!(tombstone.owner_subject_id, actor_subject_id);
+    assert_eq!(tombstone.factual_owner_id, runtime.memory_space_id());
+    assert_ne!(tombstone.factual_owner_id, actor_subject_id);
 
     let revisions = platform
         .replay_harness()
@@ -1435,8 +1436,9 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
         })
         .expect("replace extraction in one transaction");
 
-    let manifest_key = memory_facet_manifest_key(runtime.memory_space_id(), runtime.subject_id())
-        .expect("facet manifest key");
+    let manifest_key =
+        memory_facet_manifest_key(runtime.memory_space_id(), runtime.memory_space_id())
+            .expect("facet manifest key");
     let manifest = platform
         .replay_harness()
         .read_json_docs_by_keys(
@@ -1462,7 +1464,7 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
     assert_eq!(
         runtime
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term store")
             .count()
             .expect("owner count"),
@@ -1502,7 +1504,7 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
         .expect("seed transcript-backed extraction");
     let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1648,7 +1650,7 @@ fn temporal_memory_graph_write_success_reports_transaction_lineage() {
         .expect("seed graph owners");
     let owners = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(usize::MAX)
         .expect("graph owners");
@@ -1798,14 +1800,14 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
     assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&record_id)
         .unwrap()
         .is_some());
     assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_control_read_store("space:owner-default")
+        .memory_space_long_term_memory_control_read_store("space:owner-default")
         .expect("scoped long-term control store")
         .get_long_term_control_tombstone(&record_id)
         .unwrap()
@@ -1839,7 +1841,7 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
         .expect("seed extraction");
     let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1866,14 +1868,14 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
     assert_eq!(report.affected_records[0].record_id, owner_id);
     assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
         .is_none());
     assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_control_read_store("space:owner-default")
+        .memory_space_long_term_memory_control_read_store("space:owner-default")
         .expect("scoped long-term control store")
         .get_long_term_control_tombstone(&owner_id)
         .expect("control tombstone")
@@ -1917,7 +1919,7 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
         .expect("seed extraction");
     let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -1954,7 +1956,7 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
     assert_eq!(report.affected_records[0].new_source_revision, Some(1));
     let updated = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
@@ -2004,7 +2006,7 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
         .expect("seed extraction");
     let old_owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -2035,7 +2037,7 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
     assert_eq!(report.operation, "supersede");
     assert!(runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&old_owner_id)
         .expect("old long-term get")
@@ -2043,7 +2045,7 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
     assert_no_facet_index_doc_for_owner(&platform, &old_owner_id);
     let new_owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -2091,7 +2093,7 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
         .expect("seed extraction");
     let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -2124,7 +2126,7 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
         .contains(&"report_only_subject_visibility_not_indexed".to_string()));
     let updated = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("long-term get")
@@ -2175,7 +2177,7 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
         .expect("seed extraction");
     let owner_id = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .list(20)
         .expect("long-term list")
@@ -2229,7 +2231,7 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
     assert_eq!(report.operation, "change_privacy");
     let owner = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+        .memory_space_long_term_memory_read_store("space:owner-default")
         .expect("scoped long-term store")
         .get(&owner_id)
         .expect("owner read")
@@ -2369,7 +2371,7 @@ fn long_term_policy_event_budget_rejects_without_partial_policy() {
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
     assert!(platform
         .replay_harness()
-        .scoped_long_term_memory_control_read_store("space:owner-default")
+        .memory_space_long_term_memory_control_read_store("space:owner-default")
         .expect("scoped long-term control store")
         .list_long_term_governance_policies(10)
         .unwrap()

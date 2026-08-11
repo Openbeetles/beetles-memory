@@ -13674,6 +13674,8 @@ mod p7_operator_unit_tests {
         fs::create_dir_all(sdk_root.join("apps/desktop/src-tauri"))
             .expect("desktop workspace owner");
         fs::create_dir_all(sdk_root.join("dev-docs")).expect("development truth owner");
+        fs::create_dir_all(sdk_root.join("dev-docs/archive"))
+            .expect("archived development truth owner");
         fs::create_dir_all(sdk_root.join("scripts")).expect("SDK scripts owner");
         fs::create_dir_all(runner_root.join("src")).expect("runner source owner");
         fs::create_dir_all(runner_root.join("tests")).expect("runner tests owner");
@@ -13796,10 +13798,10 @@ mod p7_operator_unit_tests {
             "long-term-memory-control-surface-plan.md",
             "memory-write-transaction-plan.md",
             "multi-subject-memory-space-plan.md",
-            "next-gen-soul-memory-roadmap.md",
+            "archive/next-gen-soul-memory-roadmap.md",
             "replay-sandbox-plan.md",
             "runtime-budget-refactor-plan.md",
-            "sdk-host-integration-readiness-plan.md",
+            "archive/sdk-host-integration-readiness-plan.md",
             "soul-and-subject-memory-boundary.md",
             "temporal-memory-graph-plan.md",
         ] {

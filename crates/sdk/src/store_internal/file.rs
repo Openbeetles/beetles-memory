@@ -3903,6 +3903,7 @@ fn digest_parts(seed: u64, parts: &[&[u8]]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store_internal::recall_index::ArchiveRecallManifest;
     use serde_json::json;
 
     fn file_test_profile() -> crate::ProfileId {
@@ -4011,7 +4012,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_projection_uses_exact_subject_root_under_entry_and_byte_budgets() {
+    fn scoped_projection_excludes_soul_and_uses_exact_typed_subject_root_under_budgets() {
         let root = std::env::temp_dir().join(format!(
             "bm-file-scoped-exact-{}-{}",
             std::process::id(),
@@ -4036,26 +4037,48 @@ mod tests {
         };
         let (engine, _, _) =
             FileStoreEngine::open_with_capacity(&config, store_capacity).expect("open file store");
-        let target = json!({"identity_anchor": "target Soul"});
+        let soul = json!({"identity_anchor": "target Soul"});
         engine
-            .put_json_value_unlocked("self_authored_core", "subject-target", &target)
+            .put_json_value_unlocked("self_authored_core", "subject-target", &soul)
             .expect("write target owner");
+        let soul_request = crate::StoreScopedProjectionRequest {
+            scope: crate::StoreScopedProjectionScope::subject("space-target", "subject-target")
+                .expect("projection scope"),
+            json_namespaces: vec!["self_authored_core".to_string()],
+            include_events: false,
+        };
+        let excluded = engine
+            .read_scoped_json_unlocked_exact(&soul_request, store_capacity)
+            .expect("subject-global Soul namespace is excluded from memory-space projection");
+        assert!(excluded.documents.is_empty());
+        assert_eq!(excluded.logical_bytes, 0);
+
+        let target_manifest =
+            ArchiveRecallManifest::build(1, "space-target", "subject-target", std::iter::empty())
+                .expect("target archive recall manifest");
+        let target_key = target_manifest.physical_key.clone();
+        let target = serde_json::to_value(target_manifest).expect("target manifest json");
+        engine
+            .put_json_value_unlocked("archive_recall_manifests", &target_key, &target)
+            .expect("write target typed root");
         for index in 0..64 {
+            let subject_id = format!("unrelated-subject-{index}");
+            let manifest =
+                ArchiveRecallManifest::build(1, "space-target", &subject_id, std::iter::empty())
+                    .expect("unrelated archive recall manifest");
+            let manifest_key = manifest.physical_key.clone();
             engine
                 .put_json_value_unlocked(
-                    "self_authored_core",
-                    &format!("unrelated-subject-{index}"),
-                    &json!({
-                        "identity_anchor": format!("unrelated-{index}"),
-                        "padding": "x".repeat(2048),
-                    }),
+                    "archive_recall_manifests",
+                    &manifest_key,
+                    &serde_json::to_value(manifest).expect("unrelated manifest json"),
                 )
-                .expect("write unrelated owner");
+                .expect("write unrelated typed root");
         }
         let request = crate::StoreScopedProjectionRequest {
             scope: crate::StoreScopedProjectionScope::subject("space-target", "subject-target")
                 .expect("projection scope"),
-            json_namespaces: vec!["self_authored_core".to_string()],
+            json_namespaces: vec!["archive_recall_manifests".to_string()],
             include_events: false,
         };
         let exact_bytes = serde_json::to_vec(&target).expect("target bytes").len();
@@ -4070,10 +4093,9 @@ mod tests {
         assert_eq!(exact.documents.len(), 1);
         assert_eq!(exact.logical_bytes, exact_bytes);
         assert_eq!(
-            exact.documents.get(&(
-                "self_authored_core".to_string(),
-                "subject-target".to_string()
-            )),
+            exact
+                .documents
+                .get(&("archive_recall_manifests".to_string(), target_key,)),
             Some(&target)
         );
 

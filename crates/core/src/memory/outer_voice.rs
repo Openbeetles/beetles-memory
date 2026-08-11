@@ -58,6 +58,7 @@ impl OuterVoice {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterVoiceRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -173,7 +174,8 @@ pub(crate) fn run_outer_voice_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<OuterVoiceRefreshOutcome> {
-    let relationship_id = relationship_scope_id(input.channel, input.chat_id);
+    let relationship_id =
+        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     let should_refresh = decision_override.unwrap_or_else(|| {
         memory_policy(profile)
             .outer_voice
@@ -578,6 +580,8 @@ fn apply_relationship_constitution_to_outer_voice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
     use crate::orchestrator::PressureLevel;
     use serde_json::json;
 
@@ -680,6 +684,7 @@ mod tests {
         };
         assert!(policy.should_refresh(
             OuterVoiceRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "c",
                 ingress: IngressKind::System,
                 channel: "_self_runtime",

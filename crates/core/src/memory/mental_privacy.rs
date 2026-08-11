@@ -10,14 +10,14 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::{
-    board_subject_scope_id, clamp_boundary_persona_to_constitution,
-    classify_private_garden_doc_path, enforce_relationship_constitution_share_action,
+    clamp_boundary_persona_to_constitution, classify_private_garden_doc_path,
+    enforce_relationship_constitution_share_action,
     llm_json::{
         coerce_json_text, get_object_bool, get_object_string_list, get_object_text,
         parse_llm_json_payload, LlmJsonPayload,
     },
-    normalize_private_garden_doc_path, private_garden_scope_id, relationship_scope_id,
-    render_inner_life_block, render_outer_voice_block, render_recent_persona_evidence_block,
+    normalize_private_garden_doc_path, relationship_scope_id, render_inner_life_block,
+    render_outer_voice_block, render_recent_persona_evidence_block,
     render_relationship_constitution_block, render_self_continuity_block, render_self_model_block,
     scrub_private_source_echoes, InnerLife, InnerLifeStore, OuterVoice, OuterVoiceStore,
     PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc, PrivateGardenDocRecord,
@@ -413,6 +413,7 @@ pub struct BoundaryPersonaRefreshContext<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MentalPrivacyDisclosureAdjudicationInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub user_content: &'a str,
@@ -437,6 +438,7 @@ pub struct MentalPrivacyDisclosureAdjudication {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MentalPrivacyReviewInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub user_content: &'a str,
@@ -472,6 +474,7 @@ pub fn mental_privacy_adjudication_failure_fallback() -> MentalPrivacyDisclosure
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundaryPersonaRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub trigger: &'a str,
@@ -995,12 +998,11 @@ fn mental_privacy_garden_doc_limit() -> usize {
 
 fn select_relevant_garden_docs(
     store: &dyn PrivateGardenStore,
-    chat_id: &str,
+    mounted_subject_id: &str,
     user_content: &str,
     draft_reply: &str,
     records: &[PrivateGardenDocRecord],
 ) -> Vec<PrivateGardenDoc> {
-    let _ = chat_id;
     let mut scored = records
         .iter()
         .map(|record| {
@@ -1018,7 +1020,7 @@ fn select_relevant_garden_docs(
     });
     let mut docs = Vec::new();
     for (_, record) in scored.into_iter().take(MENTAL_PRIVACY_GARDEN_RENDER_LIMIT) {
-        if let Ok(Some(doc)) = store.read(private_garden_scope_id(), &record.path) {
+        if let Ok(Some(doc)) = store.read(mounted_subject_id, &record.path) {
             docs.push(doc);
         }
     }
@@ -1523,15 +1525,15 @@ pub fn run_mental_privacy_review(
     ctx: MentalPrivacyReviewContext<'_>,
     input: MentalPrivacyReviewInput<'_>,
 ) -> Result<MentalPrivacyReviewOutcome> {
-    let subject_id = board_subject_scope_id();
-    let relationship_id = relationship_scope_id(input.channel, input.chat_id);
+    let subject_id = input.mounted_subject_id;
+    let relationship_id = relationship_scope_id(subject_id, input.channel, input.chat_id);
     let self_model = ctx.self_model_store.get(subject_id)?;
     let self_continuity = ctx.self_continuity_store.get(subject_id)?;
     let inner_life = ctx.inner_life_store.get(subject_id)?;
     let private_workspace = ctx.private_doc_store.get(subject_id)?;
     let private_garden_records = ctx
         .private_garden_store
-        .list(private_garden_scope_id(), mental_privacy_garden_doc_limit())?;
+        .list(subject_id, mental_privacy_garden_doc_limit())?;
     let known_targets = collect_private_targets(
         self_model.as_ref(),
         self_continuity.as_ref(),
@@ -1556,7 +1558,7 @@ pub fn run_mental_privacy_review(
     let relationship_constitution = ctx.relationship_constitution_store.get(&relationship_id)?;
     let private_garden_docs = select_relevant_garden_docs(
         ctx.private_garden_store,
-        input.chat_id,
+        subject_id,
         input.user_content,
         input.draft_reply,
         &private_garden_records,
@@ -1682,15 +1684,15 @@ pub fn run_mental_privacy_disclosure_adjudication(
     if input.user_content.trim().is_empty() {
         return Ok(None);
     }
-    let subject_id = board_subject_scope_id();
-    let relationship_id = relationship_scope_id(input.channel, input.chat_id);
+    let subject_id = input.mounted_subject_id;
+    let relationship_id = relationship_scope_id(subject_id, input.channel, input.chat_id);
     let self_model = ctx.self_model_store.get(subject_id)?;
     let self_continuity = ctx.self_continuity_store.get(subject_id)?;
     let inner_life = ctx.inner_life_store.get(subject_id)?;
     let private_workspace = ctx.private_doc_store.get(subject_id)?;
     let private_garden_records = ctx
         .private_garden_store
-        .list(private_garden_scope_id(), mental_privacy_garden_doc_limit())?;
+        .list(subject_id, mental_privacy_garden_doc_limit())?;
     let mental_privacy_state = ctx.mental_privacy_store.get(&relationship_id)?;
     let known_targets = collect_private_targets(
         self_model.as_ref(),
@@ -1851,7 +1853,8 @@ pub(crate) fn run_boundary_persona_refresh_with_state(
     recent: &[SessionMessage],
     decision_override: Option<bool>,
 ) -> Result<BoundaryPersonaRefreshOutcome> {
-    let relationship_id = relationship_scope_id(input.channel, input.chat_id);
+    let relationship_id =
+        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     let Some(mut state) = existing_state.or_else(|| {
         ctx.mental_privacy_store
             .get(&relationship_id)

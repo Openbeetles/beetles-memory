@@ -1149,7 +1149,7 @@ fn same_owner_id_does_not_collide_across_long_term_and_evidence_document_planes(
         .expect("create long-term owner");
     let shared_owner_id = platform
         .replay_harness()
-        .scoped_long_term_memory_read_store(MEMORY_SPACE_ID, "agent:agent-main")
+        .memory_space_long_term_memory_read_store(MEMORY_SPACE_ID)
         .expect("long-term store")
         .list(8)
         .expect("long-term owners")

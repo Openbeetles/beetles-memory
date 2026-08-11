@@ -72,16 +72,18 @@ impl ReplayStoreHarness<'_> {
 
     pub fn seed_private_doc_workspace(
         &self,
-        scope_id: &str,
+        mounted_subject_id: &str,
         workspace: &bm_core::memory::PrivateDocWorkspace,
     ) -> Result<()> {
         use bm_core::platform::Platform as _;
-        self.platform.private_doc_store().set(scope_id, workspace)
+        self.platform
+            .private_doc_store()
+            .set(mounted_subject_id, workspace)
     }
 
     pub fn seed_private_garden_doc(
         &self,
-        scope_id: &str,
+        mounted_subject_id: &str,
         path: &str,
         content: &str,
         updated_at: u64,
@@ -89,7 +91,7 @@ impl ReplayStoreHarness<'_> {
         use bm_core::platform::Platform as _;
         self.platform
             .private_garden_store()
-            .write(scope_id, path, content, updated_at)
+            .write(mounted_subject_id, path, content, updated_at)
             .map(|_| ())
     }
 }

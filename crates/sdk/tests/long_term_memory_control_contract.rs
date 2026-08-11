@@ -322,7 +322,7 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
 
     let control_store = runtime
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
+        .memory_space_long_term_memory_control_read_store(runtime.memory_space_id())
         .expect("scoped long-term control store");
     let tombstone = control_store
         .get_long_term_control_tombstone(&record_id)
@@ -445,7 +445,7 @@ fn runtime_invalidate_retains_operator_only_version_closure_without_tombstone() 
     assert_eq!(retained.owner_ref.owner_id, record_id);
     let control_store = runtime
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
+        .memory_space_long_term_memory_control_read_store(runtime.memory_space_id())
         .expect("control store");
     assert!(control_store
         .get_long_term_control_tombstone(&record_id)
@@ -659,7 +659,7 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
         .expect("seed governed and private records");
     let raw_records = runtime
         .replay_harness()
-        .scoped_long_term_memory_read_store(runtime.memory_space_id(), runtime.subject_id())
+        .memory_space_long_term_memory_read_store(runtime.memory_space_id())
         .expect("scoped long-term read store")
         .list(10)
         .expect("raw owner records");
@@ -927,7 +927,7 @@ fn runtime_policy_mutation_persists_suppression_policy() {
     assert!(report.accepted);
     let policies = runtime
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
+        .memory_space_long_term_memory_control_read_store(runtime.memory_space_id())
         .expect("scoped long-term control store")
         .list_long_term_governance_policies(10)
         .unwrap();
@@ -967,7 +967,7 @@ fn runtime_rejects_space_wide_policy_before_persistence_and_scoped_export() {
 
     let control_store = platform
         .replay_harness()
-        .scoped_long_term_memory_control_read_store(runtime.memory_space_id())
+        .memory_space_long_term_memory_control_read_store(runtime.memory_space_id())
         .expect("scoped control store");
     assert!(control_store
         .list_long_term_governance_policies(10)
@@ -1826,7 +1826,7 @@ fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
     assert_eq!(
         platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term read store")
             .count()
             .unwrap(),
@@ -1897,7 +1897,7 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
     assert_eq!(
         platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term read store")
             .count()
             .unwrap(),
@@ -1962,7 +1962,7 @@ fn runtime_suppression_policy_blocks_automatic_post_turn_long_term_refresh() {
     assert_eq!(
         platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term read store")
             .count()
             .unwrap(),
@@ -2153,7 +2153,7 @@ fn runtime_mutates_shared_fact_memory_from_transcript_derived_ref_target() {
     assert_eq!(
         platform
             .replay_harness()
-            .scoped_long_term_memory_read_store("space:owner-default", "agent:agent-main")
+            .memory_space_long_term_memory_read_store("space:owner-default")
             .expect("scoped long-term read store")
             .count()
             .unwrap(),

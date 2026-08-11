@@ -13,11 +13,10 @@ use bm_llm_gateway::{
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::{
-    board_subject_scope_id, private_garden_scope_id, MemoryAuditSink, MemoryClock, MemoryIdentity,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemoryWriteRequest, NoopMemoryAuditSink, PressureLevel, PrivateDocEntry, PrivateDocWorkspace,
-    ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StoreBackendConfig,
+    default_agent_subject_id, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryWriteRequest,
+    NoopMemoryAuditSink, PressureLevel, PrivateDocEntry, PrivateDocWorkspace, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 
 #[cfg(feature = "nonproduction-replay-harness")]
@@ -66,6 +65,7 @@ fn gateway_audit_report_has_stages_without_raw_sensitive_payloads() {
 #[test]
 #[cfg(feature = "nonproduction-replay-harness")]
 fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnostics() {
+    let mounted_subject_id = default_agent_subject_id("agent-main");
     let platform = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(
             ProfileId::native_dev_full().expect("supported host-native dev-full profile"),
@@ -76,7 +76,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
     platform
         .replay_harness()
         .seed_private_doc_workspace(
-            board_subject_scope_id(),
+            &mounted_subject_id,
             &PrivateDocWorkspace {
                 inner_journal: Some(PrivateDocEntry {
                     content: "RAW_PRIVATE_WORKSPACE_NOTE_DO_NOT_AUDIT".to_string(),
@@ -90,7 +90,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
     platform
         .replay_harness()
         .seed_private_garden_doc(
-            private_garden_scope_id(),
+            &mounted_subject_id,
             "diary/gateway.md",
             "RAW_PRIVATE_GARDEN_NOTE_DO_NOT_AUDIT",
             1_800_000_000,

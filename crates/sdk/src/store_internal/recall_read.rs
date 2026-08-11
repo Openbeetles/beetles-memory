@@ -325,7 +325,7 @@ impl<'a> RecallImmutableReadContext<'a> {
     pub(crate) fn materialize_long_term_owner_closure(
         &mut self,
         memory_space_id: &str,
-        mounted_subject_id: &str,
+        factual_owner_id: &str,
         owner_ref: &GovernedMemoryOwnerRef,
         max_retained_revisions_per_owner: usize,
         max_distinct_owners: usize,
@@ -340,7 +340,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         if let Some(closure) = self.long_term_owner_closures.get(owner_ref) {
             return Ok(Some(closure.clone()));
         }
-        let root_key = long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)?;
+        let root_key = long_term_version_scope_manifest_key(memory_space_id, factual_owner_id)?;
         let Some(root) = self.read_json::<LongTermMemoryVersionScopeManifest>(
             crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
             &root_key,
@@ -348,7 +348,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         else {
             return Ok(None);
         };
-        validate_long_term_scope_root_shape(&root, &root_key, memory_space_id, mounted_subject_id)?;
+        validate_long_term_scope_root_shape(&root, &root_key, memory_space_id, factual_owner_id)?;
         let Some(head_binding) = root
             .head_bindings
             .iter()
@@ -357,7 +357,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             return Ok(None);
         };
         let expected_head_key =
-            long_term_version_head_key(memory_space_id, mounted_subject_id, owner_ref)?;
+            long_term_version_head_key(memory_space_id, factual_owner_id, owner_ref)?;
         if head_binding.head_physical_key != expected_head_key {
             return Err(Error::config(
                 "recall_long_term_owner_closure",
@@ -378,7 +378,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         if LongTermMemoryVersionHeadBinding::from_head(&head)? != *head_binding
             || head.owner_ref != *owner_ref
             || head.memory_space_id != memory_space_id
-            || head.mounted_subject_id != mounted_subject_id
+            || head.factual_owner_id != factual_owner_id
             || head.retained_revision_digests.len() > max_retained_revisions_per_owner
         {
             return Err(Error::config(
@@ -395,7 +395,7 @@ impl<'a> RecallImmutableReadContext<'a> {
                     crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                     long_term_version_material_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         owner_ref,
                         retained.owner_revision,
                     )?,
@@ -433,7 +433,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         if owner_materials.iter().any(|material| {
             !material.validate_contract().accepted
                 || material.memory_space_id != memory_space_id
-                || material.mounted_subject_id != mounted_subject_id
+                || material.factual_owner_id != factual_owner_id
                 || material.owner_ref != *owner_ref
                 || retained_by_revision.get(&material.owner_revision).copied()
                     != Some(material.content_digest.as_str())
@@ -506,7 +506,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             )?;
             if binding.control_revision_physical_key != canonical_control_key
                 || revision.memory_space_id != memory_space_id
-                || revision.mounted_subject_id != mounted_subject_id
+                || revision.factual_owner_id != factual_owner_id
                 || revision.transition.predecessor != binding.predecessor
                 || revision.content_digest != binding.control_revision_content_digest
             {
@@ -522,7 +522,7 @@ impl<'a> RecallImmutableReadContext<'a> {
                 {
                     let successor_key = long_term_version_material_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &successor.owner_ref,
                         successor.owner_revision,
                     )?;
@@ -549,7 +549,7 @@ impl<'a> RecallImmutableReadContext<'a> {
                         })?;
                     let successor_head_key = long_term_version_head_key(
                         memory_space_id,
-                        mounted_subject_id,
+                        factual_owner_id,
                         &successor.owner_ref,
                     )?;
                     if successor_head_binding.head_physical_key != successor_head_key {
@@ -1268,12 +1268,12 @@ fn validate_long_term_scope_root_shape(
     root: &LongTermMemoryVersionScopeManifest,
     expected_key: &str,
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
 ) -> Result<()> {
     if root.schema_version != LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION
         || root.physical_key != expected_key
         || root.memory_space_id != memory_space_id
-        || root.mounted_subject_id != mounted_subject_id
+        || root.factual_owner_id != factual_owner_id
         || root.manifest_revision == 0
         || root.head_count != root.head_bindings.len() as u64
         || root.transition_count != root.transition_bindings.len() as u64
@@ -2456,7 +2456,7 @@ mod tests {
         let mut material = LongTermMemoryVersionMaterial {
             schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
             memory_space_id: "space-1".into(),
-            mounted_subject_id: "subject-1".into(),
+            factual_owner_id: "space-1".into(),
             owner_ref: long_term_owner_ref(),
             owner_revision,
             governed_content: LongTermMemoryGovernedContent {
@@ -2508,7 +2508,7 @@ mod tests {
             schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
             revision_id: "correct-state-1-r1".into(),
             memory_space_id: "space-1".into(),
-            mounted_subject_id: "subject-1".into(),
+            factual_owner_id: "space-1".into(),
             operation: LongTermControlOperation::Correct,
             invalidation_reason_code: None,
             transition: transition.clone(),
@@ -2538,7 +2538,7 @@ mod tests {
         let head = LongTermMemoryHeadManifest {
             schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
             memory_space_id: "space-1".into(),
-            mounted_subject_id: "subject-1".into(),
+            factual_owner_id: "space-1".into(),
             owner_ref: long_term_owner_ref(),
             current_revision: 2,
             retained_revision_digests: materials
@@ -2553,7 +2553,7 @@ mod tests {
         };
         let root = LongTermMemoryVersionScopeManifest::build(
             "space-1",
-            "subject-1",
+            "space-1",
             2,
             std::slice::from_ref(&head),
             &materials,
@@ -2573,7 +2573,7 @@ mod tests {
             (
                 (
                     crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
-                    long_term_version_head_key("space-1", "subject-1", &head.owner_ref)
+                    long_term_version_head_key("space-1", "space-1", &head.owner_ref)
                         .expect("head key"),
                 ),
                 serde_json::to_value(head).expect("head JSON"),
@@ -2583,7 +2583,7 @@ mod tests {
                     crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                     long_term_version_material_key(
                         "space-1",
-                        "subject-1",
+                        "space-1",
                         &first.owner_ref,
                         first.owner_revision,
                     )
@@ -2596,7 +2596,7 @@ mod tests {
                     crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                     long_term_version_material_key(
                         "space-1",
-                        "subject-1",
+                        "space-1",
                         &second.owner_ref,
                         second.owner_revision,
                     )
@@ -2618,7 +2618,7 @@ mod tests {
     fn two_owner_long_term_documents() -> BTreeMap<(String, String), serde_json::Value> {
         let (mut documents, _) = long_term_owner_documents();
         let root_key =
-            long_term_version_scope_manifest_key("space-1", "subject-1").expect("root key");
+            long_term_version_scope_manifest_key("space-1", "space-1").expect("root key");
         let original_root = documents
             .get(&(
                 crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
@@ -2630,7 +2630,7 @@ mod tests {
             })
             .expect("original root");
         let first_head_key =
-            long_term_version_head_key("space-1", "subject-1", &long_term_owner_ref())
+            long_term_version_head_key("space-1", "space-1", &long_term_owner_ref())
                 .expect("first head key");
         let first_head = documents
             .get(&(
@@ -2646,7 +2646,7 @@ mod tests {
             .map(|retained| {
                 let key = long_term_version_material_key(
                     "space-1",
-                    "subject-1",
+                    "space-1",
                     &first_head.owner_ref,
                     retained.owner_revision,
                 )
@@ -2690,7 +2690,7 @@ mod tests {
         let second_head = LongTermMemoryHeadManifest {
             schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
             memory_space_id: "space-1".into(),
-            mounted_subject_id: "subject-1".into(),
+            factual_owner_id: "space-1".into(),
             owner_ref: second_owner,
             current_revision: 1,
             retained_revision_digests: vec![LongTermMemoryRetainedRevisionDigest {
@@ -2704,7 +2704,7 @@ mod tests {
         let heads = vec![first_head, second_head.clone()];
         let root = LongTermMemoryVersionScopeManifest::build(
             "space-1",
-            "subject-1",
+            "space-1",
             3,
             &heads,
             &materials,
@@ -2723,7 +2723,7 @@ mod tests {
         documents.insert(
             (
                 crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
-                long_term_version_head_key("space-1", "subject-1", &second_head.owner_ref)
+                long_term_version_head_key("space-1", "space-1", &second_head.owner_ref)
                     .expect("second head key"),
             ),
             serde_json::to_value(second_head).expect("second head JSON"),
@@ -2733,7 +2733,7 @@ mod tests {
                 crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                 long_term_version_material_key(
                     "space-1",
-                    "subject-1",
+                    "space-1",
                     &second_material.owner_ref,
                     second_material.owner_revision,
                 )
@@ -3316,13 +3316,13 @@ mod tests {
         let mut context =
             RecallImmutableReadContext::new(Box::new(JsonMapSession { json: documents }));
         let before = context
-            .select_long_term_owner_as_of("space-1", "subject-1", &long_term_owner_ref(), 19, 4, 1)
+            .select_long_term_owner_as_of("space-1", "space-1", &long_term_owner_ref(), 19, 4, 1)
             .expect("as-of predecessor")
             .expect("predecessor projection");
         assert_eq!(before.material.owner_revision, 1);
         assert_eq!(before.validity.valid_until, Some(20));
         let after = context
-            .select_long_term_owner_as_of("space-1", "subject-1", &long_term_owner_ref(), 20, 4, 1)
+            .select_long_term_owner_as_of("space-1", "space-1", &long_term_owner_ref(), 20, 4, 1)
             .expect("cached as-of successor")
             .expect("successor projection");
         assert_eq!(after.material.owner_revision, 2);
@@ -3336,7 +3336,7 @@ mod tests {
         let error = RecallImmutableReadContext::new(Box::new(JsonMapSession {
             json: missing_control,
         }))
-        .materialize_long_term_owner_closure("space-1", "subject-1", &long_term_owner_ref(), 4, 1)
+        .materialize_long_term_owner_closure("space-1", "space-1", &long_term_owner_ref(), 4, 1)
         .expect_err("a bound control transition cannot be absent");
         assert_eq!(error.stage(), "recall_long_term_owner_closure");
     }
@@ -3347,22 +3347,10 @@ mod tests {
         let mut context =
             RecallImmutableReadContext::new(Box::new(JsonMapSession { json: documents }));
         context
-            .materialize_long_term_owner_closure(
-                "space-1",
-                "subject-1",
-                &long_term_owner_ref(),
-                4,
-                1,
-            )
+            .materialize_long_term_owner_closure("space-1", "space-1", &long_term_owner_ref(), 4, 1)
             .expect("first owner closure");
         let error = context
-            .materialize_long_term_owner_closure(
-                "space-1",
-                "subject-1",
-                &long_term_owner_ref(),
-                4,
-                0,
-            )
+            .materialize_long_term_owner_closure("space-1", "space-1", &long_term_owner_ref(), 4, 0)
             .expect_err("a cached owner cannot bypass a zero request ceiling");
         assert_eq!(error.stage(), "governed_current_recall");
         let second = GovernedMemoryOwnerRef::new(
@@ -3370,7 +3358,7 @@ mod tests {
             "ltm-2",
         );
         let error = context
-            .materialize_long_term_owner_closure("space-1", "subject-1", &second, 4, 1)
+            .materialize_long_term_owner_closure("space-1", "space-1", &second, 4, 1)
             .expect_err("second distinct owner must be rejected before IO");
         assert_eq!(error.stage(), "governed_current_recall");
     }
@@ -3381,7 +3369,7 @@ mod tests {
         let mut context =
             RecallImmutableReadContext::new(Box::new(JsonMapSession { json: documents }));
         assert!(context
-            .materialize_long_term_historical_scope("space-1", "subject-1", 4, 1, 1)
+            .materialize_long_term_historical_scope("space-1", "space-1", 4, 1, 1)
             .expect("bounded historical scope"));
         assert_eq!(context.cached_address_counts(), (5, 0));
 
@@ -3403,7 +3391,7 @@ mod tests {
         let mut zero_context =
             RecallImmutableReadContext::new(Box::new(JsonMapSession { json: documents }));
         let error = zero_context
-            .materialize_long_term_historical_scope("space-1", "subject-1", 4, 1, 0)
+            .materialize_long_term_historical_scope("space-1", "space-1", 4, 1, 0)
             .expect_err("zero as-of candidate budget");
         assert_eq!(error.stage(), "governed_historical_recall");
         assert_eq!(zero_context.cached_address_counts(), (0, 0));
@@ -3412,7 +3400,7 @@ mod tests {
             json: two_owner_long_term_documents(),
         }));
         let error = n_plus_one_context
-            .materialize_long_term_historical_scope("space-1", "subject-1", 4, 2, 1)
+            .materialize_long_term_historical_scope("space-1", "space-1", 4, 2, 1)
             .expect_err("two bound owners cannot fit one as-of candidate slot");
         assert_eq!(error.stage(), "governed_historical_recall");
         assert_eq!(

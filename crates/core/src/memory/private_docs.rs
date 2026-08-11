@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use super::{
-    board_subject_scope_id, build_self_state,
+    build_self_state,
     llm_json::{coerce_json_text, parse_llm_json_payload, LlmJsonPayload},
     memory_policy, render_autonomy_strategy_block, render_execution_state_block,
     render_inner_life_block, render_internal_memory_topology_block,
@@ -94,6 +94,7 @@ pub(crate) fn estimate_private_doc_workspace_chars(workspace: &PrivateDocWorkspa
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrivateDocWorkspaceRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -216,7 +217,7 @@ pub fn run_private_doc_workspace_refresh(
     input: PrivateDocWorkspaceRefreshInput<'_>,
     profile: MemoryProfile,
 ) -> Result<PrivateDocWorkspaceRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     let existing_workspace = ctx.private_doc_store.get(subject_id)?;
     let summary_text = match ctx.session_summary_store.get_with_count(input.chat_id) {
         Ok(entry) => entry.map(|(summary, _)| summary),
@@ -244,8 +245,8 @@ pub fn run_private_doc_workspace_refresh(
         Ok(model) => model,
         Err(error) => {
             log::warn!(
-                "[agent_private_docs] failed to read self model for chat_id={}: {}",
-                input.chat_id,
+                "[agent_private_docs] failed to read self model for subject_id={}: {}",
+                subject_id,
                 error
             );
             None
@@ -293,7 +294,7 @@ pub(crate) fn run_private_doc_workspace_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<PrivateDocWorkspaceRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     let policy = memory_policy(profile).private_docs;
     if !decision_override.unwrap_or_else(|| {
         should_refresh_private_doc_workspace(input, existing_workspace.is_some(), profile)
@@ -665,6 +666,8 @@ fn apply_private_doc_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
     use crate::error::Result;
     use crate::llm::{LlmModelCompat, LlmResponse, StopReason};
     use crate::memory::LongTermMemoryStore;
@@ -1231,6 +1234,7 @@ mod tests {
                 private_doc_store: &private_doc_store,
             },
             PrivateDocWorkspaceRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "c1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1245,10 +1249,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, PrivateDocWorkspaceRefreshOutcome::Updated);
-        let stored = private_doc_store
-            .get(board_subject_scope_id())
-            .unwrap()
-            .unwrap();
+        let stored = private_doc_store.get(TEST_SUBJECT_ID).unwrap().unwrap();
         assert!(stored
             .inner_journal
             .as_ref()

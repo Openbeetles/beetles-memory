@@ -21,7 +21,8 @@ use super::{
     GovernedOwnerTransition, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryEntryPlan,
     LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryQuery, LongTermMemoryReadStore,
     LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemoryStaleHint, LongTermMemoryStore,
-    LongTermMemoryVersionMaterial, MemoryPrivacyClass, SubjectId, TranscriptEvidenceRef,
+    LongTermMemoryVersionMaterial, MemoryPrivacyClass, MemorySpaceId, SubjectId,
+    TranscriptEvidenceRef,
 };
 
 fn plan_or_apply_owner_mutation(
@@ -44,7 +45,7 @@ pub const LONG_TERM_CONTROL_REVISION_NAMESPACE: &str = "long_term_control_revisi
 pub const LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE: &str = "long_term_control_tombstone";
 pub const LONG_TERM_GOVERNANCE_POLICY_NAMESPACE: &str = "long_term_governance_policy";
 pub const LONG_TERM_CONTROL_AUDIT_NAMESPACE: &str = "long_term_control_audit";
-pub const LONG_TERM_CONTROL_SCHEMA_VERSION: u32 = 2;
+pub const LONG_TERM_CONTROL_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -281,7 +282,7 @@ pub struct LongTermMemoryControlMutationRequest {
     pub operation: MemoryLongTermMutation,
     pub reason: String,
     pub dry_run: bool,
-    pub owner_subject_id: SubjectId,
+    pub factual_owner_id: MemorySpaceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_subject_id: Option<SubjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -414,7 +415,7 @@ pub struct MemoryLongTermMutationReport {
 pub struct LongTermMemoryControlRevisionIntent {
     pub revision_id: String,
     pub memory_space_id: String,
-    pub mounted_subject_id: SubjectId,
+    pub factual_owner_id: MemorySpaceId,
     pub operation: LongTermControlOperation,
     pub invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
     pub transition: GovernedOwnerTransition,
@@ -432,7 +433,7 @@ impl LongTermMemoryControlRevisionIntent {
         before: &LongTermMemoryEntry,
         after: Option<&LongTermMemoryEntry>,
         reason: impl Into<String>,
-        mounted_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
         actor_subject_id: Option<SubjectId>,
         memory_space_id: impl Into<String>,
         created_at: u64,
@@ -444,7 +445,7 @@ impl LongTermMemoryControlRevisionIntent {
             before,
             after,
             reason,
-            mounted_subject_id,
+            factual_owner_id,
             actor_subject_id,
             memory_space_id,
             created_at,
@@ -459,7 +460,7 @@ impl LongTermMemoryControlRevisionIntent {
         before: &LongTermMemoryEntry,
         reason_code: LongTermInvalidationReasonCode,
         reason: impl Into<String>,
-        mounted_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
         actor_subject_id: SubjectId,
         memory_space_id: impl Into<String>,
         created_at: u64,
@@ -471,7 +472,7 @@ impl LongTermMemoryControlRevisionIntent {
             before,
             None,
             reason,
-            mounted_subject_id,
+            factual_owner_id,
             Some(actor_subject_id),
             memory_space_id,
             created_at,
@@ -487,7 +488,7 @@ impl LongTermMemoryControlRevisionIntent {
         before: &LongTermMemoryEntry,
         after: Option<&LongTermMemoryEntry>,
         reason: impl Into<String>,
-        mounted_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
         actor_subject_id: Option<SubjectId>,
         memory_space_id: impl Into<String>,
         created_at: u64,
@@ -535,7 +536,7 @@ impl LongTermMemoryControlRevisionIntent {
         let intent = Self {
             revision_id: revision_id.into(),
             memory_space_id: memory_space_id.into(),
-            mounted_subject_id,
+            factual_owner_id,
             operation,
             invalidation_reason_code,
             transition: GovernedOwnerTransition {
@@ -558,8 +559,9 @@ impl LongTermMemoryControlRevisionIntent {
             || self.revision_id != self.revision_id.trim()
             || self.memory_space_id.trim().is_empty()
             || self.memory_space_id != self.memory_space_id.trim()
-            || self.mounted_subject_id.trim().is_empty()
-            || self.mounted_subject_id != self.mounted_subject_id.trim()
+            || self.factual_owner_id.trim().is_empty()
+            || self.factual_owner_id != self.factual_owner_id.trim()
+            || self.factual_owner_id != self.memory_space_id
             || self.reason.trim().is_empty()
             || self.reason != self.reason.trim()
             || self.created_at == 0
@@ -590,7 +592,7 @@ pub struct LongTermMemoryControlRevision {
     pub schema_version: u32,
     pub revision_id: String,
     pub memory_space_id: String,
-    pub mounted_subject_id: SubjectId,
+    pub factual_owner_id: MemorySpaceId,
     pub operation: LongTermControlOperation,
     pub invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
     pub transition: GovernedOwnerTransition,
@@ -625,7 +627,7 @@ impl LongTermMemoryControlRevision {
         let transition_validation = intent.transition.validate_contract(predecessor, successor);
         if !transition_validation.accepted
             || predecessor.memory_space_id != intent.memory_space_id
-            || predecessor.mounted_subject_id != intent.mounted_subject_id
+            || predecessor.factual_owner_id != intent.factual_owner_id
         {
             return Err(Error::config(
                 "long_term_control_revision",
@@ -639,7 +641,7 @@ impl LongTermMemoryControlRevision {
             schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
             revision_id: intent.revision_id,
             memory_space_id: intent.memory_space_id,
-            mounted_subject_id: intent.mounted_subject_id,
+            factual_owner_id: intent.factual_owner_id,
             operation: intent.operation,
             invalidation_reason_code: intent.invalidation_reason_code,
             transition: intent.transition,
@@ -661,7 +663,7 @@ impl LongTermMemoryControlRevision {
             schema_version: u32,
             revision_id: &'a str,
             memory_space_id: &'a str,
-            mounted_subject_id: &'a str,
+            factual_owner_id: &'a str,
             operation: LongTermControlOperation,
             invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
             transition: &'a GovernedOwnerTransition,
@@ -676,7 +678,7 @@ impl LongTermMemoryControlRevision {
             schema_version: self.schema_version,
             revision_id: &self.revision_id,
             memory_space_id: &self.memory_space_id,
-            mounted_subject_id: &self.mounted_subject_id,
+            factual_owner_id: &self.factual_owner_id,
             operation: self.operation,
             invalidation_reason_code: self.invalidation_reason_code,
             transition: &self.transition,
@@ -689,7 +691,7 @@ impl LongTermMemoryControlRevision {
         })
         .map_err(|error| Error::config("long_term_control_revision", error.to_string()))?;
         let mut hasher = Sha256::new();
-        hash_control_field(&mut hasher, b"long_term_control_revision_v2");
+        hash_control_field(&mut hasher, b"long_term_control_revision_v3");
         hash_control_field(&mut hasher, &encoded);
         Ok(format!("{:x}", hasher.finalize()))
     }
@@ -698,7 +700,8 @@ impl LongTermMemoryControlRevision {
         if self.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
             || self.revision_id.trim().is_empty()
             || self.memory_space_id.trim().is_empty()
-            || self.mounted_subject_id.trim().is_empty()
+            || self.factual_owner_id.trim().is_empty()
+            || self.factual_owner_id != self.memory_space_id
             || self.reason.trim().is_empty()
             || self.created_at == 0
             || self.transition.terminated_at < self.created_at
@@ -748,7 +751,7 @@ pub struct LongTermMemoryTombstone {
     pub last_source_revision: Option<u64>,
     pub previous_digest: String,
     pub reason: String,
-    pub owner_subject_id: SubjectId,
+    pub factual_owner_id: MemorySpaceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_subject_id: Option<SubjectId>,
     pub memory_space_id: String,
@@ -772,8 +775,9 @@ impl LongTermMemoryTombstone {
             || !is_control_sha256(&self.previous_digest)
             || self.reason.trim().is_empty()
             || self.reason != self.reason.trim()
-            || self.owner_subject_id.trim().is_empty()
-            || self.owner_subject_id != self.owner_subject_id.trim()
+            || self.factual_owner_id.trim().is_empty()
+            || self.factual_owner_id != self.factual_owner_id.trim()
+            || self.factual_owner_id != self.memory_space_id
             || self.memory_space_id.trim().is_empty()
             || self.memory_space_id != self.memory_space_id.trim()
             || self.created_at == 0
@@ -848,7 +852,7 @@ pub struct LongTermMemoryControlAuditEvent {
     pub operation: LongTermControlOperation,
     pub effects: Vec<ControlEffectRef>,
     pub reason: String,
-    pub owner_subject_id: SubjectId,
+    pub factual_owner_id: MemorySpaceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_subject_id: Option<SubjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -864,7 +868,7 @@ impl LongTermMemoryControlAuditEvent {
         operation: LongTermControlOperation,
         mut effects: Vec<ControlEffectRef>,
         reason: impl Into<String>,
-        owner_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
         actor_subject_id: Option<SubjectId>,
         memory_space_id: impl Into<String>,
         created_at: u64,
@@ -878,7 +882,7 @@ impl LongTermMemoryControlAuditEvent {
             operation,
             effects,
             reason: reason.into(),
-            owner_subject_id,
+            factual_owner_id,
             actor_subject_id,
             memory_space_id: Some(memory_space_id.into()),
             created_at,
@@ -893,7 +897,7 @@ impl LongTermMemoryControlAuditEvent {
             self.operation,
             &self.effects,
             &self.reason,
-            &self.owner_subject_id,
+            &self.factual_owner_id,
             &self.actor_subject_id,
             &self.memory_space_id,
             self.created_at,
@@ -915,18 +919,18 @@ pub enum ControlEffectRef {
     Revision {
         revision_id: String,
         transition: GovernedOwnerTransition,
-        mounted_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
     },
     Tombstone {
         tombstone_id: String,
         record_id: String,
-        owner_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
         owner_revision: u64,
         source_revision: Option<u64>,
     },
     Policy {
         policy_id: String,
-        owner_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
         policy_revision: u64,
         deleted: bool,
     },
@@ -1031,7 +1035,7 @@ pub fn bind_long_term_version_mutation(
     let predecessor = snapshot.current_material(lease)?.clone();
     let control_intent = intent.control_revision_intent;
     if control_intent.memory_space_id != predecessor.memory_space_id
-        || control_intent.mounted_subject_id != predecessor.mounted_subject_id
+        || control_intent.factual_owner_id != predecessor.factual_owner_id
         || control_intent.transition.predecessor != predecessor.owner_revision_ref()
     {
         return Err(Error::config(
@@ -1100,7 +1104,7 @@ pub fn bind_long_term_version_mutation(
         .map(|successor| {
             LongTermMemoryVersionMaterial::from_current_projection(
                 &predecessor.memory_space_id,
-                &predecessor.mounted_subject_id,
+                &predecessor.factual_owner_id,
                 successor,
                 effective_at,
                 Some(predecessor.owner_revision_ref()),
@@ -1170,7 +1174,7 @@ pub fn bind_long_term_version_mutation(
             last_source_revision: predecessor.governed_content.source_revision,
             previous_digest: predecessor.content_digest.clone(),
             reason: control_revision.reason.clone(),
-            owner_subject_id: predecessor.mounted_subject_id.clone(),
+            factual_owner_id: predecessor.factual_owner_id.clone(),
             actor_subject_id: control_revision.actor_subject_id.clone(),
             memory_space_id: predecessor.memory_space_id.clone(),
             created_at: effective_at,
@@ -1184,13 +1188,13 @@ pub fn bind_long_term_version_mutation(
     let mut effects = vec![ControlEffectRef::Revision {
         revision_id: control_revision.revision_id.clone(),
         transition: control_revision.transition.clone(),
-        mounted_subject_id: control_revision.mounted_subject_id.clone(),
+        factual_owner_id: control_revision.factual_owner_id.clone(),
     }];
     if let Some(tombstone) = &tombstone {
         effects.push(ControlEffectRef::Tombstone {
             tombstone_id: tombstone.tombstone_id.clone(),
             record_id: tombstone.record_id.clone(),
-            owner_subject_id: tombstone.owner_subject_id.clone(),
+            factual_owner_id: tombstone.factual_owner_id.clone(),
             owner_revision: tombstone.last_owner_revision,
             source_revision: tombstone.last_source_revision,
         });
@@ -1201,7 +1205,7 @@ pub fn bind_long_term_version_mutation(
         operation,
         effects,
         control_revision.reason.clone(),
-        predecessor.mounted_subject_id.clone(),
+        predecessor.factual_owner_id.clone(),
         control_revision.actor_subject_id.clone(),
         predecessor.memory_space_id.clone(),
         control_revision.created_at,
@@ -1270,7 +1274,7 @@ pub fn bind_long_term_control_audit_batch(
             .entry((
                 audit.operation,
                 audit.reason.clone(),
-                audit.owner_subject_id.clone(),
+                audit.factual_owner_id.clone(),
                 audit.actor_subject_id.clone(),
                 memory_space_id,
                 audit.created_at,
@@ -1314,7 +1318,7 @@ fn canonical_long_term_tombstone_id(
     ))
     .map_err(|error| Error::config("long_term_control_tombstone", error.to_string()))?;
     let mut hasher = Sha256::new();
-    hash_control_field(&mut hasher, b"long_term_control_tombstone_v2");
+    hash_control_field(&mut hasher, b"long_term_control_tombstone_v3");
     hash_control_field(&mut hasher, &encoded);
     Ok(format!("ltmt-{:x}", hasher.finalize()))
 }
@@ -1324,7 +1328,7 @@ pub struct LongTermControlPostImageClosure {
     pub transaction_id: String,
     pub operation: LongTermControlOperation,
     pub memory_space_id: String,
-    pub owner_subject_id: SubjectId,
+    pub factual_owner_id: MemorySpaceId,
     pub actor_subject_id: Option<SubjectId>,
     pub owner_records: Vec<LongTermMemoryVersionMaterialImage>,
     pub revisions: Vec<GovernedDocumentImage<LongTermMemoryControlRevision>>,
@@ -1337,10 +1341,10 @@ pub fn validate_long_term_control_post_image(
     closure: &LongTermControlPostImageClosure,
 ) -> GovernedPostImageValidation {
     let memory_space_id = closure.memory_space_id.trim();
-    let owner_subject_id = closure.owner_subject_id.trim();
+    let factual_owner_id = closure.factual_owner_id.trim();
     let mut failures = Vec::new();
     if memory_space_id.is_empty()
-        || owner_subject_id.is_empty()
+        || factual_owner_id.is_empty()
         || closure.transaction_id.trim().is_empty()
     {
         failures.push("long_term_control_transaction_scope_invalid".to_string());
@@ -1353,7 +1357,7 @@ pub fn validate_long_term_control_post_image(
             .observed_owner_ref()
             .map(|owner_ref| owner_ref.owner_id.as_str())
             .unwrap_or_default();
-        if !image.has_exact_physical_closure(memory_space_id, owner_subject_id) {
+        if !image.has_exact_physical_closure(memory_space_id, factual_owner_id) {
             failures.push("long_term_control_owner_physical_key_drift".to_string());
         }
         if image.before != image.after
@@ -1391,7 +1395,7 @@ pub fn validate_long_term_control_post_image(
         }
         if revision.operation != closure.operation
             || revision.memory_space_id != memory_space_id
-            || revision.mounted_subject_id != owner_subject_id
+            || revision.factual_owner_id != factual_owner_id
             || revision.actor_subject_id != closure.actor_subject_id
         {
             failures.push("long_term_control_revision_operation_scope_drift".to_string());
@@ -1428,7 +1432,7 @@ pub fn validate_long_term_control_post_image(
         expected_effects.push(ControlEffectRef::Revision {
             revision_id: revision.revision_id.clone(),
             transition: revision.transition.clone(),
-            mounted_subject_id: revision.mounted_subject_id.clone(),
+            factual_owner_id: revision.factual_owner_id.clone(),
         });
     }
 
@@ -1453,7 +1457,7 @@ pub fn validate_long_term_control_post_image(
         }
         if tombstone.operation != closure.operation
             || tombstone.memory_space_id != memory_space_id
-            || tombstone.owner_subject_id != owner_subject_id
+            || tombstone.factual_owner_id != factual_owner_id
             || tombstone.actor_subject_id != closure.actor_subject_id
         {
             failures.push("long_term_control_tombstone_operation_scope_drift".to_string());
@@ -1472,7 +1476,7 @@ pub fn validate_long_term_control_post_image(
         expected_effects.push(ControlEffectRef::Tombstone {
             tombstone_id: tombstone.tombstone_id.clone(),
             record_id: tombstone.record_id.clone(),
-            owner_subject_id: tombstone.owner_subject_id.clone(),
+            factual_owner_id: tombstone.factual_owner_id.clone(),
             owner_revision: tombstone.last_owner_revision,
             source_revision: tombstone.last_source_revision,
         });
@@ -1495,7 +1499,6 @@ pub fn validate_long_term_control_post_image(
         if policy.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
             || policy.memory_space_id != memory_space_id
             || policy.selector.memory_space_id.as_deref() != Some(memory_space_id)
-            || policy.selector.subject_id.as_deref() != Some(owner_subject_id)
         {
             failures.push("long_term_control_policy_schema_or_scope_drift".to_string());
         }
@@ -1512,7 +1515,7 @@ pub fn validate_long_term_control_post_image(
         }
         expected_effects.push(ControlEffectRef::Policy {
             policy_id: policy.policy_id.clone(),
-            owner_subject_id: owner_subject_id.to_string(),
+            factual_owner_id: factual_owner_id.to_string(),
             policy_revision: image
                 .after
                 .as_ref()
@@ -1555,7 +1558,7 @@ pub fn validate_long_term_control_post_image(
             failures.push("long_term_control_audit_operation_drift".to_string());
         }
         if audit.memory_space_id.as_deref() != Some(memory_space_id)
-            || audit.owner_subject_id != owner_subject_id
+            || audit.factual_owner_id != factual_owner_id
         {
             failures.push("long_term_control_audit_scope_drift".to_string());
         }
@@ -1604,7 +1607,7 @@ pub enum LongTermMemoryControlWrite {
     PutGovernancePolicy(MemoryLongTermGovernancePolicy),
     DeleteGovernancePolicy {
         policy_id: String,
-        owner_subject_id: SubjectId,
+        factual_owner_id: MemorySpaceId,
         policy_revision: u64,
     },
     AppendAudit(LongTermMemoryControlAuditEvent),
@@ -1621,14 +1624,14 @@ fn control_effects_from_writes(
                     Some(ControlEffectRef::Revision {
                         revision_id: revision.revision_id.clone(),
                         transition: revision.transition.clone(),
-                        mounted_subject_id: revision.mounted_subject_id.clone(),
+                        factual_owner_id: revision.factual_owner_id.clone(),
                     })
                 }
                 LongTermMemoryControlWrite::PutTombstone(tombstone) => {
                     Some(ControlEffectRef::Tombstone {
                         tombstone_id: tombstone.tombstone_id.clone(),
                         record_id: tombstone.record_id.clone(),
-                        owner_subject_id: tombstone.owner_subject_id.clone(),
+                        factual_owner_id: tombstone.factual_owner_id.clone(),
                         owner_revision: tombstone.last_owner_revision,
                         source_revision: tombstone.last_source_revision,
                     })
@@ -1636,18 +1639,18 @@ fn control_effects_from_writes(
                 LongTermMemoryControlWrite::PutGovernancePolicy(policy) => {
                     Some(ControlEffectRef::Policy {
                         policy_id: policy.policy_id.clone(),
-                        owner_subject_id: required_policy_subject(&policy.selector)?,
+                        factual_owner_id: required_policy_factual_owner(&policy.selector)?,
                         policy_revision: policy.policy_revision,
                         deleted: false,
                     })
                 }
                 LongTermMemoryControlWrite::DeleteGovernancePolicy {
                     policy_id,
-                    owner_subject_id,
+                    factual_owner_id,
                     policy_revision,
                 } => Some(ControlEffectRef::Policy {
                     policy_id: policy_id.clone(),
-                    owner_subject_id: owner_subject_id.clone(),
+                    factual_owner_id: factual_owner_id.clone(),
                     policy_revision: *policy_revision,
                     deleted: true,
                 }),
@@ -2045,7 +2048,7 @@ impl LongTermMemoryControlStore for PlanningLongTermMemoryControlStore<'_> {
             self.writes.lock().expect("control writes lock").push(
                 LongTermMemoryControlWrite::DeleteGovernancePolicy {
                     policy_id: policy_id.to_string(),
-                    owner_subject_id: required_policy_subject(&existing.selector)?,
+                    factual_owner_id: required_policy_factual_owner(&existing.selector)?,
                     policy_revision: existing.policy_revision,
                 },
             );
@@ -2185,6 +2188,7 @@ fn plan_long_term_memory_control_mutation_with_sinks(
     control_store: &dyn LongTermMemoryControlStore,
     request: LongTermMemoryControlMutationRequest,
 ) -> Result<MemoryLongTermMutationReport> {
+    validate_factual_owner_scope(&request)?;
     let operation_label = mutation_label(&request.operation);
     match &request.operation {
         MemoryLongTermMutation::Correct {
@@ -2284,7 +2288,7 @@ fn plan_long_term_memory_governance_policy_mutation_with_sink(
         | MemoryGovernancePolicyMutation::RemoveSuppression { selector } => selector,
     };
     required_policy_memory_space(selector)?;
-    required_policy_subject(selector)?;
+    required_policy_factual_owner(selector)?;
     match operation {
         MemoryGovernancePolicyMutation::Suppress { selector, duration } => {
             let memory_space_id = required_policy_memory_space(&selector)?;
@@ -2759,7 +2763,7 @@ fn apply_invalidate(
             &previous,
             contract.reason_code,
             contract.audit_reason.clone(),
-            request.owner_subject_id.clone(),
+            request.factual_owner_id.clone(),
             contract.actor_subject_id.clone(),
             memory_space_id,
             request.now_secs,
@@ -3423,7 +3427,7 @@ fn tombstone_for(
         last_source_revision: entry.source_revision,
         previous_digest: digest_entry(entry),
         reason: request.reason.clone(),
-        owner_subject_id: request.owner_subject_id.clone(),
+        factual_owner_id: request.factual_owner_id.clone(),
         actor_subject_id: request.actor_subject_id.clone(),
         memory_space_id,
         created_at: request.now_secs,
@@ -3459,7 +3463,7 @@ fn control_revision_intent_for(
         before,
         after,
         request.reason.clone(),
-        request.owner_subject_id.clone(),
+        request.factual_owner_id.clone(),
         request.actor_subject_id.clone(),
         memory_space_id,
         request.now_secs,
@@ -3500,24 +3504,24 @@ fn write_record_audit(
                     revision.operation == typed_operation
                         && revision.created_at == request.now_secs
                         && revision.memory_space_id == memory_space_id
-                        && revision.mounted_subject_id == request.owner_subject_id
+                        && revision.factual_owner_id == request.factual_owner_id
                 })
                 .map(|revision| ControlEffectRef::Revision {
                     revision_id: revision.revision_id,
                     transition: revision.transition,
-                    mounted_subject_id: revision.mounted_subject_id,
+                    factual_owner_id: revision.factual_owner_id,
                 }),
         );
         if let Some(tombstone) = control_store.get_long_term_control_tombstone(record_id)? {
             if tombstone.operation == typed_operation
                 && tombstone.created_at == request.now_secs
                 && tombstone.memory_space_id == memory_space_id
-                && tombstone.owner_subject_id == request.owner_subject_id
+                && tombstone.factual_owner_id == request.factual_owner_id
             {
                 effects.push(ControlEffectRef::Tombstone {
                     tombstone_id: tombstone.tombstone_id,
                     record_id: tombstone.record_id,
-                    owner_subject_id: tombstone.owner_subject_id,
+                    factual_owner_id: tombstone.factual_owner_id,
                     owner_revision: tombstone.last_owner_revision,
                     source_revision: tombstone.last_source_revision,
                 });
@@ -3536,7 +3540,7 @@ fn write_record_audit(
         typed_operation,
         effects,
         request.reason.clone(),
-        request.owner_subject_id.clone(),
+        request.factual_owner_id.clone(),
         request.actor_subject_id.clone(),
         memory_space_id,
         request.now_secs,
@@ -3579,12 +3583,12 @@ fn write_policy_audit(
             "one policy audit cannot span memory spaces",
         ));
     }
-    let owner_subject_id = required_policy_subject(&policies[0].selector)?;
+    let factual_owner_id = required_policy_factual_owner(&policies[0].selector)?;
     for policy in policies {
-        if required_policy_subject(&policy.selector)? != owner_subject_id {
+        if required_policy_factual_owner(&policy.selector)? != factual_owner_id {
             return Err(Error::config(
                 "long_term_control_policy_audit_scope",
-                "one policy audit cannot span owner subjects",
+                "one policy audit cannot span factual owners",
             ));
         }
     }
@@ -3592,7 +3596,7 @@ fn write_policy_audit(
         .iter()
         .map(|policy| ControlEffectRef::Policy {
             policy_id: policy.policy_id.clone(),
-            owner_subject_id: owner_subject_id.clone(),
+            factual_owner_id: factual_owner_id.clone(),
             policy_revision: policy.policy_revision,
             deleted,
         })
@@ -3603,7 +3607,7 @@ fn write_policy_audit(
         typed_operation,
         effects,
         reason,
-        owner_subject_id,
+        factual_owner_id,
         None,
         memory_space_id,
         now_secs,
@@ -3630,19 +3634,44 @@ fn required_policy_memory_space(selector: &MemoryGovernanceSelector) -> Result<S
         })
 }
 
-fn required_policy_subject(selector: &MemoryGovernanceSelector) -> Result<SubjectId> {
+fn required_policy_factual_owner(selector: &MemoryGovernanceSelector) -> Result<MemorySpaceId> {
     selector
         .subject_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
         .ok_or_else(|| {
             Error::config(
                 "long_term_control_policy_subject_required",
-                "governance policies require an exact subject_id in scoped runtime storage",
+                "scoped runtime governance policies require an exact subject selector",
             )
-        })
+        })?;
+    required_policy_memory_space(selector)
+}
+
+fn validate_factual_owner_scope(request: &LongTermMemoryControlMutationRequest) -> Result<()> {
+    let factual_owner_id = request.factual_owner_id.trim();
+    let memory_space_id = request
+        .memory_space_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::config(
+                "long_term_control_memory_space_required",
+                "control mutations require an explicit memory_space_id",
+            )
+        })?;
+    if factual_owner_id.is_empty()
+        || factual_owner_id != request.factual_owner_id
+        || factual_owner_id != memory_space_id
+    {
+        return Err(Error::config(
+            "long_term_control_factual_owner_scope",
+            "shared long-term factual owner must exactly equal memory_space_id",
+        ));
+    }
+    Ok(())
 }
 
 fn confirmation_token_for(selector: &MemoryLongTermSelector, record_ids: &[String]) -> String {

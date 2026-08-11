@@ -48,24 +48,17 @@ fn typed_memory_space_archive_round_trips_only_with_the_runtime_scope() {
 
     assert_eq!(imported.imported_scope, scope);
     assert_eq!(
-        target_runtime
-            .list_long_term_memory(MemoryLongTermListRequest {
-                query: LongTermMemoryQuery {
-                    limit: 20,
-                    ..LongTermMemoryQuery::default()
-                },
-                cursor: None,
-                limit: 20,
-                view: MemoryLongTermControlView::HostUi,
-            })
-            .expect("target owner list")
-            .records
-            .len(),
+        target_platform
+            .replay_harness()
+            .memory_space_long_term_memory_read_store(target_runtime.memory_space_id())
+            .expect("target memory-space owner store")
+            .count()
+            .expect("target memory-space owner count"),
         1
     );
     let manifest_key = memory_facet_manifest_key(
         target_runtime.memory_space_id(),
-        target_runtime.subject_id(),
+        target_runtime.memory_space_id(),
     )
     .expect("target facet manifest key");
     assert_eq!(

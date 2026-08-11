@@ -12,7 +12,7 @@ use bm_core::memory::{
 };
 
 const MEMORY_SPACE_ID: &str = "space-1";
-const MOUNTED_SUBJECT_ID: &str = "subject-1";
+const FACTUAL_OWNER_ID: &str = "space-1";
 const OWNER_ID: &str = "state-1";
 
 fn owner_ref(owner_id: &str) -> GovernedMemoryOwnerRef {
@@ -29,7 +29,7 @@ fn bound_creation_owns_revision_one_material_head_and_effective_time() {
     let bound = bind_long_term_version_creation(
         LongTermMemoryVersionCreateIntent {
             memory_space_id: MEMORY_SPACE_ID.into(),
-            mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+            factual_owner_id: FACTUAL_OWNER_ID.into(),
             projection,
             governed_evidence_refs: vec![evidence_ref()],
             requested_at: 5,
@@ -48,6 +48,26 @@ fn bound_creation_owns_revision_one_material_head_and_effective_time() {
     );
 }
 
+#[test]
+fn bound_creation_rejects_a_non_space_factual_owner() {
+    let projection = predecessor_material()
+        .to_current_projection()
+        .expect("revision-one projection");
+    let error = bind_long_term_version_creation(
+        LongTermMemoryVersionCreateIntent {
+            memory_space_id: MEMORY_SPACE_ID.into(),
+            factual_owner_id: "agent:alpha".into(),
+            projection,
+            governed_evidence_refs: vec![evidence_ref()],
+            requested_at: 5,
+        },
+        LongTermVersionRetentionLease::try_new(2).expect("retention lease"),
+    )
+    .expect_err("shared factual owner must be the exact MemorySpace");
+
+    assert_eq!(error.stage(), "long_term_version_creation");
+}
+
 fn evidence_ref() -> GovernedOwnerRevisionRef {
     GovernedOwnerRevisionRef::try_new(
         GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::EvidenceDocument, "evidence-1"),
@@ -60,7 +80,7 @@ fn predecessor_material() -> LongTermMemoryVersionMaterial {
     let mut material = LongTermMemoryVersionMaterial {
         schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
         memory_space_id: MEMORY_SPACE_ID.into(),
-        mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+        factual_owner_id: FACTUAL_OWNER_ID.into(),
         owner_ref: owner_ref(OWNER_ID),
         owner_revision: 1,
         governed_content: LongTermMemoryGovernedContent {
@@ -104,7 +124,7 @@ fn owner_snapshot(material: LongTermMemoryVersionMaterial) -> LongTermVersionOwn
         head: LongTermMemoryHeadManifest {
             schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
             memory_space_id: MEMORY_SPACE_ID.into(),
-            mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+            factual_owner_id: FACTUAL_OWNER_ID.into(),
             owner_ref: material.owner_ref.clone(),
             current_revision: material.owner_revision,
             retained_revision_digests: vec![LongTermMemoryRetainedRevisionDigest {
@@ -137,7 +157,7 @@ fn advance_intent(
         &before,
         Some(&after),
         "operator correction",
-        MOUNTED_SUBJECT_ID.into(),
+        FACTUAL_OWNER_ID.into(),
         Some("operator-1".into()),
         MEMORY_SPACE_ID,
         20,
@@ -166,7 +186,7 @@ fn terminal_intent(
             &before,
             LongTermInvalidationReasonCode::ContradictedByGovernedEvidence,
             "operator terminal decision",
-            MOUNTED_SUBJECT_ID.into(),
+            FACTUAL_OWNER_ID.into(),
             "operator-1".into(),
             MEMORY_SPACE_ID,
             20,
@@ -183,7 +203,7 @@ fn terminal_intent(
             &before,
             None,
             "operator terminal decision",
-            MOUNTED_SUBJECT_ID.into(),
+            FACTUAL_OWNER_ID.into(),
             actor_subject_id,
             MEMORY_SPACE_ID,
             20,
@@ -223,7 +243,7 @@ fn bound_advance_owns_monotonic_time_revision_audit_and_retention() {
         vec![ControlEffectRef::Revision {
             revision_id: bound.control_revision.revision_id.clone(),
             transition: bound.control_revision.transition.clone(),
-            mounted_subject_id: MOUNTED_SUBJECT_ID.into(),
+            factual_owner_id: FACTUAL_OWNER_ID.into(),
         }]
     );
     assert_ne!(bound.audit.event_id, "pending");

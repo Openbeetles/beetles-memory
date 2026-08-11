@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use super::{
-    board_subject_scope_id,
     llm_json::{get_object_text, parse_llm_json_payload, LlmJsonPayload},
     memory_policy, render_execution_state_block, render_internal_memory_topology_block,
     render_private_memory_boundary_block, render_recent_persona_evidence_block,
@@ -101,6 +100,7 @@ pub(crate) fn estimate_self_model_chars(model: &SelfModel) -> usize {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelfModelRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -264,7 +264,7 @@ pub fn run_self_model_refresh(
     input: SelfModelRefreshInput<'_>,
     profile: MemoryProfile,
 ) -> Result<SelfModelRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     let existing_model = ctx.self_model_store.get(subject_id)?;
     let summary_text = match ctx.session_summary_store.get_with_count(input.chat_id) {
         Ok(entry) => entry.map(|(summary, _)| summary),
@@ -324,7 +324,7 @@ pub(crate) fn run_self_model_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<SelfModelRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     let policy = memory_policy(profile).self_model;
     if !decision_override
         .unwrap_or_else(|| should_refresh_self_model(input, existing_model.is_some(), profile))
@@ -757,6 +757,8 @@ fn apply_self_model_field_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SUBJECT_ID: &str = "agent:test";
     use crate::error::Result;
     use crate::llm::{LlmModelCompat, LlmResponse, StopReason};
     use crate::memory::LongTermMemoryStore;
@@ -1247,6 +1249,7 @@ mod tests {
                 self_model_store: &self_model_store,
             },
             SelfModelRefreshInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
                 chat_id: "c1",
                 ingress: IngressKind::User,
                 channel: "chat_channel",
@@ -1261,10 +1264,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, SelfModelRefreshOutcome::Updated);
-        let stored = self_model_store
-            .get(board_subject_scope_id())
-            .unwrap()
-            .unwrap();
+        let stored = self_model_store.get(TEST_SUBJECT_ID).unwrap().unwrap();
         assert!(stored.self_narrative.contains("共享事实层"));
         assert_eq!(
             summary_store.get("c1").unwrap().as_deref(),

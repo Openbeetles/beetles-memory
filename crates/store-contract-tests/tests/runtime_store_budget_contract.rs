@@ -1,6 +1,7 @@
 mod support;
 use bm_core::budget::StoreRuntimeBudget;
 use bm_core::feature_gate::ProfileId;
+use bm_core::memory::LongTermMemoryVersionScopeManifest;
 use bm_core::platform::Platform as _;
 #[cfg(feature = "sqlite-store")]
 use bm_sdk::nonproduction_replay_harness::SqliteStoreEngine;
@@ -9,8 +10,13 @@ use bm_sdk::nonproduction_replay_harness::{
     MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget, StoreEngine,
     StoreEventLog, StoreEventScope, StoreScopedProjectionReplaceRequest,
     StoreScopedProjectionScope, StoreSnapshot, StoreSnapshotBlob, StoreSnapshotJsonDoc,
+    LONG_TERM_HEAD_MANIFEST_NAMESPACE, LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+    LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
+
+const TYPED_RESTORE_MEMORY_SPACE_ID: &str = "space:typed-restore";
+const TYPED_RESTORE_SUBJECT_ID: &str = "subject:typed-restore";
 
 fn tiny_store_budget() -> StoreRuntimeBudget {
     StoreRuntimeBudget {
@@ -47,36 +53,55 @@ fn typed_restore_event(event_id: &str, revision: &str) -> MemoryStoreEvent {
         event_id,
         MemoryStoreEventKind::MemoryProjection,
         StoreEventScope::new("agent", "owner", "test", "typed-restore")
-            .with_memory_space("space:typed-restore")
-            .with_subject("subject:typed-restore"),
+            .with_memory_space(TYPED_RESTORE_MEMORY_SPACE_ID)
+            .with_subject(TYPED_RESTORE_SUBJECT_ID),
         1,
     )
-    .with_plane("self_model")
-    .with_record_key("subject:typed-restore")
+    .with_plane(LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE)
+    .with_record_key(typed_restore_document(1).key)
     .with_payload("revision", revision)
+}
+
+fn typed_restore_document(revision: u64) -> StoreSnapshotJsonDoc {
+    let manifest = LongTermMemoryVersionScopeManifest::build(
+        TYPED_RESTORE_MEMORY_SPACE_ID,
+        TYPED_RESTORE_MEMORY_SPACE_ID,
+        revision,
+        &[],
+        &[],
+        &[],
+        &[],
+        1,
+    )
+    .expect("typed restore manifest");
+    StoreSnapshotJsonDoc {
+        namespace: LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+        key: manifest.physical_key.clone(),
+        value: serde_json::to_value(manifest).expect("serialize typed restore manifest"),
+    }
 }
 
 fn typed_restore_request() -> StoreScopedProjectionReplaceRequest {
     StoreScopedProjectionReplaceRequest {
-        scope: StoreScopedProjectionScope::subject("space:typed-restore", "subject:typed-restore")
-            .expect("typed restore scope"),
-        json_namespaces: vec!["self_model".to_string()],
-        json_docs: vec![StoreSnapshotJsonDoc {
-            namespace: "self_model".to_string(),
-            key: "subject:typed-restore".to_string(),
-            value: json!({"revision": "replacement"}),
-        }],
+        scope: StoreScopedProjectionScope::subject(
+            TYPED_RESTORE_MEMORY_SPACE_ID,
+            TYPED_RESTORE_SUBJECT_ID,
+        )
+        .expect("typed restore scope"),
+        json_namespaces: vec![
+            LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+            LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+            LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+        ],
+        json_docs: vec![typed_restore_document(2)],
         events: vec![typed_restore_event("typed-restore:new", "replacement")],
     }
 }
 
 fn seed_typed_restore(engine: &dyn StoreEngine) {
+    let before = typed_restore_document(1);
     engine
-        .put_json_value(
-            "self_model",
-            "subject:typed-restore",
-            json!({"revision": "before"}),
-        )
+        .put_json_value(&before.namespace, &before.key, before.value)
         .expect("seed typed restore JSON");
     engine
         .put_blob("retained_private", "keep", b"12345")
@@ -90,9 +115,12 @@ fn typed_restore_state(
     engine: &dyn StoreEngine,
 ) -> (Option<Value>, Option<Vec<u8>>, Vec<MemoryStoreEvent>) {
     (
-        engine
-            .get_json_value("self_model", "subject:typed-restore")
-            .expect("read typed restore JSON"),
+        {
+            let address = typed_restore_document(1);
+            engine
+                .get_json_value(&address.namespace, &address.key)
+                .expect("read typed restore JSON")
+        },
         engine
             .get_blob("retained_private", "keep")
             .expect("read typed restore blob"),
@@ -110,11 +138,7 @@ fn assert_typed_restore_success(
         .replace_scoped_projection_with_capacity(&request, capacity)
         .unwrap_or_else(|error| panic!("{backend} typed restore exact budget: {error}"));
     let state = typed_restore_state(engine);
-    assert_eq!(
-        state.0,
-        Some(json!({"revision": "replacement"})),
-        "{backend}"
-    );
+    assert_eq!(state.0, Some(typed_restore_document(2).value), "{backend}");
     assert_eq!(state.1, Some(b"12345".to_vec()), "{backend}");
     assert_eq!(state.2, request.events, "{backend}");
 }

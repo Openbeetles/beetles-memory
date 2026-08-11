@@ -5,20 +5,20 @@ use crate::task_execution::{
 use std::collections::BTreeSet;
 
 use super::{
-    board_subject_scope_id, build_archive_evidence_block, build_continuity_recall_query,
-    build_self_state, build_world_snapshot_from_commitments, collect_private_targets,
-    decide_prompt_recall_route, derive_relationship_constitution,
-    inspect_continuity_capsule_recall, load_recent_persona_evidence, load_world_snapshot_reminders,
-    load_world_snapshot_tasks, memory_capability_profile, memory_policy,
-    parse_explicit_long_term_slot_query, private_garden_scope_id, recall_long_term_memory_block,
-    relationship_scope_id, render_autonomy_strategy_block, render_continuity_capsule_block,
-    render_exact_long_term_memory_block, render_execution_state_block, render_inner_life_block,
-    render_mental_privacy_boundary_block, render_outer_voice_block,
-    render_persistent_self_authored_core_block, render_private_doc_workspace_block,
-    render_private_garden_block, render_relationship_constitution_block,
-    render_relationship_portfolio_block, render_self_continuity_block, render_self_model_block,
-    render_self_state_block, render_turn_observation_ledger_block, render_work_continuity_block,
-    render_world_sense_block, render_world_snapshot_block, ContinuityCapsuleRecallInspectionInput,
+    build_archive_evidence_block, build_continuity_recall_query, build_self_state,
+    build_world_snapshot_from_commitments, collect_private_targets, decide_prompt_recall_route,
+    derive_relationship_constitution, inspect_continuity_capsule_recall,
+    load_recent_persona_evidence, load_world_snapshot_reminders, load_world_snapshot_tasks,
+    memory_capability_profile, memory_policy, parse_explicit_long_term_slot_query,
+    recall_long_term_memory_block, relationship_scope_id, render_autonomy_strategy_block,
+    render_continuity_capsule_block, render_exact_long_term_memory_block,
+    render_execution_state_block, render_inner_life_block, render_mental_privacy_boundary_block,
+    render_outer_voice_block, render_persistent_self_authored_core_block,
+    render_private_doc_workspace_block, render_private_garden_block,
+    render_relationship_constitution_block, render_relationship_portfolio_block,
+    render_self_continuity_block, render_self_model_block, render_self_state_block,
+    render_turn_observation_ledger_block, render_work_continuity_block, render_world_sense_block,
+    render_world_snapshot_block, ContinuityCapsuleRecallInspectionInput,
     ContinuityCapsuleScopeKind, MemoryProfile, PromptMemoryContextParams,
     PromptRecallRouterDecision, RecallPlane, RecallQuery, RecallSelectionReport, SessionMessage,
     WorldSnapshotContext, MAX_WORK_CONTINUITY_BLOCK_LEN,
@@ -26,7 +26,7 @@ use super::{
 
 pub(crate) struct PromptContextSeed {
     pub profile: MemoryProfile,
-    pub subject_id: &'static str,
+    pub subject_id: String,
     pub relationship_id: String,
     pub esp_compact_first_turn_graph: bool,
     pub reuse_stored_relationship_constitution: bool,
@@ -224,7 +224,11 @@ pub(crate) fn seed_prompt_context(
     health: &mut PromptContextLoadHealth,
 ) -> PromptContextSeed {
     let profile = params.memory_system_kind.memory_profile();
-    let relationship_id = relationship_scope_id(params.current_channel, params.chat_id);
+    let relationship_id = relationship_scope_id(
+        params.mounted_subject_id,
+        params.current_channel,
+        params.chat_id,
+    );
     let relationship_constitution_existing =
         load_optional_with_health(health, "relationship_constitution_existing", || {
             params.relationship_constitution_store.get(&relationship_id)
@@ -244,7 +248,7 @@ pub(crate) fn seed_prompt_context(
 
     PromptContextSeed {
         profile,
-        subject_id: board_subject_scope_id(),
+        subject_id: params.mounted_subject_id.to_string(),
         relationship_id,
         esp_compact_first_turn_graph,
         reuse_stored_relationship_constitution,
@@ -374,7 +378,9 @@ pub(crate) fn load_constitutional_stage(
         .load_l1_constitutional
         .then(|| {
             load_optional_with_health(health, "self_authored_core", || {
-                params.self_authored_core_store.get(seed.subject_id)
+                params
+                    .self_authored_core_store
+                    .get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -384,7 +390,9 @@ pub(crate) fn load_constitutional_stage(
         .load_l2_background_governance
         .then(|| {
             load_optional_with_health(health, "relationship_portfolio", || {
-                params.relationship_portfolio_store.get(seed.subject_id)
+                params
+                    .relationship_portfolio_store
+                    .get(seed.subject_id.as_str())
             })
         })
         .flatten();
@@ -393,14 +401,16 @@ pub(crate) fn load_constitutional_stage(
         || params.participation_plan.load_l2_background_governance)
         .then(|| {
             load_optional_with_health(health, "relationship_topology", || {
-                params.relationship_topology_store.get(seed.subject_id)
+                params
+                    .relationship_topology_store
+                    .get(seed.subject_id.as_str())
             })
         })
         .flatten();
     let self_model = load_private_background
         .then(|| {
             load_optional_with_health(health, "self_model", || {
-                params.self_model_store.get(seed.subject_id)
+                params.self_model_store.get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -410,7 +420,7 @@ pub(crate) fn load_constitutional_stage(
             || params.participation_plan.load_l2_background_governance))
         .then(|| {
             load_optional_with_health(health, "self_continuity", || {
-                params.self_continuity_store.get(seed.subject_id)
+                params.self_continuity_store.get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -419,7 +429,7 @@ pub(crate) fn load_constitutional_stage(
     let felt_significance = load_subjective_projection
         .then(|| {
             load_optional_with_health(health, "felt_significance", || {
-                params.felt_significance_store.get(seed.subject_id)
+                params.felt_significance_store.get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -427,7 +437,9 @@ pub(crate) fn load_constitutional_stage(
     let temperament_continuity = load_subjective_projection
         .then(|| {
             load_optional_with_health(health, "temperament_continuity", || {
-                params.temperament_continuity_store.get(seed.subject_id)
+                params
+                    .temperament_continuity_store
+                    .get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -435,7 +447,7 @@ pub(crate) fn load_constitutional_stage(
     let inner_conflict = load_subjective_projection
         .then(|| {
             load_optional_with_health(health, "inner_conflict", || {
-                params.inner_conflict_store.get(seed.subject_id)
+                params.inner_conflict_store.get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -445,7 +457,7 @@ pub(crate) fn load_constitutional_stage(
         .load_l2_background_governance
         .then(|| {
             load_optional_with_health(health, "autonomy_strategy", || {
-                params.autonomy_strategy_store.get(seed.subject_id)
+                params.autonomy_strategy_store.get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -463,7 +475,7 @@ pub(crate) fn load_constitutional_stage(
     let inner_life = load_private_depth
         .then(|| {
             load_optional_with_health(health, "inner_life", || {
-                params.inner_life_store.get(seed.subject_id)
+                params.inner_life_store.get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -471,7 +483,7 @@ pub(crate) fn load_constitutional_stage(
     let private_workspace = load_private_depth
         .then(|| {
             load_optional_with_health(health, "private_workspace", || {
-                params.private_doc_store.get(seed.subject_id)
+                params.private_doc_store.get(seed.subject_id.as_str())
             })
             .map(Box::new)
         })
@@ -480,7 +492,7 @@ pub(crate) fn load_constitutional_stage(
         if load_private_depth && params.include_private_garden_projection {
             load_vec_with_health(health, "private_garden", || {
                 params.private_garden_store.list(
-                    private_garden_scope_id(),
+                    seed.subject_id.as_str(),
                     prompt_private_garden_doc_limit(seed.profile),
                 )
             })

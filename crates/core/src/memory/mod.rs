@@ -616,10 +616,9 @@ pub use self_runtime::{
     SELF_RUNTIME_CHANNEL, SELF_RUNTIME_SYSTEM_PROMPT,
 };
 pub use self_scope::{
-    board_subject_scope_id, default_agent_subject_id, default_memory_space_id, default_subject_id,
-    primary_human_subject_id, private_garden_scope_id, relationship_scope, relationship_scope_id,
-    system_governor_subject_id, MemorySpaceId, RelationshipId, RelationshipScope, SubjectId,
-    BOARD_SUBJECT_SCOPE_ID, PRIVATE_GARDEN_SCOPE_ID,
+    default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
+    relationship_scope, relationship_scope_id, system_governor_subject_id, MemorySpaceId,
+    RelationshipId, RelationshipScope, SubjectId,
 };
 pub use self_state::{
     build_self_state, render_self_state_block, SelfAutonomyState, SelfAutonomyStatus,
@@ -873,30 +872,30 @@ pub trait InnerConflictStore: Send + Sync {
 
 /// LLM 私有文档工作区。仅保存主观内部文档，不回写共享事实层。
 pub trait PrivateDocStore: Send + Sync {
-    fn get(&self, chat_id: &str) -> Result<Option<PrivateDocWorkspace>>;
-    fn set(&self, chat_id: &str, workspace: &PrivateDocWorkspace) -> Result<()>;
-    fn clear(&self, chat_id: &str) -> Result<()>;
+    fn get(&self, mounted_subject_id: &str) -> Result<Option<PrivateDocWorkspace>>;
+    fn set(&self, mounted_subject_id: &str, workspace: &PrivateDocWorkspace) -> Result<()>;
+    fn clear(&self, mounted_subject_id: &str) -> Result<()>;
 }
 
-/// LLM 私有花园。自由文档工作区，仍由程序保证 chat scope / 路径合法 / 配额。
+/// LLM 私有花园。自由文档工作区，仍由程序保证 mounted-subject scope / 路径合法 / 配额。
 pub trait PrivateGardenStore: Send + Sync {
-    fn list(&self, chat_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>>;
-    fn read(&self, chat_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>>;
+    fn list(&self, mounted_subject_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>>;
+    fn read(&self, mounted_subject_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>>;
     fn write(
         &self,
-        chat_id: &str,
+        mounted_subject_id: &str,
         doc_path: &str,
         content: &str,
         now_secs: u64,
     ) -> Result<PrivateGardenDocRecord>;
     fn move_doc(
         &self,
-        chat_id: &str,
+        mounted_subject_id: &str,
         from_path: &str,
         to_path: &str,
         now_secs: u64,
     ) -> Result<Option<PrivateGardenDocRecord>>;
-    fn delete(&self, chat_id: &str, doc_path: &str) -> Result<bool>;
+    fn delete(&self, mounted_subject_id: &str, doc_path: &str) -> Result<bool>;
 }
 
 /// 重要消息存储。offset_from_end=1 表示最后一条 user 消息。供 build_context 截断时优先保留。

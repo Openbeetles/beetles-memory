@@ -14,7 +14,6 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 use super::{
-    board_subject_scope_id,
     llm_json::{get_object_text, parse_llm_json_payload, LlmJsonPayload},
     memory_policy, relationship_scope_id, render_autonomy_strategy_block,
     render_execution_state_block, render_self_continuity_block, whole_record_lease_advanced,
@@ -102,6 +101,7 @@ pub struct WorldSnapshotContext<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorldSenseRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -431,8 +431,9 @@ pub fn run_world_sense_refresh(
     snapshot: &WorldSnapshot,
     profile: MemoryProfile,
 ) -> Result<WorldSenseRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
-    let relationship_id = relationship_scope_id(input.channel, input.chat_id);
+    let subject_id = input.mounted_subject_id;
+    let relationship_id =
+        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     let existing_world_sense = ctx.world_sense_store.get(&relationship_id)?;
     let summary_text = ctx
         .session_summary_store
@@ -474,7 +475,8 @@ pub(crate) fn run_world_sense_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<WorldSenseRefreshOutcome> {
-    let relationship_id = relationship_scope_id(input.channel, input.chat_id);
+    let relationship_id =
+        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     if !decision_override.unwrap_or_else(|| {
         memory_policy(profile)
             .world_sense

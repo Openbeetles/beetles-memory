@@ -271,14 +271,14 @@ impl StorePlatformPreparation {
 pub(crate) struct ScopedLongTermMemoryStore {
     platform: StorePlatform,
     memory_space_id: String,
-    mounted_subject_id: String,
+    factual_owner_id: String,
 }
 
 #[derive(Clone)]
 pub(crate) struct ScopedLongTermMemoryControlReadStore {
     platform: StorePlatform,
     memory_space_id: String,
-    mounted_subject_id: String,
+    control_owner_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -405,23 +405,21 @@ impl StorePlatform {
         StorePlatformPreparation::prepare(config, None)
     }
 
-    pub fn scoped_long_term_memory_read_store(
+    pub fn memory_space_long_term_memory_read_store(
         &self,
         memory_space_id: &str,
-        mounted_subject_id: &str,
     ) -> Result<Arc<dyn bm_core::memory::LongTermMemoryReadStore>> {
         let memory_space_id = memory_space_id.trim().to_string();
-        let mounted_subject_id = mounted_subject_id.trim().to_string();
         scoped_long_term_memory_storage_prefix(&memory_space_id)?;
-        long_term_version_scope_manifest_key(&memory_space_id, &mounted_subject_id)?;
+        long_term_version_scope_manifest_key(&memory_space_id, &memory_space_id)?;
         Ok(Arc::new(ScopedLongTermMemoryStore {
             platform: self.clone(),
+            factual_owner_id: memory_space_id.clone(),
             memory_space_id,
-            mounted_subject_id,
         }))
     }
 
-    pub fn scoped_long_term_memory_control_read_store(
+    pub fn memory_space_long_term_memory_control_read_store(
         &self,
         memory_space_id: &str,
     ) -> Result<Arc<dyn LongTermMemoryControlReadStore>> {
@@ -432,7 +430,7 @@ impl StorePlatform {
         Ok(Arc::new(ScopedLongTermMemoryControlReadStore {
             platform: self.clone(),
             memory_space_id: memory_space_id.trim().to_string(),
-            mounted_subject_id: self.config.event_scope.subject_id.clone(),
+            control_owner_id: memory_space_id.trim().to_string(),
         }))
     }
 
@@ -1253,10 +1251,9 @@ impl StorePlatform {
         if control_mutations.is_empty() {
             return Ok(());
         }
-        let manifest_key = control_plane_scope_manifest_key(
-            &batch.scope.memory_space_id,
-            &batch.scope.subject_id,
-        )?;
+        let control_owner_id = batch.scope.memory_space_id.as_str();
+        let manifest_key =
+            control_plane_scope_manifest_key(&batch.scope.memory_space_id, control_owner_id)?;
         let previous_value = self
             .engine
             .get_json_value(CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE, &manifest_key)?;
@@ -1275,7 +1272,7 @@ impl StorePlatform {
             previous.validate(self.capacity.kv_max_entries)?;
             if previous.physical_key != manifest_key
                 || previous.memory_space_id != batch.scope.memory_space_id
-                || previous.mounted_subject_id != batch.scope.subject_id
+                || previous.mounted_subject_id != control_owner_id
             {
                 return Err(Error::config(
                     "control_plane_scope_manifest",
@@ -1298,7 +1295,7 @@ impl StorePlatform {
                     &entry.key,
                     &value,
                     &batch.scope.memory_space_id,
-                    &batch.scope.subject_id,
+                    control_owner_id,
                 )?;
             }
         }
@@ -1326,7 +1323,7 @@ impl StorePlatform {
                         &key,
                         &value,
                         &batch.scope.memory_space_id,
-                        &batch.scope.subject_id,
+                        control_owner_id,
                     )?;
                     entries.insert(
                         (namespace.clone(), key.clone()),
@@ -1361,7 +1358,7 @@ impl StorePlatform {
                 .map(|manifest| manifest.revision.saturating_add(1))
                 .unwrap_or(1),
             &batch.scope.memory_space_id,
-            &batch.scope.subject_id,
+            control_owner_id,
             entries.into_values(),
             self.capacity.kv_max_entries,
         )?;
@@ -3777,21 +3774,11 @@ fn validate_long_term_version_root_post_image(
             )
         })?;
     let memory_space_id = batch.scope.memory_space_id.as_str();
-    let mounted_subject_id = match &batch.scope.physical_owning_scope {
-        crate::store_internal::StorePhysicalOwningScope::Subject { mounted_subject_id } => {
-            mounted_subject_id.as_str()
-        }
-        crate::store_internal::StorePhysicalOwningScope::SharedProgram => {
-            return Err(Error::config(
-                "memory_write_transaction_long_term_root_post_image_invalid",
-                "long-term memory requires a subject physical owning scope",
-            ));
-        }
-    };
+    let factual_owner_id = memory_space_id;
     validate_long_term_version_scope_image(
         after,
         memory_space_id,
-        mounted_subject_id,
+        factual_owner_id,
         max_retained,
         "memory_write_transaction_long_term_root_post_image_invalid",
     )
@@ -3800,14 +3787,14 @@ fn validate_long_term_version_root_post_image(
 fn validate_long_term_version_scope_image(
     state: &BackendTransactionState,
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     max_retained: usize,
     stage: &'static str,
 ) -> Result<()> {
     let material_namespace = crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE;
     let head_namespace = crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE;
     let root_namespace = crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE;
-    let root_key = long_term_version_scope_manifest_key(memory_space_id, mounted_subject_id)?;
+    let root_key = long_term_version_scope_manifest_key(memory_space_id, factual_owner_id)?;
     let root_value = state
         .json
         .get(&(root_namespace.to_string(), root_key.clone()))
@@ -3826,7 +3813,7 @@ fn validate_long_term_version_scope_image(
         })?;
     if root.physical_key != root_key
         || root.memory_space_id != memory_space_id
-        || root.mounted_subject_id != mounted_subject_id
+        || root.factual_owner_id != factual_owner_id
     {
         return Err(Error::config(
             stage,
@@ -3845,7 +3832,7 @@ fn validate_long_term_version_scope_image(
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .filter(|head| {
-            head.memory_space_id == memory_space_id && head.mounted_subject_id == mounted_subject_id
+            head.memory_space_id == memory_space_id && head.factual_owner_id == factual_owner_id
         })
         .collect::<Vec<_>>();
     let materials = state
@@ -3861,7 +3848,7 @@ fn validate_long_term_version_scope_image(
         .into_iter()
         .filter(|material| {
             material.memory_space_id == memory_space_id
-                && material.mounted_subject_id == mounted_subject_id
+                && material.factual_owner_id == factual_owner_id
         })
         .collect::<Vec<_>>();
     let scoped_control_revisions = state
@@ -3882,7 +3869,7 @@ fn validate_long_term_version_scope_image(
         .into_iter()
         .filter(|(_, revision)| {
             revision.memory_space_id == memory_space_id
-                && revision.mounted_subject_id == mounted_subject_id
+                && revision.factual_owner_id == factual_owner_id
         })
         .collect::<Vec<_>>();
     let purged_owner_refs = scoped_control_revisions
@@ -3957,7 +3944,7 @@ fn validate_long_term_version_scope_image(
     } else {
         let rebuilt = LongTermMemoryVersionScopeManifest::build(
             memory_space_id,
-            mounted_subject_id,
+            factual_owner_id,
             root.manifest_revision,
             &heads,
             &materials,
@@ -4006,18 +3993,18 @@ fn validate_long_term_version_store_image(
                 let material =
                     serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone())
                         .map_err(|error| Error::config(stage, error.to_string()))?;
-                scopes.insert((material.memory_space_id, material.mounted_subject_id));
+                scopes.insert((material.memory_space_id, material.factual_owner_id));
             }
             namespace if namespace == head_namespace => {
                 let head = serde_json::from_value::<LongTermMemoryHeadManifest>(value.clone())
                     .map_err(|error| Error::config(stage, error.to_string()))?;
-                scopes.insert((head.memory_space_id, head.mounted_subject_id));
+                scopes.insert((head.memory_space_id, head.factual_owner_id));
             }
             namespace if namespace == root_namespace => {
                 let root =
                     serde_json::from_value::<LongTermMemoryVersionScopeManifest>(value.clone())
                         .map_err(|error| Error::config(stage, error.to_string()))?;
-                scopes.insert((root.memory_space_id, root.mounted_subject_id));
+                scopes.insert((root.memory_space_id, root.factual_owner_id));
             }
             namespace if namespace == LONG_TERM_CONTROL_REVISION_NAMESPACE => {
                 let revision =
@@ -4027,17 +4014,17 @@ fn validate_long_term_version_store_image(
                     revision.transition.termination,
                     GovernedOwnerTermination::Deleted | GovernedOwnerTermination::Forgotten
                 ) {
-                    scopes.insert((revision.memory_space_id, revision.mounted_subject_id));
+                    scopes.insert((revision.memory_space_id, revision.factual_owner_id));
                 }
             }
             _ => {}
         }
     }
-    for (memory_space_id, mounted_subject_id) in scopes {
+    for (memory_space_id, factual_owner_id) in scopes {
         validate_long_term_version_scope_image(
             state,
             &memory_space_id,
-            &mounted_subject_id,
+            &factual_owner_id,
             max_retained,
             stage,
         )?;
@@ -4798,10 +4785,10 @@ fn governed_image<T: DeserializeOwned>(
 fn long_term_current_material_in_state(
     state: &BackendTransactionState,
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     owner_ref: &GovernedMemoryOwnerRef,
 ) -> Result<Option<(String, LongTermMemoryVersionMaterial)>> {
-    let head_key = long_term_version_head_key(memory_space_id, mounted_subject_id, owner_ref)?;
+    let head_key = long_term_version_head_key(memory_space_id, factual_owner_id, owner_ref)?;
     let Some(head_value) = state.json.get(&(
         crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
         head_key.clone(),
@@ -4818,7 +4805,7 @@ fn long_term_current_material_in_state(
     )?;
     if !head.validate_contract().accepted
         || head.memory_space_id != memory_space_id
-        || head.mounted_subject_id != mounted_subject_id
+        || head.factual_owner_id != factual_owner_id
         || head.owner_ref != *owner_ref
     {
         return Err(Error::config(
@@ -4841,7 +4828,7 @@ fn long_term_current_material_in_state(
         })?;
     let material_key = long_term_version_material_key(
         memory_space_id,
-        mounted_subject_id,
+        factual_owner_id,
         owner_ref,
         head.current_revision,
     )?;
@@ -4866,7 +4853,7 @@ fn long_term_current_material_in_state(
         })?;
     if !material.validate_contract().accepted
         || material.memory_space_id != memory_space_id
-        || material.mounted_subject_id != mounted_subject_id
+        || material.factual_owner_id != factual_owner_id
         || material.owner_ref != *owner_ref
         || material.owner_revision != head.current_revision
         || material.content_digest != retained.content_digest
@@ -4881,19 +4868,15 @@ fn long_term_current_material_in_state(
 
 fn governed_long_term_material_image(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
     owner_ref: &GovernedMemoryOwnerRef,
     before: &BackendTransactionState,
     after: &BackendTransactionState,
 ) -> Result<LongTermMemoryVersionMaterialImage> {
-    let before_material = long_term_current_material_in_state(
-        before,
-        memory_space_id,
-        mounted_subject_id,
-        owner_ref,
-    )?;
+    let before_material =
+        long_term_current_material_in_state(before, memory_space_id, factual_owner_id, owner_ref)?;
     let after_material =
-        long_term_current_material_in_state(after, memory_space_id, mounted_subject_id, owner_ref)?;
+        long_term_current_material_in_state(after, memory_space_id, factual_owner_id, owner_ref)?;
     Ok(LongTermMemoryVersionMaterialImage {
         before_physical_key: before_material.as_ref().map(|(key, _)| key.clone()),
         before: before_material.map(|(_, material)| material),
@@ -4978,7 +4961,40 @@ fn validate_facet_post_image(
         return Ok(());
     }
     let memory_space_id = batch.scope.memory_space_id.as_str();
-    let subject_id = batch.scope.subject_id.as_str();
+    let facet_owner_keys = batch_json_keys(batch, MEMORY_FACET_INDEX_NAMESPACE);
+    let facet_posting_keys = batch_json_keys(batch, MEMORY_FACET_POSTING_NAMESPACE);
+    let long_term_facet_transaction = batch_mutates_namespace(
+        batch,
+        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+    ) || batch_mutates_namespace(
+        batch,
+        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+    ) || facet_owner_keys.iter().any(|key| {
+        [after, before].into_iter().any(|state| {
+            state
+                .json
+                .get(&(MEMORY_FACET_INDEX_NAMESPACE.to_string(), key.clone()))
+                .and_then(|value| serde_json::from_value::<MemoryFacetIndexDoc>(value.clone()).ok())
+                .is_some_and(|doc| doc.owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm)
+        })
+    }) || facet_posting_keys.iter().any(|key| {
+        [after, before].into_iter().any(|state| {
+            let value = state
+                .json
+                .get(&(MEMORY_FACET_POSTING_NAMESPACE.to_string(), key.clone()));
+            value.is_some_and(|value| {
+                serde_json::from_value::<MemoryFacetIndexManifest>(value.clone())
+                    .is_ok_and(|manifest| manifest.subject_id == memory_space_id)
+                    || serde_json::from_value::<MemoryFacetPostingDoc>(value.clone())
+                        .is_ok_and(|posting| posting.subject_id == memory_space_id)
+            })
+        })
+    });
+    let subject_id = if long_term_facet_transaction {
+        memory_space_id
+    } else {
+        batch.scope.subject_id.as_str()
+    };
     let manifest_key = memory_facet_manifest_key(memory_space_id, subject_id).map_err(|error| {
         Error::config(
             "memory_write_transaction_owner_facet_post_image_invalid",
@@ -5123,7 +5139,7 @@ fn validate_facet_post_image(
             GovernedMemoryOwnerPlane::LongTerm => {
                 long_term_owners.push(governed_long_term_material_image(
                     memory_space_id,
-                    subject_id,
+                    memory_space_id,
                     &owner_ref,
                     before,
                     after,
@@ -5155,6 +5171,7 @@ fn validate_facet_post_image(
         "memory_write_transaction_owner_facet_post_image_invalid",
         validate_memory_facet_post_image(&MemoryFacetPostImageClosure {
             memory_space_id: memory_space_id.to_string(),
+            long_term_owner_id: memory_space_id.to_string(),
             mounted_subject_id: subject_id.to_string(),
             long_term_owners,
             evidence_document_owners,
@@ -5555,7 +5572,7 @@ fn validate_graph_post_image(
             GovernedMemoryOwnerPlane::LongTerm => {
                 long_term_owners.push(governed_long_term_material_image(
                     memory_space_id,
-                    subject_id,
+                    memory_space_id,
                     &owner_ref,
                     before,
                     after,
@@ -5587,6 +5604,7 @@ fn validate_graph_post_image(
         "memory_write_transaction_graph_post_image_invalid",
         validate_memory_graph_post_image(&MemoryGraphPostImageClosure {
             memory_space_id: memory_space_id.to_string(),
+            long_term_owner_id: memory_space_id.to_string(),
             mounted_subject_id: subject_id.to_string(),
             allow_missing_before_owners: graph_repair_authorized,
             validate_transition_successors: true,
@@ -5699,7 +5717,7 @@ fn validate_control_post_image(
         .map(|owner_id| {
             governed_long_term_material_image(
                 memory_space_id,
-                batch.scope.subject_id.as_str(),
+                memory_space_id,
                 &GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner_id),
                 before,
                 after,
@@ -5712,7 +5730,7 @@ fn validate_control_post_image(
             transaction_id: batch.transaction_id.clone(),
             operation,
             memory_space_id: memory_space_id.to_string(),
-            owner_subject_id: batch.scope.subject_id.clone(),
+            factual_owner_id: memory_space_id.to_string(),
             actor_subject_id,
             owner_records,
             revisions,
@@ -5728,7 +5746,7 @@ pub(crate) fn validate_control_document_for_scope(
     physical_key: &str,
     value: &serde_json::Value,
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    factual_owner_id: &str,
 ) -> Result<()> {
     let logical_key = match namespace {
         LONG_TERM_CONTROL_REVISION_NAMESPACE => {
@@ -5740,7 +5758,7 @@ pub(crate) fn validate_control_document_for_scope(
                 )
             })?;
             if revision.memory_space_id != memory_space_id
-                || revision.mounted_subject_id != mounted_subject_id
+                || revision.factual_owner_id != factual_owner_id
             {
                 return Err(Error::config(
                     "control_plane_scope_manifest",
@@ -5758,7 +5776,7 @@ pub(crate) fn validate_control_document_for_scope(
                     )
                 })?;
             if tombstone.memory_space_id != memory_space_id
-                || tombstone.owner_subject_id != mounted_subject_id
+                || tombstone.factual_owner_id != factual_owner_id
             {
                 return Err(Error::config(
                     "control_plane_scope_manifest",
@@ -5777,11 +5795,10 @@ pub(crate) fn validate_control_document_for_scope(
                 })?;
             if policy.memory_space_id != memory_space_id
                 || policy.selector.memory_space_id.as_deref() != Some(memory_space_id)
-                || policy.selector.subject_id.as_deref() != Some(mounted_subject_id)
             {
                 return Err(Error::config(
                     "control_plane_scope_manifest",
-                    "governance policy must declare the exact memory-space and subject closure",
+                    "governance policy must declare the exact memory-space closure",
                 ));
             }
             policy.policy_id
@@ -5795,18 +5812,20 @@ pub(crate) fn validate_control_document_for_scope(
                     )
                 })?;
             if audit.memory_space_id.as_deref() != Some(memory_space_id)
-                || audit.owner_subject_id != mounted_subject_id
+                || audit.factual_owner_id != factual_owner_id
                 || audit.effects.iter().any(|effect| match effect {
                     ControlEffectRef::Revision {
-                        mounted_subject_id: owner_subject_id,
+                        factual_owner_id: effect_owner_id,
                         ..
                     }
                     | ControlEffectRef::Tombstone {
-                        owner_subject_id, ..
+                        factual_owner_id: effect_owner_id,
+                        ..
                     }
                     | ControlEffectRef::Policy {
-                        owner_subject_id, ..
-                    } => owner_subject_id != mounted_subject_id,
+                        factual_owner_id: effect_owner_id,
+                        ..
+                    } => effect_owner_id != factual_owner_id,
                 })
             {
                 return Err(Error::config(
@@ -8558,7 +8577,7 @@ fn transcript_attr_repair_target_from_value(value: &serde_json::Value) -> (Strin
 impl ScopedLongTermMemoryStore {
     fn scope_manifest(&self) -> Result<Option<LongTermMemoryVersionScopeManifest>> {
         let key =
-            long_term_version_scope_manifest_key(&self.memory_space_id, &self.mounted_subject_id)?;
+            long_term_version_scope_manifest_key(&self.memory_space_id, &self.factual_owner_id)?;
         let manifest = self
             .platform
             .json_get::<LongTermMemoryVersionScopeManifest>(
@@ -8583,7 +8602,7 @@ impl ScopedLongTermMemoryStore {
     ) -> Result<LongTermMemoryEntry> {
         let material_key = long_term_version_material_key(
             &self.memory_space_id,
-            &self.mounted_subject_id,
+            &self.factual_owner_id,
             &head.owner_ref,
             head.current_revision,
         )?;
@@ -8652,11 +8671,8 @@ impl bm_core::memory::LongTermMemoryReadStore for ScopedLongTermMemoryStore {
     fn get(&self, id: &str) -> Result<Option<LongTermMemoryEntry>> {
         let owner_ref =
             GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, id.to_string());
-        let key = long_term_version_head_key(
-            &self.memory_space_id,
-            &self.mounted_subject_id,
-            &owner_ref,
-        )?;
+        let key =
+            long_term_version_head_key(&self.memory_space_id, &self.factual_owner_id, &owner_ref)?;
         let Some(head) = self.platform.json_get::<LongTermMemoryHeadManifest>(
             crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
             &key,
@@ -8718,7 +8734,7 @@ impl ScopedLongTermMemoryControlReadStore {
         T: DeserializeOwned,
     {
         let manifest_key =
-            control_plane_scope_manifest_key(&self.memory_space_id, &self.mounted_subject_id)?;
+            control_plane_scope_manifest_key(&self.memory_space_id, &self.control_owner_id)?;
         let mut session = self
             .platform
             .engine
@@ -8744,7 +8760,7 @@ impl ScopedLongTermMemoryControlReadStore {
         manifest.validate(self.platform.capacity.kv_max_entries)?;
         if manifest.physical_key != manifest_key
             || manifest.memory_space_id != self.memory_space_id
-            || manifest.mounted_subject_id != self.mounted_subject_id
+            || manifest.mounted_subject_id != self.control_owner_id
         {
             return Err(Error::config(
                 "control_plane_scope_manifest",
@@ -8789,7 +8805,7 @@ impl ScopedLongTermMemoryControlReadStore {
                     &entry.key,
                     &value,
                     &self.memory_space_id,
-                    &self.mounted_subject_id,
+                    &self.control_owner_id,
                 )?;
                 serde_json::from_value(value).map_err(|error| {
                     Error::config("control_plane_scope_manifest", error.to_string())
@@ -9036,8 +9052,8 @@ impl TurnContinuityEvidenceStore for StorePlatform {
 }
 
 impl PrivateGardenStore for StorePlatform {
-    fn list(&self, chat_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
-        let prefix = private_garden_key_prefix(chat_id);
+    fn list(&self, mounted_subject_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
+        let prefix = private_garden_key_prefix(mounted_subject_id);
         let mut docs = Vec::new();
         for key in self.engine.list_json_keys("private_garden")? {
             if !key.starts_with(&prefix) {
@@ -9052,14 +9068,17 @@ impl PrivateGardenStore for StorePlatform {
         Ok(docs)
     }
 
-    fn read(&self, chat_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
+    fn read(&self, mounted_subject_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
         let path = normalize_private_garden_doc_path(doc_path)?;
-        self.json_get("private_garden", &private_garden_key(chat_id, &path))
+        self.json_get(
+            "private_garden",
+            &private_garden_key(mounted_subject_id, &path),
+        )
     }
 
     fn write(
         &self,
-        chat_id: &str,
+        mounted_subject_id: &str,
         doc_path: &str,
         content: &str,
         now_secs: u64,
@@ -9075,7 +9094,7 @@ impl PrivateGardenStore for StorePlatform {
             ));
         }
         let path = normalize_private_garden_doc_path(doc_path)?;
-        let key = private_garden_key(chat_id, &path);
+        let key = private_garden_key(mounted_subject_id, &path);
         let revision = self
             .json_get::<PrivateGardenDoc>("private_garden", &key)?
             .map(|doc| doc.revision.saturating_add(1))
@@ -9093,29 +9112,32 @@ impl PrivateGardenStore for StorePlatform {
 
     fn move_doc(
         &self,
-        chat_id: &str,
+        mounted_subject_id: &str,
         from_path: &str,
         to_path: &str,
         now_secs: u64,
     ) -> Result<Option<PrivateGardenDocRecord>> {
         let from = normalize_private_garden_doc_path(from_path)?;
         let to = normalize_private_garden_doc_path(to_path)?;
-        let Some(doc) = PrivateGardenStore::read(self, chat_id, &from)? else {
+        let Some(doc) = PrivateGardenStore::read(self, mounted_subject_id, &from)? else {
             return Ok(None);
         };
-        PrivateGardenStore::delete(self, chat_id, &from)?;
+        PrivateGardenStore::delete(self, mounted_subject_id, &from)?;
         Ok(Some(PrivateGardenStore::write(
             self,
-            chat_id,
+            mounted_subject_id,
             &to,
             &doc.content,
             now_secs,
         )?))
     }
 
-    fn delete(&self, chat_id: &str, doc_path: &str) -> Result<bool> {
+    fn delete(&self, mounted_subject_id: &str, doc_path: &str) -> Result<bool> {
         let path = normalize_private_garden_doc_path(doc_path)?;
-        self.json_delete("private_garden", &private_garden_key(chat_id, &path))
+        self.json_delete(
+            "private_garden",
+            &private_garden_key(mounted_subject_id, &path),
+        )
     }
 }
 
@@ -10070,7 +10092,7 @@ fn validate_complete_snapshot_facet_graph_closure(
                 )
             })?;
         let mut subjects = Vec::new();
-        for field in ["mounted_subject_id", "subject_id"] {
+        for field in ["factual_owner_id", "mounted_subject_id", "subject_id"] {
             if let Some(subject_id) = value
                 .get(field)
                 .and_then(serde_json::Value::as_str)
@@ -10104,7 +10126,7 @@ fn validate_complete_snapshot_facet_graph_closure(
         if subjects.is_empty() {
             return Err(Error::config(
                 "store_snapshot_import",
-                format!("{namespace} is missing its exact mounted-subject scope"),
+                format!("{namespace} is missing its exact owner scope"),
             ));
         }
         Ok(subjects
@@ -10240,7 +10262,6 @@ pub(crate) fn validate_scoped_projection_governed_closure(
         blobs: BTreeMap::new(),
         events: snapshot.events.clone(),
     };
-    let before = after.clone();
     crate::store_internal::transaction::validate_scoped_recall_manifest_documents(
         &after.json,
         &after.blobs,
@@ -10251,72 +10272,7 @@ pub(crate) fn validate_scoped_projection_governed_closure(
         projection_scope,
         snapshot.json_docs.len().max(1),
     )?;
-    let Some(mounted_subject_id) = projection_scope.mounted_subject_id() else {
-        return Ok(());
-    };
-    let memory_space_id = projection_scope.memory_space_id.as_str();
-    let scope = StoreEventScope::system("memory_space_import_validation")
-        .with_memory_space(memory_space_id)
-        .with_subject(mounted_subject_id);
-    let build_batch = |operation: &str, namespaces: &[&str]| StoreMutationBatch {
-        transaction_id: format!("{operation}:{memory_space_id}:{mounted_subject_id}"),
-        operation: operation.to_string(),
-        scope: scope.clone(),
-        mutations: snapshot
-            .json_docs
-            .iter()
-            .filter(|doc| namespaces.contains(&doc.namespace.as_str()))
-            .map(|doc| StoreMutation::PutJson {
-                namespace: doc.namespace.clone(),
-                key: doc.key.clone(),
-                value: doc.value.clone(),
-                event_kind: MemoryStoreEventKind::MemoryMaintenance,
-                plane: doc.namespace.clone(),
-                record_key: doc.key.clone(),
-            })
-            .collect(),
-    };
-
-    const FACET_CLOSURE_NAMESPACES: &[&str] =
-        &[MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE];
-    let governed_owner_present = snapshot.json_docs.iter().any(|doc| {
-        doc.namespace == crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE
-            || doc.namespace == crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE
-            || doc.namespace == GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE
-    });
-    let facet_batch = build_batch(
-        "memory_space_import_facet_validation",
-        FACET_CLOSURE_NAMESPACES,
-    );
-    if governed_owner_present && facet_batch.mutations.is_empty() {
-        return Err(Error::config(
-            "memory_space_import",
-            "governed owner projection is missing its facet closure",
-        ));
-    }
-    if !facet_batch.mutations.is_empty() {
-        validate_facet_post_image(&facet_batch, &before, &after)?;
-    }
-
-    const GRAPH_CLOSURE_NAMESPACES: &[&str] = &[
-        MEMORY_GRAPH_MANIFEST_NAMESPACE,
-        MEMORY_GRAPH_REVISION_NAMESPACE,
-        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
-        MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
-        MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
-        MEMORY_GRAPH_INDEX_NAMESPACE,
-        MEMORY_GRAPH_NODE_NAMESPACE,
-        MEMORY_GRAPH_EDGE_NAMESPACE,
-        MEMORY_GRAPH_BACKLINK_NAMESPACE,
-    ];
-    let graph_batch = build_batch(
-        "memory_space_import_graph_validation",
-        GRAPH_CLOSURE_NAMESPACES,
-    );
-    if !graph_batch.mutations.is_empty() {
-        validate_graph_post_image(&graph_batch, &before, &after, false)?;
-    }
-    Ok(())
+    validate_complete_snapshot_facet_graph_closure(&after.json)
 }
 
 fn enforce_snapshot_logical_budget(
@@ -10417,12 +10373,15 @@ fn tail<T>(mut values: Vec<T>, limit: usize) -> Vec<T> {
     values
 }
 
-fn private_garden_key_prefix(chat_id: &str) -> String {
-    format!("{chat_id}::")
+fn private_garden_key_prefix(mounted_subject_id: &str) -> String {
+    format!("{mounted_subject_id}::")
 }
 
-fn private_garden_key(chat_id: &str, doc_path: &str) -> String {
-    format!("{}{doc_path}", private_garden_key_prefix(chat_id))
+fn private_garden_key(mounted_subject_id: &str, doc_path: &str) -> String {
+    format!(
+        "{}{doc_path}",
+        private_garden_key_prefix(mounted_subject_id)
+    )
 }
 
 fn private_garden_record(doc: &PrivateGardenDoc) -> PrivateGardenDocRecord {

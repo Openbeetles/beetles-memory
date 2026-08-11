@@ -1,10 +1,7 @@
-//! Selfhood scope helpers.
-//! 主体/关系作用域辅助：把“板级主体”与“当前关系层”明确分开。
+//! Subject ownership scope helpers.
+//! 主体/关系作用域辅助：Soul 与私域绑定 canonical Subject；关系 key 进一步绑定该主体与会话边。
 
 use serde::{Deserialize, Serialize};
-
-pub const BOARD_SUBJECT_SCOPE_ID: &str = "board.self";
-pub const PRIVATE_GARDEN_SCOPE_ID: &str = BOARD_SUBJECT_SCOPE_ID;
 
 pub type MemorySpaceId = String;
 pub type SubjectId = String;
@@ -15,14 +12,6 @@ pub struct RelationshipScope {
     pub relationship_id: RelationshipId,
     pub channel: String,
     pub conversation_id: Option<String>,
-}
-
-pub fn board_subject_scope_id() -> &'static str {
-    BOARD_SUBJECT_SCOPE_ID
-}
-
-pub fn default_subject_id() -> SubjectId {
-    BOARD_SUBJECT_SCOPE_ID.to_string()
 }
 
 pub fn default_memory_space_id(owner_id: &str) -> MemorySpaceId {
@@ -45,23 +34,21 @@ pub fn default_agent_subject_id(agent_id: &str) -> SubjectId {
     format!("agent:{agent}")
 }
 
-pub fn private_garden_scope_id() -> &'static str {
-    PRIVATE_GARDEN_SCOPE_ID
-}
-
-pub fn relationship_scope_id(channel: &str, chat_id: &str) -> String {
+pub fn relationship_scope_id(mounted_subject_id: &str, channel: &str, chat_id: &str) -> String {
+    let subject = encode_scope_component(mounted_subject_id);
     let channel = encode_scope_component(channel);
     let chat = encode_scope_component(chat_id);
-    format!("rel:{}:{}", channel, chat)
+    format!("rel:{subject}:{channel}:{chat}")
 }
 
 pub fn relationship_scope(
+    mounted_subject_id: &str,
     channel: &str,
     chat_id: &str,
     conversation_id: Option<String>,
 ) -> RelationshipScope {
     RelationshipScope {
-        relationship_id: relationship_scope_id(channel, chat_id),
+        relationship_id: relationship_scope_id(mounted_subject_id, channel, chat_id),
         channel: channel.trim().to_string(),
         conversation_id,
     }
@@ -97,23 +84,17 @@ fn push_hex_escape(out: &mut String, byte: u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::{board_subject_scope_id, private_garden_scope_id, relationship_scope_id};
+    use super::relationship_scope_id;
 
     #[test]
-    fn board_subject_scope_id_is_stable() {
-        assert_eq!(board_subject_scope_id(), "board.self");
-    }
-
-    #[test]
-    fn relationship_scope_id_encodes_channel_and_chat() {
+    fn relationship_scope_id_binds_subject_channel_and_chat() {
         assert_eq!(
-            relationship_scope_id("chat/channel", "user:1"),
-            "rel:chat_2fchannel:user_3a1"
+            relationship_scope_id("agent:alpha", "chat/channel", "user:1"),
+            "rel:agent_3aalpha:chat_2fchannel:user_3a1"
         );
-    }
-
-    #[test]
-    fn private_garden_scope_id_is_board_subject_scope() {
-        assert_eq!(private_garden_scope_id(), board_subject_scope_id());
+        assert_ne!(
+            relationship_scope_id("agent:alpha", "chat/channel", "user:1"),
+            relationship_scope_id("agent:beta", "chat/channel", "user:1")
+        );
     }
 }

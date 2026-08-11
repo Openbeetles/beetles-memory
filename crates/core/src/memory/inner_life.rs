@@ -10,7 +10,6 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use super::{
-    board_subject_scope_id,
     llm_json::{get_object_text, parse_llm_json_payload, LlmJsonPayload},
     memory_policy, render_execution_state_block, render_internal_memory_topology_block,
     render_private_doc_workspace_block, render_private_memory_boundary_block,
@@ -58,6 +57,7 @@ pub(crate) fn estimate_inner_life_chars(inner_life: &InnerLife) -> usize {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InnerLifeRefreshInput<'a> {
+    pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -155,7 +155,7 @@ pub fn run_inner_life_refresh(
     input: InnerLifeRefreshInput<'_>,
     profile: MemoryProfile,
 ) -> Result<InnerLifeRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     let existing = ctx.inner_life_store.get(subject_id)?;
     let summary_text = ctx
         .session_summary_store
@@ -198,7 +198,7 @@ pub(crate) fn run_inner_life_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<InnerLifeRefreshOutcome> {
-    let subject_id = board_subject_scope_id();
+    let subject_id = input.mounted_subject_id;
     if !decision_override
         .unwrap_or_else(|| should_refresh_inner_life(input, existing_inner_life.is_some(), profile))
     {

@@ -158,38 +158,6 @@ pub use bm_core::llm::{
     ToolSpec,
 };
 pub use bm_core::memory::{
-    board_subject_scope_id, default_agent_subject_id, default_memory_space_id,
-    primary_human_subject_id, private_garden_scope_id, system_governor_subject_id,
-    ActorAttribution, CanonicalTurnDelta, CommittedSessionMessage, ConversationKey,
-    ConversationScope, DeferredGovernanceJob, DeferredGovernanceJobStatus,
-    DeferredGovernanceJobSummary, DeferredGovernanceQueueReport, DerivedMemoryPlane,
-    DerivedMemoryRef, GovernedWriteDecision, HostOpaqueRef, HostRefRelation, HostRefVisibility,
-    LongTermInvalidationContract, LongTermInvalidationReasonCode, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
-    MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermGovernancePolicy,
-    MemoryLongTermMutation, MemoryLongTermSelector, MemoryLongTermTarget,
-    MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemorySemanticJudgmentSource,
-    MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain, PostTurnPrivateGardenReport,
-    PostTurnSemanticGovernanceReport, PrivateDocEntry, PrivateDocWorkspace,
-    PrivateGardenAdmissionDecision, PrivateGardenGovernanceManifestAction,
-    PrivateGardenGovernanceManifestEntry, RedactedTranscriptSlice, SessionTurnCommitReport,
-    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SoulCandidateDisposition,
-    SoulCandidateHandoffReport, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
-    SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
-    SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulSurface, SubjectVisibility,
-    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
-    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
-    TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptCommitReport,
-    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
-    TranscriptLifecycleState, TranscriptLifecycleTransition, TranscriptRedactionReason,
-    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairIssue,
-    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
-    TranscriptTurnPage, TranscriptTurnRecord,
-};
-pub use bm_core::memory::{
     build_core_revision_diff_from_record, build_memory_graph_persistence_plan,
     build_relationship_boundary_audit_from_constitution_audit, build_soul_compact_digest,
     build_soul_feedback_report_from_turn_ledger,
@@ -232,6 +200,37 @@ pub use bm_core::memory::{
     PromptMemoryContext, PromptMemoryContextParams, PromptParticipationPlan,
     PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, RecallCandidate,
     RecallPlane, RecallQuery, RecallSelectionReport, WorkingRecallInspection,
+};
+pub use bm_core::memory::{
+    default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
+    system_governor_subject_id, ActorAttribution, CanonicalTurnDelta, CommittedSessionMessage,
+    ConversationKey, ConversationScope, DeferredGovernanceJob, DeferredGovernanceJobStatus,
+    DeferredGovernanceJobSummary, DeferredGovernanceQueueReport, DerivedMemoryPlane,
+    DerivedMemoryRef, GovernedWriteDecision, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    LongTermInvalidationContract, LongTermInvalidationReasonCode, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermGovernancePolicy,
+    MemoryLongTermMutation, MemoryLongTermSelector, MemoryLongTermTarget,
+    MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain, PostTurnPrivateGardenReport,
+    PostTurnSemanticGovernanceReport, PrivateDocEntry, PrivateDocWorkspace,
+    PrivateGardenAdmissionDecision, PrivateGardenGovernanceManifestAction,
+    PrivateGardenGovernanceManifestEntry, RedactedTranscriptSlice, SessionTurnCommitReport,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SoulCandidateDisposition,
+    SoulCandidateHandoffReport, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
+    SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
+    SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulSurface, SubjectVisibility,
+    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
+    TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptCommitReport,
+    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
+    TranscriptLifecycleState, TranscriptLifecycleTransition, TranscriptRedactionReason,
+    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairIssue,
+    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
+    TranscriptTurnPage, TranscriptTurnRecord,
 };
 pub use bm_core::memory::{
     governed_evidence_document_content_digest, governed_evidence_source_locator_digest,
@@ -1028,7 +1027,7 @@ fn rebuild_projected_long_term_private_closure(
     }
     let original_root = &original_root[0];
     if original_root.memory_space_id != scope.memory_space_id
-        || original_root.mounted_subject_id != scope.mounted_subject_id
+        || original_root.factual_owner_id != scope.memory_space_id
     {
         return Err(Error::config(
             "memory_space_export",
@@ -1162,7 +1161,7 @@ fn rebuild_projected_long_term_private_closure(
     if !heads.is_empty() || !materials.is_empty() || !transitions.is_empty() {
         let root = LongTermMemoryVersionScopeManifest::build(
             &scope.memory_space_id,
-            &scope.mounted_subject_id,
+            &scope.memory_space_id,
             original_root.manifest_revision,
             &heads,
             &materials,
@@ -1180,7 +1179,7 @@ fn rebuild_projected_long_term_private_closure(
     }
 
     let control_manifest_key =
-        control_plane_scope_manifest_key(&scope.memory_space_id, &scope.mounted_subject_id)?;
+        control_plane_scope_manifest_key(&scope.memory_space_id, &scope.memory_space_id)?;
     let original_control_manifest = snapshot
         .json_docs
         .iter()
@@ -1222,7 +1221,7 @@ fn rebuild_projected_long_term_private_closure(
         let manifest = ControlPlaneScopeManifest::build(
             revision,
             &scope.memory_space_id,
-            &scope.mounted_subject_id,
+            &scope.memory_space_id,
             control_entries,
             max_scope_entries,
         )?;
@@ -1617,10 +1616,23 @@ fn rebuild_projected_facet_closure(
     scope: &MemorySpaceScope,
     retained_owners: &BTreeSet<bm_core::memory::GovernedMemoryOwnerRef>,
 ) -> Result<()> {
-    let mut owner_versions = Vec::new();
-    let mut posting_revisions = Vec::new();
+    let facet_scope_id = |owner_plane: bm_core::memory::GovernedMemoryOwnerPlane| match owner_plane
+    {
+        bm_core::memory::GovernedMemoryOwnerPlane::LongTerm => Ok(scope.memory_space_id.as_str()),
+        bm_core::memory::GovernedMemoryOwnerPlane::EvidenceDocument => {
+            Ok(scope.mounted_subject_id.as_str())
+        }
+        _ => Err(Error::config(
+            "memory_space_export",
+            "projected facet owner uses an unsupported owner plane",
+        )),
+    };
+    let mut owner_versions =
+        BTreeMap::<String, Vec<bm_core::memory::MemoryFacetOwnerVersion>>::new();
+    let mut posting_revisions =
+        BTreeMap::<String, Vec<bm_core::memory::MemoryFacetPostingRevision>>::new();
     let mut rebuilt = Vec::with_capacity(snapshot.json_docs.len());
-    let mut manifest_doc = None;
+    let mut manifest_docs = BTreeMap::<String, StoreSnapshotJsonDoc>::new();
 
     for mut doc in snapshot.json_docs.drain(..) {
         match doc.namespace.as_str() {
@@ -1630,11 +1642,25 @@ fn rebuild_projected_facet_closure(
                 )
                 .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
                 if retained_owners.contains(&facet.owner_ref) {
-                    owner_versions.push(bm_core::memory::MemoryFacetOwnerVersion {
-                        owner_ref: facet.owner_ref.clone(),
-                        owner_revision: facet.owner_revision,
-                        facet_index_revision: facet.facet_index_revision,
-                    });
+                    let facet_scope_id = facet_scope_id(facet.owner_ref.owner_plane)?;
+                    if !facet
+                        .subject_ids
+                        .iter()
+                        .any(|subject| subject == facet_scope_id)
+                    {
+                        return Err(Error::config(
+                            "memory_space_export",
+                            "facet owner differs from its canonical projected owner lane",
+                        ));
+                    }
+                    owner_versions
+                        .entry(facet_scope_id.to_string())
+                        .or_default()
+                        .push(bm_core::memory::MemoryFacetOwnerVersion {
+                            owner_ref: facet.owner_ref.clone(),
+                            owner_revision: facet.owner_revision,
+                            facet_index_revision: facet.facet_index_revision,
+                        });
                     rebuilt.push(doc);
                 }
             }
@@ -1646,11 +1672,12 @@ fn rebuild_projected_facet_closure(
                     .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
                     let expected_key = bm_core::memory::memory_facet_manifest_key(
                         &scope.memory_space_id,
-                        &scope.mounted_subject_id,
+                        &manifest.subject_id,
                     )
                     .map_err(|error| Error::config("memory_space_export", format!("{error:?}")))?;
                     if manifest.memory_space_id != scope.memory_space_id
-                        || manifest.subject_id != scope.mounted_subject_id
+                        || (manifest.subject_id != scope.memory_space_id
+                            && manifest.subject_id != scope.mounted_subject_id)
                         || doc.key != expected_key
                     {
                         return Err(Error::config(
@@ -1658,10 +1685,10 @@ fn rebuild_projected_facet_closure(
                             "facet manifest is outside the exact archive scope",
                         ));
                     }
-                    if manifest_doc.replace(doc).is_some() {
+                    if manifest_docs.insert(manifest.subject_id, doc).is_some() {
                         return Err(Error::config(
                             "memory_space_export",
-                            "projected facet closure contains duplicate manifests",
+                            "projected facet closure contains a duplicate owner-lane manifest",
                         ));
                     }
                     continue;
@@ -1674,13 +1701,24 @@ fn rebuild_projected_facet_closure(
                     .owner_versions
                     .retain(|version| retained_owners.contains(&version.owner_ref));
                 if !posting.owner_versions.is_empty() {
+                    for owner in &posting.owner_versions {
+                        if facet_scope_id(owner.owner_ref.owner_plane)? != posting.subject_id {
+                            return Err(Error::config(
+                                "memory_space_export",
+                                "facet posting mixes canonical owner lanes",
+                            ));
+                        }
+                    }
                     posting.owner_versions.sort();
                     doc.value = serde_json::to_value(&posting)
                         .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
-                    posting_revisions.push(bm_core::memory::MemoryFacetPostingRevision {
-                        posting_key: posting.posting_key,
-                        revision: posting.revision,
-                    });
+                    posting_revisions
+                        .entry(posting.subject_id)
+                        .or_default()
+                        .push(bm_core::memory::MemoryFacetPostingRevision {
+                            posting_key: posting.posting_key,
+                            revision: posting.revision,
+                        });
                     rebuilt.push(doc);
                 }
             }
@@ -1688,13 +1726,16 @@ fn rebuild_projected_facet_closure(
         }
     }
 
-    owner_versions.sort();
-    posting_revisions.sort();
-    if !owner_versions.is_empty() {
-        let mut manifest_doc = manifest_doc.ok_or_else(|| {
+    for (facet_scope_id, mut owner_versions) in owner_versions {
+        owner_versions.sort();
+        let mut posting_revisions = posting_revisions
+            .remove(&facet_scope_id)
+            .unwrap_or_default();
+        posting_revisions.sort();
+        let mut manifest_doc = manifest_docs.remove(&facet_scope_id).ok_or_else(|| {
             Error::config(
                 "memory_space_export",
-                "retained governed owners require a facet manifest",
+                "retained governed owners require their exact owner-lane facet manifest",
             )
         })?;
         let mut manifest = serde_json::from_value::<bm_core::memory::MemoryFacetIndexManifest>(
