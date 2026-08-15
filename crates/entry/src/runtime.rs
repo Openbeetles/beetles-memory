@@ -24,6 +24,8 @@ use bm_sdk::{
 use sha2::{Digest, Sha256};
 
 use crate::config::{enabled_capability_policy, privacy_policy};
+use crate::governance_coordinator::EntryGovernanceCoordinator;
+use crate::governance_model::EntryGovernanceModelStore;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::EntryConsoleMemoryBenchmarkReport;
 use crate::{
@@ -36,8 +38,10 @@ use crate::{
     EntryConsoleWorkbenchFacetInspector, EntryConsoleWorkbenchProceduralEvolution,
     EntryConsoleWorkbenchProjectionInspector, EntryConsoleWorkbenchRecallInspector,
     EntryConsoleWorkbenchReport, EntryConsoleWorkbenchSkillRef, EntryConsoleWorkbenchSoulHealth,
-    EntryConsoleWorkbenchStatus, EntryIdempotencyCache, EntryIdempotencyConfig, EntryIdentity,
-    EntryResponse, EntryScope, EntryTransportConfig, EntryTransportContext,
+    EntryConsoleWorkbenchStatus, EntryGovernanceModelConfigUpdate, EntryGovernanceModelConfigView,
+    EntryGovernanceModelExecutionBinding, EntryGovernanceModelProbePlan, EntryIdempotencyCache,
+    EntryIdempotencyConfig, EntryIdentity, EntryResponse, EntryScope, EntryTransportConfig,
+    EntryTransportContext,
 };
 
 const FACET_AUDIT_MARKDOWN_FORMAT: &str = "obsidian-style-facet-audit-markdown";
@@ -285,6 +289,7 @@ impl EntryRuntimeManagerState {
 
 fn close_entry_runtimes(runtimes: Vec<Arc<EntryRuntime>>) -> Result<()> {
     for runtime in runtimes {
+        runtime.governance_coordinator.shutdown();
         runtime.runtime.close(MemoryCloseRequest {
             reason: "entry_runtime_manager_evicted".to_string(),
         })?;
@@ -293,12 +298,14 @@ fn close_entry_runtimes(runtimes: Vec<Arc<EntryRuntime>>) -> Result<()> {
 }
 
 pub struct EntryRuntime {
+    governance_coordinator: EntryGovernanceCoordinator,
     config: EntryRuntimeConfig,
     store: MemoryStoreHandle,
-    runtime: MemoryRuntime,
+    runtime: Arc<MemoryRuntime>,
     capability: EntryCapabilityView,
     idempotency: EntryIdempotencyCache,
     console: EntryConsoleState,
+    governance_model: Arc<EntryGovernanceModelStore>,
 }
 
 #[derive(Debug)]
@@ -331,21 +338,23 @@ impl EntryRuntime {
     fn from_store_handle(config: EntryRuntimeConfig, store: MemoryStoreHandle) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
         let privacy = privacy_policy(config.privacy.clone());
-        let runtime = MemoryRuntime::builder()
-            .identity(MemoryIdentity::new(
-                config.identity.agent_id.clone(),
-                config.identity.owner_id.clone(),
-            )?)
-            .scope(MemoryScope::new(
-                config.scope.channel.clone(),
-                config.scope.chat_id.clone(),
-            )?)
-            .store(store.clone())
-            .agent_skill_dirs(agent_skill_dirs_from_env())
-            .capability_policy(capability_policy.clone())
-            .privacy_policy(privacy.clone())
-            .audit_sink(Arc::new(NoopMemoryAuditSink))
-            .build()?;
+        let runtime = Arc::new(
+            MemoryRuntime::builder()
+                .identity(MemoryIdentity::new(
+                    config.identity.agent_id.clone(),
+                    config.identity.owner_id.clone(),
+                )?)
+                .scope(MemoryScope::new(
+                    config.scope.channel.clone(),
+                    config.scope.chat_id.clone(),
+                )?)
+                .store(store.clone())
+                .agent_skill_dirs(agent_skill_dirs_from_env())
+                .capability_policy(capability_policy.clone())
+                .privacy_policy(privacy.clone())
+                .audit_sink(Arc::new(NoopMemoryAuditSink))
+                .build()?,
+        );
         let runtime_budget = runtime.runtime_budget();
         let capability = entry_capability_view(
             runtime_budget.profile,
@@ -355,18 +364,40 @@ impl EntryRuntime {
         )?;
         let idempotency = EntryIdempotencyCache::new(config.idempotency.max_keys);
         let console = EntryConsoleState::new(&config, &runtime_budget);
+        let governance_model = Arc::new(EntryGovernanceModelStore::open(
+            &config.store,
+            runtime.memory_space_id(),
+            runtime.subject_id(),
+            &runtime.scope().channel,
+            &runtime.scope().chat_id,
+            runtime_budget.profile.as_str(),
+        )?);
+        runtime
+            .set_governance_model_policy_revision(governance_model.current_policy_revision()?)?;
+        let governance_coordinator =
+            EntryGovernanceCoordinator::start(Arc::clone(&runtime), Arc::clone(&governance_model));
         Ok(Self {
+            governance_coordinator,
             config,
             store,
             runtime,
             capability,
             idempotency,
             console,
+            governance_model,
         })
     }
 
     pub fn runtime(&self) -> &MemoryRuntime {
         &self.runtime
+    }
+
+    pub fn governance_coordinator_report(&self) -> crate::EntryGovernanceCoordinatorReport {
+        self.governance_coordinator.report()
+    }
+
+    pub fn shutdown_governance_coordinator(&self) {
+        self.governance_coordinator.shutdown();
     }
 
     pub fn runtime_budget(&self) -> RuntimeBudgetReport {
@@ -885,6 +916,39 @@ impl EntryRuntime {
         self.console.llm_gateway()
     }
 
+    pub fn console_governance_model(&self) -> EntryGovernanceModelConfigView {
+        self.governance_model.view()
+    }
+
+    pub fn console_update_governance_model(
+        &self,
+        update: EntryGovernanceModelConfigUpdate,
+    ) -> Result<EntryGovernanceModelConfigView> {
+        let view = self.governance_model.update(update)?;
+        self.runtime
+            .set_governance_model_policy_revision(view.config_revision.unwrap_or(1))?;
+        self.governance_coordinator.wake();
+        Ok(view)
+    }
+
+    pub fn console_governance_model_probe_plan(&self) -> Result<EntryGovernanceModelProbePlan> {
+        self.governance_model.probe_plan()
+    }
+
+    pub fn governance_model_execution_binding(
+        &self,
+    ) -> Result<EntryGovernanceModelExecutionBinding> {
+        self.governance_model.execution_binding()
+    }
+
+    pub fn governance_model_execution_binding_for_revision(
+        &self,
+        config_revision: u64,
+    ) -> Result<EntryGovernanceModelExecutionBinding> {
+        self.governance_model
+            .execution_binding_for_revision(config_revision)
+    }
+
     pub fn console_run_llm_gateway_smoke_check(
         &self,
         id: &str,
@@ -1069,6 +1133,9 @@ impl EntryRuntime {
         services: AdapterRuntimeServices<'_>,
         lease: &EntryRuntimeBudgetLease,
     ) -> Result<EntryResponse> {
+        self.runtime.set_governance_model_policy_revision(
+            self.governance_model.current_policy_revision()?,
+        )?;
         if context.operation() != command.operation() {
             return Ok(EntryResponse::from_adapter(
                 AdapterResponse::Rejected {
@@ -1177,6 +1244,11 @@ impl EntryRuntime {
         let context = context.into_parts();
         let auth = context.auth.into_adapter();
         let envelope = AdapterEnvelope {
+            protocol_version: bm_adapter::ExternalAiMemoryProtocolVersion::V1,
+            runtime_binding: bm_adapter::AdapterProtocolBinding::for_runtime(
+                &self.runtime,
+                &lease.inner,
+            ),
             request_id: context.request_id,
             transport: context.transport,
             mode: context.mode,
@@ -1200,6 +1272,7 @@ impl EntryRuntime {
         }
         self.console
             .record_adapter_response(operation, &response.adapter);
+        self.governance_coordinator.wake();
         Ok(response)
     }
 }

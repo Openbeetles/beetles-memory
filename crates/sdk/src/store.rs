@@ -620,7 +620,7 @@ mod runtime_metric_event_acquisition_tests {
     }
 
     #[test]
-    fn aggregate_event_budget_rejects_before_parsing_the_first_excess_source_line() {
+    fn aggregate_event_or_byte_budget_rejects_before_parsing_the_first_excess_source_line() {
         let profile = metric_test_profile();
         let platform =
             StorePlatform::open(StoreBackendConfig::in_memory(profile).expect("in-memory config"))
@@ -644,6 +644,25 @@ mod runtime_metric_event_acquisition_tests {
             event_bytes.push(b'\n');
         }
         event_bytes.extend_from_slice(b"{not-json}\n");
+        let manifest_bytes = std::fs::metadata(root.join("manifest.json"))
+            .expect("manifest metadata")
+            .len() as usize;
+        let primary_bytes = platform
+            .read_metric_events(StoreCapacityBudget::from_runtime_budget(
+                budget.store_budget,
+            ))
+            .expect("primary metric events")
+            .accounted_snapshot_bytes;
+        let remaining_bytes = budget
+            .store_budget
+            .snapshot_max_bytes
+            .checked_sub(primary_bytes)
+            .expect("primary bytes fit active snapshot budget");
+        let expected_stage = if manifest_bytes + event_bytes.len() > remaining_bytes {
+            "runtime_metrics_event_bytes"
+        } else {
+            "runtime_metrics_event_capacity"
+        };
         std::fs::write(root.join("events/events.jsonl"), event_bytes)
             .expect("write exact events plus excess corrupt line");
 
@@ -653,7 +672,7 @@ mod runtime_metric_event_acquisition_tests {
                 Err(error) => error,
             };
 
-        assert_eq!(error.stage(), "runtime_metrics_event_capacity");
+        assert_eq!(error.stage(), expected_stage);
         std::fs::remove_dir_all(root).expect("remove event store");
     }
 

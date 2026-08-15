@@ -37,7 +37,6 @@ fn run_macos_live_gate() {
     .expect("live memory authority");
     let mut config = OllamaTransparentConfig::new(&data_dir, gateway_binary_path(), authority)
         .expect("live transparent config");
-    config.maintenance_model = model.clone();
     config.open_app_after_enable = true;
     config.restore_official_after_disable = true;
 

@@ -20,7 +20,9 @@ cargo test --locked -p bm-store-contract-tests --test file_store_contract
 cargo test --locked -p bm-store-contract-tests --features sqlite-store --test sqlite_store_contract
 cargo test --locked -p bm-entry --test runtime_contract entry_runtime
 cargo test --locked -p bm-mcp --features server-stdio --bin bm-mcp-server mcp_server
-cargo test --locked -p bm-http --features server-std --bin bm-http-console http_console
+cargo test --locked -p bm-http --no-default-features \
+  --features "server-std,http-console-bin,$gateway_production_feature" \
+  --bin bm-http-console http_console
 cargo check --locked -p bm-llm-gateway --no-default-features \
   --features "server-async,client-reqwest,$gateway_production_feature" \
   --bin bm-llm-gateway

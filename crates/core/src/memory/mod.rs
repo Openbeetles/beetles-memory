@@ -313,8 +313,9 @@ pub use long_term_extraction::{
     build_long_term_memory_extraction_input, evaluate_long_term_memory_extraction_turn,
     mark_long_term_memory_extraction_deferred, mark_long_term_memory_extraction_processed,
     mark_long_term_memory_extraction_requested, parse_long_term_memory_extraction_response,
-    persist_long_term_memory_extraction_state, plan_long_term_memory_extraction_with_report,
-    run_long_term_memory_refresh, LongTermMemoryDraftAdmissionPolicy,
+    parse_long_term_memory_extraction_response_strict, persist_long_term_memory_extraction_state,
+    plan_long_term_memory_extraction_with_report, run_long_term_memory_refresh,
+    run_long_term_memory_refresh_strict, LongTermMemoryDraftAdmissionPolicy,
     LongTermMemoryExtractionApplyReport, LongTermMemoryExtractionState,
     LongTermMemoryExtractionStateStore, LongTermMemoryExtractionTurnDecision,
     LongTermMemoryExtractionTurnInput, LongTermMemoryRefreshContext, LongTermMemoryRefreshOutcome,
@@ -474,11 +475,18 @@ pub use personality_closure::{
     PersonalityGovernanceRepairPlan, PersonalityRuntimeGovernanceGate,
 };
 pub use post_turn_governance::{
-    build_deferred_governance_queue_report, DeferredGovernanceJob, DeferredGovernanceJobStatus,
-    DeferredGovernanceJobSummary, DeferredGovernanceQueueReport, GovernedWriteDecision,
-    MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
-    PostTurnMemoryGovernanceReport, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    PrivateGardenAdmissionDecision, SoulCandidateDisposition, SoulCandidateHandoffReport,
+    build_deferred_governance_queue_report, post_turn_governance_transcript_digest,
+    DeferredGovernanceJobStatus, DeferredGovernanceJobSummary, DeferredGovernanceQueueReport,
+    GovernedWriteDecision, MemoryPlaneGovernanceReport, MemoryWriteAuthority, MemoryWriteDomain,
+    PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceErrorClassV2,
+    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1, PostTurnGovernanceJobStatusV2,
+    PostTurnGovernanceJobV2, PostTurnGovernanceReceiptV2, PostTurnGovernanceReconciliationCursorV1,
+    PostTurnGovernanceScopeIndexV2, PostTurnMemoryGovernanceReport, PostTurnPrivateGardenReport,
+    PostTurnSemanticGovernanceReport, PrivateGardenAdmissionDecision, SoulCandidateDisposition,
+    SoulCandidateHandoffReport, MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS,
+    MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+    POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION, POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+    POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION,
 };
 pub(crate) use private_docs::estimate_private_doc_workspace_chars;
 pub(crate) use private_docs::run_private_doc_workspace_refresh_with_state;
@@ -499,7 +507,8 @@ pub use private_garden::{
 };
 pub(crate) use private_garden_governance::run_private_garden_governance_with_state;
 pub use private_garden_governance::{
-    run_private_garden_governance, PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
+    run_private_garden_governance, run_private_garden_governance_strict,
+    PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
     PrivateGardenGovernanceManifestAction, PrivateGardenGovernanceManifestEntry,
     PrivateGardenGovernanceOutcome, PRIVATE_GARDEN_GOVERNANCE_SYSTEM_PROMPT,
 };

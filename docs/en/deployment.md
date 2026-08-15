@@ -93,7 +93,16 @@ Example write body:
   "topic": "server-entry",
   "title": "Server entry guard",
   "summary": "Server runtime accepts HTTP entry requests through bm-entry.",
-  "content": "Decode HTTP requests into adapter commands and dispatch through the SDK runtime."
+  "content": "Decode HTTP requests into adapter commands and dispatch through the SDK runtime.",
+  "source": "manual",
+  "source_chat_id": "local-console",
+  "owning_scope": {"kind": "shared_program"},
+  "creation_ref": {
+    "kind": "replay_promotion",
+    "candidate_ref": "example:server-entry-guard",
+    "verification_receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "privacy_class": "public_runtime"
 }
 ```
 
@@ -132,18 +141,24 @@ Standalone deployments may expose the configuration console on the same HTTP lis
 This repository provides the formal `bm-http-console` executable for Linux server, Linux device, non-desktop deployments, device HTTP consoles, and local development scenarios that explicitly verify the HTTP shell. It is not the macOS desktop production entry, it is not an example entry, and it does not bypass the kernel; all `/console/*` and `/memory/*` requests enter the same `EntryRuntime`.
 
 ```bash
-cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
+cargo run --locked -p bm-http --features server-std,http-console-bin,profile-server-linux-memory-gateway --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
-  --store-path /var/lib/beetle-memory/http-console-store
+  --store-path /var/lib/beetle-memory/http-console-store \
+  --connection-read-deadline-ms 5000 \
+  --write-timeout-ms 5000
 ```
+
+Use `profile-linux-device-standalone-memory` for a Linux device and `profile-desktop-macos-standalone-memory` for local macOS HTTP-shell verification. The executable requires exactly one production profile matching the real target and no longer selects dev-full implicitly.
 
 To mount host-managed standard Agent Skill directories in standalone deployments, set `BM_AGENT_SKILL_DIRS` before starting the process. Use the platform path separator for multiple directories. The runtime scans them read-only for recall/projection and does not manage or execute their files.
 
 ```bash
 BM_AGENT_SKILL_DIRS=/path/to/project/.agents/skills:/path/to/user/skills \
-  cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
+  cargo run --locked -p bm-http --features server-std,http-console-bin,profile-server-linux-memory-gateway --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
-  --store-path /var/lib/beetle-memory/http-console-store
+  --store-path /var/lib/beetle-memory/http-console-store \
+  --connection-read-deadline-ms 5000 \
+  --write-timeout-ms 5000
 ```
 
 The HTTP shell frontend dev server uses port `5176` and proxies `/console/*` and `/memory/*` to `127.0.0.1:8718`. This verifies the HTTP shell only; the macOS desktop production shape should use the Tauri commands above:

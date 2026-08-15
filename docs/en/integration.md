@@ -186,12 +186,23 @@ runtime.write(MemoryWriteRequest::Candidates {
 })?;
 ```
 
-If post-turn LLM services are unavailable, `finalize_turn_and_maintain` still
-commits the transcript and writes a deferred governance job under
-`memory/governance_jobs/pending.json`. Run `MemoryRuntime::run_due_governance`
-when services recover. The queue is isolated by memory space / subject / channel
-/ chat / turn; hosts must not reimplement this queue or retry with host-owned
-semantics.
+If post-turn LLM services are unavailable, `finalize_turn` still
+commits the transcript and atomically creates a V2 intent in the StorePlatform
+`post_turn_governance_jobs` and `post_turn_governance_scope_indexes` typed
+namespaces. Once services recover, the SDK first acquires an exact lease through
+`MemoryRuntime::claim_governance_job`, then calls
+`MemoryRuntime::run_claimed_governance`. The latter revalidates transcript and
+privacy authority before the first network byte and commits the memory
+post-image, `succeeded` job, scope index, and receipt in one backend transaction.
+The legacy `memory/governance_jobs/pending.json` payload is never read or
+migrated; a non-empty legacy file fails with
+`legacy_governance_queue_reset_required` and requires explicit operator action.
+Hosts must not reimplement the queue, assemble memory mutations, or retry with
+host-owned semantics.
+If a canonical transcript commit exists but intent admission was interrupted,
+call `MemoryRuntime::reconcile_governance_intents` with a bounded page of 1 to
+32 turns for the current exact conversation. Its cursor and repaired intents
+advance in one CAS and never scan another subject or conversation.
 Operator surfaces should use `MemoryRuntime::deferred_governance_report()` or
 `inspect.deferred_governance` for pending / retrying / failed / terminal counts,
 recent jobs, scope, subject, turn, reason, and last error for the current runtime

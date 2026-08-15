@@ -4,7 +4,7 @@ use bm_sdk::{
 
 use crate::{
     AdapterCommand, AdapterEnvelope, AdapterErrorKey, AdapterProjectionReport, AdapterResponse,
-    AdapterSdkReport,
+    AdapterSdkReport, AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion,
 };
 
 pub struct AdapterRuntimeServices<'a> {
@@ -52,6 +52,33 @@ pub fn dispatch_adapter_command_with_services(
     mut envelope: AdapterEnvelope<AdapterCommand>,
     services: AdapterRuntimeServices<'_>,
 ) -> Result<AdapterResponse<AdapterSdkReport>> {
+    if envelope.protocol_version != ExternalAiMemoryProtocolVersion::V1 {
+        return Ok(AdapterResponse::Rejected {
+            request_id: envelope.request_id,
+            audit_id: envelope.audit_id,
+            error_key: AdapterErrorKey::RuntimeBindingMismatch,
+            reason: "protocol_version_mismatch".to_string(),
+        });
+    }
+    if let Some(reason) = envelope.runtime_binding.mismatch_reason(runtime, lease) {
+        return Ok(AdapterResponse::Rejected {
+            request_id: envelope.request_id,
+            audit_id: envelope.audit_id,
+            error_key: AdapterErrorKey::RuntimeBindingMismatch,
+            reason: reason.to_string(),
+        });
+    }
+    if let Some(reason) = envelope
+        .runtime_binding
+        .source_mismatch_reason(&envelope.source)
+    {
+        return Ok(AdapterResponse::Rejected {
+            request_id: envelope.request_id,
+            audit_id: envelope.audit_id,
+            error_key: AdapterErrorKey::RuntimeBindingMismatch,
+            reason: reason.to_string(),
+        });
+    }
     envelope
         .payload
         .pin_accepted_at(runtime.config().clock.now_secs());
@@ -80,6 +107,13 @@ fn dispatch_adapter_command_with_services_in_lease(
     let report = match envelope.payload {
         AdapterCommand::Write(request) => {
             AdapterSdkReport::Write(Box::new(runtime.write(request)?))
+        }
+        AdapterCommand::FinalizeTurn(request) => {
+            let turn_id = request.turn.turn_id.clone();
+            let report = runtime.finalize_turn(*request)?;
+            AdapterSdkReport::FinalizeTurn(Box::new(AdapterTurnFinalizeReport::from_sdk(
+                turn_id, report,
+            )))
         }
         AdapterCommand::Recall(request) => {
             AdapterSdkReport::Recall(Box::new(runtime.recall(request)?))

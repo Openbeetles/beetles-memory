@@ -38,6 +38,11 @@ fn runtime_with_auth(auth: EntryAuthConfig) -> EntryRuntime {
     .expect("entry runtime")
 }
 
+#[test]
+fn wss_server_feature_enables_entry_governance_model_client() {
+    assert!(bm_entry::entry_governance_model_client_compiled());
+}
+
 fn write_payload(name: &str, summary: &str) -> String {
     serde_json::json!({
         "name": name,
@@ -58,6 +63,63 @@ fn write_payload(name: &str, summary: &str) -> String {
         "privacy_class": "shared_with_subject",
     })
     .to_string()
+}
+
+fn finalize_payload() -> String {
+    serde_json::json!({
+        "turn": {
+            "turn_id": "turn-wss-pl1d",
+            "conversation": {
+                "channel": "wss",
+                "chat_id": "chat-1",
+                "conversation_id": "conversation-wss-pl1d"
+            },
+            "subject": "agent:wss-agent",
+            "delivery_status": "delivered",
+            "source": {
+                "ingress": "user",
+                "channel": "wss",
+                "provider": null,
+                "protocol": "native",
+                "endpoint": "command.finalize_turn",
+                "model_alias": null,
+                "model_resolved": null,
+                "request_id": "request-wss-pl1d",
+                "client_conversation_hint": "conversation-wss-pl1d"
+            },
+            "input_messages": [{
+                "role": "user",
+                "content": "WSS queued contract",
+                "authority": "user_asserted",
+                "observed_at": 1,
+                "speaker_id": "user",
+                "speaker_kind": "human"
+            }],
+            "external_content_used": false
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn wss_finalize_returns_typed_queued_report() {
+    let runtime = runtime();
+    let mut session = WssRuntimeSession::new(
+        &runtime,
+        "session-finalize",
+        support::trusted_auth("peer-finalize"),
+    );
+    let response = session
+        .handle_frame(WssRuntimeFrame::command(
+            "command.finalize_turn",
+            finalize_payload(),
+        ))
+        .expect("WSS finalize");
+    let value: serde_json::Value =
+        serde_json::from_str(&response.payload).expect("WSS finalize response");
+    assert_eq!(value["operation"], "finalize_turn");
+    assert_eq!(value["result"]["memoryConsolidation"]["state"], "queued");
+    assert!(value["result"]["memoryConsolidation"]["jobId"].is_string());
 }
 
 fn response_status(response: &bm_wss::WssRuntimeEvent) -> String {

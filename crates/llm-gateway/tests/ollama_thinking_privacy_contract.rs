@@ -1,20 +1,16 @@
 use bm_entry::EntryRuntimeBaseConfig;
 use bm_llm_gateway::{
-    handle_ollama_request_with_services, GatewayAuditOutcome, GatewayAuditStage, GatewayConfig,
+    handle_ollama_request, GatewayAuditOutcome, GatewayAuditStage, GatewayConfig,
     GatewayProviderConfig, GatewayRuntime, GatewayScopeRequest, OllamaGatewayBody,
     OllamaGatewayRequest, OllamaNativeUpstream, OllamaPassthroughRequest, OllamaUpstreamRequest,
-    OllamaUpstreamResponse, OpenAiGatewayServices,
+    OllamaUpstreamResponse,
 };
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy,
-    MemoryWriteRequest, Message, ResponseBody, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StopReason, ToolChoicePolicy, ToolSpec,
+    MemoryCapabilityPolicy, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
 };
 use serde_json::{json, Value};
 
 mod support;
-use std::borrow::Cow;
-use std::sync::{Arc, Mutex};
 
 fn gateway_config() -> GatewayConfig {
     let mut config = GatewayConfig::default_for_local_dev();
@@ -140,74 +136,14 @@ impl OllamaNativeUpstream for ThinkingMockOllamaUpstream {
     }
 }
 
-#[derive(Default)]
-struct StaticHttpClient;
-
-impl LlmHttpClient for StaticHttpClient {
-    fn do_post(
-        &mut self,
-        _url: &str,
-        _headers: &[(&str, &str)],
-        _body: &[u8],
-    ) -> bm_sdk::Result<(u16, ResponseBody)> {
-        Ok((200, ResponseBody::Heap(Vec::new())))
-    }
-}
-
-struct CapturingMaintenanceLlm {
-    observed_text: Arc<Mutex<Vec<String>>>,
-}
-
-impl CapturingMaintenanceLlm {
-    fn new(observed_text: Arc<Mutex<Vec<String>>>) -> Self {
-        Self { observed_text }
-    }
-}
-
-impl LlmClient for CapturingMaintenanceLlm {
-    fn model_compat(&self) -> LlmModelCompat {
-        LlmModelCompat::default()
-    }
-
-    fn chat(
-        &self,
-        _http: &mut dyn LlmHttpClient,
-        system: &str,
-        messages: &[Message],
-        _tools: Option<&[ToolSpec]>,
-        _tool_choice: ToolChoicePolicy,
-    ) -> bm_sdk::Result<LlmResponse> {
-        let mut joined = system.to_string();
-        for message in messages {
-            joined.push('\n');
-            joined.push_str(message.role.as_ref());
-            joined.push(':');
-            joined.push_str(&message.content);
-        }
-        self.observed_text
-            .lock()
-            .expect("capture lock")
-            .push(joined);
-        Ok(LlmResponse {
-            content: "Summary: final answer".to_string(),
-            stop_reason: StopReason::EndTurn,
-            tool_calls: None,
-        })
-    }
-}
-
 #[test]
 fn chat_forces_think_false_and_strips_thinking_before_response_and_maintenance() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     seed_runtime_skill(&gateway, &config);
     let mut upstream = ThinkingMockOllamaUpstream::default();
-    let mut http = StaticHttpClient;
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let llm = CapturingMaintenanceLlm::new(observed.clone());
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    let response = handle_ollama_request_with_services(
+    let response = handle_ollama_request(
         &gateway,
         OllamaGatewayRequest::post_json(
             "/api/chat",
@@ -220,7 +156,6 @@ fn chat_forces_think_false_and_strips_thinking_before_response_and_maintenance()
             }),
         ),
         &mut upstream,
-        &mut services,
     )
     .expect("chat response");
 
@@ -242,12 +177,8 @@ fn chat_forces_think_false_and_strips_thinking_before_response_and_maintenance()
     assert!(!audit_text.contains("SECRET_TOP_LEVEL_THINKING"));
     assert!(response.audit.stages.iter().any(|stage| {
         stage.stage == GatewayAuditStage::Maintenance
-            && stage.outcome == GatewayAuditOutcome::Succeeded
+            && stage.outcome == GatewayAuditOutcome::Queued
     }));
-    let maintenance_text = observed.lock().expect("capture lock").join("\n");
-    assert!(!maintenance_text.contains("SECRET_JSON_THINKING"));
-    assert!(!maintenance_text.contains("SECRET_TOP_LEVEL_THINKING"));
-    assert!(!maintenance_text.contains("thinking"));
 }
 
 #[test]
@@ -262,12 +193,8 @@ fn streaming_chat_strips_thinking_before_chunks_and_deferred_maintenance() {
             "{\"message\":{\"role\":\"assistant\",\"content\":\"lo\"},\"thinking\":\"SECRET_STREAM_TOP\",\"done\":true}\n".to_string(),
         ],
     ));
-    let mut http = StaticHttpClient;
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let llm = CapturingMaintenanceLlm::new(observed.clone());
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    let mut response = handle_ollama_request_with_services(
+    let mut response = handle_ollama_request(
         &gateway,
         OllamaGatewayRequest::post_json(
             "/api/chat",
@@ -279,7 +206,6 @@ fn streaming_chat_strips_thinking_before_chunks_and_deferred_maintenance() {
             }),
         ),
         &mut upstream,
-        &mut services,
     )
     .expect("stream response");
 
@@ -299,70 +225,11 @@ fn streaming_chat_strips_thinking_before_chunks_and_deferred_maintenance() {
     assert!(!returned.contains("SECRET_STREAM_THINKING"));
     assert!(!returned.contains("SECRET_STREAM_TOP"));
     assert!(!returned.contains("\"thinking\""));
-    response.finish_deferred_maintenance(&mut services);
+    response.finish_deferred_maintenance();
     assert!(response.audit.stages.iter().any(|stage| {
         stage.stage == GatewayAuditStage::Maintenance
-            && stage.outcome == GatewayAuditOutcome::Succeeded
+            && stage.outcome == GatewayAuditOutcome::Queued
     }));
-    let maintenance_text = observed.lock().expect("capture lock").join("\n");
-    assert!(!maintenance_text.contains("SECRET_STREAM_THINKING"));
-    assert!(!maintenance_text.contains("SECRET_STREAM_TOP"));
-    assert!(!maintenance_text.contains("thinking"));
-}
-
-#[test]
-fn ollama_maintenance_client_requests_think_false() {
-    let provider = GatewayProviderConfig::ollama_native("http://127.0.0.1:11435/api");
-    let llm = bm_llm_gateway::OllamaMaintenanceLlmClient::new(provider, "qwen2.5:7b");
-    let mut http = CapturingHttpClient::default();
-
-    let _ = llm
-        .chat(
-            &mut http,
-            "Summarize safely.",
-            &[Message {
-                role: Cow::Borrowed("user"),
-                content: "remember privacy".to_string(),
-            }],
-            None,
-            ToolChoicePolicy::Auto,
-        )
-        .expect("maintenance llm response");
-
-    assert_eq!(http.body_json()["think"], false);
-}
-
-#[derive(Default)]
-struct CapturingHttpClient {
-    body: Option<Vec<u8>>,
-}
-
-impl CapturingHttpClient {
-    fn body_json(&self) -> Value {
-        serde_json::from_slice(self.body.as_deref().expect("captured body")).expect("json")
-    }
-}
-
-impl LlmHttpClient for CapturingHttpClient {
-    fn do_post(
-        &mut self,
-        _url: &str,
-        _headers: &[(&str, &str)],
-        body: &[u8],
-    ) -> bm_sdk::Result<(u16, ResponseBody)> {
-        self.body = Some(body.to_vec());
-        Ok((
-            200,
-            ResponseBody::Heap(
-                json!({
-                    "message": { "role": "assistant", "content": "maintenance summary" },
-                    "done": true
-                })
-                .to_string()
-                .into_bytes(),
-            ),
-        ))
-    }
 }
 
 trait OllamaGatewayBodyAssertions {

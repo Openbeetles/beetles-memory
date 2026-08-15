@@ -17,7 +17,7 @@ required-features = ["server-stdio"]
 
 [features]
 default = []
-server-stdio = ["bm-entry"]
+server-stdio = ["bm-entry", "bm-entry/governance-model-client-std"]
 profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-adapter/profile-linux-device-standalone-memory"]

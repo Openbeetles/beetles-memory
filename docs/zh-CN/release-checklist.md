@@ -19,8 +19,13 @@
 
 ```bash
 cargo fmt --all -- --check
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --exclude bm-desktop
+cargo clippy --locked --workspace --exclude bm-desktop --all-targets -- -D warnings
+# 在 macOS 上使用必需的 production profile 执行 desktop 门禁。
+cargo test --locked -p bm-desktop --no-default-features \
+  --features profile-desktop-macos-standalone-memory
+cargo clippy --locked -p bm-desktop --all-targets --no-default-features \
+  --features profile-desktop-macos-standalone-memory -- -D warnings
 cargo doc --locked --no-deps --no-default-features \
   -p bm-core \
   -p bm-sdk \
@@ -29,6 +34,8 @@ cargo doc --locked --no-deps --no-default-features \
   -p bm-adapter \
   -p bm-entry \
   -p bm-cli \
+  -p bm-llm-gateway \
+  -p bm-ollama-transparent \
   -p bm-http \
   -p bm-wss \
   -p bm-mcp \
@@ -57,10 +64,18 @@ bm-core
 bm-sdk
 bm-replay / bm-evolve / bm-adapter
 bm-entry
-bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
+bm-ollama-transparent
+bm-cli / bm-llm-gateway / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
 通过 `scripts/check_release_surface.sh` 运行 staged `cargo publish --dry-run -p <crate>`。release gate 会运行 production hardening 检查、使用临时 Cargo target，并在 ignored artifact baseline 发生变化时失败。
+
+## 回滚
+
+- 首次真实发布前，任一门禁失败都应停止，在 `dev` 修复并冻结新候选；不得通过移动 `main` 或 release tag 掩盖失败候选。
+- crates.io 版本不可变。已发布包存在缺陷时，不覆盖版本、不删除 tag 伪装回滚；停止对外宣布该版本，修复后按相同依赖顺序发布新的 patch 版本。
+- 任何可能打开既有 store 的新二进制部署前，都必须在数据路径之外备份该精确 store。部署回滚恢复上一版已签名二进制及其匹配的 store 备份；archive import/export 不是隐式 schema migration 或回滚路径。
+- release tag 只能从已验收的 `main` commit 创建，已存在的 release tag 永不重指向。
 
 ## 范围检查
 

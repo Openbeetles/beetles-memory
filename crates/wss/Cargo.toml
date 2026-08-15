@@ -13,7 +13,7 @@ path = "src/lib.rs"
 [features]
 default = []
 nonproduction-replay-harness = ["bm-adapter/nonproduction-replay-harness"]
-server-std = ["bm-entry"]
+server-std = ["bm-entry", "bm-entry/governance-model-client-std"]
 client-compact = ["bm-entry"]
 profile-esp-standalone-memory = ["bm-adapter/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-adapter/profile-esp-embedded-sdk"]

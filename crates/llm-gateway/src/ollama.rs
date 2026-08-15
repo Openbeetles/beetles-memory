@@ -2,12 +2,10 @@ use std::collections::BTreeMap;
 
 use bm_entry::EntryOperationCapability;
 use bm_sdk::{
-    ConversationScope, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse,
-    MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource, Message,
-    ProviderModelContextLimit, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
-    TranscriptInputMessage,
+    ConversationScope, MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource,
+    ProviderModelContextLimit, RuntimeLifecycleModeInput, TranscriptInputMessage,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use crate::agent_tools::request_scoped_agent_tool_registry;
 #[cfg(feature = "client-reqwest")]
@@ -29,8 +27,7 @@ use crate::provider::select_provider_for_kind;
 use crate::{
     GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage, GatewayConfig, GatewayError,
     GatewayProviderConfig, GatewayProviderKind, GatewayRequestBudgetContext, GatewayRuntime,
-    GatewayScopeRequest, GatewayScopeResolver, GatewayUpstreamResponseBudget,
-    OpenAiGatewayServices, Result,
+    GatewayScopeRequest, GatewayScopeResolver, GatewayUpstreamResponseBudget, Result,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,8 +82,8 @@ pub struct OllamaGatewayResponse {
 }
 
 impl OllamaGatewayResponse {
-    pub fn finish_deferred_maintenance(&mut self, services: &mut OpenAiGatewayServices<'_>) {
-        if let Some(outcome) = self.body.finish_deferred_maintenance(services) {
+    pub fn finish_deferred_maintenance(&mut self) {
+        if let Some(outcome) = self.body.finish_deferred_maintenance() {
             self.audit
                 .record_stage(GatewayAuditStage::Maintenance, outcome);
         }
@@ -96,11 +93,10 @@ impl OllamaGatewayResponse {
         &mut self,
         plan: GatewayMaintenancePlan,
         endpoint: OllamaCompletionEndpoint,
-        services: &mut OpenAiGatewayServices<'_>,
     ) {
         match &mut self.body {
             OllamaGatewayBody::Json(body) => {
-                let outcome = run_ollama_json_maintenance(plan, endpoint, body, services);
+                let outcome = run_ollama_json_maintenance(plan, endpoint, body);
                 self.audit
                     .record_stage(GatewayAuditStage::Maintenance, outcome.into());
             }
@@ -166,14 +162,11 @@ impl OllamaGatewayBody {
         }
     }
 
-    fn finish_deferred_maintenance(
-        &mut self,
-        services: &mut OpenAiGatewayServices<'_>,
-    ) -> Option<GatewayAuditOutcome> {
+    fn finish_deferred_maintenance(&mut self) -> Option<GatewayAuditOutcome> {
         match self {
             Self::Json(_) => None,
             Self::Ndjson(body) => body
-                .finish_deferred_maintenance(services)
+                .finish_deferred_maintenance()
                 .map(GatewayAuditOutcome::from),
         }
     }
@@ -285,11 +278,10 @@ impl OllamaNdjsonBody {
 
     fn finish_deferred_maintenance(
         &mut self,
-        services: &mut OpenAiGatewayServices<'_>,
     ) -> Option<crate::maintenance::GatewayMaintenanceRunOutcome> {
         self.deferred_maintenance
             .take()
-            .map(|maintenance| maintenance.finish(services))
+            .map(|maintenance| maintenance.finish())
     }
 }
 
@@ -451,36 +443,24 @@ pub fn handle_ollama_request(
     request: OllamaGatewayRequest,
     upstream: &mut dyn OllamaNativeUpstream,
 ) -> Result<OllamaGatewayResponse> {
-    let mut services = OpenAiGatewayServices::new();
-    handle_ollama_request_with_services(gateway, request, upstream, &mut services)
-}
-
-pub fn handle_ollama_request_with_services(
-    gateway: &GatewayRuntime,
-    request: OllamaGatewayRequest,
-    upstream: &mut dyn OllamaNativeUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
-) -> Result<OllamaGatewayResponse> {
     let context = gateway.begin_request()?;
     gateway.execute_with_request_context(&context, || {
-        handle_ollama_request_with_services_in_budget_lease(
+        handle_ollama_request_in_budget_lease(
             gateway,
             &context,
             gateway.config(),
             request,
             upstream,
-            services,
         )
     })
 }
 
-pub(crate) fn handle_ollama_request_with_services_in_budget_lease(
+pub(crate) fn handle_ollama_request_in_budget_lease(
     gateway: &GatewayRuntime,
     context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     request: OllamaGatewayRequest,
     upstream: &mut dyn OllamaNativeUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OllamaGatewayResponse> {
     upstream.bind_response_budget(context.response_budget().clone())?;
     let provider = select_provider_for_kind(
@@ -494,12 +474,12 @@ pub(crate) fn handle_ollama_request_with_services_in_budget_lease(
     let required_capabilities = required_ollama_capabilities(request.method, &request.path);
     request.scope.require_capabilities(required_capabilities)?;
     match (route.action, route.known_endpoint) {
-        (OllamaRouteAction::Intercept, Some(OllamaKnownEndpoint::Chat)) => handle_chat(
-            gateway, context, config, request, provider, upstream, services,
-        ),
-        (OllamaRouteAction::Intercept, Some(OllamaKnownEndpoint::Generate)) => handle_generate(
-            gateway, context, config, request, provider, upstream, services,
-        ),
+        (OllamaRouteAction::Intercept, Some(OllamaKnownEndpoint::Chat)) => {
+            handle_chat(gateway, context, config, request, provider, upstream)
+        }
+        (OllamaRouteAction::Intercept, Some(OllamaKnownEndpoint::Generate)) => {
+            handle_generate(gateway, context, config, request, provider, upstream)
+        }
         (OllamaRouteAction::Passthrough, _) => {
             handle_passthrough(context, config, request, provider, upstream, route)
         }
@@ -565,7 +545,6 @@ fn handle_chat(
     mut request: OllamaGatewayRequest,
     provider: &GatewayProviderConfig,
     upstream: &mut dyn OllamaNativeUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OllamaGatewayResponse> {
     let body = required_body(&mut request, "chat body is required")?;
     let body_object = body
@@ -675,7 +654,6 @@ fn handle_chat(
         task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
-        config: config.maintenance,
         budget: context.report().maintenance_budget,
     });
     let upstream_request = OllamaUpstreamRequest {
@@ -696,11 +674,7 @@ fn handle_chat(
             .audit
             .record_note("ollama_thinking_response_stripped");
     }
-    response.prepare_post_reply_maintenance(
-        maintenance_plan,
-        OllamaCompletionEndpoint::Chat,
-        services,
-    );
+    response.prepare_post_reply_maintenance(maintenance_plan, OllamaCompletionEndpoint::Chat);
     Ok(response)
 }
 
@@ -711,7 +685,6 @@ fn handle_generate(
     mut request: OllamaGatewayRequest,
     provider: &GatewayProviderConfig,
     upstream: &mut dyn OllamaNativeUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OllamaGatewayResponse> {
     let body = required_body(&mut request, "generate body is required")?;
     let body_object = body
@@ -833,7 +806,6 @@ fn handle_generate(
         task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
-        config: config.maintenance,
         budget: context.report().maintenance_budget,
     });
     let upstream_request = OllamaUpstreamRequest {
@@ -856,11 +828,7 @@ fn handle_generate(
             .audit
             .record_note("ollama_thinking_response_stripped");
     }
-    response.prepare_post_reply_maintenance(
-        maintenance_plan,
-        OllamaCompletionEndpoint::Generate,
-        services,
-    );
+    response.prepare_post_reply_maintenance(maintenance_plan, OllamaCompletionEndpoint::Generate);
     Ok(response)
 }
 
@@ -1172,22 +1140,13 @@ impl OllamaDeferredMaintenance {
         self.accumulator.observe_ndjson_chunk(chunk, self.endpoint);
     }
 
-    fn finish(
-        self,
-        services: &mut OpenAiGatewayServices<'_>,
-    ) -> crate::maintenance::GatewayMaintenanceRunOutcome {
+    fn finish(self) -> crate::maintenance::GatewayMaintenanceRunOutcome {
         let (reply_content, tool_calls, reuse_outcome_note, saw_done) =
             self.accumulator.into_parts(self.endpoint);
         if !saw_done {
             return crate::maintenance::GatewayMaintenanceRunOutcome::Skipped;
         }
-        run_text_maintenance(
-            self.plan,
-            reply_content,
-            tool_calls,
-            reuse_outcome_note,
-            services,
-        )
+        run_text_maintenance(self.plan, reply_content, tool_calls, reuse_outcome_note)
     }
 }
 
@@ -1195,7 +1154,6 @@ fn run_ollama_json_maintenance(
     plan: GatewayMaintenancePlan,
     endpoint: OllamaCompletionEndpoint,
     body: &Value,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> crate::maintenance::GatewayMaintenanceRunOutcome {
     let mut accumulator = OllamaReplyAccumulator::new(plan.budget());
     accumulator.observe_json_response(body, endpoint);
@@ -1204,13 +1162,7 @@ fn run_ollama_json_maintenance(
     if !saw_done {
         return crate::maintenance::GatewayMaintenanceRunOutcome::Skipped;
     }
-    run_text_maintenance(
-        plan,
-        reply_content,
-        tool_calls,
-        reuse_outcome_note,
-        services,
-    )
+    run_text_maintenance(plan, reply_content, tool_calls, reuse_outcome_note)
 }
 
 struct OllamaReplyAccumulator {
@@ -1338,106 +1290,6 @@ impl OllamaReplyAccumulator {
 struct OllamaToolCallSummary {
     name: String,
     arguments_bytes: usize,
-}
-
-pub struct OllamaMaintenanceLlmClient {
-    provider: GatewayProviderConfig,
-    model: String,
-}
-
-impl OllamaMaintenanceLlmClient {
-    pub fn new(provider: GatewayProviderConfig, model: impl Into<String>) -> Self {
-        Self {
-            provider,
-            model: model.into(),
-        }
-    }
-}
-
-impl LlmClient for OllamaMaintenanceLlmClient {
-    fn model_compat(&self) -> LlmModelCompat {
-        LlmModelCompat::default()
-    }
-
-    fn chat(
-        &self,
-        http: &mut dyn LlmHttpClient,
-        system: &str,
-        messages: &[Message],
-        _tools: Option<&[ToolSpec]>,
-        _tool_choice: ToolChoicePolicy,
-    ) -> bm_sdk::Result<LlmResponse> {
-        let mut ollama_messages = Vec::new();
-        if !system.trim().is_empty() {
-            ollama_messages.push(json!({
-                "role": "system",
-                "content": system,
-            }));
-        }
-        ollama_messages.extend(messages.iter().map(|message| {
-            json!({
-                "role": message.role.as_ref(),
-                "content": message.content,
-            })
-        }));
-        let body = json!({
-            "model": self.model,
-            "messages": ollama_messages,
-            "stream": false,
-            "think": false,
-        })
-        .to_string();
-        let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-        let bearer;
-        if let Some(env_name) = self.provider.secret_env_name() {
-            let token = std::env::var(env_name).map_err(|_| {
-                bm_sdk::Error::config("ollama_maintenance_llm", "provider api key env is unset")
-            })?;
-            bearer = format!("Bearer {token}");
-            headers.push(("authorization".to_string(), bearer));
-        }
-        let header_refs = headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect::<Vec<_>>();
-        let (status, response) = http.do_post(
-            &format!("{}/chat", self.provider.base_url.trim_end_matches('/')),
-            &header_refs,
-            body.as_bytes(),
-        )?;
-        if !(200..300).contains(&status) {
-            return Err(bm_sdk::Error::http("ollama_maintenance_llm", status));
-        }
-        let value: Value = serde_json::from_slice(response.as_ref())
-            .map_err(|error| bm_sdk::Error::config("ollama_maintenance_llm", error.to_string()))?;
-        let message = value.get("message").ok_or_else(|| {
-            bm_sdk::Error::config("ollama_maintenance_llm", "missing message in response")
-        })?;
-        let content = message
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let has_tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .map(|tool_calls| !tool_calls.is_empty())
-            .unwrap_or(false);
-        let stop_reason = if has_tool_calls {
-            StopReason::ToolUse
-        } else {
-            match value.get("done_reason").and_then(Value::as_str) {
-                Some("length") => StopReason::MaxTokens,
-                Some("stop") | None => StopReason::EndTurn,
-                Some(_) => StopReason::Other,
-            }
-        };
-        Ok(LlmResponse {
-            content,
-            stop_reason,
-            tool_calls: None,
-        })
-    }
 }
 
 #[cfg(feature = "client-reqwest")]

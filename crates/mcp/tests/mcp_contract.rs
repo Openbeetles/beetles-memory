@@ -8,6 +8,7 @@ fn tool_schema_maps_to_adapter_commands_not_memory_planes() {
         tools.iter().map(|tool| tool.name).collect::<Vec<_>>(),
         vec![
             "memory_capabilities",
+            "memory_finalize_turn",
             "memory_recall",
             "memory_project",
             "memory_inspect",
@@ -26,6 +27,11 @@ fn tool_schema_maps_to_adapter_commands_not_memory_planes() {
     assert!(tools
         .iter()
         .any(|tool| tool.name == "memory_project" && tool.operation == AdapterOperation::Project));
+    assert!(tools.iter().any(|tool| {
+        tool.name == "memory_finalize_turn"
+            && tool.operation == AdapterOperation::FinalizeTurn
+            && tool.schema_fields.contains(&"turn".to_string())
+    }));
     assert!(tools.iter().any(|tool| {
         tool.name == "memory_long_term_list" && tool.operation == AdapterOperation::LongTermList
     }));

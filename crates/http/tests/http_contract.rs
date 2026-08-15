@@ -7,12 +7,13 @@ use bm_http::{
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
     let routes = route_specs();
-    assert_eq!(routes.len(), 13);
+    assert_eq!(routes.len(), 14);
     assert_eq!(
         routes.iter().map(|route| route.path).collect::<Vec<_>>(),
         vec![
             "/memory/profile/capabilities",
             "/memory/write",
+            "/memory/finalize-turn",
             "/memory/recall",
             "/memory/project",
             "/memory/maintain",
@@ -37,6 +38,7 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
     assert!(matches!(capabilities.auth, RouteAuth::TokenOrLoopback));
     assert!(capabilities.profile_gate_required);
     for (path, operation) in [
+        ("/memory/finalize-turn", AdapterOperation::FinalizeTurn),
         ("/memory/long-term/list", AdapterOperation::LongTermList),
         ("/memory/long-term/detail", AdapterOperation::LongTermDetail),
         ("/memory/long-term/mutate", AdapterOperation::LongTermMutate),

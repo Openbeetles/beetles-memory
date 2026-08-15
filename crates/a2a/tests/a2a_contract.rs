@@ -28,6 +28,7 @@ fn bridge_messages_are_memory_report_or_request_only() {
         vec![
             "peer_capability",
             "memory_write_candidate",
+            "memory_finalize_turn_request",
             "memory_recall_request",
             "memory_projection_request",
             "memory_long_term_list_request",
@@ -44,6 +45,7 @@ fn bridge_messages_are_memory_report_or_request_only() {
         .filter_map(|message| message.operation)
         .collect();
     assert!(operations.contains(&AdapterOperation::Write));
+    assert!(operations.contains(&AdapterOperation::FinalizeTurn));
     assert!(operations.contains(&AdapterOperation::Recall));
     assert!(operations.contains(&AdapterOperation::Project));
     assert!(operations.contains(&AdapterOperation::LongTermList));

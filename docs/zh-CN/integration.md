@@ -185,9 +185,18 @@ runtime.write(MemoryWriteRequest::Candidates {
 })?;
 ```
 
-如果 post-turn LLM 服务暂时不可用，`finalize_turn_and_maintain` 仍会先提交会话，
-并在 `memory/governance_jobs/pending.json` 写入待恢复治理任务。服务恢复后调用
-`MemoryRuntime::run_due_governance` 继续治理；队列按 memory space / subject / channel / chat / turn 隔离，宿主不能自己重做这条队列，也不能用宿主语义重试。
+如果 post-turn LLM 服务暂时不可用，`finalize_turn` 仍会先提交会话，
+并在 StorePlatform 的 `post_turn_governance_jobs` 与
+`post_turn_governance_scope_indexes` typed namespace 中原子建立 V2 intent。服务恢复后，SDK
+先通过 `MemoryRuntime::claim_governance_job` 取得 exact lease，再调用
+`MemoryRuntime::run_claimed_governance`；后者在首个网络字节前复核 transcript/privacy
+authority，并把 memory post-image、job=`succeeded`、scope index 与 receipt 放入同一 backend
+transaction。旧 `memory/governance_jobs/pending.json` 不再读取或迁移；检测到非空旧文件时会
+返回 `legacy_governance_queue_reset_required`，必须由 operator 显式处理。宿主不能自己重做队列、
+拼装 memory mutation 或用宿主语义重试。
+若 canonical transcript 已提交但 intent admission 曾中断，调用
+`MemoryRuntime::reconcile_governance_intents` 以 1 到 32 条的有界页修复当前 exact conversation；
+cursor 与新建 intent 在同一 CAS 前进，不会扫描其他主体或会话。
 运维面使用 `MemoryRuntime::deferred_governance_report()` 或 `inspect.deferred_governance`
 查看当前 runtime scope 下的 pending / retrying / failed / terminal 计数、recent jobs、scope、subject、turn、reason 和 last error。
 

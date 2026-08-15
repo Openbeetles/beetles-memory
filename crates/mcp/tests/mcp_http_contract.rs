@@ -401,7 +401,7 @@ fn remote_mcp_catalog_and_dispatch_share_one_request_capability_snapshot() {
         Some(-32602)
     );
 
-    let recall = r#"{"jsonrpc":"2.0","id":"recall","method":"tools/call","params":{"name":"memory_recall","arguments":{"query":"release","limit":1}}}"#;
+    let recall = r#"{"jsonrpc":"2.0","id":"recall","method":"tools/call","params":{"name":"memory_recall","arguments":{"temporal_operation":{"kind":"current"},"query":"release","limit":1}}}"#;
     let (result, response) = serve_mcp_request(&server, &runtime, authorized_json_request(recall));
     result.expect("authorized tools/call");
     let response = response_json(&response);
@@ -409,7 +409,8 @@ fn remote_mcp_catalog_and_dispatch_share_one_request_capability_snapshot() {
         response
             .pointer("/result/structuredContent/status")
             .and_then(serde_json::Value::as_str),
-        Some("accepted")
+        Some("accepted"),
+        "{response}"
     );
 }
 

@@ -10,11 +10,10 @@ use std::thread;
 use std::time::Duration;
 
 use bm_llm_gateway::{
-    serve_llm_gateway_http_accepted_stream_with_services_in_request, GatewayConfig,
-    GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig,
-    GatewayHttpRequestBindings, GatewayProviderConfig, GatewayRequestBudgetContext, GatewayRuntime,
-    OpenAiCompatibleUpstream, OpenAiGatewayServices, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
-    ReqwestOllamaNativeUpstream, Result,
+    serve_llm_gateway_http_accepted_stream_in_request, GatewayConfig, GatewayHttpConnectionHandler,
+    GatewayHttpFront, GatewayHttpFrontConfig, GatewayHttpRequestBindings, GatewayProviderConfig,
+    GatewayRequestBudgetContext, GatewayRuntime, OpenAiCompatibleUpstream, OpenAiUpstreamRequest,
+    OpenAiUpstreamResponse, ReqwestOllamaNativeUpstream, Result,
 };
 
 fn gateway_config(upstream_addr: SocketAddr) -> GatewayConfig {
@@ -25,8 +24,12 @@ fn gateway_config(upstream_addr: SocketAddr) -> GatewayConfig {
         GatewayProviderConfig::ollama_native(format!("http://{upstream_addr}/api")),
     );
     config.default_provider = "ollama".to_string();
-    config.maintenance.enabled = false;
     config
+}
+
+#[test]
+fn gateway_server_feature_enables_entry_governance_model_client() {
+    assert!(bm_entry::entry_governance_model_client_compiled());
 }
 
 fn start_front(
@@ -90,11 +93,10 @@ impl GatewayHttpConnectionHandler for TestGatewayConnection {
     ) -> Result<()> {
         let mut openai = MockOpenAiUpstream;
         let mut ollama = ReqwestOllamaNativeUpstream::new()?;
-        let mut services = OpenAiGatewayServices::new();
-        serve_llm_gateway_http_accepted_stream_with_services_in_request(
+        serve_llm_gateway_http_accepted_stream_in_request(
             &self.gateway,
             context,
-            GatewayHttpRequestBindings::new(&mut openai, &mut ollama, &mut services),
+            GatewayHttpRequestBindings::new(&mut openai, &mut ollama),
             stream,
         )
     }

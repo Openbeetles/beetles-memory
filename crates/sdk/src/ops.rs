@@ -12,13 +12,14 @@ use bm_core::memory::{
     MemoryLongTermListReport as CoreMemoryLongTermListReport, MemoryLongTermMutation,
     MemoryLongTermMutationReport as CoreMemoryLongTermMutationReport, MemoryLongTermTarget,
     MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryPrivacyClass,
-    MemoryProjectionImpactReport, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, QueryFacetInput,
-    RedactedTranscriptSlice, SessionMessage, SessionTurnCommitReport, SkillEvolutionReport,
-    SubjectScopedRuntime, TranscriptAttrEnvelope, TranscriptAttrWriteRejection,
-    TranscriptCommitReport, TranscriptEvidenceRef, TranscriptLifecycleReport,
-    TranscriptLifecycleTransition, TranscriptRedactionReportItem, TranscriptRepairReport,
-    TranscriptReplayView,
+    MemoryProjectionImpactReport, PostTurnGovernanceAttemptAuthorityV2,
+    PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobV2, PostTurnPrivateGardenReport,
+    PostTurnSemanticGovernanceReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionReport, QueryFacetInput, RedactedTranscriptSlice, SessionMessage,
+    SessionTurnCommitReport, SkillEvolutionReport, SubjectScopedRuntime, TranscriptAttrEnvelope,
+    TranscriptAttrWriteRejection, TranscriptCommitReport, TranscriptEvidenceRef,
+    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRedactionReportItem,
+    TranscriptRepairReport, TranscriptReplayView,
 };
 use bm_core::memory::{
     CompactMemoryGraph, EvidenceBacklink, FacetCoverageSelectionReport, FacetRankFusionReport,
@@ -1352,22 +1353,181 @@ pub struct MemoryTurnFinalizeReport {
     pub maintenance: Option<MemoryMaintenanceReport>,
     pub private_garden_self_work: PostTurnPrivateGardenReport,
     pub semantic_governance: PostTurnSemanticGovernanceReport,
+    pub memory_consolidation: MemoryConsolidationReport,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
-#[derive(Clone, Debug)]
-pub struct MemoryDeferredGovernanceRunRequest {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryConsolidationState {
+    NotScheduled,
+    Queued,
+    Succeeded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemoryConsolidationReport {
+    pub state: MemoryConsolidationState,
+    pub job_id: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobStatusRequest {
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobStatusReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceActiveJobsRequest {
     pub limit: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemoryDeferredGovernanceRunReport {
-    pub attempted: usize,
-    pub succeeded: usize,
-    pub failed: usize,
-    pub remaining_pending: usize,
-    pub queue: DeferredGovernanceQueueReport,
-    pub lifecycle_report: RuntimeLifecycleReport,
+pub struct MemoryGovernanceActiveJobsReport {
+    pub jobs: Vec<PostTurnGovernanceJobV2>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceAttemptAuthorityRequest {
+    pub job_id: String,
+    pub binding_id: String,
+    pub config_revision: u64,
+    pub model_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceAttemptAuthorityReport {
+    pub authority: PostTurnGovernanceAttemptAuthorityV2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryGovernanceBlockKind {
+    Configuration,
+    Capability,
+    Policy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobBlockRequest {
+    pub job_id: String,
+    pub kind: MemoryGovernanceBlockKind,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobBlockReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceClaimedJobBlockRequest {
+    pub job_id: String,
+    pub lease_owner: String,
+    pub lease_epoch: u64,
+    pub kind: MemoryGovernanceBlockKind,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceClaimedJobBlockReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobResumeRequest {
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobResumeReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobFailRequest {
+    pub job_id: String,
+    pub lease_owner: String,
+    pub lease_epoch: u64,
+    pub error_class: PostTurnGovernanceErrorClassV2,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobFailReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceReconcileRequest {
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceReconcileReport {
+    pub inspected: usize,
+    pub created: usize,
+    pub cursor_sequence: u64,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobClaimRequest {
+    pub job_id: String,
+    pub lease_owner: String,
+    pub lease_until: u64,
+    pub authority: PostTurnGovernanceAttemptAuthorityV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobClaimReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobRenewRequest {
+    pub job_id: String,
+    pub lease_owner: String,
+    pub lease_epoch: u64,
+    pub lease_until: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobRenewReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobRetryRequest {
+    pub job_id: String,
+    pub lease_owner: String,
+    pub lease_epoch: u64,
+    pub error_class: PostTurnGovernanceErrorClassV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobRetryReport {
+    pub job: PostTurnGovernanceJobV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobRunRequest {
+    pub job_id: String,
+    pub lease_owner: String,
+    pub lease_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryGovernanceJobRunReport {
+    pub job: PostTurnGovernanceJobV2,
+    pub private_garden_self_work: PostTurnPrivateGardenReport,
+    pub semantic_governance: PostTurnSemanticGovernanceReport,
 }
 
 #[derive(Clone, Debug)]

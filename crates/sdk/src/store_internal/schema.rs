@@ -13,17 +13,18 @@ use bm_core::memory::{
     MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetPostingDoc,
     MemoryGraphBacklinkMembership, MemoryGraphEdge, MemoryGraphEdgeMembership, MemoryGraphNode,
     MemoryGraphNodeMembership, MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc,
-    MemoryGraphScopeManifest, MemoryLongTermGovernancePolicy,
-    GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION, GOVERNED_EVIDENCE_SOURCE_REF_SCHEMA_VERSION,
-    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
-    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
-    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE,
-    MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_BACKLINK_NAMESPACE,
-    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_EDGE_NAMESPACE,
-    MEMORY_GRAPH_INDEX_NAMESPACE, MEMORY_GRAPH_MANIFEST_NAMESPACE,
+    MemoryGraphScopeManifest, MemoryLongTermGovernancePolicy, PostTurnGovernanceJobV2,
+    PostTurnGovernanceScopeIndexV2, GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION,
+    GOVERNED_EVIDENCE_SOURCE_REF_SCHEMA_VERSION, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_SCHEMA_VERSION,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+    LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION, MEMORY_FACET_INDEX_NAMESPACE,
+    MEMORY_FACET_POSTING_NAMESPACE, MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+    MEMORY_GRAPH_BACKLINK_NAMESPACE, MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+    MEMORY_GRAPH_EDGE_NAMESPACE, MEMORY_GRAPH_INDEX_NAMESPACE, MEMORY_GRAPH_MANIFEST_NAMESPACE,
     MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_NODE_NAMESPACE,
     MEMORY_GRAPH_REVISION_NAMESPACE, MEMORY_GRAPH_SCHEMA_VERSION,
+    POST_TURN_GOVERNANCE_JOB_NAMESPACE, POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
 };
 use bm_core::platform::MemorySystemKind;
 use bm_core::skills::{
@@ -48,8 +49,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v6";
-pub const STORE_SCHEMA_VERSION: u32 = 6;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v7";
+pub const STORE_SCHEMA_VERSION: u32 = 7;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -100,6 +101,8 @@ pub(crate) enum StoreJsonDecoderKind {
     ActiveTaskRunByChatIndex,
     TaskLearningByChatIndex,
     RecallOwnerScopeBinding,
+    PostTurnGovernanceJob,
+    PostTurnGovernanceScopeIndex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,6 +304,14 @@ pub(crate) const STORE_V6_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract]
     typed_json_namespace(
         RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
         StoreJsonDecoderKind::RecallOwnerScopeBinding,
+    ),
+    typed_json_namespace(
+        POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+        StoreJsonDecoderKind::PostTurnGovernanceJob,
+    ),
+    typed_json_namespace(
+        POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+        StoreJsonDecoderKind::PostTurnGovernanceScopeIndex,
     ),
 ];
 
@@ -1004,6 +1015,25 @@ fn validate_store_json_value(
             if binding.physical_key != key || binding.validate().is_err() {
                 return Err(invalid(
                     "recall owner scope binding contract or physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PostTurnGovernanceJob => {
+            let job = decode_json::<PostTurnGovernanceJobV2>(value, invalid)?;
+            if job.job_id != key || job.identity.job_key() != key || job.validate().is_err() {
+                return Err(invalid(
+                    "post-turn governance job contract or physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PostTurnGovernanceScopeIndex => {
+            let index = decode_json::<PostTurnGovernanceScopeIndexV2>(value, invalid)?;
+            if index.scope_index_key != key || index.validate().is_err() {
+                return Err(invalid(
+                    "post-turn governance scope index contract or physical key mismatch"
+                        .to_string(),
                 ));
             }
             Ok(())
@@ -2314,8 +2344,8 @@ mod tests {
 
     #[test]
     fn p8_store_schema_identity_is_exactly_v6() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v6");
-        assert_eq!(STORE_SCHEMA_VERSION, 6);
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v7");
+        assert_eq!(STORE_SCHEMA_VERSION, 7);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );

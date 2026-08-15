@@ -48,6 +48,11 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
+#[test]
+fn a2a_bridge_feature_enables_entry_governance_model_client() {
+    assert!(bm_entry::entry_governance_model_client_compiled());
+}
+
 fn write_payload(name: &str, summary: &str) -> String {
     serde_json::json!({
         "name": name,
@@ -69,6 +74,59 @@ fn write_payload(name: &str, summary: &str) -> String {
         "privacy_class": "shared_with_subject",
     })
     .to_string()
+}
+
+fn finalize_payload() -> String {
+    serde_json::json!({
+        "turn": {
+            "turn_id": "turn-a2a-pl1d",
+            "conversation": {
+                "channel": "a2a",
+                "chat_id": "chat-1",
+                "conversation_id": "conversation-a2a-pl1d"
+            },
+            "subject": "agent:a2a-agent",
+            "delivery_status": "delivered",
+            "source": {
+                "ingress": "user",
+                "channel": "a2a",
+                "provider": null,
+                "protocol": "native",
+                "endpoint": "memory_finalize_turn_request",
+                "model_alias": null,
+                "model_resolved": null,
+                "request_id": "request-a2a-pl1d",
+                "client_conversation_hint": "conversation-a2a-pl1d"
+            },
+            "input_messages": [{
+                "role": "user",
+                "content": "A2A queued contract",
+                "authority": "user_asserted",
+                "observed_at": 1,
+                "speaker_id": "user",
+                "speaker_kind": "human"
+            }],
+            "external_content_used": false
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn a2a_finalize_returns_typed_queued_report() {
+    let runtime = runtime();
+    let response = support::bridge("bridge-finalize")
+        .handle_in_process_request(
+            &runtime,
+            "a2a-finalize-principal",
+            A2aRuntimeMessage::json("memory_finalize_turn_request", finalize_payload()),
+        )
+        .expect("A2A finalize");
+    let value: serde_json::Value =
+        serde_json::from_str(&response.payload).expect("A2A finalize response");
+    assert_eq!(value["operation"], "finalize_turn");
+    assert_eq!(value["result"]["memoryConsolidation"]["state"], "queued");
+    assert!(value["result"]["memoryConsolidation"]["jobId"].is_string());
 }
 
 fn response_status(response: &bm_a2a::A2aRuntimeResponse) -> String {

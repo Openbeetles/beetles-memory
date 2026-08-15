@@ -52,6 +52,7 @@ pub struct WssMessageSpec {
 
 const MESSAGE_SPECS: &[WssMessageSpec] = &[
     inbound("command.write", AdapterOperation::Write),
+    inbound("command.finalize_turn", AdapterOperation::FinalizeTurn),
     inbound("command.recall", AdapterOperation::Recall),
     inbound("command.project", AdapterOperation::Project),
     inbound("command.inspect", AdapterOperation::Inspect),
@@ -917,6 +918,12 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
                 AdapterSdkReport::Capabilities(catalog) => json!({
                     "status": "accepted",
                     "profile": catalog.profile.as_str(),
+                })
+                .to_string(),
+                AdapterSdkReport::FinalizeTurn(report) => json!({
+                    "status": "accepted",
+                    "operation": "finalize_turn",
+                    "result": report,
                 })
                 .to_string(),
                 AdapterSdkReport::TranscriptAttrWrite(report) => json!({

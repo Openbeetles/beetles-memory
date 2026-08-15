@@ -3,7 +3,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::bus::IngressKind;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::llm::{LlmClient, LlmHttpClient, Message, ToolChoicePolicy};
 use crate::orchestrator::PressureLevel;
 use crate::util::{scrub_credentials, truncate_content_to_max};
@@ -14,7 +14,10 @@ use std::fmt::Write as _;
 
 use super::{
     build_private_garden_preview, build_private_garden_usage, build_self_state,
-    llm_json::{coerce_json_string_list, coerce_json_text, parse_llm_json_payload, LlmJsonPayload},
+    llm_json::{
+        coerce_json_string_list, coerce_json_text, parse_llm_json_payload,
+        parse_strict_llm_json_payload, LlmJsonPayload,
+    },
     memory_policy, normalize_private_garden_doc_path, render_autonomy_strategy_block,
     render_execution_state_block, render_internal_memory_topology_block,
     render_private_doc_workspace_block, render_self_model_block, render_self_state_block,
@@ -188,6 +191,27 @@ pub fn run_private_garden_governance(
     input: PrivateGardenGovernanceInput<'_>,
     profile: MemoryProfile,
 ) -> Result<PrivateGardenGovernanceOutcome> {
+    run_private_garden_governance_inner(http, llm, ctx, input, profile, false)
+}
+
+pub fn run_private_garden_governance_strict(
+    http: &mut dyn LlmHttpClient,
+    llm: &(dyn LlmClient + Send + Sync),
+    ctx: PrivateGardenGovernanceContext<'_>,
+    input: PrivateGardenGovernanceInput<'_>,
+    profile: MemoryProfile,
+) -> Result<PrivateGardenGovernanceOutcome> {
+    run_private_garden_governance_inner(http, llm, ctx, input, profile, true)
+}
+
+fn run_private_garden_governance_inner(
+    http: &mut dyn LlmHttpClient,
+    llm: &(dyn LlmClient + Send + Sync),
+    ctx: PrivateGardenGovernanceContext<'_>,
+    input: PrivateGardenGovernanceInput<'_>,
+    profile: MemoryProfile,
+    strict_model_contract: bool,
+) -> Result<PrivateGardenGovernanceOutcome> {
     let subject_id = input.mounted_subject_id;
     let summary_text = match ctx.session_summary_store.get_with_count(input.chat_id) {
         Ok(entry) => entry.map(|(summary, _)| summary),
@@ -248,6 +272,7 @@ pub fn run_private_garden_governance(
         &[],
         None,
         None,
+        strict_model_contract,
     )
 }
 
@@ -266,6 +291,7 @@ pub(crate) fn run_private_garden_governance_with_state(
     upstream_cleanup_paths: &[String],
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
+    strict_model_contract: bool,
 ) -> Result<PrivateGardenGovernanceOutcome> {
     crate::platform::task_wdt::feed_current_task();
     let snapshot =
@@ -318,10 +344,17 @@ pub(crate) fn run_private_garden_governance_with_state(
     ) {
         Ok(response) => {
             crate::platform::task_wdt::feed_current_task();
-            let Some(raw) = parse_private_garden_governance_response(response.content.trim())
-            else {
+            let raw = if strict_model_contract {
+                parse_private_garden_governance_response_strict(response.content.trim())?
+            } else {
+                parse_private_garden_governance_response(response.content.trim())
+            };
+            let Some(raw) = raw else {
                 return Ok(PrivateGardenGovernanceOutcome::Skipped);
             };
+            if strict_model_contract {
+                validate_private_garden_governance_actions_strict(&raw, policy)?;
+            }
             crate::platform::task_wdt::feed_current_task();
             let latest_snapshot =
                 load_private_garden_snapshot(ctx.private_garden_store, input.mounted_subject_id)?;
@@ -405,6 +438,9 @@ pub(crate) fn run_private_garden_governance_with_state(
             })
         }
         Err(error) => {
+            if strict_model_contract {
+                return Err(error);
+            }
             log::warn!(
                 "[agent_private_garden] LLM governance failed for chat_id={}: {}",
                 input.chat_id,
@@ -413,6 +449,106 @@ pub(crate) fn run_private_garden_governance_with_state(
             Ok(PrivateGardenGovernanceOutcome::Skipped)
         }
     }
+}
+
+fn parse_private_garden_governance_response_strict(
+    raw: &str,
+) -> Result<Option<RawPrivateGardenGovernanceResponse>> {
+    let value = match parse_strict_llm_json_payload(raw) {
+        LlmJsonPayload::Null => return Ok(None),
+        LlmJsonPayload::Value(value) => value,
+        LlmJsonPayload::Absent => {
+            return Err(Error::config(
+                "private_garden_governance_output",
+                "model output is not valid JSON",
+            ));
+        }
+    };
+    let object = value.as_object().ok_or_else(|| {
+        Error::config(
+            "private_garden_governance_output",
+            "model output must be null or one governance object",
+        )
+    })?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "writes" | "moves" | "deletes"))
+        || object.get("writes").is_some_and(|value| {
+            value.as_array().is_none_or(|items| {
+                items.iter().any(|item| {
+                    item.as_object().is_none_or(|item| {
+                        item.len() != 2
+                            || item
+                                .get("path")
+                                .and_then(serde_json::Value::as_str)
+                                .is_none()
+                            || item
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .is_none()
+                    })
+                })
+            })
+        })
+        || object.get("moves").is_some_and(|value| {
+            value.as_array().is_none_or(|items| {
+                items.iter().any(|item| {
+                    item.as_object().is_none_or(|item| {
+                        item.len() != 2
+                            || item
+                                .get("from_path")
+                                .and_then(serde_json::Value::as_str)
+                                .is_none()
+                            || item
+                                .get("to_path")
+                                .and_then(serde_json::Value::as_str)
+                                .is_none()
+                    })
+                })
+            })
+        })
+        || object.get("deletes").is_some_and(|value| {
+            value
+                .as_array()
+                .is_none_or(|items| items.iter().any(|item| !item.is_string()))
+        })
+    {
+        return Err(Error::config(
+            "private_garden_governance_output",
+            "model output differs from the private-garden schema",
+        ));
+    }
+    Ok(parse_private_garden_governance_response(raw))
+}
+
+fn validate_private_garden_governance_actions_strict(
+    raw: &RawPrivateGardenGovernanceResponse,
+    policy: PrivateGardenGovernancePolicy,
+) -> Result<()> {
+    if raw.writes.len() > policy.max_writes
+        || raw.moves.len() > policy.max_moves
+        || raw.deletes.len() > policy.max_deletes
+        || raw.writes.iter().any(|write| {
+            normalize_private_garden_doc_path(&write.path).is_err()
+                || write.content.trim().is_empty()
+                || write.content.trim().len() > PRIVATE_GARDEN_MAX_DOC_BYTES
+        })
+        || raw.moves.iter().any(|move_action| {
+            normalize_private_garden_doc_path(&move_action.from_path).is_err()
+                || normalize_private_garden_doc_path(&move_action.to_path).is_err()
+                || move_action.from_path.trim() == move_action.to_path.trim()
+        })
+        || raw
+            .deletes
+            .iter()
+            .any(|path| normalize_private_garden_doc_path(path).is_err())
+    {
+        return Err(Error::config(
+            "private_garden_governance_output",
+            "model actions exceed the governed private-garden contract",
+        ));
+    }
+    Ok(())
 }
 
 fn load_private_garden_snapshot(

@@ -93,7 +93,16 @@ HTTP adapter 在 ingress 固定一份 fresh runtime budget report，并让 heade
   "topic": "server-entry",
   "title": "Server entry guard",
   "summary": "Server runtime accepts HTTP entry requests through bm-entry.",
-  "content": "Decode HTTP requests into adapter commands and dispatch through the SDK runtime."
+  "content": "Decode HTTP requests into adapter commands and dispatch through the SDK runtime.",
+  "source": "manual",
+  "source_chat_id": "local-console",
+  "owning_scope": {"kind": "shared_program"},
+  "creation_ref": {
+    "kind": "replay_promotion",
+    "candidate_ref": "example:server-entry-guard",
+    "verification_receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "privacy_class": "public_runtime"
 }
 ```
 
@@ -132,18 +141,24 @@ Tauri 开发态会自动启动共享 `apps/console` 前端；生产打包会先�
 本仓库提供正式可执行入口 `bm-http-console`，用于 Linux server、Linux device、非桌面部署、设备 HTTP console，以及需要显式验证 HTTP shell 的本地开发场景。它不是 macOS 桌面生产入口，不是 example，也不绕过内核；所有 `/console/*` 与 `/memory/*` 请求都进入同一个 `EntryRuntime`。
 
 ```bash
-cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
+cargo run --locked -p bm-http --features server-std,http-console-bin,profile-server-linux-memory-gateway --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
-  --store-path /var/lib/beetle-memory/http-console-store
+  --store-path /var/lib/beetle-memory/http-console-store \
+  --connection-read-deadline-ms 5000 \
+  --write-timeout-ms 5000
 ```
+
+Linux device 改用 `profile-linux-device-standalone-memory`；macOS 本地 HTTP shell 验证改用 `profile-desktop-macos-standalone-memory`。可执行文件要求本次构建只启用一个与真实目标一致的 production profile，不再隐式选择 dev-full。
 
 独立部署需要挂载宿主自管的标准 Agent Skill 目录时，在启动进程前设置 `BM_AGENT_SKILL_DIRS`。多个目录使用当前平台的 path separator 分隔。运行时只读扫描这些目录用于召回和投影，不管理、不执行其中的文件。
 
 ```bash
 BM_AGENT_SKILL_DIRS=/path/to/project/.agents/skills:/path/to/user/skills \
-  cargo run --locked -p bm-http --features server-std --bin bm-http-console -- \
+  cargo run --locked -p bm-http --features server-std,http-console-bin,profile-server-linux-memory-gateway --bin bm-http-console -- \
   --addr 127.0.0.1:8718 \
-  --store-path /var/lib/beetle-memory/http-console-store
+  --store-path /var/lib/beetle-memory/http-console-store \
+  --connection-read-deadline-ms 5000 \
+  --write-timeout-ms 5000
 ```
 
 HTTP shell 的前端开发态固定使用 `5176`，并把 `/console/*`、`/memory/*` 代理到 `127.0.0.1:8718`。这只验证 HTTP shell；macOS 桌面生产形态应使用上面的 Tauri 启动方式：

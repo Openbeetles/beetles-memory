@@ -8,30 +8,27 @@ use bm_entry::{
 use serde_json::json;
 
 use crate::{
-    ollama::{handle_ollama_request_with_services_in_budget_lease, required_ollama_capabilities},
-    openai::{handle_openai_request_with_services_in_budget_lease, required_openai_capabilities},
+    ollama::{handle_ollama_request_in_budget_lease, required_ollama_capabilities},
+    openai::{handle_openai_request_in_budget_lease, required_openai_capabilities},
     GatewayConfig, GatewayError, GatewayErrorKey, GatewayRequestBudgetContext, GatewayRuntime,
     GatewayScopeRequest, OllamaGatewayBody, OllamaGatewayMethod, OllamaGatewayRequest,
     OllamaNativeUpstream, OpenAiCompatibleUpstream, OpenAiGatewayBody, OpenAiGatewayMethod,
-    OpenAiGatewayRequest, OpenAiGatewayServices, Result,
+    OpenAiGatewayRequest, Result,
 };
 
-pub struct GatewayHttpRequestBindings<'a, 'services> {
+pub struct GatewayHttpRequestBindings<'a> {
     openai_upstream: &'a mut dyn OpenAiCompatibleUpstream,
     ollama_upstream: &'a mut dyn OllamaNativeUpstream,
-    services: &'a mut OpenAiGatewayServices<'services>,
 }
 
-impl<'a, 'services> GatewayHttpRequestBindings<'a, 'services> {
+impl<'a> GatewayHttpRequestBindings<'a> {
     pub fn new(
         openai_upstream: &'a mut dyn OpenAiCompatibleUpstream,
         ollama_upstream: &'a mut dyn OllamaNativeUpstream,
-        services: &'a mut OpenAiGatewayServices<'services>,
     ) -> Self {
         Self {
             openai_upstream,
             ollama_upstream,
-            services,
         }
     }
 }
@@ -42,29 +39,12 @@ pub fn serve_llm_gateway_http_accepted_stream(
     ollama_upstream: &mut dyn OllamaNativeUpstream,
     stream: &mut EntryAcceptedTcpStream,
 ) -> Result<()> {
-    let mut services = OpenAiGatewayServices::new();
-    serve_llm_gateway_http_accepted_stream_with_services(
-        gateway,
-        openai_upstream,
-        ollama_upstream,
-        &mut services,
-        stream,
-    )
-}
-
-pub fn serve_llm_gateway_http_accepted_stream_with_services(
-    gateway: &GatewayRuntime,
-    openai_upstream: &mut dyn OpenAiCompatibleUpstream,
-    ollama_upstream: &mut dyn OllamaNativeUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
-    stream: &mut EntryAcceptedTcpStream,
-) -> Result<()> {
     let context = match gateway.begin_request() {
         Ok(context) => context,
         Err(error) => return write_error_response(stream, &error),
     };
     match gateway.execute_with_request_context(&context, || {
-        let bindings = GatewayHttpRequestBindings::new(openai_upstream, ollama_upstream, services);
+        let bindings = GatewayHttpRequestBindings::new(openai_upstream, ollama_upstream);
         serve_llm_gateway_http_stream_in_budget_lease(gateway, &context, bindings, stream)
     }) {
         Ok(()) => Ok(()),
@@ -72,10 +52,10 @@ pub fn serve_llm_gateway_http_accepted_stream_with_services(
     }
 }
 
-pub fn serve_llm_gateway_http_accepted_stream_with_services_in_request(
+pub fn serve_llm_gateway_http_accepted_stream_in_request(
     gateway: &GatewayRuntime,
     context: &GatewayRequestBudgetContext,
-    bindings: GatewayHttpRequestBindings<'_, '_>,
+    bindings: GatewayHttpRequestBindings<'_>,
     stream: &mut EntryAcceptedTcpStream,
 ) -> Result<()> {
     gateway.execute_with_request_context(context, || {
@@ -86,14 +66,13 @@ pub fn serve_llm_gateway_http_accepted_stream_with_services_in_request(
 fn serve_llm_gateway_http_stream_in_budget_lease(
     gateway: &GatewayRuntime,
     context: &GatewayRequestBudgetContext,
-    bindings: GatewayHttpRequestBindings<'_, '_>,
+    bindings: GatewayHttpRequestBindings<'_>,
     stream: &mut EntryAcceptedTcpStream,
 ) -> Result<()> {
     let config = gateway.config();
     let GatewayHttpRequestBindings {
         openai_upstream,
         ollama_upstream,
-        services,
     } = bindings;
     let request = match read_http_gateway_request(stream, context, config) {
         Ok(request) => request,
@@ -104,29 +83,27 @@ fn serve_llm_gateway_http_stream_in_budget_lease(
             Ok(request) => request,
             Err(error) => return write_error_response(stream, &error),
         };
-        return match handle_openai_request_with_services_in_budget_lease(
+        return match handle_openai_request_in_budget_lease(
             gateway,
             context,
             config,
             request,
             openai_upstream,
-            services,
         ) {
-            Ok(response) => write_openai_http_response(stream, response, services),
+            Ok(response) => write_openai_http_response(stream, response),
             Err(error) => write_error_response(stream, &error),
         };
     }
     if request.path.starts_with("/api/") {
         let request = request.into_ollama_request();
-        return match handle_ollama_request_with_services_in_budget_lease(
+        return match handle_ollama_request_in_budget_lease(
             gateway,
             context,
             config,
             request,
             ollama_upstream,
-            services,
         ) {
-            Ok(response) => write_ollama_http_response(stream, response, services),
+            Ok(response) => write_ollama_http_response(stream, response),
             Err(error) => write_error_response(stream, &error),
         };
     }
@@ -141,22 +118,12 @@ pub fn serve_openai_http_accepted_stream(
     upstream: &mut dyn OpenAiCompatibleUpstream,
     stream: &mut EntryAcceptedTcpStream,
 ) -> Result<()> {
-    let mut services = OpenAiGatewayServices::new();
-    serve_openai_http_accepted_stream_with_services(gateway, upstream, &mut services, stream)
-}
-
-pub fn serve_openai_http_accepted_stream_with_services(
-    gateway: &GatewayRuntime,
-    upstream: &mut dyn OpenAiCompatibleUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
-    stream: &mut EntryAcceptedTcpStream,
-) -> Result<()> {
     let context = match gateway.begin_request() {
         Ok(context) => context,
         Err(error) => return write_error_response(stream, &error),
     };
     match gateway.execute_with_request_context(&context, || {
-        serve_openai_http_stream_in_budget_lease(gateway, &context, upstream, services, stream)
+        serve_openai_http_stream_in_budget_lease(gateway, &context, upstream, stream)
     }) {
         Ok(()) => Ok(()),
         Err(error) => write_error_response(stream, &error),
@@ -167,7 +134,6 @@ fn serve_openai_http_stream_in_budget_lease(
     gateway: &GatewayRuntime,
     context: &GatewayRequestBudgetContext,
     upstream: &mut dyn OpenAiCompatibleUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
     stream: &mut EntryAcceptedTcpStream,
 ) -> Result<()> {
     let config = gateway.config();
@@ -177,10 +143,8 @@ fn serve_openai_http_stream_in_budget_lease(
         Ok(request) => request,
         Err(error) => return write_error_response(stream, &error),
     };
-    match handle_openai_request_with_services_in_budget_lease(
-        gateway, context, config, request, upstream, services,
-    ) {
-        Ok(response) => write_openai_http_response(stream, response, services),
+    match handle_openai_request_in_budget_lease(gateway, context, config, request, upstream) {
+        Ok(response) => write_openai_http_response(stream, response),
         Err(error) => write_error_response(stream, &error),
     }
 }
@@ -190,22 +154,12 @@ pub fn serve_ollama_http_accepted_stream(
     upstream: &mut dyn OllamaNativeUpstream,
     stream: &mut EntryAcceptedTcpStream,
 ) -> Result<()> {
-    let mut services = OpenAiGatewayServices::new();
-    serve_ollama_http_accepted_stream_with_services(gateway, upstream, &mut services, stream)
-}
-
-pub fn serve_ollama_http_accepted_stream_with_services(
-    gateway: &GatewayRuntime,
-    upstream: &mut dyn OllamaNativeUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
-    stream: &mut EntryAcceptedTcpStream,
-) -> Result<()> {
     let context = match gateway.begin_request() {
         Ok(context) => context,
         Err(error) => return write_error_response(stream, &error),
     };
     match gateway.execute_with_request_context(&context, || {
-        serve_ollama_http_stream_in_budget_lease(gateway, &context, upstream, services, stream)
+        serve_ollama_http_stream_in_budget_lease(gateway, &context, upstream, stream)
     }) {
         Ok(()) => Ok(()),
         Err(error) => write_error_response(stream, &error),
@@ -216,7 +170,6 @@ fn serve_ollama_http_stream_in_budget_lease(
     gateway: &GatewayRuntime,
     context: &GatewayRequestBudgetContext,
     upstream: &mut dyn OllamaNativeUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
     stream: &mut EntryAcceptedTcpStream,
 ) -> Result<()> {
     let config = gateway.config();
@@ -224,10 +177,8 @@ fn serve_ollama_http_stream_in_budget_lease(
         Ok(request) => request.into_ollama_request(),
         Err(error) => return write_error_response(stream, &error),
     };
-    match handle_ollama_request_with_services_in_budget_lease(
-        gateway, context, config, request, upstream, services,
-    ) {
-        Ok(response) => write_ollama_http_response(stream, response, services),
+    match handle_ollama_request_in_budget_lease(gateway, context, config, request, upstream) {
+        Ok(response) => write_ollama_http_response(stream, response),
         Err(error) => write_error_response(stream, &error),
     }
 }
@@ -458,7 +409,6 @@ fn extract_body_conversation_hint(body: &serde_json::Value) -> Option<String> {
 fn write_openai_http_response(
     stream: &mut impl Write,
     mut response: crate::OpenAiGatewayResponse,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<()> {
     match &mut response.body {
         OpenAiGatewayBody::Json(body) => {
@@ -494,7 +444,7 @@ fn write_openai_http_response(
                     .flush()
                     .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
             }
-            response.finish_deferred_maintenance(services);
+            response.finish_deferred_maintenance();
             Ok(())
         }
     }
@@ -503,7 +453,6 @@ fn write_openai_http_response(
 fn write_ollama_http_response(
     stream: &mut impl Write,
     mut response: crate::OllamaGatewayResponse,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<()> {
     match &mut response.body {
         OllamaGatewayBody::Json(body) => {
@@ -539,7 +488,7 @@ fn write_ollama_http_response(
                     .flush()
                     .map_err(|error| GatewayError::upstream_unavailable(error.to_string()))?;
             }
-            response.finish_deferred_maintenance(services);
+            response.finish_deferred_maintenance();
             Ok(())
         }
     }

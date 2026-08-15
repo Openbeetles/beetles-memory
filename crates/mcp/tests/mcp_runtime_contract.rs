@@ -36,6 +36,11 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
+#[test]
+fn mcp_server_feature_enables_entry_governance_model_client() {
+    assert!(bm_entry::entry_governance_model_client_compiled());
+}
+
 fn write_arguments(name: &str, summary: &str) -> String {
     serde_json::json!({
         "name": name,
@@ -56,6 +61,57 @@ fn write_arguments(name: &str, summary: &str) -> String {
         "privacy_class": "shared_with_subject",
     })
     .to_string()
+}
+
+fn finalize_arguments() -> String {
+    serde_json::json!({
+        "turn": {
+            "turn_id": "turn-mcp-pl1d",
+            "conversation": {
+                "channel": "mcp",
+                "chat_id": "chat-1",
+                "conversation_id": "conversation-mcp-pl1d"
+            },
+            "subject": "agent:mcp-agent",
+            "delivery_status": "delivered",
+            "source": {
+                "ingress": "user",
+                "channel": "mcp",
+                "provider": null,
+                "protocol": "native",
+                "endpoint": "memory_finalize_turn",
+                "model_alias": null,
+                "model_resolved": null,
+                "request_id": "request-mcp-pl1d",
+                "client_conversation_hint": "conversation-mcp-pl1d"
+            },
+            "input_messages": [{
+                "role": "user",
+                "content": "MCP queued contract",
+                "authority": "user_asserted",
+                "observed_at": 1,
+                "speaker_id": "user",
+                "speaker_kind": "human"
+            }],
+            "external_content_used": false
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn mcp_finalize_returns_typed_queued_report() {
+    let runtime = runtime();
+    let result = McpToolServer::new("mcp-finalize", "principal-finalize")
+        .call(
+            &runtime,
+            McpToolCall::json("memory_finalize_turn", finalize_arguments()),
+        )
+        .expect("MCP finalize");
+    let value: Value = serde_json::from_str(&result.content).expect("MCP finalize response");
+    assert_eq!(value["operation"], "finalize_turn");
+    assert_eq!(value["result"]["memoryConsolidation"]["state"], "queued");
+    assert!(value["result"]["memoryConsolidation"]["jobId"].is_string());
 }
 
 fn assert_exact_governed_result(content: &str) {

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+governance-model-client-std = ["dep:reqwest"]
 nonproduction-replay-harness = [
     "dep:bm-replay",
     "bm-adapter/nonproduction-replay-harness",
@@ -41,7 +42,9 @@ profile-desktop-windows-dev-full = [
 bm-adapter.workspace = true
 bm-replay = { workspace = true, optional = true }
 bm-sdk.workspace = true
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "rustls"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+url = "2.5.8"

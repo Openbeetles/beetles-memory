@@ -58,6 +58,7 @@ pub struct McpResourceSpec {
 pub fn tool_specs() -> Vec<McpToolSpec> {
     vec![
         tool("memory_capabilities", AdapterOperation::Capabilities, &[]),
+        governed_tool("memory_finalize_turn", AdapterOperation::FinalizeTurn),
         governed_tool("memory_recall", AdapterOperation::Recall),
         governed_tool("memory_project", AdapterOperation::Project),
         tool(
@@ -290,7 +291,9 @@ impl McpCapabilitySnapshot {
 #[cfg(feature = "server-stdio")]
 fn mcp_operation_visible(catalog: &MemoryCapabilityCatalog, operation: AdapterOperation) -> bool {
     match operation {
-        AdapterOperation::Write | AdapterOperation::TranscriptAttrWrite => catalog.write.visible,
+        AdapterOperation::Write
+        | AdapterOperation::FinalizeTurn
+        | AdapterOperation::TranscriptAttrWrite => catalog.write.visible,
         AdapterOperation::Recall => catalog.recall.visible,
         AdapterOperation::Project => catalog.projection.visible,
         AdapterOperation::Maintain => catalog.maintenance.visible,
@@ -1396,6 +1399,9 @@ fn mcp_tool_input_schema(tool: &McpToolSpec) -> Value {
 fn tool_description(name: &str) -> &'static str {
     match name {
         "memory_capabilities" => "Return the visible Beetle Memory capability surface.",
+        "memory_finalize_turn" => {
+            "Commit one canonical turn through the runtime-owned transcript and post-turn path."
+        }
         "memory_recall" => "Recall governed memory snippets for an explicit query.",
         "memory_project" => "Build a bounded memory projection preview for an explicit query.",
         "memory_inspect" => "Inspect governed memory state without exposing raw private planes.",
@@ -1455,6 +1461,12 @@ fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolRes
                     AdapterSdkReport::Capabilities(catalog) => json!({
                         "status": "accepted",
                         "profile": catalog.profile.as_str(),
+                    })
+                    .to_string(),
+                    AdapterSdkReport::FinalizeTurn(report) => json!({
+                        "status": "accepted",
+                        "operation": "finalize_turn",
+                        "result": report,
                     })
                     .to_string(),
                     AdapterSdkReport::TranscriptAttrWrite(report) => json!({

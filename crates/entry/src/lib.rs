@@ -5,6 +5,9 @@ mod auth;
 mod config;
 mod console;
 mod error;
+mod governance_coordinator;
+mod governance_model;
+mod governance_model_client;
 mod http_ingress;
 mod idempotency;
 mod network_front;
@@ -40,6 +43,21 @@ pub use console::{
     EntryConsoleWorkbenchStatus,
 };
 pub use error::EntryErrorKey;
+pub use governance_coordinator::{
+    EntryGovernanceCoordinatorReport, EntryGovernanceCoordinatorState,
+};
+pub use governance_model::{
+    EntryGovernanceModelAuthMode, EntryGovernanceModelConfigUpdate, EntryGovernanceModelConfigView,
+    EntryGovernanceModelExecutionBinding, EntryGovernanceModelProbePlan,
+    EntryGovernanceModelProtocol,
+};
+pub use governance_model_client::{
+    ConfiguredGovernanceLlmClient, GovernanceModelConnectionProbe, GovernanceModelConnectionReport,
+};
+#[cfg(feature = "governance-model-client-std")]
+pub use governance_model_client::{
+    ReqwestGovernanceLlmHttpClient, ReqwestGovernanceModelConnectionProbe,
+};
 pub use http_ingress::{
     read_authorized_http_request, EntryAuthorizedHttpRequest, EntryHttpAuthorization,
     EntryHttpIngressError, EntryHttpIngressErrorKind, EntryHttpIngressLimits, EntryHttpRequestHead,
@@ -54,3 +72,7 @@ pub use runtime::{
     EntryRuntimeConfig, EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope,
 };
 pub use source::EntryTransportContext;
+
+pub const fn entry_governance_model_client_compiled() -> bool {
+    cfg!(feature = "governance-model-client-std")
+}

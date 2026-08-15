@@ -5,7 +5,9 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
-use crate::runner::{validate_published_executable, PublishedExecutable, PublishedExecutableKind};
+use crate::runner::PublishedExecutable;
+#[cfg(target_os = "macos")]
+use crate::runner::{validate_published_executable, PublishedExecutableKind};
 use crate::{
     ExecutableFileIdentity, ManagedProcessKind, OllamaTransparentConfig, OllamaTransparentError,
     Result,

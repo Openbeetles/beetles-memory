@@ -23,6 +23,7 @@ use bm_entry::{
     EntryConsoleSkillSetEnabled, EntryConsoleTransportUpdate, EntryHttpAuthorization,
     EntryHttpIngressErrorKind, EntryHttpIngressLimits, EntryHttpRequestHead, EntryLocalTransport,
     EntryOperationCapability, EntryRuntime, EntryRuntimeBudgetLease, EntryTransportContext,
+    GovernanceModelConnectionProbe,
 };
 #[cfg(feature = "server-std")]
 use bm_ollama_transparent::{
@@ -102,6 +103,7 @@ const ROUTES: &[RouteSpec] = &[
         profile_gate_required: true,
     },
     memory_post("/memory/write", AdapterOperation::Write),
+    memory_post("/memory/finalize-turn", AdapterOperation::FinalizeTurn),
     memory_post("/memory/recall", AdapterOperation::Recall),
     memory_post("/memory/project", AdapterOperation::Project),
     memory_post("/memory/maintain", AdapterOperation::Maintain),
@@ -129,6 +131,9 @@ const CONSOLE_ROUTES: &[ConsoleRouteSpec] = &[
     console_patch("/console/skills/enabled"),
     console_post("/console/skills/retire"),
     console_get("/console/llm-gateway"),
+    console_get("/console/governance-model"),
+    console_patch("/console/governance-model"),
+    console_post("/console/governance-model/test-connection"),
     console_post("/console/llm-gateway/smoke-checks/{id}/run"),
     console_get("/console/ollama-transparent/status"),
     console_post("/console/ollama-transparent/preflight"),
@@ -386,6 +391,7 @@ fn bind_http_response_budget(
 #[derive(Clone, Copy, Default)]
 pub struct HttpConsoleServices<'a> {
     pub ollama_transparent: Option<&'a dyn OllamaTransparentController>,
+    pub governance_model_probe: Option<&'a dyn GovernanceModelConnectionProbe>,
     pub memory_event_store_paths: &'a [PathBuf],
 }
 
@@ -394,6 +400,7 @@ impl<'a> HttpConsoleServices<'a> {
     pub const fn none() -> Self {
         Self {
             ollama_transparent: None,
+            governance_model_probe: None,
             memory_event_store_paths: &[],
         }
     }
@@ -403,6 +410,7 @@ impl<'a> HttpConsoleServices<'a> {
     ) -> Self {
         Self {
             ollama_transparent: Some(ollama_transparent),
+            governance_model_probe: None,
             memory_event_store_paths: &[],
         }
     }
@@ -412,6 +420,14 @@ impl<'a> HttpConsoleServices<'a> {
         memory_event_store_paths: &'a [PathBuf],
     ) -> Self {
         self.memory_event_store_paths = memory_event_store_paths;
+        self
+    }
+
+    pub const fn with_governance_model_probe(
+        mut self,
+        governance_model_probe: &'a dyn GovernanceModelConnectionProbe,
+    ) -> Self {
+        self.governance_model_probe = Some(governance_model_probe);
         self
     }
 }
@@ -1101,6 +1117,38 @@ fn handle_console_request(
                 "llmGateway": runtime.console_llm_gateway(),
             }),
         )),
+        (HttpMethod::Get, "/console/governance-model") => Ok(json_response(
+            200,
+            json!({
+                "status": "accepted",
+                "governanceModel": runtime.console_governance_model(),
+            }),
+        )),
+        (HttpMethod::Patch, "/console/governance-model") => {
+            let payload: bm_entry::EntryGovernanceModelConfigUpdate =
+                parse_console_json(&request.body)?;
+            match runtime.console_update_governance_model(payload) {
+                Ok(binding) => Ok(json_response(
+                    200,
+                    json!({"status": "accepted", "governanceModel": binding}),
+                )),
+                Err(error) => governance_model_config_error_response(error),
+            }
+        }
+        (HttpMethod::Post, "/console/governance-model/test-connection") => {
+            let probe = services.governance_model_probe.ok_or_else(|| {
+                bm_sdk::Error::config(
+                    "governance_model_probe",
+                    "governance model connection probe is unavailable",
+                )
+            })?;
+            let plan = runtime.console_governance_model_probe_plan()?;
+            let report = probe.probe(&plan)?;
+            Ok(json_response(
+                200,
+                json!({"status": "accepted", "result": report}),
+            ))
+        }
         (HttpMethod::Get, "/console/ollama-transparent/status") => {
             let controller = require_ollama_transparent_controller(services)?;
             Ok(json_response(
@@ -1451,6 +1499,8 @@ fn is_known_console_path(path: &str) -> bool {
             | "/console/transports"
             | "/console/devices"
             | "/console/session"
+            | "/console/governance-model"
+            | "/console/governance-model/test-connection"
     ) || path.starts_with("/console/skills/")
         || path.starts_with("/console/llm-gateway/smoke-checks/")
         || path.starts_with("/console/transports/")
@@ -1504,6 +1554,23 @@ fn console_typed_error_response(error: bm_sdk::Error) -> bm_sdk::Result<HttpRunt
 }
 
 #[cfg(feature = "server-std")]
+fn governance_model_config_error_response(
+    error: bm_sdk::Error,
+) -> bm_sdk::Result<HttpRuntimeResponse> {
+    if error.class() == Some(bm_sdk::ErrorClass::InvalidInput) {
+        return Ok(json_response(
+            422,
+            json!({
+                "status": "rejected",
+                "errorKey": "InvalidGovernanceModelConfig",
+                "reason": error.to_string(),
+            }),
+        ));
+    }
+    console_typed_error_response(error)
+}
+
+#[cfg(feature = "server-std")]
 fn json_response(status_code: u16, body: serde_json::Value) -> HttpRuntimeResponse {
     HttpRuntimeResponse {
         status_code,
@@ -1532,6 +1599,7 @@ fn render_http_response(
                 AdapterErrorKey::InvalidJson => 400,
                 AdapterErrorKey::Duplicated => 409,
                 AdapterErrorKey::OperationMismatch
+                | AdapterErrorKey::RuntimeBindingMismatch
                 | AdapterErrorKey::UnsupportedOperation
                 | AdapterErrorKey::RuntimeRejected => 422,
             },
@@ -1583,6 +1651,12 @@ fn render_report(report: AdapterSdkReport) -> bm_sdk::Result<String> {
             "accepted": report.accepted,
             "changed": report.changed,
             "agent_tool_experience": report.agent_tool_experience,
+        })
+        .to_string(),
+        AdapterSdkReport::FinalizeTurn(report) => json!({
+            "status": "accepted",
+            "operation": "finalize_turn",
+            "result": report,
         })
         .to_string(),
         AdapterSdkReport::Project(_) => unreachable!("governed project DTO handled above"),

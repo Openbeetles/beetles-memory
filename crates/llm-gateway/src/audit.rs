@@ -18,6 +18,7 @@ pub enum GatewayAuditStage {
 #[serde(rename_all = "snake_case")]
 pub enum GatewayAuditOutcome {
     Succeeded,
+    Queued,
     Failed,
     Skipped,
     NotExecuted,

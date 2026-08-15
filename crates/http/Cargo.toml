@@ -13,11 +13,16 @@ path = "src/lib.rs"
 [[bin]]
 name = "bm-http-console"
 path = "src/bin/bm-http-console.rs"
-required-features = ["server-std"]
+required-features = ["server-std", "http-console-bin"]
 
 [features]
 default = []
-server-std = ["dep:bm-entry", "dep:bm-ollama-transparent"]
+http-console-bin = []
+server-std = [
+    "dep:bm-entry",
+    "bm-entry/governance-model-client-std",
+    "dep:bm-ollama-transparent",
+]
 nonproduction-replay-harness = ["bm-entry?/nonproduction-replay-harness"]
 profile-esp-standalone-memory = [
     "bm-adapter/profile-esp-standalone-memory",

@@ -26,7 +26,7 @@ fi
 if rg -n "没有 commit 当前 user/assistant turn|GatewayMaintenancePlan 只把|MemoryRuntime::maintain\(\) 会读取" dev-docs/post-turn-memory-governance-plan.md; then
   fail "post-turn plan still treats the closed gateway commit gap as current"
 fi
-rg -Fq "project -> upstream -> finalize_turn_and_maintain" dev-docs/post-turn-memory-governance-plan.md
+rg -Fq "project -> upstream -> finalize_turn" dev-docs/post-turn-memory-governance-plan.md
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/bm-p5-reset-contract.XXXXXX")"
 trap 'chmod -R u+w "$tmp_root" 2>/dev/null || true; rm -rf "$tmp_root"' EXIT

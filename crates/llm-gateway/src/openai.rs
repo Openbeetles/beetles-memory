@@ -21,7 +21,7 @@ use crate::{
     probe_openai_provider_capabilities, GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage,
     GatewayConfig, GatewayError, GatewayProviderConfig, GatewayProviderKind,
     GatewayRequestBudgetContext, GatewayRuntime, GatewayScopeRequest, GatewayScopeResolver,
-    GatewayUpstreamResponseBudget, OpenAiGatewayServices, Result,
+    GatewayUpstreamResponseBudget, Result,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,21 +75,17 @@ pub struct OpenAiGatewayResponse {
 }
 
 impl OpenAiGatewayResponse {
-    pub fn finish_deferred_maintenance(&mut self, services: &mut OpenAiGatewayServices<'_>) {
-        if let Some(outcome) = self.body.finish_deferred_maintenance(services) {
+    pub fn finish_deferred_maintenance(&mut self) {
+        if let Some(outcome) = self.body.finish_deferred_maintenance() {
             self.audit
                 .record_stage(GatewayAuditStage::Maintenance, outcome);
         }
     }
 
-    fn prepare_post_reply_maintenance(
-        &mut self,
-        plan: GatewayMaintenancePlan,
-        services: &mut OpenAiGatewayServices<'_>,
-    ) {
+    fn prepare_post_reply_maintenance(&mut self, plan: GatewayMaintenancePlan) {
         match &mut self.body {
             OpenAiGatewayBody::Json(body) => {
-                let outcome = run_json_maintenance(plan, body, services);
+                let outcome = run_json_maintenance(plan, body);
                 self.audit
                     .record_stage(GatewayAuditStage::Maintenance, outcome.into());
             }
@@ -135,14 +131,11 @@ impl OpenAiGatewayBody {
         }
     }
 
-    fn finish_deferred_maintenance(
-        &mut self,
-        services: &mut OpenAiGatewayServices<'_>,
-    ) -> Option<GatewayAuditOutcome> {
+    fn finish_deferred_maintenance(&mut self) -> Option<GatewayAuditOutcome> {
         match self {
             Self::Json(_) => None,
             Self::Sse(body) => body
-                .finish_deferred_maintenance(services)
+                .finish_deferred_maintenance()
                 .map(GatewayAuditOutcome::from),
         }
     }
@@ -235,13 +228,10 @@ impl OpenAiSseBody {
         Ok(chunks)
     }
 
-    fn finish_deferred_maintenance(
-        &mut self,
-        services: &mut OpenAiGatewayServices<'_>,
-    ) -> Option<GatewayMaintenanceRunOutcome> {
+    fn finish_deferred_maintenance(&mut self) -> Option<GatewayMaintenanceRunOutcome> {
         self.deferred_maintenance
             .take()
-            .map(|maintenance| maintenance.finish(services))
+            .map(|maintenance| maintenance.finish())
     }
 }
 
@@ -317,36 +307,24 @@ pub fn handle_openai_request(
     request: OpenAiGatewayRequest,
     upstream: &mut dyn OpenAiCompatibleUpstream,
 ) -> Result<OpenAiGatewayResponse> {
-    let mut services = OpenAiGatewayServices::new();
-    handle_openai_request_with_services(gateway, request, upstream, &mut services)
-}
-
-pub fn handle_openai_request_with_services(
-    gateway: &GatewayRuntime,
-    request: OpenAiGatewayRequest,
-    upstream: &mut dyn OpenAiCompatibleUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
-) -> Result<OpenAiGatewayResponse> {
     let context = gateway.begin_request()?;
     gateway.execute_with_request_context(&context, || {
-        handle_openai_request_with_services_in_budget_lease(
+        handle_openai_request_in_budget_lease(
             gateway,
             &context,
             gateway.config(),
             request,
             upstream,
-            services,
         )
     })
 }
 
-pub(crate) fn handle_openai_request_with_services_in_budget_lease(
+pub(crate) fn handle_openai_request_in_budget_lease(
     gateway: &GatewayRuntime,
     context: &GatewayRequestBudgetContext,
     config: &GatewayConfig,
     request: OpenAiGatewayRequest,
     upstream: &mut dyn OpenAiCompatibleUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OpenAiGatewayResponse> {
     request
         .scope
@@ -363,12 +341,12 @@ pub(crate) fn handle_openai_request_with_services_in_budget_lease(
         (OpenAiGatewayMethod::Get, "/v1/models") => {
             handle_models(context, config, request, provider, upstream)
         }
-        (OpenAiGatewayMethod::Post, "/v1/chat/completions") => handle_chat_completion(
-            gateway, context, config, request, provider, upstream, services,
-        ),
-        (OpenAiGatewayMethod::Post, "/v1/responses") => handle_responses(
-            gateway, context, config, request, provider, upstream, services,
-        ),
+        (OpenAiGatewayMethod::Post, "/v1/chat/completions") => {
+            handle_chat_completion(gateway, context, config, request, provider, upstream)
+        }
+        (OpenAiGatewayMethod::Post, "/v1/responses") => {
+            handle_responses(gateway, context, config, request, provider, upstream)
+        }
         (OpenAiGatewayMethod::Post, "/v1/embeddings") => {
             handle_embeddings(context, config, request, provider, upstream)
         }
@@ -427,7 +405,6 @@ fn handle_chat_completion(
     mut request: OpenAiGatewayRequest,
     provider: &GatewayProviderConfig,
     upstream: &mut dyn OpenAiCompatibleUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OpenAiGatewayResponse> {
     let body = request
         .body
@@ -537,7 +514,6 @@ fn handle_chat_completion(
         task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
-        config: config.maintenance,
         budget: context.report().maintenance_budget,
     });
     let upstream_request = OpenAiUpstreamRequest {
@@ -555,7 +531,7 @@ fn handle_chat_completion(
         })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
     let mut response = upstream_response_to_gateway(context, response, audit)?;
-    response.prepare_post_reply_maintenance(maintenance_plan, services);
+    response.prepare_post_reply_maintenance(maintenance_plan);
     Ok(response)
 }
 
@@ -566,7 +542,6 @@ fn handle_responses(
     mut request: OpenAiGatewayRequest,
     provider: &GatewayProviderConfig,
     upstream: &mut dyn OpenAiCompatibleUpstream,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> Result<OpenAiGatewayResponse> {
     if !provider.openai_responses_supported {
         return Err(GatewayError::provider_unavailable(
@@ -691,7 +666,6 @@ fn handle_responses(
         task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
-        config: config.maintenance,
         budget: context.report().maintenance_budget,
     });
     let upstream_request = OpenAiUpstreamRequest {
@@ -709,7 +683,7 @@ fn handle_responses(
         })?;
     audit.record_stage(GatewayAuditStage::Upstream, GatewayAuditOutcome::Succeeded);
     let mut response = upstream_response_to_gateway(context, response, audit)?;
-    response.prepare_post_reply_maintenance(maintenance_plan, services);
+    response.prepare_post_reply_maintenance(maintenance_plan);
     Ok(response)
 }
 

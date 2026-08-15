@@ -85,3 +85,28 @@ windows-sys = { workspace = true, optional = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
 ] }
+
+[[test]]
+name = "conversation_transcript_runtime_contract"
+path = "tests/conversation_transcript_runtime_contract.rs"
+required-features = ["nonproduction-replay-harness"]
+
+[[test]]
+name = "long_term_memory_control_contract"
+path = "tests/long_term_memory_control_contract.rs"
+required-features = ["nonproduction-replay-harness"]
+
+[[test]]
+name = "post_turn_deferred_governance_contract"
+path = "tests/post_turn_deferred_governance_contract.rs"
+required-features = ["nonproduction-replay-harness"]
+
+[[test]]
+name = "post_turn_runtime_contract"
+path = "tests/post_turn_runtime_contract.rs"
+required-features = ["nonproduction-replay-harness"]
+
+[[test]]
+name = "runtime_metrics_contract"
+path = "tests/runtime_metrics_contract.rs"
+required-features = ["nonproduction-replay-harness"]

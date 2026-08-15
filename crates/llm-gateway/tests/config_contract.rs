@@ -1,8 +1,7 @@
 use bm_entry::{EntryAuthConfig, EntryBearerPrincipal, EntryOperationCapability};
 use bm_llm_gateway::{
-    llm_gateway_transport_config, GatewayConfig, GatewayErrorKey, GatewayMaintenanceConfig,
-    GatewayProjectionConfig, GatewayProviderConfig, GatewayProviderKind, GatewayRuntime,
-    GatewayRuntimeCacheConfig,
+    llm_gateway_transport_config, GatewayConfig, GatewayErrorKey, GatewayProjectionConfig,
+    GatewayProviderConfig, GatewayProviderKind, GatewayRuntime, GatewayRuntimeCacheConfig,
 };
 use bm_sdk::{PressureLevel, ProfileId, RoleFeature};
 
@@ -33,10 +32,6 @@ fn gateway_config_defaults_are_memory_required_origin_bounded_and_loopback_bound
         GatewayProjectionConfig {
             pressure: PressureLevel::Normal,
         }
-    );
-    assert_eq!(
-        config.maintenance,
-        GatewayMaintenanceConfig { enabled: true }
     );
     assert!(!config.audit.record_raw_projection);
     assert_eq!(config.audit.raw_projection_diagnostic_path, None);

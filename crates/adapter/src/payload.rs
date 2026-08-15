@@ -1,15 +1,15 @@
 use bm_sdk::{
-    AgentToolRegistryRef, AgentToolUsageFeedback, GovernedRuntimeSkillWriteInput, IngressKind,
-    LongTermMemoryQuery, MemoryCloseRequest, MemoryGovernancePolicyMutation,
-    MemoryInspectionRequest, MemoryLongTermControlView, MemoryLongTermDetailRequest,
-    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryMaintenanceRequest,
-    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    AgentToolRegistryRef, AgentToolUsageFeedback, CanonicalTurnDelta,
+    GovernedRuntimeSkillWriteInput, IngressKind, LongTermMemoryQuery, MemoryCloseRequest,
+    MemoryGovernancePolicyMutation, MemoryInspectionRequest, MemoryLongTermControlView,
+    MemoryLongTermDetailRequest, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
+    MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRecallTemporalOperation, MemoryRecoverRequest, MemoryReplayRequest,
-    MemoryTranscriptAttrWriteRequest, MemoryWriteRequest, PressureLevel, QueryFacetInput, Result,
-    RuntimeLifecycleModeInput, RuntimeLifecycleTrigger, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    TranscriptAttrEnvelope,
+    MemoryTranscriptAttrWriteRequest, MemoryTurnFinalizeRequest, MemoryWriteRequest, PressureLevel,
+    QueryFacetInput, Result, RuntimeLifecycleModeInput, RuntimeLifecycleTrigger,
+    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -113,6 +113,39 @@ pub fn governed_adapter_json_command_schema(
                 "additionalProperties": false
             }),
         }),
+        AdapterOperation::FinalizeTurn => Some(GovernedAdapterJsonCommandSchema {
+            field_names: &[
+                "turn",
+                "tool_calls",
+                "runtime_skill_selected_ids",
+                "task_learning_selected_ids",
+                "reuse_outcome_note",
+                "tool_usage_feedback",
+                "pressure",
+                "mode_input",
+            ],
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "turn": {"type": "object"},
+                    "tool_calls": {"type": "integer", "minimum": 0},
+                    "runtime_skill_selected_ids": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "task_learning_selected_ids": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "reuse_outcome_note": {"type": "string"},
+                    "tool_usage_feedback": {"type": ["object", "null"]},
+                    "pressure": {"type": "string"},
+                    "mode_input": {"type": "object"}
+                },
+                "required": ["turn"],
+                "additionalProperties": false
+            }),
+        }),
         _ => None,
     }
 }
@@ -139,6 +172,21 @@ pub fn decode_json_adapter_command(
     match operation {
         AdapterOperation::Capabilities => Ok(AdapterCommand::Capabilities),
         AdapterOperation::Write => decode_write(body, options),
+        AdapterOperation::FinalizeTurn => {
+            let payload: FinalizeTurnPayload = parse_json(body)?;
+            Ok(AdapterCommand::FinalizeTurn(Box::new(
+                MemoryTurnFinalizeRequest {
+                    turn: payload.turn,
+                    tool_calls: payload.tool_calls.unwrap_or(0),
+                    runtime_skill_selected_ids: payload.runtime_skill_selected_ids,
+                    task_learning_selected_ids: payload.task_learning_selected_ids,
+                    reuse_outcome_note: payload.reuse_outcome_note,
+                    tool_usage_feedback: payload.tool_usage_feedback,
+                    pressure: payload.pressure,
+                    mode_input: payload.mode_input,
+                },
+            )))
+        }
         AdapterOperation::Recall => {
             let payload: RecallPayload = parse_json(body)?;
             Ok(AdapterCommand::Recall(MemoryRecallRequest {
@@ -437,6 +485,26 @@ struct ProjectPayload {
     structured_query_facets: Vec<QueryFacetInput>,
     #[serde(default)]
     tool_registry_refs: Vec<AgentToolRegistryRef>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FinalizeTurnPayload {
+    turn: CanonicalTurnDelta,
+    #[serde(default)]
+    tool_calls: Option<u32>,
+    #[serde(default)]
+    runtime_skill_selected_ids: Vec<String>,
+    #[serde(default)]
+    task_learning_selected_ids: Vec<String>,
+    #[serde(default)]
+    reuse_outcome_note: String,
+    #[serde(default)]
+    tool_usage_feedback: Option<AgentToolUsageFeedback>,
+    #[serde(default)]
+    pressure: PressureLevel,
+    #[serde(default)]
+    mode_input: RuntimeLifecycleModeInput,
 }
 
 #[derive(Deserialize)]

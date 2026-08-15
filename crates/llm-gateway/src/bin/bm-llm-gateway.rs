@@ -35,11 +35,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bm_llm_gateway::{
-    serve_llm_gateway_http_accepted_stream_with_services_in_request, GatewayConfig, GatewayError,
+    serve_llm_gateway_http_accepted_stream_in_request, GatewayConfig, GatewayError,
     GatewayHttpConnectionHandler, GatewayHttpFront, GatewayHttpFrontConfig,
-    GatewayHttpRequestBindings, GatewayProviderConfig, GatewayProviderKind, GatewayRuntime,
-    OllamaMaintenanceLlmClient, OpenAiGatewayServices, OpenAiMaintenanceLlmClient,
-    ReqwestGatewayLlmHttpClient, ReqwestOllamaNativeUpstream, ReqwestOpenAiCompatibleUpstream,
+    GatewayHttpRequestBindings, GatewayProviderConfig, GatewayRuntime, ReqwestOllamaNativeUpstream,
+    ReqwestOpenAiCompatibleUpstream,
 };
 use bm_sdk::StoreBackendConfig;
 #[cfg(test)]
@@ -96,49 +95,12 @@ impl GatewayHttpConnectionHandler for ReqwestGatewayConnectionHandler {
         let mut upstream = ReqwestOpenAiCompatibleUpstream::new_with_timeout(self.request_timeout)?;
         let mut ollama_upstream =
             ReqwestOllamaNativeUpstream::new_with_timeout(self.request_timeout)?;
-        let mut maintenance_http = ReqwestGatewayLlmHttpClient::new_with_timeout(
-            self.request_timeout,
-            context.response_budget().clone(),
-        )?;
-        let maintenance_provider_name = std::env::var("BM_LLM_GATEWAY_MAINTENANCE_PROVIDER")
-            .unwrap_or_else(|_| self.gateway.default_provider_name().to_string());
-        let maintenance_provider = self.gateway.provider_config(&maintenance_provider_name)?;
-        let maintenance_model = std::env::var("BM_LLM_GATEWAY_MAINTENANCE_MODEL")
-            .unwrap_or_else(|_| "local".to_string());
-        match maintenance_provider.kind {
-            GatewayProviderKind::OpenAiCompatible => {
-                let maintenance_llm =
-                    OpenAiMaintenanceLlmClient::new(maintenance_provider, maintenance_model);
-                let mut services = OpenAiGatewayServices::new()
-                    .with_maintenance(&mut maintenance_http, &maintenance_llm);
-                serve_llm_gateway_http_accepted_stream_with_services_in_request(
-                    &self.gateway,
-                    context,
-                    GatewayHttpRequestBindings::new(
-                        &mut upstream,
-                        &mut ollama_upstream,
-                        &mut services,
-                    ),
-                    stream,
-                )
-            }
-            GatewayProviderKind::OllamaNative => {
-                let maintenance_llm =
-                    OllamaMaintenanceLlmClient::new(maintenance_provider, maintenance_model);
-                let mut services = OpenAiGatewayServices::new()
-                    .with_maintenance(&mut maintenance_http, &maintenance_llm);
-                serve_llm_gateway_http_accepted_stream_with_services_in_request(
-                    &self.gateway,
-                    context,
-                    GatewayHttpRequestBindings::new(
-                        &mut upstream,
-                        &mut ollama_upstream,
-                        &mut services,
-                    ),
-                    stream,
-                )
-            }
-        }
+        serve_llm_gateway_http_accepted_stream_in_request(
+            &self.gateway,
+            context,
+            GatewayHttpRequestBindings::new(&mut upstream, &mut ollama_upstream),
+            stream,
+        )
     }
 }
 

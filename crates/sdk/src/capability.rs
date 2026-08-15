@@ -77,6 +77,7 @@ impl MemoryAdapterCapabilityPolicy {
 pub struct MemoryPrivacyPolicy {
     pub prompt_projection_allowed: bool,
     pub private_plane_projection_allowed: bool,
+    pub governance_model_disclosure_allowed: bool,
     pub operator_inspection_allowed: bool,
     pub export_allowed: bool,
     pub import_allowed: bool,
@@ -87,6 +88,7 @@ impl MemoryPrivacyPolicy {
         Self {
             prompt_projection_allowed: true,
             private_plane_projection_allowed: false,
+            governance_model_disclosure_allowed: true,
             operator_inspection_allowed: true,
             export_allowed: true,
             import_allowed: true,

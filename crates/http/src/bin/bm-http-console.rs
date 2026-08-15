@@ -1,3 +1,55 @@
+#[cfg(all(
+    not(test),
+    not(any(
+        feature = "profile-linux-device-standalone-memory",
+        feature = "profile-desktop-macos-standalone-memory",
+        feature = "profile-server-linux-memory-gateway"
+    ))
+))]
+compile_error!(
+    "bm-http-console requires exactly one production profile: profile-linux-device-standalone-memory, profile-desktop-macos-standalone-memory, or profile-server-linux-memory-gateway"
+);
+
+#[cfg(all(
+    not(test),
+    any(
+        all(
+            feature = "profile-linux-device-standalone-memory",
+            feature = "profile-desktop-macos-standalone-memory"
+        ),
+        all(
+            feature = "profile-linux-device-standalone-memory",
+            feature = "profile-server-linux-memory-gateway"
+        ),
+        all(
+            feature = "profile-desktop-macos-standalone-memory",
+            feature = "profile-server-linux-memory-gateway"
+        )
+    )
+))]
+compile_error!("bm-http-console accepts exactly one production profile");
+
+#[cfg(all(
+    not(test),
+    feature = "profile-linux-device-standalone-memory",
+    not(target_os = "linux")
+))]
+compile_error!("profile-linux-device-standalone-memory requires target_os=linux");
+
+#[cfg(all(
+    not(test),
+    feature = "profile-server-linux-memory-gateway",
+    not(target_os = "linux")
+))]
+compile_error!("profile-server-linux-memory-gateway requires target_os=linux");
+
+#[cfg(all(
+    not(test),
+    feature = "profile-desktop-macos-standalone-memory",
+    not(target_os = "macos")
+))]
+compile_error!("profile-desktop-macos-standalone-memory requires target_os=macos");
+
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,7 +58,7 @@ use bm_entry::{
     EntryAuthConfig, EntryBearerPrincipal, EntryIdempotencyConfig, EntryIdentity,
     EntryOperationCapability, EntryRuntime, EntryRuntimeConfig, EntryScope,
     EntryTcpDispatchOutcome, EntryTcpNetworkFront, EntryTcpNetworkFrontConfig,
-    EntryTransportConfig,
+    EntryTransportConfig, ReqwestGovernanceModelConnectionProbe,
 };
 use bm_http::{serve_http_accepted_stream, validate_http_listener_security, HttpConsoleServices};
 use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendConfig};
@@ -28,10 +80,11 @@ fn main() -> bm_sdk::Result<()> {
     );
 
     let worker_runtime = Arc::clone(&runtime);
+    let governance_model_probe = Arc::new(ReqwestGovernanceModelConnectionProbe);
     let mut front = EntryTcpNetworkFront::new(options.network_front, move |mut stream| {
-        if let Err(error) =
-            serve_http_accepted_stream(&worker_runtime, &mut stream, HttpConsoleServices::none())
-        {
+        let services = HttpConsoleServices::none()
+            .with_governance_model_probe(governance_model_probe.as_ref());
+        if let Err(error) = serve_http_accepted_stream(&worker_runtime, &mut stream, services) {
             eprintln!("http console request failed: {error}");
         }
     })
@@ -218,12 +271,7 @@ impl ConsoleServerOptions {
     fn runtime_config(&self) -> bm_sdk::Result<EntryRuntimeConfig> {
         let mut capability = MemoryCapabilityPolicy::strict_profile();
         capability.communication_adapter_enabled = true;
-        let profile = ProfileId::native_dev_full().ok_or_else(|| {
-            bm_sdk::Error::config(
-                "http_console_profile",
-                "host-native dev-full profile is unavailable",
-            )
-        })?;
+        let profile = http_console_profile()?;
         Ok(EntryRuntimeConfig {
             identity: EntryIdentity {
                 agent_id: "bm-http-console".to_string(),
@@ -249,6 +297,42 @@ impl ConsoleServerOptions {
             capability,
         })
     }
+}
+
+fn http_console_profile() -> bm_sdk::Result<ProfileId> {
+    #[cfg(feature = "profile-linux-device-standalone-memory")]
+    {
+        return Ok(ProfileId::LinuxDeviceStandaloneMemory);
+    }
+    #[cfg(feature = "profile-desktop-macos-standalone-memory")]
+    {
+        return Ok(ProfileId::DesktopMacosStandaloneMemory);
+    }
+    #[cfg(feature = "profile-server-linux-memory-gateway")]
+    {
+        return Ok(ProfileId::ServerLinuxMemoryGateway);
+    }
+    #[cfg(all(
+        test,
+        not(any(
+            feature = "profile-linux-device-standalone-memory",
+            feature = "profile-desktop-macos-standalone-memory",
+            feature = "profile-server-linux-memory-gateway"
+        ))
+    ))]
+    {
+        return ProfileId::native_dev_full().ok_or_else(|| {
+            bm_sdk::Error::config(
+                "http_console_profile",
+                "host-native test profile is unavailable",
+            )
+        });
+    }
+    #[allow(unreachable_code)]
+    Err(bm_sdk::Error::config(
+        "http_console_profile",
+        "exactly one production profile must be compiled",
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -474,7 +558,13 @@ mod tests {
             .into_iter(),
         )
         .expect("HTTP options");
-        let transports = options.runtime_config().expect("runtime config").transports;
+        let config = options.runtime_config().expect("runtime config");
+        let transports = config.transports;
+
+        assert_eq!(
+            config.store.profile(),
+            http_console_profile().expect("profile")
+        );
 
         assert!(transports.http_server);
         assert!(!transports.cli);

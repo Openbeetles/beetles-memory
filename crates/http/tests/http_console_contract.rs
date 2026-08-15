@@ -2,13 +2,18 @@
 
 mod support;
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Mutex;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_entry::{
-    EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
-    EntryScope, EntryTransportConfig,
+    EntryAuthConfig, EntryGovernanceModelProtocol, EntryIdempotencyConfig, EntryIdentity,
+    EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
+    GovernanceModelConnectionProbe, GovernanceModelConnectionReport,
+    ReqwestGovernanceModelConnectionProbe,
 };
 use bm_http::{
     console_route_specs, handle_http_in_process_request,
@@ -162,6 +167,29 @@ struct MockOllamaTransparentController {
     calls: Mutex<Vec<String>>,
 }
 
+#[derive(Default)]
+struct MockGovernanceModelProbe {
+    urls: Mutex<Vec<String>>,
+}
+
+impl GovernanceModelConnectionProbe for MockGovernanceModelProbe {
+    fn probe(
+        &self,
+        plan: &bm_entry::EntryGovernanceModelProbePlan,
+    ) -> bm_sdk::Result<GovernanceModelConnectionReport> {
+        self.urls.lock().expect("probe urls").push(plan.url.clone());
+        Ok(GovernanceModelConnectionReport {
+            status: "ready".to_string(),
+            protocol: plan.protocol,
+            model: plan.model.clone(),
+            credential_used: plan.auth_mode.credential_env().is_some(),
+            response_bytes: 42,
+            duration_ms: 3,
+            reason: "model_protocol_probe_succeeded".to_string(),
+        })
+    }
+}
+
 impl MockOllamaTransparentController {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("mock calls").clone()
@@ -299,6 +327,12 @@ fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
         (HttpMethod::Post, "/console/ollama-transparent/enable"),
         (HttpMethod::Post, "/console/ollama-transparent/disable"),
         (HttpMethod::Post, "/console/ollama-transparent/open-app"),
+        (HttpMethod::Get, "/console/governance-model"),
+        (HttpMethod::Patch, "/console/governance-model"),
+        (
+            HttpMethod::Post,
+            "/console/governance-model/test-connection",
+        ),
     ] {
         assert!(
             routes
@@ -307,6 +341,191 @@ fn console_ollama_transparent_routes_are_registered_as_thin_console_routes() {
             "missing console route {method:?} {path}"
         );
     }
+}
+
+#[test]
+fn governance_model_console_routes_persist_safe_config_and_probe_exact_protocol() {
+    let runtime = runtime();
+    let initial = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::get("/console/governance-model"),
+    )
+    .expect("initial config");
+    let initial_body: Value = serde_json::from_str(&initial.body).expect("initial json");
+    assert_eq!(initial_body["governanceModel"]["configured"], false);
+
+    let raw_secret = "sk-must-never-appear";
+    let save = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::patch_json(
+            "/console/governance-model",
+            serde_json::json!({
+                "enabled": true,
+                "protocol": "ollama_native",
+                "endpoint": "http://127.0.0.1:11434/api",
+                "model": "qwen3:8b",
+                "authMode": {
+                    "kind": "credential_env",
+                    "credentialEnv": "BEETLE_MEMORY_LLM_API_KEY"
+                },
+                "requestTimeoutMs": 30000,
+                "maxInputTokens": 8192,
+                "maxOutputTokens": 1024
+            })
+            .to_string(),
+        ),
+    )
+    .expect("save config");
+    assert_eq!(save.status_code, 200, "{}", save.body);
+    assert!(!save.body.contains(raw_secret));
+    let body: Value = serde_json::from_str(&save.body).expect("save json");
+    assert_eq!(body["governanceModel"]["protocol"], "ollama_native");
+    assert_eq!(body["governanceModel"]["credentialConfigured"], true);
+
+    let probe = MockGovernanceModelProbe::default();
+    let tested = handle_http_in_process_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/governance-model/test-connection", "{}"),
+        HttpConsoleServices::none().with_governance_model_probe(&probe),
+    )
+    .expect("test connection");
+    assert_eq!(tested.status_code, 200, "{}", tested.body);
+    let tested_body: Value = serde_json::from_str(&tested.body).expect("test json");
+    assert_eq!(tested_body["result"]["status"], "ready");
+    assert_eq!(tested_body["result"]["protocol"], "ollama_native");
+    assert_eq!(
+        probe.urls.lock().expect("probe urls").as_slice(),
+        ["http://127.0.0.1:11434/api/chat"]
+    );
+    assert_eq!(
+        tested_body["result"]["protocol"],
+        serde_json::to_value(EntryGovernanceModelProtocol::OllamaNative).expect("protocol json")
+    );
+    assert!(!tested.body.contains(raw_secret));
+}
+
+#[test]
+fn governance_model_console_patch_rejects_raw_key_shaped_credential_without_leaking_it() {
+    let runtime = runtime();
+    let raw_secret = "sk-live-pl1-secret-sentinel";
+    let response = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::patch_json(
+            "/console/governance-model",
+            serde_json::json!({
+                "enabled": true,
+                "protocol": "open_ai_compatible",
+                "endpoint": "https://example.invalid/v1",
+                "model": "governance-model",
+                "authMode": {
+                    "kind": "credential_env",
+                    "credentialEnv": raw_secret
+                },
+                "requestTimeoutMs": 30000,
+                "maxInputTokens": 8192,
+                "maxOutputTokens": 1024
+            })
+            .to_string(),
+        ),
+    )
+    .expect("invalid config is a typed HTTP response");
+
+    assert_eq!(response.status_code, 422, "{}", response.body);
+    assert!(!response.body.contains(raw_secret));
+    assert!(!format!("{response:?}").contains(raw_secret));
+    assert!(!runtime.console_governance_model().configured);
+}
+
+#[test]
+fn governance_model_probe_error_never_leaks_resolved_credential() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind probe fixture");
+    let endpoint = format!("http://{}/v1", listener.local_addr().expect("fixture addr"));
+    let fixture = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept probe request");
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).expect("read probe request");
+        stream
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .expect("write probe rejection");
+    });
+    let runtime = runtime();
+    let env_name = format!(
+        "BEETLE_MEMORY_PL1_PROBE_TOKEN_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let raw_secret = "sk-probe-error-secret-sentinel";
+    std::env::set_var(&env_name, raw_secret);
+    let save = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::patch_json(
+            "/console/governance-model",
+            serde_json::json!({
+                "enabled": true,
+                "protocol": "open_ai_compatible",
+                "endpoint": endpoint,
+                "model": "governance-model",
+                "authMode": {
+                    "kind": "credential_env",
+                    "credentialEnv": env_name
+                },
+                "requestTimeoutMs": 1000,
+                "maxInputTokens": 8192,
+                "maxOutputTokens": 1024
+            })
+            .to_string(),
+        ),
+    )
+    .expect("save probe fixture config");
+    assert_eq!(save.status_code, 200, "{}", save.body);
+
+    let probe = ReqwestGovernanceModelConnectionProbe;
+    let error = handle_http_in_process_request_with_console(
+        &runtime,
+        HttpRuntimeRequest::post_json("/console/governance-model/test-connection", "{}"),
+        HttpConsoleServices::none().with_governance_model_probe(&probe),
+    )
+    .expect_err("fixture rejects the probe");
+    std::env::remove_var(&env_name);
+    fixture.join().expect("probe fixture");
+
+    assert!(!error.to_string().contains(raw_secret));
+    assert!(!format!("{error:?}").contains(raw_secret));
+}
+
+#[test]
+fn governance_model_console_route_accepts_remote_endpoint_without_secondary_scope_switch() {
+    let runtime = runtime();
+    let response = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::patch_json(
+            "/console/governance-model",
+            serde_json::json!({
+                "enabled": true,
+                "protocol": "open_ai_compatible",
+                "endpoint": "https://api.openai.com/v1",
+                "model": "gpt-4.1-mini",
+                "authMode": {
+                    "kind": "credential_env",
+                    "credentialEnv": "OPENAI_API_KEY"
+                },
+                "requestTimeoutMs": 30000,
+                "maxInputTokens": 8192,
+                "maxOutputTokens": 1024
+            })
+            .to_string(),
+        ),
+    )
+    .expect("save remote endpoint");
+    assert_eq!(response.status_code, 200, "{}", response.body);
+    assert_eq!(
+        runtime.console_governance_model().endpoint.as_deref(),
+        Some("https://api.openai.com/v1")
+    );
 }
 
 #[test]

@@ -1047,6 +1047,7 @@ fn execute_self_runtime_actions(
             &[],
             Some(true),
             Some(state.recent.as_slice()),
+            false,
         )
     } else {
         Ok(PrivateGardenGovernanceOutcome::Skipped)

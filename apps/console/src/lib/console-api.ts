@@ -2,6 +2,8 @@ import { apiJson } from "../api";
 import type {
   ConsoleApiCapabilities,
   ConsoleApiDevice,
+  ConsoleApiGovernanceModel,
+  ConsoleApiGovernanceModelConnectionReport,
   ConsoleApiLlmGateway,
   ConsoleApiLlmGatewaySmokeRunReport,
   ConsoleApiOllamaTransition,
@@ -18,6 +20,7 @@ import type {
   StatusKind,
   Transport,
   TransportId,
+  GovernanceModelConfigInput,
 } from "./types";
 import { fromApiDevice, fromApiTransport } from "./view-model";
 
@@ -26,6 +29,7 @@ export type ConsoleSnapshot = {
   overview: ConsoleApiOverview;
   skills: ConsoleApiSkillList;
   llmGateway: ConsoleApiLlmGateway;
+  governanceModel: ConsoleApiGovernanceModel;
   ollamaTransparent: ConsoleApiOllamaTransparentStatus | null;
   transports: Transport[];
   devices: Device[];
@@ -48,6 +52,7 @@ export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
     overviewResponse,
     skillResponse,
     llmGatewayResponse,
+    governanceModelResponse,
     ollamaTransparentResponse,
     transportResponse,
     deviceResponse,
@@ -56,6 +61,7 @@ export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
     apiJson<{ overview: ConsoleApiOverview }>("/console/overview"),
     apiJson<{ skills: ConsoleApiSkillList }>("/console/skills"),
     apiJson<{ llmGateway: ConsoleApiLlmGateway }>("/console/llm-gateway"),
+    apiJson<{ governanceModel: ConsoleApiGovernanceModel }>("/console/governance-model"),
     ollamaTransparentAppVisible
       ? apiJson<{ ollamaTransparent: ConsoleApiOllamaTransparentStatus }>("/console/ollama-transparent/status")
       : Promise.resolve({ ollamaTransparent: null }),
@@ -68,11 +74,30 @@ export async function loadConsoleSnapshot(): Promise<ConsoleSnapshot> {
     overview: overviewResponse.overview,
     skills: skillResponse.skills,
     llmGateway: llmGatewayResponse.llmGateway,
+    governanceModel: governanceModelResponse.governanceModel,
     ollamaTransparent: ollamaTransparentResponse.ollamaTransparent,
     transports: transportResponse.transports.map(fromApiTransport),
     devices: deviceResponse.devices.map(fromApiDevice),
     session: sessionResponse.session,
   };
+}
+
+export async function saveGovernanceModelConfig(
+  input: GovernanceModelConfigInput,
+): Promise<ConsoleApiGovernanceModel> {
+  const response = await apiJson<{ governanceModel: ConsoleApiGovernanceModel }>("/console/governance-model", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  return response.governanceModel;
+}
+
+export async function testGovernanceModelConnection(): Promise<ConsoleApiGovernanceModelConnectionReport> {
+  const response = await apiJson<{ result: ConsoleApiGovernanceModelConnectionReport }>(
+    "/console/governance-model/test-connection",
+    { method: "POST", body: "{}" },
+  );
+  return response.result;
 }
 
 export async function fetchWorkbenchReport(): Promise<ConsoleApiWorkbenchReport> {

@@ -55,6 +55,10 @@ pub fn bridge_message_specs() -> Vec<A2aBridgeMessageSpec> {
     vec![
         message("peer_capability", None),
         message("memory_write_candidate", Some(AdapterOperation::Write)),
+        message(
+            "memory_finalize_turn_request",
+            Some(AdapterOperation::FinalizeTurn),
+        ),
         message("memory_recall_request", Some(AdapterOperation::Recall)),
         message("memory_projection_request", Some(AdapterOperation::Project)),
         message(
@@ -641,6 +645,12 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
                 AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
                     unreachable!("governed DTO handled above")
                 }
+                AdapterSdkReport::FinalizeTurn(report) => json!({
+                    "status": "accepted",
+                    "operation": "finalize_turn",
+                    "result": report,
+                })
+                .to_string(),
                 AdapterSdkReport::TranscriptAttrWrite(report) => json!({
                     "status": "accepted",
                     "memory_space_id": report.key.memory_space_id,

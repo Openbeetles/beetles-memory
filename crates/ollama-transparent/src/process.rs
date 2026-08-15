@@ -749,14 +749,6 @@ fn transparent_front_env(config: &OllamaTransparentConfig) -> Vec<(String, Strin
             "ollama".to_string(),
         ),
         (
-            "BM_LLM_GATEWAY_MAINTENANCE_PROVIDER".to_string(),
-            "ollama".to_string(),
-        ),
-        (
-            "BM_LLM_GATEWAY_MAINTENANCE_MODEL".to_string(),
-            config.maintenance_model.trim().to_string(),
-        ),
-        (
             "BM_MEMORY_STORE_FILE".to_string(),
             config.memory_authority.store_path.display().to_string(),
         ),

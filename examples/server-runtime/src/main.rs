@@ -17,7 +17,15 @@ fn main() -> bm_sdk::Result<()> {
               "topic":"server-entry",
               "title":"Server entry guard",
               "summary":"Server runtime accepts HTTP entry requests through bm-entry.",
-              "content":"1. Open EntryRuntime with the server profile.\n2. Decode HTTP requests into adapter commands.\n3. Dispatch through the SDK runtime.\n4. Return only adapter reports."
+              "content":"1. Open EntryRuntime with the server profile.\n2. Decode HTTP requests into adapter commands.\n3. Dispatch through the SDK runtime.\n4. Return only adapter reports.",
+              "source":"manual",
+              "owning_scope":{"kind":"shared_program"},
+              "creation_ref":{
+                "kind":"replay_promotion",
+                "candidate_ref":"example:server-entry-guard",
+                "verification_receipt_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              },
+              "privacy_class":"public_runtime"
             }"#,
         ),
     )?;
@@ -25,7 +33,10 @@ fn main() -> bm_sdk::Result<()> {
 
     let recall = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json("/memory/recall", r#"{"query":"server entry","limit":4}"#),
+        HttpRuntimeRequest::post_json(
+            "/memory/recall",
+            r#"{"temporal_operation":{"kind":"current"},"query":"server entry","limit":4}"#,
+        ),
     )?;
     assert_eq!(recall.status_code, 200);
     assert!(recall.body.contains("\"status\""));

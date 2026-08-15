@@ -190,8 +190,13 @@ Common local checks:
 
 ```bash
 cargo fmt --all -- --check
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --exclude bm-desktop
+cargo clippy --locked --workspace --exclude bm-desktop --all-targets -- -D warnings
+# On macOS, validate the standalone desktop with its required production profile.
+cargo test --locked -p bm-desktop --no-default-features \
+  --features profile-desktop-macos-standalone-memory
+cargo clippy --locked -p bm-desktop --all-targets --no-default-features \
+  --features profile-desktop-macos-standalone-memory -- -D warnings
 bash scripts/check_profile_matrix.sh
 bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_release_surface.sh

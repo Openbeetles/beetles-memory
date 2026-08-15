@@ -1949,7 +1949,7 @@ fn runtime_suppression_policy_blocks_automatic_post_turn_long_term_refresh() {
     );
 
     let report = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request(
@@ -1988,7 +1988,11 @@ fn runtime_mutates_long_term_memory_from_transcript_derived_ref_target() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("我偏好简洁回答", "已记录。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("我偏好简洁回答", "已记录。"),
+        )
         .unwrap();
     let replay = runtime
         .replay_transcript(MemoryTranscriptReplayRequest {
@@ -2120,7 +2124,7 @@ fn runtime_mutates_shared_fact_memory_from_transcript_derived_ref_target() {
         "收到，这轮把主模型事实和证据一起写回 shared factual plane。",
     );
     runtime
-        .finalize_turn_and_maintain(Some(&mut http), Some(&llm), request)
+        .finalize_turn_with_inline_governance(Some(&mut http), Some(&llm), request)
         .unwrap();
     let key = ConversationKey::new(
         runtime.memory_space_id().to_string(),

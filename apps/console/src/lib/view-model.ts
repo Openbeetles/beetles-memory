@@ -54,7 +54,7 @@ export type NavGroup = { id: NavGroupId; label: string; pages: Page[] };
 const NAV_GROUP_PAGE_IDS: Record<NavGroupId, Page["id"][]> = {
   memoryCore: ["overview", "workbench", "skills"],
   ingress: ["llm-gateway", "transports", "devices"],
-  system: ["account"],
+  system: ["model-config", "account"],
 };
 
 export function navGroupsWithPages(t: ConsoleCopy, pages: Page[]): NavGroup[] {

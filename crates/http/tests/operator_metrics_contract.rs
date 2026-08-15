@@ -143,7 +143,7 @@ fn operator_overview_exposes_deferred_governance_queue_from_sdk_report() {
     let runtime = runtime();
     runtime
         .runtime()
-        .finalize_turn_and_maintain(None, None, finalize_request())
+        .finalize_turn(finalize_request())
         .expect("deferred finalize");
 
     let response =

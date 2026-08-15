@@ -14,6 +14,7 @@ fn inbound_messages_map_to_adapter_commands() {
             .collect::<Vec<_>>(),
         vec![
             "command.write",
+            "command.finalize_turn",
             "command.recall",
             "command.project",
             "command.inspect",
@@ -38,6 +39,7 @@ fn inbound_messages_map_to_adapter_commands() {
         .filter_map(|message| message.inbound_operation)
         .collect();
     assert!(operations.contains(&AdapterOperation::Write));
+    assert!(operations.contains(&AdapterOperation::FinalizeTurn));
     assert!(operations.contains(&AdapterOperation::Recall));
     assert!(operations.contains(&AdapterOperation::Project));
     assert!(operations.contains(&AdapterOperation::Inspect));

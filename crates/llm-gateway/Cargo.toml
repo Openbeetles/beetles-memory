@@ -17,7 +17,7 @@ required-features = ["server-async", "client-reqwest"]
 
 [features]
 default = []
-server-async = []
+server-async = ["bm-entry/governance-model-client-std"]
 client-reqwest = ["dep:reqwest"]
 nonproduction-replay-harness = ["bm-sdk/nonproduction-replay-harness"]
 profile-server-linux-memory-gateway = ["bm-entry/profile-server-linux-memory-gateway"]

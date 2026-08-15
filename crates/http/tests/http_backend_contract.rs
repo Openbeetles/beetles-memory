@@ -40,6 +40,104 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
+#[test]
+fn http_server_feature_enables_entry_governance_model_client() {
+    assert!(bm_entry::entry_governance_model_client_compiled());
+}
+
+#[test]
+fn real_http_socket_finalize_queues_then_reports_durable_configuration_block() {
+    let runtime = runtime();
+    let body = serde_json::json!({
+        "turn": {
+            "turn_id": "turn-http-pl1d",
+            "conversation": {
+                "channel": "http-backend",
+                "chat_id": "chat-1",
+                "conversation_id": "conversation-http-pl1d"
+            },
+            "subject": "agent:http-backend-agent",
+            "delivery_status": "delivered",
+            "source": {
+                "ingress": "user",
+                "channel": "http-backend",
+                "provider": null,
+                "protocol": "native",
+                "endpoint": "/memory/finalize-turn",
+                "model_alias": null,
+                "model_resolved": null,
+                "request_id": "request-http-pl1d",
+                "client_conversation_hint": "conversation-http-pl1d"
+            },
+            "input_messages": [{
+                "role": "user",
+                "content": "请记住 HTTP 真实套接字闭环。",
+                "authority": "user_asserted",
+                "observed_at": 1,
+                "speaker_id": "user",
+                "speaker_kind": "human"
+            }],
+            "assistant_message": {
+                "role": "assistant",
+                "content": "已记录。",
+                "authority": "assistant_utterance",
+                "observed_at": 1,
+                "speaker_id": "assistant",
+                "speaker_kind": "assistant"
+            },
+            "external_content_used": false
+        }
+    })
+    .to_string();
+    let response = serve_memory_request(
+        &runtime,
+        format!(
+            "POST /memory/finalize-turn HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let payload: serde_json::Value = serde_json::from_str(
+        response
+            .split_once("\r\n\r\n")
+            .expect("HTTP response body")
+            .1,
+    )
+    .expect("finalize response JSON");
+    assert_eq!(
+        payload["result"]["memoryConsolidation"]["state"], "queued",
+        "{payload}"
+    );
+    let job_id = payload["result"]["memoryConsolidation"]["jobId"]
+        .as_str()
+        .expect("queued job id")
+        .to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let job = runtime
+            .runtime()
+            .governance_job_status(bm_sdk::MemoryGovernanceJobStatusRequest {
+                job_id: job_id.clone(),
+            })
+            .expect("job status")
+            .job;
+        if job.status == bm_sdk::PostTurnGovernanceJobStatusV2::BlockedConfiguration {
+            assert_eq!(
+                job.blocking_reason.as_deref(),
+                Some("governance_model_binding_unavailable")
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job remained {:?}",
+            job.status
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn remote_runtime(
     capabilities: impl IntoIterator<Item = EntryOperationCapability>,
 ) -> EntryRuntime {

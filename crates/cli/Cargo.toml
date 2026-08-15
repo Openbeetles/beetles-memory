@@ -15,7 +15,8 @@ name = "bm"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["governance-model-client-std"]
+governance-model-client-std = ["bm-entry/governance-model-client-std"]
 profile-esp-standalone-memory = ["bm-entry/profile-esp-standalone-memory"]
 profile-esp-embedded-sdk = ["bm-entry/profile-esp-embedded-sdk"]
 profile-linux-device-standalone-memory = ["bm-entry/profile-linux-device-standalone-memory"]

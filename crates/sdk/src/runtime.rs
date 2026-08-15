@@ -51,12 +51,13 @@ use bm_core::memory::{
     plan_governed_shared_memory_in_space, plan_long_term_memory_control_mutation,
     plan_long_term_memory_governance_policy_mutation, plan_long_term_memory_owner_mutation,
     plan_long_term_memory_upsert, plan_temporal_memory_graph_write,
-    project_current_long_term_recall_lifecycle_facts,
+    post_turn_governance_transcript_digest, project_current_long_term_recall_lifecycle_facts,
     project_historical_long_term_recall_lifecycle_facts, promote_task_experience_to_procedure,
     relationship_scope, rerank_recall_with_temporal_graph,
     rerank_recall_with_temporal_graph_and_facets, run_long_term_memory_refresh,
-    run_memory_retention_compaction, run_post_reply_memory_maintenance,
-    run_private_garden_governance, scoped_governed_evidence_document_key,
+    run_long_term_memory_refresh_strict, run_memory_retention_compaction,
+    run_post_reply_memory_maintenance, run_private_garden_governance,
+    run_private_garden_governance_strict, scoped_governed_evidence_document_key,
     scoped_governed_evidence_source_ref_key, scoped_long_term_control_storage_key,
     scoped_long_term_memory_storage_key, scoped_memory_facet_owner_storage_key,
     score_recall_delivery_texts, select_long_term_current_recall_query_time,
@@ -66,9 +67,8 @@ use bm_core::memory::{
     validate_memory_graph_read_chain, validate_memory_graph_revision_doc,
     validate_memory_graph_scope_manifest, CanonicalTurnDelta, CompactMemoryGraph,
     ContinuitySnapshotImportContext, ContinuitySnapshotImportPlan, ConversationKey,
-    ConversationTranscriptStore, DeferredGovernanceJob, DeferredGovernanceJobStatus,
-    DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef,
-    DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
+    ConversationTranscriptStore, DeferredGovernanceQueueReport, DerivedMemoryPlane,
+    DerivedMemoryRef, DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
     FacetCoverageSelectionReport, FacetRankFusionCandidateReport, FacetRankFusionReport,
     FacetReportAudience, GovernedEvidenceBinding, GovernedEvidenceDocument,
     GovernedEvidenceDocumentDeletePlan, GovernedEvidenceDocumentPlan, GovernedEvidenceSourceRef,
@@ -100,8 +100,10 @@ use bm_core::memory::{
     MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryPlaneGovernanceReport,
     MemoryPrivacyClass, MemoryUpdateLineageReport, MemoryWriteAuthority, MemoryWriteCandidate,
     MemoryWriteDomain, ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    PremiseTypedSource, PrivateGardenDoc, PrivateGardenDocRecord, PrivateGardenGovernanceContext,
+    PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV2,
+    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PremiseTypedSource,
+    PrivateGardenDoc, PrivateGardenDocRecord, PrivateGardenGovernanceContext,
     PrivateGardenGovernanceInput, PrivateGardenGovernanceManifestEntry,
     PrivateGardenGovernanceOutcome, PrivateGardenStore, ProceduralMemoryDeliveryReport,
     ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProjectionBudgetDecision,
@@ -116,15 +118,16 @@ use bm_core::memory::{
     SubjectProjectionWorkIntegrityReport, SubjectRegistry, SubjectRelationshipGraph,
     SubjectScopedRuntime, TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport,
     TranscriptAttrEnvelope, TranscriptAttrWriteRejection, TranscriptAttrWriteReport,
-    TranscriptConversationAlias, TranscriptEvidenceRef,
+    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
     TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
-    TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptLifecycleTransition,
-    TranscriptRedactionReason, TranscriptRedactionReportItem,
-    TranscriptRepairReport as CoreTranscriptRepairReport, TranscriptReplayView,
-    TranscriptTurnRecord, WorkingRecallInspectionInput, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
-    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MAX_LONG_TERM_MEMORY_ITEMS,
-    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, PRIVATE_GARDEN_MAX_DOC_BYTES,
+    TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptLifecycleState,
+    TranscriptLifecycleTransition, TranscriptRedactionReason, TranscriptRedactionReportItem,
+    TranscriptRedactionState, TranscriptRepairReport as CoreTranscriptRepairReport,
+    TranscriptReplayView, TranscriptTurnCursor, TranscriptTurnRecord, WorkingRecallInspectionInput,
+    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
+    MAX_LONG_TERM_MEMORY_ITEMS, MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE,
+    PRIVATE_GARDEN_MAX_DOC_BYTES,
 };
 use bm_core::metrics::{
     OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricEventKind, RuntimeMetricsQuery,
@@ -174,12 +177,19 @@ use crate::ops::{
     MemoryProjectionProceduralDigestContentEntry, MemoryProjectionProceduralDigestReceipt,
     MemoryProjectionSurfaceSet, RuntimeProjectionSourceBlock,
 };
+use crate::store_internal::post_turn_governance::{
+    block_claimed_governance_job, block_governance_job, cancel_governance_job,
+    claim_governance_job, complete_governance_job_with_memory_plan, dead_letter_governance_job,
+    ensure_governance_intent, governance_completion_transaction_id,
+    read_job as read_governance_job, read_scope_index as read_governance_scope_index,
+    reconcile_governance_intents, renew_governance_job_lease, resume_governance_job,
+    retry_governance_job, GovernanceIntentEnsureOutcome,
+};
 use crate::{
     Error, GovernedRuntimeSkillWriteInput, LlmClient, MemoryArchiveScope, MemoryCapabilityCatalog,
-    MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest,
-    MemoryDeferredGovernanceRunReport, MemoryDeferredGovernanceRunRequest,
-    MemoryEvalEvidenceApplicability, MemoryEvalQuestionEvaluation, MemoryEvalRecallAtK,
-    MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
+    MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest, MemoryConsolidationReport,
+    MemoryConsolidationState, MemoryEvalEvidenceApplicability, MemoryEvalQuestionEvaluation,
+    MemoryEvalRecallAtK, MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
     MemoryEvalRecallCandidateRenderLoss, MemoryEvalRecallCandidateSelectionLoss,
     MemoryEvalRecallEvidenceGroupCoverage, MemoryEvalRecallEvidenceRefIndexEntry,
     MemoryEvalRecallFacetStageDiagnostics, MemoryEvalRecallGoldRank,
@@ -189,8 +199,19 @@ use crate::{
     MemoryEvalRecallStageEvidenceRefs, MemoryEvidenceDocumentMutation,
     MemoryEvidenceDocumentReadReport, MemoryEvidenceDocumentReadRequest,
     MemoryEvidenceDocumentView, MemoryEvidenceDocumentWriteSummary, MemoryEvidenceRefView,
-    MemoryEvidenceRefVisibility, MemoryFacetRecallIndexReport,
-    MemoryGovernancePolicyMutationReport, MemoryGraphIntegrityMaintenanceReport,
+    MemoryEvidenceRefVisibility, MemoryFacetRecallIndexReport, MemoryGovernanceActiveJobsReport,
+    MemoryGovernanceActiveJobsRequest, MemoryGovernanceAttemptAuthorityReport,
+    MemoryGovernanceAttemptAuthorityRequest, MemoryGovernanceBlockKind,
+    MemoryGovernanceClaimedJobBlockReport, MemoryGovernanceClaimedJobBlockRequest,
+    MemoryGovernanceJobBlockReport, MemoryGovernanceJobBlockRequest,
+    MemoryGovernanceJobClaimReport, MemoryGovernanceJobClaimRequest, MemoryGovernanceJobFailReport,
+    MemoryGovernanceJobFailRequest, MemoryGovernanceJobRenewReport,
+    MemoryGovernanceJobRenewRequest, MemoryGovernanceJobResumeReport,
+    MemoryGovernanceJobResumeRequest, MemoryGovernanceJobRetryReport,
+    MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunReport, MemoryGovernanceJobRunRequest,
+    MemoryGovernanceJobStatusReport, MemoryGovernanceJobStatusRequest,
+    MemoryGovernancePolicyMutationReport, MemoryGovernanceReconcileReport,
+    MemoryGovernanceReconcileRequest, MemoryGraphIntegrityMaintenanceReport,
     MemoryGraphIntegrityMaintenanceRequest, MemoryGraphRecallIndexReport, MemoryInspectionReport,
     MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
@@ -1293,6 +1314,7 @@ pub struct MemoryRuntime {
     lifecycle: RuntimeLifecycleEngine,
     agent_tool_registries: Mutex<Vec<AgentToolRegistrySnapshot>>,
     last_conversation_id: Mutex<Option<String>>,
+    governance_model_policy_revision: Mutex<u64>,
 }
 
 struct GovernedLongTermMemoryReadView<'a> {
@@ -2808,7 +2830,7 @@ impl LongTermMemoryReadStore for MaterializedGovernedLongTermMemoryReadView<'_> 
             self.owner_states,
             self.temporal_operation,
         )?;
-        visible.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        visible.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
         visible.truncate(limit.min(MAX_LONG_TERM_MEMORY_ITEMS));
         Ok(visible)
     }
@@ -5955,16 +5977,14 @@ impl MemoryRuntime {
                     namespace,
                     record_key,
                     ..
-                } if namespace == "long_term" => {
-                    if !record_key.trim().is_empty() {
-                        changes.insert(
-                            GovernedMemoryOwnerRef::new(
-                                GovernedMemoryOwnerPlane::LongTerm,
-                                record_key.trim(),
-                            ),
-                            None,
-                        );
-                    }
+                } if namespace == "long_term" && !record_key.trim().is_empty() => {
+                    changes.insert(
+                        GovernedMemoryOwnerRef::new(
+                            GovernedMemoryOwnerPlane::LongTerm,
+                            record_key.trim(),
+                        ),
+                        None,
+                    );
                 }
                 StoreMutation::PutJson {
                     namespace, value, ..
@@ -5981,16 +6001,16 @@ impl MemoryRuntime {
                     namespace,
                     record_key,
                     ..
-                } if namespace == crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
-                    if !record_key.trim().is_empty() {
-                        changes.insert(
-                            GovernedMemoryOwnerRef::new(
-                                GovernedMemoryOwnerPlane::LongTerm,
-                                record_key.trim(),
-                            ),
-                            None,
-                        );
-                    }
+                } if namespace == crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE
+                    && !record_key.trim().is_empty() =>
+                {
+                    changes.insert(
+                        GovernedMemoryOwnerRef::new(
+                            GovernedMemoryOwnerPlane::LongTerm,
+                            record_key.trim(),
+                        ),
+                        None,
+                    );
                 }
                 _ => {}
             }
@@ -7884,36 +7904,53 @@ impl MemoryRuntime {
         merge_json_preconditions(preconditions, owner_preconditions)
     }
 
-    fn run_long_term_memory_refresh_transactional(
+    fn plan_long_term_memory_refresh_transactional(
         &self,
         http: &mut (dyn LlmHttpClient + '_),
         llm: &(dyn CoreLlmClient + Send + Sync + '_),
         ctx: LongTermMemoryRefreshTransactionContext<'_>,
-        chat_id: &str,
-        pressure: PressureLevel,
-        profile: MemoryProfile,
-    ) -> Result<LongTermMemoryRefreshOutcome> {
+    ) -> Result<(LongTermMemoryRefreshOutcome, MemoryStoreMutationPlan)> {
         let planning_long_term = PlanningLongTermMemoryStore::new(
             ctx.long_term_memory_store,
             &self.config.scoped_runtime.actor_subject_id,
         )?;
-        let outcome = run_long_term_memory_refresh(
-            http,
-            llm,
-            LongTermMemoryRefreshContext {
-                memory_store: ctx.memory_store,
-                session_store: ctx.session_store,
-                session_summary_store: ctx.session_summary_store,
-                long_term_memory_store: ctx.long_term_memory_store,
-                extraction_state_store: ctx.extraction_state_store,
-                turn_ledger_store: ctx.turn_ledger_store,
-                skill_storage: ctx.skill_storage,
-                draft_admission_policy: ctx.draft_admission_policy,
-            },
-            chat_id,
-            pressure,
-            profile,
-        );
+        let refresh_context = LongTermMemoryRefreshContext {
+            memory_store: ctx.memory_store,
+            session_store: ctx.session_store,
+            session_summary_store: ctx.session_summary_store,
+            long_term_memory_store: ctx.long_term_memory_store,
+            extraction_state_store: ctx.extraction_state_store,
+            turn_ledger_store: ctx.turn_ledger_store,
+            skill_storage: ctx.skill_storage,
+            draft_admission_policy: ctx.draft_admission_policy,
+        };
+        let outcome = if ctx.strict_model_contract {
+            run_long_term_memory_refresh_strict(
+                http,
+                llm,
+                refresh_context,
+                ctx.chat_id,
+                ctx.pressure,
+                ctx.profile,
+            )
+        } else {
+            run_long_term_memory_refresh(
+                http,
+                llm,
+                refresh_context,
+                ctx.chat_id,
+                ctx.pressure,
+                ctx.profile,
+            )
+        };
+        let outcome = if ctx.strict_model_contract {
+            match outcome {
+                LongTermMemoryRefreshOutcome::Failed { error, .. } => return Err(error),
+                outcome => outcome,
+            }
+        } else {
+            outcome
+        };
         let mut mutations = Vec::new();
         let mut preconditions = Vec::new();
         match &outcome {
@@ -7927,7 +7964,7 @@ impl MemoryRuntime {
                 ..
             } => {
                 if let Some(mutation) = long_term_extraction_state_mutation(
-                    chat_id,
+                    ctx.chat_id,
                     previous_state.as_ref(),
                     next_state,
                 )? {
@@ -7975,7 +8012,7 @@ impl MemoryRuntime {
                     self.config.clock.now_secs(),
                 )?);
                 if let Some(mutation) = long_term_extraction_state_mutation(
-                    chat_id,
+                    ctx.chat_id,
                     previous_state.as_ref(),
                     next_state,
                 )? {
@@ -7983,16 +8020,13 @@ impl MemoryRuntime {
                 }
             }
         }
-        if !mutations.is_empty() {
-            self.commit_memory_mutation_batch(
-                "post_turn.long_term_refresh",
-                MemoryStoreMutationPlan {
-                    mutations,
-                    preconditions,
-                },
-            )?;
-        }
-        Ok(outcome)
+        Ok((
+            outcome,
+            MemoryStoreMutationPlan {
+                mutations,
+                preconditions,
+            },
+        ))
     }
 
     fn plan_long_term_extraction_transaction(
@@ -12750,7 +12784,26 @@ impl MemoryRuntime {
         })
     }
 
-    pub fn finalize_turn_and_maintain(
+    pub fn finalize_turn(
+        &self,
+        request: MemoryTurnFinalizeRequest,
+    ) -> Result<MemoryTurnFinalizeReport> {
+        self.finalize_turn_internal(None, None, request)
+    }
+
+    /// Non-production seam for semantic contract and replay harnesses.
+    #[cfg(feature = "nonproduction-replay-harness")]
+    #[doc(hidden)]
+    pub fn finalize_turn_with_inline_governance(
+        &self,
+        http: Option<&mut (dyn LlmHttpClient + '_)>,
+        llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
+        request: MemoryTurnFinalizeRequest,
+    ) -> Result<MemoryTurnFinalizeReport> {
+        self.finalize_turn_internal(http, llm, request)
+    }
+
+    fn finalize_turn_internal(
         &self,
         http: Option<&mut (dyn LlmHttpClient + '_)>,
         llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
@@ -12777,6 +12830,22 @@ impl MemoryRuntime {
         let session_commit = core_report.session_commit;
 
         if !session_commit.committed && !transcript_committed {
+            let memory_consolidation = if transcript_commit.is_some() {
+                self.ensure_post_turn_governance_intent(
+                    &request,
+                    transcript_commit.as_ref(),
+                    session_commit
+                        .skipped_reason
+                        .as_deref()
+                        .unwrap_or("turn_not_committed"),
+                )?
+            } else {
+                MemoryConsolidationReport {
+                    state: MemoryConsolidationState::NotScheduled,
+                    job_id: None,
+                    reason: "turn_not_committed".to_string(),
+                }
+            };
             let lifecycle = self.start_lifecycle(
                 RuntimeLifecycleOperation::Maintain,
                 RuntimeLifecycleTrigger::PostReply,
@@ -12802,6 +12871,7 @@ impl MemoryRuntime {
                 semantic_governance: PostTurnSemanticGovernanceReport::skipped(
                     "turn_not_committed",
                 ),
+                memory_consolidation,
                 lifecycle_report,
             });
         }
@@ -12845,8 +12915,97 @@ impl MemoryRuntime {
             maintenance: Some(maintenance),
             private_garden_self_work,
             semantic_governance,
+            memory_consolidation: MemoryConsolidationReport {
+                state: MemoryConsolidationState::Succeeded,
+                job_id: None,
+                reason: "synchronous_governance_completed".to_string(),
+            },
             lifecycle_report,
         })
+    }
+
+    fn plan_post_turn_private_garden(
+        &self,
+        http: &mut (dyn LlmHttpClient + '_),
+        governance_llm: &(dyn CoreLlmClient + Send + Sync + '_),
+        request: &MemoryTurnFinalizeRequest,
+        session_store: &dyn SessionStore,
+        session_summary_store: &dyn SessionSummaryStore,
+        strict_model_contract: bool,
+    ) -> Result<(PostTurnPrivateGardenReport, MemoryStoreMutationPlan)> {
+        let platform = self.config.platform.as_ref();
+        let execution_state_store = platform.execution_state_store();
+        let self_model_store = platform.self_model_store();
+        let private_doc_store = platform.private_doc_store();
+        let private_garden_store = platform.private_garden_store();
+        let planning_private_garden_store =
+            PlanningPrivateGardenStore::new(private_garden_store.as_ref());
+        let user_content = latest_user_content(&request.turn);
+        let reply_content = assistant_content(&request.turn).unwrap_or_default();
+        let context = PrivateGardenGovernanceContext {
+            session_store,
+            session_summary_store,
+            execution_state_store: execution_state_store.as_ref(),
+            self_model_store: self_model_store.as_ref(),
+            private_doc_store: private_doc_store.as_ref(),
+            private_garden_store: &planning_private_garden_store,
+        };
+        let input = PrivateGardenGovernanceInput {
+            mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
+            chat_id: &self.config.scope.chat_id,
+            ingress: request.turn.source.ingress,
+            channel: &request.turn.source.channel,
+            user_content: &user_content,
+            reply_content: &reply_content,
+            pressure: request.pressure,
+            tool_calls: request.tool_calls,
+            now_secs: self.config.clock.now_secs(),
+        };
+        let outcome = if strict_model_contract {
+            run_private_garden_governance_strict(
+                http,
+                governance_llm,
+                context,
+                input,
+                self.memory_profile(),
+            )?
+        } else {
+            run_private_garden_governance(
+                http,
+                governance_llm,
+                context,
+                input,
+                self.memory_profile(),
+            )?
+        };
+        match outcome {
+            PrivateGardenGovernanceOutcome::Skipped => Ok((
+                PostTurnPrivateGardenReport::no_change("policy_skipped_or_no_private_change"),
+                MemoryStoreMutationPlan::default(),
+            )),
+            PrivateGardenGovernanceOutcome::Updated {
+                writes,
+                moves,
+                deletes,
+                manifest,
+            } => {
+                let mut plan = planning_private_garden_store.into_plan()?;
+                plan.mutations
+                    .extend(plan_private_garden_derived_memory_ref_mutations(
+                        &self.config.memory_space_id,
+                        &self.config.subject_id,
+                        &request.turn,
+                        &manifest,
+                        self.config.clock.now_secs(),
+                    )?);
+                Ok((
+                    PostTurnPrivateGardenReport::applied_with_manifest(
+                        writes, moves, deletes, manifest,
+                    ),
+                    plan,
+                ))
+            }
+        }
     }
 
     fn run_post_turn_governance_after_commit(
@@ -12894,62 +13053,17 @@ impl MemoryRuntime {
                 mode_input: request.mode_input,
             },
         )?;
-        let execution_state_store = platform.execution_state_store();
-        let self_model_store = platform.self_model_store();
-        let private_doc_store = platform.private_doc_store();
-        let private_garden_store = platform.private_garden_store();
-        let planning_private_garden_store =
-            PlanningPrivateGardenStore::new(private_garden_store.as_ref());
-        let private_garden_self_work = match run_private_garden_governance(
+        let (private_garden_self_work, private_garden_plan) = self.plan_post_turn_private_garden(
             http,
             governance_llm,
-            PrivateGardenGovernanceContext {
-                session_store: session_store.as_ref(),
-                session_summary_store: session_summary_store.as_ref(),
-                execution_state_store: execution_state_store.as_ref(),
-                self_model_store: self_model_store.as_ref(),
-                private_doc_store: private_doc_store.as_ref(),
-                private_garden_store: &planning_private_garden_store,
-            },
-            PrivateGardenGovernanceInput {
-                mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
-                chat_id: &self.config.scope.chat_id,
-                ingress: turn_ingress,
-                channel: &turn_channel,
-                user_content: &finalize_user_content,
-                reply_content: finalize_assistant_content.as_deref().unwrap_or_default(),
-                pressure,
-                tool_calls: request.tool_calls,
-                now_secs: self.config.clock.now_secs(),
-            },
-            self.memory_profile(),
-        )? {
-            PrivateGardenGovernanceOutcome::Skipped => {
-                PostTurnPrivateGardenReport::no_change("policy_skipped_or_no_private_change")
-            }
-            PrivateGardenGovernanceOutcome::Updated {
-                writes,
-                moves,
-                deletes,
-                manifest,
-            } => {
-                let mut mutations = planning_private_garden_store.into_mutations()?;
-                mutations.extend(plan_private_garden_derived_memory_ref_mutations(
-                    &self.config.memory_space_id,
-                    &self.config.subject_id,
-                    &request.turn,
-                    &manifest,
-                    self.config.clock.now_secs(),
-                )?);
-                if !mutations.is_empty() {
-                    self.commit_memory_mutation_batch(
-                        "post_turn.private_garden",
-                        MemoryStoreMutationPlan::from_mutations(mutations),
-                    )?;
-                }
-                PostTurnPrivateGardenReport::applied_with_manifest(writes, moves, deletes, manifest)
-            }
-        };
+            request,
+            session_store.as_ref(),
+            session_summary_store.as_ref(),
+            false,
+        )?;
+        if !private_garden_plan.mutations.is_empty() {
+            self.commit_memory_mutation_batch("post_turn.private_garden", private_garden_plan)?;
+        }
         let memory_store = platform.memory_store();
         let long_term_memory_store = self.config.long_term_memory_read_store.clone();
         let extraction_state_store = platform.long_term_memory_extraction_state_store();
@@ -12966,10 +13080,14 @@ impl MemoryRuntime {
         let long_term_refresh = if semantic_refresh_allowed {
             let draft_admission_policy =
                 self.long_term_draft_admission_policy(self.config.clock.now_secs())?;
-            let outcome = self.run_long_term_memory_refresh_transactional(
+            let (outcome, plan) = self.plan_long_term_memory_refresh_transactional(
                 http,
                 governance_llm,
                 LongTermMemoryRefreshTransactionContext {
+                    chat_id: &self.config.scope.chat_id,
+                    pressure,
+                    profile: self.memory_profile(),
+                    strict_model_contract: false,
                     memory_store: memory_store.as_ref(),
                     session_store: session_store.as_ref(),
                     session_summary_store: session_summary_store.as_ref(),
@@ -12981,10 +13099,10 @@ impl MemoryRuntime {
                         .as_ref()
                         .map(|policy| policy as &dyn LongTermMemoryDraftAdmissionPolicy),
                 },
-                &self.config.scope.chat_id,
-                pressure,
-                self.memory_profile(),
             )?;
+            if !plan.mutations.is_empty() {
+                self.commit_memory_mutation_batch("post_turn.long_term_refresh", plan)?;
+            }
             Some(outcome)
         } else {
             None
@@ -13001,15 +13119,8 @@ impl MemoryRuntime {
         request: &MemoryTurnFinalizeRequest,
         reason: &'static str,
     ) -> Result<MemoryTurnFinalizeReport> {
-        enqueue_deferred_governance_job(
-            self.config.platform.as_ref(),
-            &self.config.scope,
-            &session_commit,
-            &self.config.memory_space_id,
-            request,
-            reason,
-            self.config.clock.now_secs(),
-        )?;
+        let memory_consolidation =
+            self.ensure_post_turn_governance_intent(request, transcript_commit.as_ref(), reason)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::PostReply,
@@ -13034,7 +13145,10 @@ impl MemoryRuntime {
                         .is_some_and(|report| report.committed)
                         .to_string(),
                 ),
-                ("deferred_governance_job", "true".to_string()),
+                (
+                    "deferred_governance_job",
+                    memory_consolidation.job_id.is_some().to_string(),
+                ),
             ],
         )?;
         Ok(MemoryTurnFinalizeReport {
@@ -13046,122 +13160,1101 @@ impl MemoryRuntime {
                 reason,
                 "post_turn_governance",
             ),
+            memory_consolidation,
             lifecycle_report,
         })
     }
 
-    pub fn run_due_governance(
+    fn ensure_post_turn_governance_intent(
         &self,
-        http: &mut (dyn LlmHttpClient + '_),
-        llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
-        request: MemoryDeferredGovernanceRunRequest,
-    ) -> Result<MemoryDeferredGovernanceRunReport> {
-        self.ensure_visible("maintain", self.capabilities.maintenance)?;
-        let governance_llm: &(dyn CoreLlmClient + Send + Sync) =
-            if let Some(config_llm) = self.config.llm.as_deref() {
-                config_llm
-            } else {
-                llm.ok_or_else(|| Error::config("deferred_governance", "llm_unavailable"))?
-            };
-        let limit = request.limit.max(1);
-        let mut jobs = read_deferred_governance_jobs(self.config.platform.as_ref())?;
-        let mut attempted = 0usize;
-        let mut succeeded = 0usize;
-        let mut failed = 0usize;
-
-        for job in jobs.iter_mut() {
-            if attempted >= limit {
-                break;
-            }
-            if !matches!(
-                job.status,
-                DeferredGovernanceJobStatus::Pending | DeferredGovernanceJobStatus::Retrying
-            ) || !deferred_governance_job_matches_runtime(job, &self.config)
-            {
-                continue;
-            }
-            attempted = attempted.saturating_add(1);
-            let Some(turn) = job.turn.clone() else {
-                failed = failed.saturating_add(1);
-                job.status = DeferredGovernanceJobStatus::Failed;
-                job.attempts = job.attempts.saturating_add(1);
-                job.last_error = Some("missing_canonical_turn_delta".to_string());
-                continue;
-            };
-            let finalize_request = MemoryTurnFinalizeRequest {
-                turn,
-                tool_calls: job.tool_calls,
-                runtime_skill_selected_ids: job.runtime_skill_selected_ids.clone(),
-                task_learning_selected_ids: job.task_learning_selected_ids.clone(),
-                reuse_outcome_note: job.reuse_outcome_note.clone(),
-                tool_usage_feedback: None,
-                pressure: job.pressure,
-                mode_input: job.mode_input,
-            };
-            match self.run_post_turn_governance_after_commit(
-                http,
-                governance_llm,
-                &finalize_request,
-            ) {
-                Ok((_maintenance, _private_garden, _semantic)) => {
-                    succeeded = succeeded.saturating_add(1);
-                    job.status = DeferredGovernanceJobStatus::Terminal;
-                    job.attempts = job.attempts.saturating_add(1);
-                    job.last_error = None;
-                }
-                Err(error) => {
-                    failed = failed.saturating_add(1);
-                    job.status = DeferredGovernanceJobStatus::Retrying;
-                    job.attempts = job.attempts.saturating_add(1);
-                    job.last_error = Some(error.to_string());
-                }
-            }
+        request: &MemoryTurnFinalizeRequest,
+        transcript_commit: Option<&bm_core::memory::TranscriptCommitReport>,
+        blocking_reason: &str,
+    ) -> Result<MemoryConsolidationReport> {
+        reject_legacy_governance_queue(self.config.platform.as_ref())?;
+        let transcript_commit = transcript_commit.ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_intent",
+                "canonical transcript authority is required before queue admission",
+            )
+        })?;
+        let key = ConversationKey::from_delta(&self.config.memory_space_id, &request.turn)?;
+        if transcript_commit.key != key || transcript_commit.turn_id != request.turn.turn_id {
+            return Err(Error::config(
+                "post_turn_governance_intent",
+                "transcript commit authority differs from finalize turn identity",
+            ));
         }
-        let remaining_pending = jobs
-            .iter()
-            .filter(|job| {
-                matches!(
-                    job.status,
-                    DeferredGovernanceJobStatus::Pending | DeferredGovernanceJobStatus::Retrying
-                ) && deferred_governance_job_matches_runtime(job, &self.config)
-            })
-            .count();
-        write_deferred_governance_jobs(self.config.platform.as_ref(), &jobs)?;
-        let scoped_jobs = scoped_deferred_governance_jobs(&jobs, &self.config);
-        let queue = build_deferred_governance_queue_report(&scoped_jobs, 16);
-        let lifecycle = self.start_lifecycle(
-            RuntimeLifecycleOperation::Maintain,
-            RuntimeLifecycleTrigger::DeferredDue,
-            RuntimeLifecycleModeInput::default(),
-        );
-        let lifecycle_report = self.finish_lifecycle_success_with_payload(
-            lifecycle,
-            RuntimeLifecycleEventKind::RuntimeLifecycle,
-            RuntimeLifecycleEffect::RunMaintenance,
-            attempted > 0,
-            "deferred_governance_completed",
-            &[
-                ("attempted", attempted.to_string()),
-                ("succeeded", succeeded.to_string()),
-                ("failed", failed.to_string()),
-                ("remaining_pending", remaining_pending.to_string()),
-            ],
+        let record = self
+            .config
+            .platform
+            .conversation_transcript_store()
+            .get_turn(&key, &self.config.subject_id, &request.turn.turn_id)?
+            .ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_intent",
+                    "canonical transcript record is missing after commit",
+                )
+            })?;
+        let now_secs = self.config.clock.now_secs();
+        if record.sequence != transcript_commit.sequence {
+            return Err(Error::conflict(
+                "post_turn_governance_intent",
+                "transcript sequence differs from commit authority",
+            ));
+        }
+        let job = self.build_governance_job_from_transcript(
+            &record,
+            &request.turn.conversation.chat_id,
+            request.tool_calls,
+            blocking_reason,
+            now_secs,
         )?;
-        Ok(MemoryDeferredGovernanceRunReport {
-            attempted,
-            succeeded,
-            failed,
-            remaining_pending,
-            queue,
-            lifecycle_report,
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_intent",
+                "durable governance intent requires StorePlatform-backed runtime",
+            )
+        })?;
+        let scope = self
+            .memory_write_transaction_scope()
+            .with_conversation(key.conversation_id.clone());
+        let outcome = ensure_governance_intent(
+            store_platform,
+            scope,
+            &self.runtime_budget(),
+            &job,
+            now_secs,
+        )?;
+        Ok(MemoryConsolidationReport {
+            state: MemoryConsolidationState::Queued,
+            job_id: Some(job.job_id),
+            reason: match outcome {
+                GovernanceIntentEnsureOutcome::Created => "governance_intent_created",
+                GovernanceIntentEnsureOutcome::AlreadyPresent => {
+                    "governance_intent_already_present"
+                }
+            }
+            .to_string(),
         })
+    }
+
+    fn build_governance_job_from_transcript(
+        &self,
+        record: &TranscriptTurnRecord,
+        chat_id: &str,
+        tool_calls: u32,
+        blocking_reason: &str,
+        now_secs: u64,
+    ) -> Result<PostTurnGovernanceJobV2> {
+        if record.key.memory_space_id != self.config.memory_space_id
+            || record.key.channel_id != self.config.scope.channel
+            || record.subject != self.config.subject_id
+            || chat_id != self.config.scope.chat_id
+        {
+            return Err(Error::config(
+                "post_turn_governance_intent",
+                "canonical transcript differs from mounted runtime scope",
+            ));
+        }
+        let identity = PostTurnGovernanceIdentityV2::new(
+            &record.key.memory_space_id,
+            &self.config.subject_id,
+            &record.key.channel_id,
+            chat_id,
+            &record.key.conversation_id,
+            &record.turn_id,
+        )?;
+        let runtime_binding_digest = self.current_runtime_binding_digest();
+        let mut job = PostTurnGovernanceJobV2::pending(
+            identity,
+            record.sequence,
+            post_turn_governance_transcript_digest(record)?,
+            runtime_binding_digest,
+            1,
+            *self
+                .governance_model_policy_revision
+                .lock()
+                .expect("governance model policy revision lock"),
+            self.current_privacy_digest(),
+            record.candidate_ids.clone(),
+            tool_calls,
+            5,
+            now_secs,
+        )?;
+        job.blocking_reason = Some(blocking_reason.to_string());
+        job.validate()?;
+        Ok(job)
+    }
+
+    fn current_runtime_binding_digest(&self) -> String {
+        sha256_field_digest(&[
+            self.config.memory_space_id.as_bytes(),
+            self.config.subject_id.as_bytes(),
+            self.config.scope.channel.as_bytes(),
+            self.config.scope.chat_id.as_bytes(),
+            self.config.identity.agent_id.as_bytes(),
+            self.memory_profile().as_str().as_bytes(),
+        ])
+    }
+
+    fn current_privacy_digest(&self) -> String {
+        let privacy = &self.config.privacy_policy;
+        let privacy_flags = [
+            privacy.prompt_projection_allowed as u8,
+            privacy.private_plane_projection_allowed as u8,
+            privacy.governance_model_disclosure_allowed as u8,
+            privacy.operator_inspection_allowed as u8,
+            privacy.export_allowed as u8,
+            privacy.import_allowed as u8,
+        ];
+        sha256_field_digest(&[&privacy_flags])
+    }
+
+    pub fn set_governance_model_policy_revision(&self, revision: u64) -> Result<()> {
+        if revision == 0 {
+            return Err(Error::invalid_input(
+                "post_turn_governance_policy_revision",
+                "governance model policy revision must be greater than zero",
+            ));
+        }
+        *self
+            .governance_model_policy_revision
+            .lock()
+            .expect("governance model policy revision lock") = revision;
+        Ok(())
     }
 
     pub fn deferred_governance_report(&self) -> Result<DeferredGovernanceQueueReport> {
         self.ensure_visible("inspect.deferred_governance", self.capabilities.inspection)?;
-        let jobs = read_deferred_governance_jobs(self.config.platform.as_ref())?;
-        let scoped_jobs = scoped_deferred_governance_jobs(&jobs, &self.config);
-        Ok(build_deferred_governance_queue_report(&scoped_jobs, 16))
+        let Some(store_platform) = self.config.store_platform.as_ref() else {
+            return Ok(DeferredGovernanceQueueReport::default());
+        };
+        let conversation_id = self
+            .last_conversation_id
+            .lock()
+            .expect("last conversation id lock")
+            .clone()
+            .or_else(|| self.config.scope.conversation_id.clone())
+            .unwrap_or_else(|| self.config.scope.chat_id.clone());
+        let identity = PostTurnGovernanceIdentityV2::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+            conversation_id,
+            "scope-report",
+        )?;
+        let Some(index) = read_governance_scope_index(store_platform, &identity.scope_id())? else {
+            return Ok(DeferredGovernanceQueueReport::default());
+        };
+        let mut jobs = Vec::new();
+        for reference in index
+            .active_jobs
+            .iter()
+            .chain(index.recent_terminal_jobs.iter())
+        {
+            let job = read_governance_job(store_platform, &reference.job_id)?.ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_report",
+                    "scope index references a missing governance job",
+                )
+            })?;
+            self.validate_governance_job_runtime_scope(&job)?;
+            if reference.state_revision != job.state_revision || reference.status != job.status {
+                return Err(Error::conflict(
+                    "post_turn_governance_report",
+                    "scope index ref differs from governance job authority",
+                ));
+            }
+            jobs.push(job);
+        }
+        Ok(build_deferred_governance_queue_report(&jobs, 16))
+    }
+
+    pub fn active_governance_jobs(
+        &self,
+        request: MemoryGovernanceActiveJobsRequest,
+    ) -> Result<MemoryGovernanceActiveJobsReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        const MAX_ACTIVE_JOB_PAGE: usize = 32;
+        if request.limit == 0 || request.limit > MAX_ACTIVE_JOB_PAGE {
+            return Err(Error::invalid_input(
+                "post_turn_governance_active_jobs",
+                "active governance job limit must be between 1 and 32",
+            ));
+        }
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_active_jobs",
+                "active governance jobs require StorePlatform-backed runtime",
+            )
+        })?;
+        let identity = PostTurnGovernanceIdentityV2::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+            "runtime-scope-job-query",
+            "runtime-scope-job-query",
+        )?;
+        let Some(index) = read_governance_scope_index(store_platform, &identity.scope_id())? else {
+            return Ok(MemoryGovernanceActiveJobsReport {
+                jobs: Vec::new(),
+                has_more: false,
+            });
+        };
+        let has_more = index.active_jobs.len() > request.limit;
+        let mut jobs = Vec::with_capacity(index.active_jobs.len());
+        for reference in &index.active_jobs {
+            let job = read_governance_job(store_platform, &reference.job_id)?.ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_active_jobs",
+                    "runtime scope index references a missing governance job",
+                )
+            })?;
+            self.validate_governance_job_runtime_scope(&job)?;
+            if reference.state_revision != job.state_revision || reference.status != job.status {
+                return Err(Error::conflict(
+                    "post_turn_governance_active_jobs",
+                    "runtime scope index ref differs from governance job authority",
+                ));
+            }
+            jobs.push(job);
+        }
+        let now_secs = self.config.clock.now_secs();
+        jobs.sort_by_key(|job| {
+            let priority = match job.status {
+                PostTurnGovernanceJobStatusV2::Pending => 0,
+                PostTurnGovernanceJobStatusV2::Leased => {
+                    if job.lease_until.is_none_or(|deadline| deadline <= now_secs) {
+                        0
+                    } else {
+                        4
+                    }
+                }
+                PostTurnGovernanceJobStatusV2::RetryWaiting => {
+                    if job
+                        .next_attempt_at
+                        .is_none_or(|eligible_at| eligible_at <= now_secs)
+                    {
+                        0
+                    } else {
+                        4
+                    }
+                }
+                PostTurnGovernanceJobStatusV2::BlockedConfiguration => 1,
+                PostTurnGovernanceJobStatusV2::BlockedPolicy => 2,
+                PostTurnGovernanceJobStatusV2::BlockedCapability => 3,
+                PostTurnGovernanceJobStatusV2::Succeeded
+                | PostTurnGovernanceJobStatusV2::Cancelled
+                | PostTurnGovernanceJobStatusV2::DeadLetter => 5,
+            };
+            (
+                priority,
+                job.next_attempt_at.unwrap_or(job.created_at),
+                job.created_at,
+                job.job_id.clone(),
+            )
+        });
+        jobs.truncate(request.limit);
+        Ok(MemoryGovernanceActiveJobsReport { jobs, has_more })
+    }
+
+    pub fn prepare_governance_attempt_authority(
+        &self,
+        request: MemoryGovernanceAttemptAuthorityRequest,
+    ) -> Result<MemoryGovernanceAttemptAuthorityReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_attempt_authority",
+                "attempt authority requires StorePlatform-backed runtime",
+            )
+        })?;
+        let job = read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+            Error::not_found(
+                "post_turn_governance_attempt_authority",
+                "governance job not found",
+            )
+        })?;
+        self.validate_governance_job_runtime_scope(&job)?;
+        if job.runtime_binding_digest != self.current_runtime_binding_digest() {
+            return Err(Error::conflict(
+                "post_turn_governance_attempt_authority",
+                "governance job runtime binding differs from mounted runtime",
+            ));
+        }
+        self.ensure_governance_transcript_claimable(store_platform, &job)?;
+        let current_privacy_digest = self.current_privacy_digest();
+        if !self
+            .config
+            .privacy_policy
+            .governance_model_disclosure_allowed
+            || current_privacy_digest != job.pinned_privacy_digest
+        {
+            return Err(Error::conflict(
+                "post_turn_governance_attempt_authority",
+                "current privacy authority differs from the pinned governance policy",
+            ));
+        }
+        let transcript = self.load_governance_transcript(&job)?;
+        let authority = PostTurnGovernanceAttemptAuthorityV2 {
+            binding_id: request.binding_id.trim().to_string(),
+            config_revision: request.config_revision,
+            model_id: request.model_id.trim().to_string(),
+            privacy_revision: job.pinned_privacy_revision,
+            privacy_digest: current_privacy_digest,
+            transcript_lifecycle_revision: transcript.updated_at.max(1),
+            disclosure_authority_digest: sha256_field_digest(&[
+                job.job_id.as_bytes(),
+                job.transcript_digest.as_bytes(),
+                request.binding_id.trim().as_bytes(),
+                request.config_revision.to_string().as_bytes(),
+                request.model_id.trim().as_bytes(),
+                job.pinned_privacy_digest.as_bytes(),
+                transcript.updated_at.to_string().as_bytes(),
+            ]),
+        };
+        authority.validate()?;
+        if let Some(pinned) = job.attempt_authority.as_ref() {
+            if pinned != &authority {
+                return Err(Error::conflict(
+                    "post_turn_governance_attempt_authority",
+                    "current execution authority differs from the first claimed attempt",
+                ));
+            }
+        }
+        Ok(MemoryGovernanceAttemptAuthorityReport { authority })
+    }
+
+    pub fn block_governance_job(
+        &self,
+        request: MemoryGovernanceJobBlockRequest,
+    ) -> Result<MemoryGovernanceJobBlockReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_block",
+                "governance job block requires StorePlatform-backed runtime",
+            )
+        })?;
+        let before =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found("post_turn_governance_block", "governance job not found")
+            })?;
+        self.validate_governance_job_runtime_scope(&before)?;
+        let status = match request.kind {
+            MemoryGovernanceBlockKind::Configuration => {
+                PostTurnGovernanceJobStatusV2::BlockedConfiguration
+            }
+            MemoryGovernanceBlockKind::Capability => {
+                PostTurnGovernanceJobStatusV2::BlockedCapability
+            }
+            MemoryGovernanceBlockKind::Policy => PostTurnGovernanceJobStatusV2::BlockedPolicy,
+        };
+        let job = block_governance_job(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(before.identity.conversation_id.clone()),
+            &self.runtime_budget(),
+            &before.job_id,
+            status,
+            &request.reason,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceJobBlockReport { job })
+    }
+
+    pub fn resume_governance_job(
+        &self,
+        request: MemoryGovernanceJobResumeRequest,
+    ) -> Result<MemoryGovernanceJobResumeReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_resume",
+                "governance job resume requires StorePlatform-backed runtime",
+            )
+        })?;
+        let before =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found("post_turn_governance_resume", "governance job not found")
+            })?;
+        self.validate_governance_job_runtime_scope(&before)?;
+        let job = resume_governance_job(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(before.identity.conversation_id.clone()),
+            &self.runtime_budget(),
+            &before.job_id,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceJobResumeReport { job })
+    }
+
+    pub fn block_claimed_governance_job(
+        &self,
+        request: MemoryGovernanceClaimedJobBlockRequest,
+    ) -> Result<MemoryGovernanceClaimedJobBlockReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_block_claimed",
+                "claimed governance block requires StorePlatform-backed runtime",
+            )
+        })?;
+        let before =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found(
+                    "post_turn_governance_block_claimed",
+                    "governance job not found",
+                )
+            })?;
+        self.validate_governance_job_runtime_scope(&before)?;
+        let status = match request.kind {
+            MemoryGovernanceBlockKind::Configuration => {
+                PostTurnGovernanceJobStatusV2::BlockedConfiguration
+            }
+            MemoryGovernanceBlockKind::Capability => {
+                PostTurnGovernanceJobStatusV2::BlockedCapability
+            }
+            MemoryGovernanceBlockKind::Policy => PostTurnGovernanceJobStatusV2::BlockedPolicy,
+        };
+        let job = block_claimed_governance_job(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(before.identity.conversation_id.clone()),
+            &self.runtime_budget(),
+            &before.job_id,
+            &request.lease_owner,
+            request.lease_epoch,
+            status,
+            &request.reason,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceClaimedJobBlockReport { job })
+    }
+
+    pub fn fail_governance_job(
+        &self,
+        request: MemoryGovernanceJobFailRequest,
+    ) -> Result<MemoryGovernanceJobFailReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_fail",
+                "governance job failure requires StorePlatform-backed runtime",
+            )
+        })?;
+        let before =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found("post_turn_governance_fail", "governance job not found")
+            })?;
+        self.validate_governance_job_runtime_scope(&before)?;
+        let job = dead_letter_governance_job(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(before.identity.conversation_id.clone()),
+            &self.runtime_budget(),
+            &before.job_id,
+            &request.lease_owner,
+            request.lease_epoch,
+            request.error_class,
+            &request.reason,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceJobFailReport { job })
+    }
+
+    pub fn reconcile_governance_intents(
+        &self,
+        request: MemoryGovernanceReconcileRequest,
+    ) -> Result<MemoryGovernanceReconcileReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        reject_legacy_governance_queue(self.config.platform.as_ref())?;
+        const MAX_RECONCILIATION_TURNS: usize = 32;
+        if request.limit == 0 || request.limit > MAX_RECONCILIATION_TURNS {
+            return Err(Error::invalid_input(
+                "post_turn_governance_reconcile",
+                "reconciliation limit must be between 1 and 32 turns",
+            ));
+        }
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_reconcile",
+                "governance reconciliation requires StorePlatform-backed runtime",
+            )
+        })?;
+        let conversation_id = self
+            .last_conversation_id
+            .lock()
+            .expect("last conversation id lock")
+            .clone()
+            .or_else(|| self.config.scope.conversation_id.clone())
+            .unwrap_or_else(|| self.config.scope.chat_id.clone());
+        let key = ConversationKey::new(
+            &self.config.memory_space_id,
+            &self.config.scope.channel,
+            &conversation_id,
+        )?;
+        let scope_identity = PostTurnGovernanceIdentityV2::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+            &conversation_id,
+            "reconciliation-scope",
+        )?;
+        let before_index = read_governance_scope_index(store_platform, &scope_identity.scope_id())?;
+        let existing_cursor = before_index
+            .as_ref()
+            .and_then(|index| index.reconciliation_cursor(&conversation_id));
+        let cursor = if let Some(existing_cursor) = existing_cursor {
+            let turn = self
+                .config
+                .platform
+                .conversation_transcript_store()
+                .get_turn(&key, &self.config.subject_id, &existing_cursor.turn_id)?
+                .ok_or_else(|| {
+                    Error::conflict(
+                        "post_turn_governance_reconcile",
+                        "reconciliation cursor turn is missing",
+                    )
+                })?;
+            if turn.sequence != existing_cursor.sequence {
+                return Err(Error::conflict(
+                    "post_turn_governance_reconcile",
+                    "reconciliation cursor sequence differs from transcript authority",
+                ));
+            }
+            Some(TranscriptTurnCursor::for_record(&turn).encode()?)
+        } else {
+            None
+        };
+        let page = self
+            .config
+            .platform
+            .conversation_transcript_store()
+            .list_turns_page(
+                &key,
+                &self.config.subject_id,
+                cursor.as_deref(),
+                request.limit,
+            )?;
+        if page.turns.is_empty() {
+            return Ok(MemoryGovernanceReconcileReport {
+                inspected: 0,
+                created: 0,
+                cursor_sequence: before_index
+                    .as_ref()
+                    .and_then(|index| index.reconciliation_cursor(&conversation_id))
+                    .map_or(0, |cursor| cursor.sequence),
+                has_more: false,
+            });
+        }
+        let now_secs = self.config.clock.now_secs();
+        let jobs = page
+            .turns
+            .iter()
+            .map(|turn| {
+                self.build_governance_job_from_transcript(
+                    turn,
+                    &self.config.scope.chat_id,
+                    0,
+                    "reconciled_transcript_intent",
+                    now_secs,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let last = page.turns.last().expect("non-empty page");
+        let created = reconcile_governance_intents(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(conversation_id),
+            &self.runtime_budget(),
+            &jobs,
+            now_secs,
+        )?;
+        Ok(MemoryGovernanceReconcileReport {
+            inspected: jobs.len(),
+            created,
+            cursor_sequence: last.sequence,
+            has_more: page.has_more,
+        })
+    }
+
+    pub fn governance_job_status(
+        &self,
+        request: MemoryGovernanceJobStatusRequest,
+    ) -> Result<MemoryGovernanceJobStatusReport> {
+        self.ensure_visible("inspect.governance_job", self.capabilities.inspection)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_status",
+                "governance job status requires StorePlatform-backed runtime",
+            )
+        })?;
+        let job = read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+            Error::not_found("post_turn_governance_status", "governance job not found")
+        })?;
+        self.validate_governance_job_runtime_scope(&job)?;
+        Ok(MemoryGovernanceJobStatusReport { job })
+    }
+
+    pub fn claim_governance_job(
+        &self,
+        request: MemoryGovernanceJobClaimRequest,
+    ) -> Result<MemoryGovernanceJobClaimReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        reject_legacy_governance_queue(self.config.platform.as_ref())?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_claim",
+                "governance job claim requires StorePlatform-backed runtime",
+            )
+        })?;
+        let before =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found("post_turn_governance_claim", "governance job not found")
+            })?;
+        self.validate_governance_job_runtime_scope(&before)?;
+        self.ensure_governance_transcript_claimable(store_platform, &before)?;
+        let scope = self
+            .memory_write_transaction_scope()
+            .with_conversation(before.identity.conversation_id.clone());
+        let job = claim_governance_job(
+            store_platform,
+            scope,
+            &self.runtime_budget(),
+            &before.job_id,
+            &request.lease_owner,
+            request.lease_until,
+            request.authority,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceJobClaimReport { job })
+    }
+
+    pub fn retry_governance_job(
+        &self,
+        request: MemoryGovernanceJobRetryRequest,
+    ) -> Result<MemoryGovernanceJobRetryReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_retry",
+                "governance job retry requires StorePlatform-backed runtime",
+            )
+        })?;
+        let before =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found("post_turn_governance_retry", "governance job not found")
+            })?;
+        self.validate_governance_job_runtime_scope(&before)?;
+        let job = retry_governance_job(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(before.identity.conversation_id.clone()),
+            &self.runtime_budget(),
+            &before.job_id,
+            &request.lease_owner,
+            request.lease_epoch,
+            request.error_class,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceJobRetryReport { job })
+    }
+
+    pub fn renew_governance_job_lease(
+        &self,
+        request: MemoryGovernanceJobRenewRequest,
+    ) -> Result<MemoryGovernanceJobRenewReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_renew",
+                "governance lease renewal requires StorePlatform-backed runtime",
+            )
+        })?;
+        let before =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found("post_turn_governance_renew", "governance job not found")
+            })?;
+        self.validate_governance_job_runtime_scope(&before)?;
+        let job = renew_governance_job_lease(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(before.identity.conversation_id.clone()),
+            &self.runtime_budget(),
+            &before.job_id,
+            &request.lease_owner,
+            request.lease_epoch,
+            request.lease_until,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceJobRenewReport { job })
+    }
+
+    pub fn run_claimed_governance(
+        &self,
+        http: &mut (dyn LlmHttpClient + '_),
+        llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
+        request: MemoryGovernanceJobRunRequest,
+    ) -> Result<MemoryGovernanceJobRunReport> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.run_claimed_governance(http, llm, request)
+            });
+        }
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        reject_legacy_governance_queue(self.config.platform.as_ref())?;
+        let governance_llm: &(dyn CoreLlmClient + Send + Sync) =
+            if let Some(configured) = self.config.llm.as_deref() {
+                configured
+            } else {
+                llm.ok_or_else(|| {
+                    Error::config("post_turn_governance_run", "governance llm is unavailable")
+                })?
+            };
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_run",
+                "governance execution requires StorePlatform-backed runtime",
+            )
+        })?;
+        let leased =
+            read_governance_job(store_platform, request.job_id.trim())?.ok_or_else(|| {
+                Error::not_found("post_turn_governance_run", "governance job not found")
+            })?;
+        self.validate_governance_job_runtime_scope(&leased)?;
+        if leased.status == PostTurnGovernanceJobStatusV2::Succeeded
+            && leased.lease_epoch == request.lease_epoch
+            && leased.receipt.as_ref().is_some_and(|receipt| {
+                governance_completion_transaction_id(&leased.job_id, request.lease_epoch)
+                    .is_ok_and(|transaction_id| receipt.semantic_transaction_id == transaction_id)
+            })
+        {
+            return Ok(MemoryGovernanceJobRunReport {
+                job: leased,
+                private_garden_self_work: PostTurnPrivateGardenReport::skipped(
+                    "governance_already_completed",
+                ),
+                semantic_governance: PostTurnSemanticGovernanceReport::skipped(
+                    "governance_already_completed",
+                ),
+            });
+        }
+        if leased.status != PostTurnGovernanceJobStatusV2::Leased
+            || leased.lease_owner.as_deref() != Some(request.lease_owner.as_str())
+            || leased.lease_epoch != request.lease_epoch
+        {
+            return Err(Error::conflict(
+                "post_turn_governance_run",
+                "run authority differs from the active governance lease",
+            ));
+        }
+        self.ensure_governance_disclosure_authority(store_platform, &leased)?;
+        let transcript = self.load_governance_transcript(&leased)?;
+        let turn = canonical_turn_delta_from_transcript(&leased, &transcript)?;
+        let finalize_request = MemoryTurnFinalizeRequest {
+            turn,
+            tool_calls: leased.tool_call_count,
+            runtime_skill_selected_ids: Vec::new(),
+            task_learning_selected_ids: Vec::new(),
+            reuse_outcome_note: String::new(),
+            tool_usage_feedback: None,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        };
+        let platform = self.config.platform.as_ref();
+        let session_store = self.transcript_backed_session_store(
+            platform.session_store(),
+            TranscriptReplayView::RawOwnerOnly,
+        );
+        let session_summary_store = platform.session_summary_store();
+        let mut disclosure_http = GovernanceDisclosureHttpClient {
+            runtime: self,
+            job_id: leased.job_id.clone(),
+            lease_owner: request.lease_owner.clone(),
+            lease_epoch: request.lease_epoch,
+            inner: http,
+        };
+
+        let (private_garden_self_work, mut mutation_plan) = self.plan_post_turn_private_garden(
+            &mut disclosure_http,
+            governance_llm,
+            &finalize_request,
+            session_store.as_ref(),
+            session_summary_store.as_ref(),
+            true,
+        )?;
+        let semantic_refresh_allowed = finalize_request.turn.source.ingress == IngressKind::User
+            && finalize_request.turn.source.channel != "cron"
+            && !finalize_request.turn.external_content_used
+            && !latest_user_content(&finalize_request.turn).is_empty()
+            && assistant_content(&finalize_request.turn).is_some();
+        let long_term_refresh = if semantic_refresh_allowed {
+            let draft_admission_policy =
+                self.long_term_draft_admission_policy(self.config.clock.now_secs())?;
+            let (outcome, plan) = self.plan_long_term_memory_refresh_transactional(
+                &mut disclosure_http,
+                governance_llm,
+                LongTermMemoryRefreshTransactionContext {
+                    chat_id: &self.config.scope.chat_id,
+                    pressure: finalize_request.pressure,
+                    profile: self.memory_profile(),
+                    strict_model_contract: true,
+                    memory_store: platform.memory_store().as_ref(),
+                    session_store: session_store.as_ref(),
+                    session_summary_store: session_summary_store.as_ref(),
+                    long_term_memory_store: self.config.long_term_memory_read_store.as_ref(),
+                    extraction_state_store: platform
+                        .long_term_memory_extraction_state_store()
+                        .as_ref(),
+                    turn_ledger_store: platform.turn_ledger_store().as_ref(),
+                    skill_storage: platform.skill_storage().as_ref(),
+                    draft_admission_policy: draft_admission_policy
+                        .as_ref()
+                        .map(|policy| policy as &dyn LongTermMemoryDraftAdmissionPolicy),
+                },
+            )?;
+            mutation_plan.merge(plan)?;
+            Some(outcome)
+        } else {
+            None
+        };
+
+        self.ensure_governance_disclosure_authority(store_platform, &leased)?;
+        self.append_graph_owner_cascade_mutations(
+            &mut mutation_plan.mutations,
+            &mut mutation_plan.preconditions,
+        )?;
+        self.append_graph_owner_closure_preconditions(
+            &mutation_plan.mutations,
+            &mut mutation_plan.preconditions,
+        )?;
+        let transaction_id =
+            governance_completion_transaction_id(&leased.job_id, leased.lease_epoch)?;
+        bind_control_audit_transaction_id(&mut mutation_plan.mutations, &transaction_id)?;
+        let completed = complete_governance_job_with_memory_plan(
+            store_platform,
+            self.memory_write_transaction_scope()
+                .with_conversation(leased.identity.conversation_id.clone()),
+            &self.runtime_budget(),
+            &leased.job_id,
+            &request.lease_owner,
+            request.lease_epoch,
+            mutation_plan.mutations,
+            mutation_plan.preconditions,
+            self.config.clock.now_secs(),
+        )?;
+        Ok(MemoryGovernanceJobRunReport {
+            job: completed,
+            private_garden_self_work,
+            semantic_governance: semantic_report_from_atomic_refresh(long_term_refresh.as_ref()),
+        })
+    }
+
+    fn validate_governance_job_runtime_scope(&self, job: &PostTurnGovernanceJobV2) -> Result<()> {
+        if job.identity.memory_space_id != self.config.memory_space_id
+            || job.identity.mounted_subject_id != self.config.subject_id
+            || job.identity.channel_id != self.config.scope.channel
+            || job.identity.chat_id != self.config.scope.chat_id
+        {
+            return Err(Error::config(
+                "post_turn_governance_scope",
+                "governance job identity differs from mounted runtime",
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_governance_transcript(
+        &self,
+        job: &PostTurnGovernanceJobV2,
+    ) -> Result<TranscriptTurnRecord> {
+        let key = ConversationKey::new(
+            &job.identity.memory_space_id,
+            &job.identity.channel_id,
+            &job.identity.conversation_id,
+        )?;
+        self.config
+            .platform
+            .conversation_transcript_store()
+            .get_turn(
+                &key,
+                &job.identity.mounted_subject_id,
+                &job.identity.turn_id,
+            )?
+            .ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_run",
+                    "canonical transcript authority is missing",
+                )
+            })
+    }
+
+    fn ensure_governance_disclosure_authority(
+        &self,
+        store_platform: &StorePlatform,
+        leased: &PostTurnGovernanceJobV2,
+    ) -> Result<()> {
+        let current = read_governance_job(store_platform, &leased.job_id)?.ok_or_else(|| {
+            Error::not_found(
+                "post_turn_governance_disclosure",
+                "governance job not found",
+            )
+        })?;
+        if current.status != PostTurnGovernanceJobStatusV2::Leased
+            || current.lease_owner != leased.lease_owner
+            || current.lease_epoch != leased.lease_epoch
+            || current.transcript_digest != leased.transcript_digest
+            || current
+                .lease_until
+                .is_none_or(|lease_until| lease_until <= self.config.clock.now_secs())
+        {
+            return Err(Error::conflict(
+                "post_turn_governance_disclosure",
+                "governance disclosure authority is stale",
+            ));
+        }
+        let authority = current.attempt_authority.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_disclosure",
+                "leased governance job is missing attempt authority",
+            )
+        })?;
+        if authority.privacy_revision < current.pinned_privacy_revision
+            || authority.privacy_digest != current.pinned_privacy_digest
+            || authority.privacy_digest != self.current_privacy_digest()
+            || !self
+                .config
+                .privacy_policy
+                .governance_model_disclosure_allowed
+        {
+            return Err(Error::conflict(
+                "post_turn_governance_disclosure",
+                "attempt privacy authority differs from pinned governance policy",
+            ));
+        }
+        self.ensure_governance_transcript_claimable(store_platform, &current)
+    }
+
+    fn ensure_governance_transcript_claimable(
+        &self,
+        store_platform: &StorePlatform,
+        job: &PostTurnGovernanceJobV2,
+    ) -> Result<()> {
+        let key = ConversationKey::new(
+            &job.identity.memory_space_id,
+            &job.identity.channel_id,
+            &job.identity.conversation_id,
+        )?;
+        let record = self
+            .config
+            .platform
+            .conversation_transcript_store()
+            .get_turn(
+                &key,
+                &job.identity.mounted_subject_id,
+                &job.identity.turn_id,
+            )?
+            .ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_claim",
+                    "canonical transcript authority is missing",
+                )
+            })?;
+        if matches!(
+            record.lifecycle_state,
+            TranscriptLifecycleState::Masked | TranscriptLifecycleState::RawDeleted
+        ) || matches!(
+            record.redaction_state,
+            TranscriptRedactionState::Masked | TranscriptRedactionState::RawDeleted
+        ) {
+            let reason = if matches!(record.lifecycle_state, TranscriptLifecycleState::RawDeleted)
+                || matches!(record.redaction_state, TranscriptRedactionState::RawDeleted)
+            {
+                "transcript_raw_deleted"
+            } else {
+                "transcript_masked"
+            };
+            cancel_governance_job(
+                store_platform,
+                self.memory_write_transaction_scope()
+                    .with_conversation(job.identity.conversation_id.clone()),
+                &self.runtime_budget(),
+                &job.job_id,
+                reason,
+                self.config.clock.now_secs(),
+            )?;
+            return Err(Error::conflict(
+                "post_turn_governance_claim",
+                "canonical transcript no longer permits governance",
+            ));
+        }
+        if record.sequence != job.transcript_sequence
+            || post_turn_governance_transcript_digest(&record)? != job.transcript_digest
+        {
+            return Err(Error::conflict(
+                "post_turn_governance_claim",
+                "canonical transcript authority differs from the durable intent",
+            ));
+        }
+        Ok(())
+    }
+
+    fn cancel_governance_for_transcript_lifecycle(
+        &self,
+        key: &ConversationKey,
+        turn_id: Option<&str>,
+        transition: TranscriptLifecycleTransition,
+    ) -> Result<()> {
+        let reason = match transition {
+            TranscriptLifecycleTransition::Mask => "transcript_masked",
+            TranscriptLifecycleTransition::DeleteRaw => "transcript_raw_deleted",
+            TranscriptLifecycleTransition::Archive | TranscriptLifecycleTransition::Restore => {
+                return Ok(())
+            }
+        };
+        let Some(store_platform) = self.config.store_platform.as_ref() else {
+            return Ok(());
+        };
+        let identity = PostTurnGovernanceIdentityV2::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &key.channel_id,
+            &self.config.scope.chat_id,
+            &key.conversation_id,
+            turn_id.unwrap_or("scope-cancellation"),
+        )?;
+        let Some(index) = read_governance_scope_index(store_platform, &identity.scope_id())? else {
+            return Ok(());
+        };
+        for reference in index.active_jobs {
+            let job = read_governance_job(store_platform, &reference.job_id)?.ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_cancel",
+                    "scope index references a missing governance job",
+                )
+            })?;
+            if turn_id.is_some_and(|turn_id| job.identity.turn_id != turn_id) {
+                continue;
+            }
+            self.validate_governance_job_runtime_scope(&job)?;
+            cancel_governance_job(
+                store_platform,
+                self.memory_write_transaction_scope()
+                    .with_conversation(job.identity.conversation_id.clone()),
+                &self.runtime_budget(),
+                &job.job_id,
+                reason,
+                self.config.clock.now_secs(),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn run_retention_compaction(
@@ -13371,9 +14464,7 @@ impl MemoryRuntime {
             self.memory_profile(),
             self.config.clock.now_secs(),
         );
-        let deferred_jobs = read_deferred_governance_jobs(platform)?;
-        let scoped_deferred_jobs = scoped_deferred_governance_jobs(&deferred_jobs, &self.config);
-        let deferred_governance = build_deferred_governance_queue_report(&scoped_deferred_jobs, 16);
+        let deferred_governance = self.deferred_governance_report()?;
         self.audit("inspect", true, "inspection_completed");
         let surface = bm_core::platform::build_memory_operator_surface_with_capabilities(
             platform,
@@ -13666,6 +14757,8 @@ impl MemoryRuntime {
             request.channel_id,
             request.conversation_id,
         )?;
+        let governed_turn_id = request.turn_id.clone();
+        let governance_transition = request.transition;
         self.ensure_transcript_lifecycle_has_facet_impact_or_fails_closed(
             &key,
             request.turn_id.as_deref(),
@@ -13675,13 +14768,18 @@ impl MemoryRuntime {
         let mut transcript = transcript_store.apply_lifecycle_request(
             &self.config.scoped_runtime.mounted_subject_id,
             &CoreTranscriptLifecycleRequest {
-                key,
+                key: key.clone(),
                 turn_id: request.turn_id,
                 transition: request.transition,
                 reason: request.reason,
                 requested_by: self.config.identity.owner_id.clone(),
                 requested_at: self.config.clock.now_secs(),
             },
+        )?;
+        self.cancel_governance_for_transcript_lifecycle(
+            &key,
+            governed_turn_id.as_deref(),
+            governance_transition,
         )?;
         sanitize_transcript_lifecycle_report_for_view(
             &mut transcript,
@@ -14462,6 +15560,181 @@ impl MemoryRuntime {
             }
             MemoryRuntimeSystemKind::LinuxFull => PromptParticipationPlan::full(),
         }
+    }
+}
+
+struct GovernanceDisclosureHttpClient<'a> {
+    runtime: &'a MemoryRuntime,
+    job_id: String,
+    lease_owner: String,
+    lease_epoch: u64,
+    inner: &'a mut dyn LlmHttpClient,
+}
+
+impl GovernanceDisclosureHttpClient<'_> {
+    fn revalidate_before_egress(&self) -> Result<()> {
+        let store = self.runtime.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_disclosure",
+                "StorePlatform authority is unavailable",
+            )
+        })?;
+        let job = read_governance_job(store, &self.job_id)?.ok_or_else(|| {
+            Error::not_found(
+                "post_turn_governance_disclosure",
+                "governance job not found",
+            )
+        })?;
+        if job.lease_owner.as_deref() != Some(self.lease_owner.as_str())
+            || job.lease_epoch != self.lease_epoch
+        {
+            return Err(Error::conflict(
+                "post_turn_governance_disclosure",
+                "network disclosure lease is stale",
+            ));
+        }
+        self.runtime
+            .ensure_governance_disclosure_authority(store, &job)
+    }
+}
+
+impl LlmHttpClient for GovernanceDisclosureHttpClient<'_> {
+    fn do_post(
+        &mut self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<(u16, bm_core::platform::ResponseBody)> {
+        self.revalidate_before_egress()?;
+        self.inner.do_post(url, headers, body)
+    }
+
+    fn do_post_streaming(
+        &mut self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        max_response_bytes: Option<usize>,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<u16> {
+        self.revalidate_before_egress()?;
+        self.inner
+            .do_post_streaming(url, headers, body, max_response_bytes, on_chunk)
+    }
+
+    fn reset_connection_for_retry(&mut self) {
+        self.inner.reset_connection_for_retry();
+    }
+}
+
+fn canonical_turn_delta_from_transcript(
+    job: &PostTurnGovernanceJobV2,
+    record: &TranscriptTurnRecord,
+) -> Result<CanonicalTurnDelta> {
+    if record.key.memory_space_id != job.identity.memory_space_id
+        || record.key.channel_id != job.identity.channel_id
+        || record.key.conversation_id != job.identity.conversation_id
+        || record.turn_id != job.identity.turn_id
+        || record.subject != job.identity.mounted_subject_id
+        || record.sequence != job.transcript_sequence
+        || post_turn_governance_transcript_digest(record)? != job.transcript_digest
+    {
+        return Err(Error::conflict(
+            "post_turn_governance_run",
+            "canonical transcript differs from durable governance authority",
+        ));
+    }
+    let convert_message =
+        |message: &bm_core::memory::TranscriptMessageRecord| TranscriptInputMessage {
+            role: message.role.clone(),
+            content: message.content.clone(),
+            authority: message.authority,
+            observed_at: message.observed_at,
+            speaker_id: message.actor.speaker_id.clone(),
+            speaker_kind: message.actor.speaker_kind.clone(),
+        };
+    Ok(CanonicalTurnDelta {
+        turn_id: record.turn_id.clone(),
+        conversation: bm_core::memory::ConversationScope {
+            channel: job.identity.channel_id.clone(),
+            chat_id: job.identity.chat_id.clone(),
+            conversation_id: Some(job.identity.conversation_id.clone()),
+        },
+        subject: record.subject.clone(),
+        delivery_status: record.delivery_status,
+        source: record.source.clone(),
+        actor: Some(record.actor.clone()),
+        input_messages: record.input_messages.iter().map(convert_message).collect(),
+        assistant_message: record.assistant_message.as_ref().map(convert_message),
+        tool_observations: record.tool_observations.clone(),
+        external_content_used: record.external_content_used,
+        candidate_ids: record.candidate_ids.clone(),
+    })
+}
+
+fn semantic_report_from_atomic_refresh(
+    refresh: Option<&LongTermMemoryRefreshOutcome>,
+) -> PostTurnSemanticGovernanceReport {
+    let (decision, authority, accepted_count, reason) = match refresh {
+        Some(LongTermMemoryRefreshOutcome::Processed { changed_count, .. })
+            if *changed_count > 0 =>
+        {
+            (
+                GovernedWriteDecision::Accepted,
+                MemoryWriteAuthority::LlmGovernedSemantic,
+                *changed_count,
+                "long_term_extraction_applied",
+            )
+        }
+        Some(LongTermMemoryRefreshOutcome::Processed { .. }) => (
+            GovernedWriteDecision::NotApplicable,
+            MemoryWriteAuthority::LlmGovernedSemantic,
+            0,
+            "long_term_extraction_noop",
+        ),
+        Some(LongTermMemoryRefreshOutcome::Deferred { .. }) => (
+            GovernedWriteDecision::Deferred,
+            MemoryWriteAuthority::RuntimeDeterministic,
+            0,
+            "long_term_extraction_deferred",
+        ),
+        Some(LongTermMemoryRefreshOutcome::Failed { .. }) => (
+            GovernedWriteDecision::Rejected,
+            MemoryWriteAuthority::LlmGovernedSemantic,
+            0,
+            "long_term_extraction_failed",
+        ),
+        None => (
+            GovernedWriteDecision::NotApplicable,
+            MemoryWriteAuthority::RuntimeDeterministic,
+            0,
+            "long_term_extraction_not_eligible",
+        ),
+    };
+    let proposal_count = if accepted_count > 0 {
+        accepted_count
+    } else {
+        usize::from(decision != GovernedWriteDecision::NotApplicable)
+    };
+    PostTurnSemanticGovernanceReport {
+        attempted: true,
+        executed: true,
+        skipped_reason: None,
+        proposal_count,
+        accepted_count,
+        rejected_count: usize::from(decision == GovernedWriteDecision::Rejected),
+        deferred_count: usize::from(decision == GovernedWriteDecision::Deferred),
+        plane_reports: vec![MemoryPlaneGovernanceReport {
+            domain: MemoryWriteDomain::Program,
+            plane: "long_term_memory".to_string(),
+            authority,
+            decision,
+            reason: reason.to_string(),
+            evidence_refs: Vec::new(),
+            privacy_decision: "runtime_policy".to_string(),
+            profile_decision: "profile_capability_checked".to_string(),
+        }],
+        soul_candidate_handoffs: Vec::new(),
     }
 }
 
@@ -20206,105 +21479,17 @@ fn semantic_report_from_maintenance(
 
 const REL_PATH_DEFERRED_GOVERNANCE_JOBS: &str = "memory/governance_jobs/pending.json";
 
-fn enqueue_deferred_governance_job(
-    platform: &dyn Platform,
-    scope: &MemoryScope,
-    session_commit: &bm_core::memory::SessionTurnCommitReport,
-    memory_space_id: &str,
-    request: &MemoryTurnFinalizeRequest,
-    reason: &'static str,
-    now_secs: u64,
-) -> Result<()> {
-    if !session_commit.committed {
-        return Ok(());
-    }
-    let mut jobs = read_deferred_governance_jobs(platform)?;
-    let memory_space_id = memory_space_id.trim();
-    let subject_id = request.turn.subject.trim();
-    let idempotency_key = format!(
-        "{}:{}:{}:{}:{}",
-        memory_space_id,
-        subject_id,
-        scope.channel,
-        session_commit.chat_id,
-        if request.turn.turn_id.trim().is_empty() {
-            session_commit.after_count.to_string()
-        } else {
-            request.turn.turn_id.trim().to_string()
-        }
-    );
-    if jobs
-        .iter()
-        .any(|job| job.idempotency_key == idempotency_key)
+fn reject_legacy_governance_queue(platform: &dyn Platform) -> Result<()> {
+    if platform
+        .state_fs()
+        .read(REL_PATH_DEFERRED_GOVERNANCE_JOBS)?
+        .is_some_and(|bytes| !bytes.is_empty())
     {
-        return Ok(());
+        return Err(Error::config(
+            "post_turn_governance_legacy_queue",
+            "legacy_governance_queue_reset_required",
+        ));
     }
-    jobs.push(DeferredGovernanceJob {
-        job_id: format!("governance-{:016x}", fnv1a64(idempotency_key.as_bytes())),
-        idempotency_key,
-        status: DeferredGovernanceJobStatus::Pending,
-        memory_space_id: memory_space_id.to_string(),
-        subject_id: subject_id.to_string(),
-        channel: scope.channel.clone(),
-        chat_id: session_commit.chat_id.clone(),
-        conversation_id: request.turn.conversation.conversation_id.clone(),
-        turn_id: request.turn.turn_id.trim().to_string(),
-        candidate_ids: request.turn.candidate_ids.clone(),
-        reason: reason.to_string(),
-        retry_policy: "standard_backoff".to_string(),
-        created_at: now_secs,
-        attempts: 0,
-        turn: Some(request.turn.clone()),
-        tool_calls: request.tool_calls,
-        runtime_skill_selected_ids: request.runtime_skill_selected_ids.clone(),
-        task_learning_selected_ids: request.task_learning_selected_ids.clone(),
-        reuse_outcome_note: request.reuse_outcome_note.clone(),
-        pressure: request.pressure,
-        mode_input: request.mode_input,
-        last_error: None,
-    });
-    write_deferred_governance_jobs(platform, &jobs)
-}
-
-fn deferred_governance_job_matches_runtime(
-    job: &DeferredGovernanceJob,
-    config: &MemoryRuntimeConfig,
-) -> bool {
-    job.memory_space_id.trim() == config.memory_space_id
-        && job.subject_id.trim() == config.subject_id
-        && job.channel.trim() == config.scope.channel
-        && job.chat_id.trim() == config.scope.chat_id
-}
-
-fn scoped_deferred_governance_jobs(
-    jobs: &[DeferredGovernanceJob],
-    config: &MemoryRuntimeConfig,
-) -> Vec<DeferredGovernanceJob> {
-    jobs.iter()
-        .filter(|job| deferred_governance_job_matches_runtime(job, config))
-        .cloned()
-        .collect()
-}
-
-fn read_deferred_governance_jobs(platform: &dyn Platform) -> Result<Vec<DeferredGovernanceJob>> {
-    let state_fs = platform.state_fs();
-    match state_fs.read(REL_PATH_DEFERRED_GOVERNANCE_JOBS)? {
-        Some(bytes) if !bytes.is_empty() => {
-            serde_json::from_slice::<Vec<DeferredGovernanceJob>>(&bytes)
-                .map_err(|error| Error::config("deferred_governance_jobs", error.to_string()))
-        }
-        _ => Ok(Vec::new()),
-    }
-}
-
-fn write_deferred_governance_jobs(
-    platform: &dyn Platform,
-    jobs: &[DeferredGovernanceJob],
-) -> Result<()> {
-    let state_fs = platform.state_fs();
-    let bytes = serde_json::to_vec_pretty(&jobs)
-        .map_err(|error| Error::config("deferred_governance_jobs", error.to_string()))?;
-    state_fs.write(REL_PATH_DEFERRED_GOVERNANCE_JOBS, &bytes)?;
     Ok(())
 }
 
@@ -20315,6 +21500,15 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn sha256_field_digest(fields: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for field in fields {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn bound_text_for_budget(value: &str, max_chars: usize, max_bytes: usize) -> String {
@@ -21157,6 +22351,10 @@ struct MemoryLongTermExtractionTransactionPlan {
 }
 
 struct LongTermMemoryRefreshTransactionContext<'a> {
+    chat_id: &'a str,
+    pressure: PressureLevel,
+    profile: MemoryProfile,
+    strict_model_contract: bool,
     memory_store: &'a dyn bm_core::memory::MemoryStore,
     session_store: &'a dyn SessionStore,
     session_summary_store: &'a dyn bm_core::memory::SessionSummaryStore,
@@ -22634,7 +23832,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             }
         }
         let mut entries = map.into_values().collect::<Vec<_>>();
-        entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
         if limit > 0 {
             entries.truncate(limit);
         }
@@ -23454,6 +24652,7 @@ fn plan_control_writes(
 struct PlanningPrivateGardenStore<'a> {
     base: &'a dyn PrivateGardenStore,
     changes: Mutex<BTreeMap<String, Option<PrivateGardenDoc>>>,
+    read_set: Mutex<BTreeMap<String, Option<PrivateGardenDoc>>>,
 }
 
 impl<'a> PlanningPrivateGardenStore<'a> {
@@ -23461,18 +24660,38 @@ impl<'a> PlanningPrivateGardenStore<'a> {
         Self {
             base,
             changes: Mutex::new(BTreeMap::new()),
+            read_set: Mutex::new(BTreeMap::new()),
         }
     }
 
-    fn into_mutations(self) -> Result<Vec<StoreMutation>> {
+    fn into_plan(self) -> Result<MemoryStoreMutationPlan> {
         let changes = self
             .changes
             .into_inner()
             .map_err(|_| Error::config("private_garden_plan", "planning store poisoned"))?;
-        changes
-            .into_iter()
-            .map(|(key, value)| match value {
-                Some(doc) => Ok(StoreMutation::PutJson {
+        let read_set = self
+            .read_set
+            .into_inner()
+            .map_err(|_| Error::config("private_garden_plan", "read set poisoned"))?;
+        let mut plan = MemoryStoreMutationPlan::default();
+        for (key, value) in changes {
+            let before = read_set.get(&key).ok_or_else(|| {
+                Error::config(
+                    "private_garden_plan",
+                    "private garden mutation is missing its planning read",
+                )
+            })?;
+            plan.preconditions.push(json_precondition(
+                "private_garden",
+                &key,
+                before
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| Error::config("private_garden_plan", error.to_string()))?,
+            ));
+            plan.mutations.push(match value {
+                Some(doc) => StoreMutation::PutJson {
                     namespace: "private_garden".to_string(),
                     key: key.clone(),
                     value: serde_json::to_value(&doc)
@@ -23480,16 +24699,17 @@ impl<'a> PlanningPrivateGardenStore<'a> {
                     event_kind: MemoryStoreEventKind::MemoryWrite,
                     plane: "private_garden".to_string(),
                     record_key: key,
-                }),
-                None => Ok(StoreMutation::DeleteJson {
+                },
+                None => StoreMutation::DeleteJson {
                     namespace: "private_garden".to_string(),
                     key: key.clone(),
                     event_kind: MemoryStoreEventKind::MemoryDelete,
                     plane: "private_garden".to_string(),
                     record_key: key,
-                }),
-            })
-            .collect()
+                },
+            });
+        }
+        Ok(plan)
     }
 }
 
@@ -23520,7 +24740,7 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
             }
         }
         let mut rows = records.into_values().collect::<Vec<_>>();
-        rows.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
         if limit > 0 {
             rows.truncate(limit);
         }
@@ -23539,7 +24759,12 @@ impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
         {
             return Ok(value);
         }
-        self.base.read(mounted_subject_id, &path)
+        let value = self.base.read(mounted_subject_id, &path)?;
+        self.read_set
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key, value.clone());
+        Ok(value)
     }
 
     fn write(
@@ -24217,6 +25442,7 @@ impl MemoryRuntimeBuilder {
             lifecycle: RuntimeLifecycleEngine,
             agent_tool_registries: Mutex::new(self.agent_tool_registries),
             last_conversation_id: Mutex::new(None),
+            governance_model_policy_revision: Mutex::new(1),
         };
         let lifecycle = runtime.start_lifecycle(
             RuntimeLifecycleOperation::Open,

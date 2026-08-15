@@ -23,6 +23,28 @@ pub(crate) fn parse_llm_json_payload(raw: &str) -> LlmJsonPayload {
     LlmJsonPayload::Absent
 }
 
+/// Parse the narrow wire shape accepted by production governance paths.
+///
+/// Models commonly wrap an otherwise valid JSON value in one Markdown code
+/// fence.  Accept that transport wrapper, but never search explanatory prose
+/// for an embedded value: strict callers must be able to fail closed when the
+/// response contains more than the governed payload.
+pub(crate) fn parse_strict_llm_json_payload(raw: &str) -> LlmJsonPayload {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return LlmJsonPayload::Absent;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return map_payload(value);
+    }
+    let Some(body) = extract_exact_code_fence_body(trimmed) else {
+        return LlmJsonPayload::Absent;
+    };
+    serde_json::from_str::<Value>(body)
+        .map(map_payload)
+        .unwrap_or(LlmJsonPayload::Absent)
+}
+
 pub(crate) fn get_object_text(object: &Map<String, Value>, key: &str) -> String {
     object.get(key).map(coerce_json_text).unwrap_or_default()
 }
@@ -155,6 +177,18 @@ fn extract_first_code_fence_body(raw: &str) -> Option<&str> {
     Some(body[..fence_end].trim())
 }
 
+fn extract_exact_code_fence_body(raw: &str) -> Option<&str> {
+    let fenced = raw.strip_prefix("```")?;
+    let newline = fenced.find('\n')?;
+    let language = fenced[..newline].trim();
+    if !language.is_empty() && !language.eq_ignore_ascii_case("json") {
+        return None;
+    }
+    let body_with_closing_fence = fenced[newline + 1..].trim_end();
+    let body = body_with_closing_fence.strip_suffix("```")?.trim();
+    (!body.is_empty()).then_some(body)
+}
+
 fn extract_first_json_slice(raw: &str) -> Option<&str> {
     for (start, ch) in raw.char_indices() {
         if ch != '{' && ch != '[' {
@@ -262,6 +296,28 @@ mod tests {
             }
             other => panic!("unexpected payload: {other:?}"),
         }
+    }
+
+    #[test]
+    fn strict_parser_accepts_only_exact_json_or_one_exact_fence() {
+        assert!(matches!(
+            parse_strict_llm_json_payload("[{\"field\":\"value\"}]"),
+            LlmJsonPayload::Value(Value::Array(_))
+        ));
+        assert!(matches!(
+            parse_strict_llm_json_payload("```json\n[{\"field\":\"value\"}]\n```"),
+            LlmJsonPayload::Value(Value::Array(_))
+        ));
+        assert!(matches!(
+            parse_strict_llm_json_payload(
+                "Here is the result:\n```json\n[{\"field\":\"value\"}]\n```"
+            ),
+            LlmJsonPayload::Absent
+        ));
+        assert!(matches!(
+            parse_strict_llm_json_payload("```json\n[]\n```\nextra"),
+            LlmJsonPayload::Absent
+        ));
     }
 
     #[test]

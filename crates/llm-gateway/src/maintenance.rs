@@ -1,56 +1,27 @@
 use std::collections::BTreeMap;
-#[cfg(feature = "client-reqwest")]
-use std::io::Read;
 use std::sync::Arc;
 
+use bm_adapter::{
+    AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport, TransportKind,
+    TransportMode,
+};
 use bm_entry::EntryRuntime;
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationScope, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse,
-    MaintenanceBudget, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
-    MemoryTurnSource, Message, RuntimeLifecycleModeInput, StopReason, ToolChoicePolicy, ToolSpec,
+    CanonicalTurnDelta, ConversationScope, MaintenanceBudget, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, RuntimeLifecycleModeInput,
     TranscriptInputMessage,
 };
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "client-reqwest")]
-use crate::GatewayUpstreamResponseBudget;
-use crate::{GatewayAuditOutcome, GatewayMaintenanceConfig, GatewayProviderConfig};
+use crate::GatewayAuditOutcome;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GatewayInputTranscript {
     pub(crate) latest_user_text: String,
     pub(crate) messages: Vec<TranscriptInputMessage>,
-}
-
-pub struct OpenAiGatewayServices<'a> {
-    maintenance_http: Option<&'a mut dyn LlmHttpClient>,
-    maintenance_llm: Option<&'a (dyn LlmClient + Send + Sync)>,
-}
-
-impl<'a> OpenAiGatewayServices<'a> {
-    pub const fn new() -> Self {
-        Self {
-            maintenance_http: None,
-            maintenance_llm: None,
-        }
-    }
-
-    pub fn with_maintenance(
-        mut self,
-        http: &'a mut dyn LlmHttpClient,
-        llm: &'a (dyn LlmClient + Send + Sync),
-    ) -> Self {
-        self.maintenance_http = Some(http);
-        self.maintenance_llm = Some(llm);
-        self
-    }
-}
-
-impl Default for OpenAiGatewayServices<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 pub(crate) struct GatewayMaintenancePlan {
@@ -64,7 +35,6 @@ pub(crate) struct GatewayMaintenancePlan {
     task_learning_selected_ids: Vec<String>,
     pressure: bm_sdk::PressureLevel,
     mode_input: RuntimeLifecycleModeInput,
-    config: GatewayMaintenanceConfig,
     budget: MaintenanceBudget,
 }
 
@@ -79,7 +49,6 @@ pub(crate) struct GatewayMaintenancePlanInput {
     pub(crate) task_learning_selected_ids: Vec<String>,
     pub(crate) pressure: bm_sdk::PressureLevel,
     pub(crate) mode_input: RuntimeLifecycleModeInput,
-    pub(crate) config: GatewayMaintenanceConfig,
     pub(crate) budget: MaintenanceBudget,
 }
 
@@ -101,7 +70,6 @@ impl GatewayMaintenancePlan {
             task_learning_selected_ids: input.task_learning_selected_ids,
             pressure: input.pressure,
             mode_input: input.mode_input,
-            config: input.config,
             budget,
         }
     }
@@ -144,7 +112,6 @@ impl GatewayMaintenancePlan {
                 pressure: self.pressure,
                 mode_input: self.mode_input,
             },
-            enabled: self.config.enabled,
         }
     }
 }
@@ -233,9 +200,9 @@ impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {
     fn from(value: GatewayMaintenanceRunOutcome) -> Self {
         match value {
             GatewayMaintenanceRunOutcome::Succeeded => Self::Succeeded,
+            GatewayMaintenanceRunOutcome::Queued => Self::Queued,
             GatewayMaintenanceRunOutcome::Failed => Self::Failed,
             GatewayMaintenanceRunOutcome::Skipped => Self::Skipped,
-            GatewayMaintenanceRunOutcome::NotExecuted => Self::NotExecuted,
         }
     }
 }
@@ -243,43 +210,59 @@ impl From<GatewayMaintenanceRunOutcome> for GatewayAuditOutcome {
 pub(crate) struct GatewayMaintenanceTask {
     runtime: Arc<EntryRuntime>,
     request: MemoryTurnFinalizeRequest,
-    enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GatewayMaintenanceRunOutcome {
     Succeeded,
+    Queued,
     Failed,
     Skipped,
-    NotExecuted,
 }
 
 impl GatewayMaintenanceTask {
-    pub(crate) fn run(
-        self,
-        services: &mut OpenAiGatewayServices<'_>,
-    ) -> GatewayMaintenanceRunOutcome {
-        let missing_services = self.enabled
-            && (services.maintenance_http.is_none() || services.maintenance_llm.is_none());
-        let http = if self.enabled {
-            services.maintenance_http.as_deref_mut()
-        } else {
-            None
-        };
-        let llm = if self.enabled {
-            services.maintenance_llm
-        } else {
-            None
-        };
-        match self
+    pub(crate) fn run(self) -> GatewayMaintenanceRunOutcome {
+        let turn_id = self.request.turn.turn_id.clone();
+        let request_id = format!("llm-gateway-finalize:{turn_id}");
+        let auth = self
             .runtime
-            .runtime()
-            .finalize_turn_and_maintain(http, llm, self.request)
-        {
-            Ok(report) if report.maintenance.is_some() => GatewayMaintenanceRunOutcome::Succeeded,
-            Ok(_) if !self.enabled => GatewayMaintenanceRunOutcome::Skipped,
-            Ok(_) if missing_services => GatewayMaintenanceRunOutcome::NotExecuted,
-            Ok(_) => GatewayMaintenanceRunOutcome::Skipped,
+            .authenticate_local_transport(bm_entry::EntryLocalTransport::InProcess, "llm-gateway");
+        let context = bm_entry::EntryTransportContext::new(
+            request_id.clone(),
+            TransportKind::Sdk,
+            TransportMode::InProcess,
+            AdapterOperation::FinalizeTurn,
+            "llm-gateway",
+            "llm_gateway",
+            request_id.clone(),
+            format!("audit:{request_id}"),
+            auth,
+        );
+        match self.runtime.handle(
+            context,
+            AdapterCommand::FinalizeTurn(Box::new(self.request)),
+        ) {
+            Ok(response) => match response.adapter {
+                AdapterResponse::Accepted {
+                    report: AdapterSdkReport::FinalizeTurn(report),
+                    ..
+                } => match report.memory_consolidation.state {
+                    bm_sdk::MemoryConsolidationState::Succeeded => {
+                        GatewayMaintenanceRunOutcome::Succeeded
+                    }
+                    bm_sdk::MemoryConsolidationState::Queued => {
+                        GatewayMaintenanceRunOutcome::Queued
+                    }
+                    bm_sdk::MemoryConsolidationState::NotScheduled => {
+                        GatewayMaintenanceRunOutcome::Skipped
+                    }
+                },
+                AdapterResponse::Duplicated { .. } => GatewayMaintenanceRunOutcome::Queued,
+                AdapterResponse::Rejected { .. } | AdapterResponse::Queued { .. } => {
+                    GatewayMaintenanceRunOutcome::Failed
+                }
+                AdapterResponse::Accepted { .. } => GatewayMaintenanceRunOutcome::Failed,
+            },
             Err(_) => GatewayMaintenanceRunOutcome::Failed,
         }
     }
@@ -303,25 +286,20 @@ impl OpenAiDeferredMaintenance {
         self.accumulator.observe_sse_chunk(chunk);
     }
 
-    pub(crate) fn finish(
-        self,
-        services: &mut OpenAiGatewayServices<'_>,
-    ) -> GatewayMaintenanceRunOutcome {
+    pub(crate) fn finish(self) -> GatewayMaintenanceRunOutcome {
         self.plan
             .task_from_snapshot(self.accumulator.into_snapshot())
-            .run(services)
+            .run()
     }
 }
 
 pub(crate) fn run_json_maintenance(
     plan: GatewayMaintenancePlan,
     body: &Value,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> GatewayMaintenanceRunOutcome {
     let mut accumulator = OpenAiReplyAccumulator::new(plan.budget);
     accumulator.observe_json_response(body);
-    plan.task_from_snapshot(accumulator.into_snapshot())
-        .run(services)
+    plan.task_from_snapshot(accumulator.into_snapshot()).run()
 }
 
 pub(crate) fn run_text_maintenance(
@@ -329,7 +307,6 @@ pub(crate) fn run_text_maintenance(
     reply_content: String,
     tool_calls: u32,
     reuse_outcome_note: String,
-    services: &mut OpenAiGatewayServices<'_>,
 ) -> GatewayMaintenanceRunOutcome {
     let budget = plan.budget;
     plan.task_from_snapshot(MaintenanceSnapshot {
@@ -342,7 +319,7 @@ pub(crate) fn run_text_maintenance(
         tool_calls,
         reuse_outcome_note,
     })
-    .run(services)
+    .run()
 }
 
 #[derive(Debug)]
@@ -596,184 +573,6 @@ fn bound_text(value: &str, max_chars: usize, max_bytes: usize) -> String {
     let mut bounded = BoundedText::new(max_chars, max_bytes);
     bounded.push_str(value);
     bounded.into_string()
-}
-
-pub struct OpenAiMaintenanceLlmClient {
-    provider: GatewayProviderConfig,
-    model: String,
-}
-
-impl OpenAiMaintenanceLlmClient {
-    pub fn new(provider: GatewayProviderConfig, model: impl Into<String>) -> Self {
-        Self {
-            provider,
-            model: model.into(),
-        }
-    }
-}
-
-impl LlmClient for OpenAiMaintenanceLlmClient {
-    fn model_compat(&self) -> LlmModelCompat {
-        LlmModelCompat::default()
-    }
-
-    fn chat(
-        &self,
-        http: &mut dyn LlmHttpClient,
-        system: &str,
-        messages: &[Message],
-        _tools: Option<&[ToolSpec]>,
-        _tool_choice: ToolChoicePolicy,
-    ) -> bm_sdk::Result<LlmResponse> {
-        let mut openai_messages = Vec::new();
-        if !system.trim().is_empty() {
-            openai_messages.push(json!({
-                "role": "system",
-                "content": system,
-            }));
-        }
-        openai_messages.extend(messages.iter().map(|message| {
-            json!({
-                "role": message.role.as_ref(),
-                "content": message.content,
-            })
-        }));
-        let body = json!({
-            "model": self.model,
-            "messages": openai_messages,
-            "stream": false,
-        })
-        .to_string();
-        let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-        let bearer;
-        if let Some(env_name) = self.provider.secret_env_name() {
-            let token = std::env::var(env_name).map_err(|_| {
-                bm_sdk::Error::config("openai_maintenance_llm", "provider api key env is unset")
-            })?;
-            bearer = format!("Bearer {token}");
-            headers.push(("authorization".to_string(), bearer));
-        }
-        let header_refs = headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect::<Vec<_>>();
-        let (status, response) = http.do_post(
-            &format!(
-                "{}/chat/completions",
-                self.provider.base_url.trim_end_matches('/')
-            ),
-            &header_refs,
-            body.as_bytes(),
-        )?;
-        if !(200..300).contains(&status) {
-            return Err(bm_sdk::Error::http("openai_maintenance_llm", status));
-        }
-        let value: Value = serde_json::from_slice(response.as_ref())
-            .map_err(|error| bm_sdk::Error::config("openai_maintenance_llm", error.to_string()))?;
-        let choice = value
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-            .ok_or_else(|| {
-                bm_sdk::Error::config("openai_maintenance_llm", "missing choices in response")
-            })?;
-        let content = choice
-            .get("message")
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let stop_reason = match choice.get("finish_reason").and_then(Value::as_str) {
-            Some("tool_calls") => StopReason::ToolUse,
-            Some("length") => StopReason::MaxTokens,
-            Some("stop") | None => StopReason::EndTurn,
-            Some(_) => StopReason::Other,
-        };
-        Ok(LlmResponse {
-            content,
-            stop_reason,
-            tool_calls: None,
-        })
-    }
-}
-
-#[cfg(feature = "client-reqwest")]
-pub struct ReqwestGatewayLlmHttpClient {
-    client: reqwest::blocking::Client,
-    response_budget: GatewayUpstreamResponseBudget,
-}
-
-#[cfg(feature = "client-reqwest")]
-impl ReqwestGatewayLlmHttpClient {
-    pub fn new(response_budget: GatewayUpstreamResponseBudget) -> bm_sdk::Result<Self> {
-        Self::new_with_timeout(std::time::Duration::from_secs(600), response_budget)
-    }
-
-    pub fn new_with_timeout(
-        timeout: std::time::Duration,
-        response_budget: GatewayUpstreamResponseBudget,
-    ) -> bm_sdk::Result<Self> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|error| bm_sdk::Error::config("gateway_llm_http_client", error.to_string()))?;
-        Ok(Self {
-            client,
-            response_budget,
-        })
-    }
-}
-
-#[cfg(feature = "client-reqwest")]
-impl LlmHttpClient for ReqwestGatewayLlmHttpClient {
-    fn do_post(
-        &mut self,
-        url: &str,
-        headers: &[(&str, &str)],
-        body: &[u8],
-    ) -> bm_sdk::Result<(u16, bm_sdk::ResponseBody)> {
-        let mut request = self.client.post(url);
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        let mut response = request
-            .body(body.to_vec())
-            .send()
-            .map_err(|error| bm_sdk::Error::config("gateway_llm_http_client", error.to_string()))?;
-        let status = response.status().as_u16();
-        let limits = self.response_budget.limits();
-        let limit = limits
-            .buffered_json_max_bytes
-            .min(limits.response_body_max_bytes);
-        if response
-            .content_length()
-            .is_some_and(|content_length| content_length > limit as u64)
-        {
-            return Err(bm_sdk::Error::config(
-                "gateway_llm_http_client",
-                "maintenance response exceeds pinned LLM gateway budget",
-            ));
-        }
-        let read_limit = limit.checked_add(1).ok_or_else(|| {
-            bm_sdk::Error::config(
-                "gateway_llm_http_client",
-                "maintenance response budget cannot be bounded",
-            )
-        })?;
-        let mut body = Vec::new();
-        response
-            .by_ref()
-            .take(read_limit as u64)
-            .read_to_end(&mut body)
-            .map_err(|error| bm_sdk::Error::config("gateway_llm_http_client", error.to_string()))?;
-        if body.len() > limit {
-            return Err(bm_sdk::Error::config(
-                "gateway_llm_http_client",
-                "maintenance response exceeds pinned LLM gateway budget",
-            ));
-        }
-        Ok((status, bm_sdk::ResponseBody::Heap(body)))
-    }
 }
 
 #[cfg(test)]

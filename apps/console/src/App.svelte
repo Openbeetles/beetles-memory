@@ -18,6 +18,7 @@
   import type {
     ConsoleApiCapabilities,
     ConsoleApiDevice,
+    ConsoleApiGovernanceModel,
     ConsoleApiLlmGateway,
     ConsoleApiOllamaTransparentStatus,
     ConsoleApiOverview,
@@ -50,6 +51,7 @@
   import AccountPage from "./pages/AccountPage.svelte";
   import DevicesPage from "./pages/DevicesPage.svelte";
   import LlmGatewayPage from "./pages/LlmGatewayPage.svelte";
+  import ModelConfigPage from "./pages/ModelConfigPage.svelte";
   import OverviewPage from "./pages/OverviewPage.svelte";
   import SkillMemoryPage from "./pages/SkillMemoryPage.svelte";
   import TransportsPage from "./pages/TransportsPage.svelte";
@@ -71,6 +73,7 @@
   let overviewData = $state<ConsoleApiOverview | null>(null);
   let consoleCapabilities = $state<ConsoleApiCapabilities | null>(null);
   let llmGateway = $state<ConsoleApiLlmGateway | null>(null);
+  let governanceModel = $state<ConsoleApiGovernanceModel | null>(null);
   let workbenchReport = $state<ConsoleApiWorkbenchReport | null>(null);
   let ollamaTransparent = $state<ConsoleApiOllamaTransparentStatus | null>(null);
   let sessionData = $state<ConsoleApiSession | null>(null);
@@ -143,6 +146,7 @@
       consoleCapabilities = snapshot.capabilities;
       overviewData = snapshot.overview;
       llmGateway = snapshot.llmGateway;
+      governanceModel = snapshot.governanceModel;
       ollamaTransparent = snapshot.ollamaTransparent;
       skillReport = snapshot.skills;
       skills = snapshot.skills.skills;
@@ -154,6 +158,7 @@
       overviewData = null;
       consoleCapabilities = null;
       llmGateway = null;
+      governanceModel = null;
       workbenchReport = null;
       ollamaTransparent = null;
       skillReport = null;
@@ -416,6 +421,14 @@
         />
       {:else if activePage === "account"}
         <AccountPage {t} {lang} {accountFields} onLangChange={setLang} />
+      {:else if activePage === "model-config"}
+        <ModelConfigPage
+          {t}
+          {governanceModel}
+          {backendConnected}
+          onUpdated={(binding) => (governanceModel = binding)}
+          onBackendDisconnected={() => (backendConnected = false)}
+        />
       {:else if activePage === "transports"}
         <TransportsPage
           {t}

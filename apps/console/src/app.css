@@ -801,7 +801,10 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
 
 .account-panel  { margin-bottom:0; }
 
-.settings-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start; }
+.settings-grid {
+  display:grid; grid-template-columns:minmax(0,1fr); gap:12px; align-items:start;
+  width:calc((100% - 12px) / 2); margin-inline:auto;
+}
 
 .settings-row {
   display:flex; align-items:center; justify-content:space-between; gap:12px;
@@ -813,6 +816,45 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
   font-size:12px; color:var(--mu); white-space:nowrap;
 }
 .settings-row-label :global(svg) { color:var(--fa); flex-shrink:0; }
+
+/* ─ MEMORY EVOLUTION MODEL ─ */
+.model-config-layout {
+  width:calc((100% - 12px) / 2); margin-inline:auto;
+}
+.model-config-panel { margin:0; }
+.model-config-form { display:grid; gap:14px; }
+.model-config-switch-row {
+  display:grid; grid-template-columns:34px minmax(0,1fr) auto; align-items:center; gap:10px;
+  padding:8px 2px 12px; border-bottom:1px solid var(--rule);
+}
+.model-config-switch-row strong { font-size:12px; color:var(--tx); }
+.model-protocol-picker {
+  display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:0; padding:0; border:0;
+}
+.model-protocol-picker legend {
+  grid-column:1 / -1; margin-bottom:2px; color:var(--fa); font-size:10px; font-weight:700;
+  text-transform:uppercase;
+}
+.model-protocol-picker button {
+  min-height:34px; padding:6px 10px; color:var(--mu); font-size:11px; font-weight:700;
+  border:1px solid var(--bd); border-radius:var(--r); background:transparent;
+  transition:color var(--tr),border-color var(--tr),background var(--tr);
+}
+.model-protocol-picker button:hover { color:var(--tx); border-color:var(--bd-md); }
+.model-protocol-picker button.active {
+  color:var(--sig); border-color:var(--sig-bd); background:var(--sig-lo);
+}
+.model-config-fields { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.model-config-fields .wide { grid-column:1 / -1; }
+.model-config-feedback {
+  display:flex; align-items:center; gap:6px; margin:0; padding:8px 10px; font-size:11px;
+  line-height:1.45; border:1px solid var(--bd); border-radius:var(--r);
+}
+.model-config-feedback.ready { color:var(--gn); border-color:var(--gn-bd); }
+.model-config-feedback.blocked { color:var(--rd); border-color:var(--rd-bd); }
+.model-config-feedback.limited { color:var(--am); border-color:var(--am-bd); }
+.model-config-actions { display:flex; justify-content:flex-end; gap:7px; }
+.model-config-actions button { min-width:118px; justify-content:center; }
 
 /* ─ SKILL MEMORY ─ */
 .skill-top { margin-top:0; margin-bottom:10px; padding-top:12px; }
@@ -1143,6 +1185,11 @@ input:disabled,textarea:disabled { color:var(--fa); opacity:.4; }
   .device-ledger-row.header { display:none; }
   .row-actions { width:100%; }
   .row-actions button { flex:1; justify-content:center; }
+  .settings-grid,.model-config-layout { width:100%; }
+  .model-config-fields { grid-template-columns:1fr; }
+  .model-config-fields .wide { grid-column:auto; }
+  .model-config-actions { flex-direction:column-reverse; }
+  .model-config-actions button { width:100%; }
 }
 
 @media (prefers-reduced-motion:reduce) {

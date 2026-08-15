@@ -9,6 +9,7 @@ pub enum AdapterErrorKey {
     Duplicated,
     PayloadTooLarge,
     OperationMismatch,
+    RuntimeBindingMismatch,
     UnsupportedOperation,
     RuntimeRejected,
 }
@@ -22,6 +23,7 @@ impl AdapterErrorKey {
             Self::Duplicated => "duplicated",
             Self::PayloadTooLarge => "payload_too_large",
             Self::OperationMismatch => "operation_mismatch",
+            Self::RuntimeBindingMismatch => "runtime_binding_mismatch",
             Self::UnsupportedOperation => "unsupported_operation",
             Self::RuntimeRejected => "runtime_rejected",
         }

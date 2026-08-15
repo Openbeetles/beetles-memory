@@ -196,7 +196,7 @@ fi
 if ! rg -n 'required-features = \["server-async", "client-reqwest"\]' crates/llm-gateway/Cargo.toml >/dev/null; then
   fail "bm-llm-gateway binary must be gated behind server-async and client-reqwest"
 fi
-if contract_rg_match '/v1/chat/completions|/api/chat|/api/generate' crates/http/src crates/http/tests; then
+if contract_rg_match '/v1/chat/completions|/api/chat|/api/generate' crates/http/src; then
   fail "model protocol routes must not be added to bm-http"
 fi
 

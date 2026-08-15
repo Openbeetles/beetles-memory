@@ -21,15 +21,17 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use super::{
-    build_archive_evidence_block, memory_policy, plan_governed_shared_memory,
-    render_long_term_memory_block, run_memory_governance_kernel, search_archive_records,
-    ArchiveRecordSource, ArchiveSearchHit, ArchiveSearchQuery, LongTermExtractionPolicy,
-    LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemoryReadStore, LongTermMemorySlot, LongTermMemorySourceScope,
-    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryEvidenceAuthority,
-    MemoryGovernanceContext, MemoryGovernanceInput, MemoryProfile, MemoryStore, SessionMessage,
-    SessionStore, SessionSummaryStore, SharedMemoryWriteAction, SharedMemoryWriteSource,
-    TurnLedgerStore, MAX_LONG_TERM_MEMORY_ITEMS,
+    build_archive_evidence_block,
+    llm_json::{parse_strict_llm_json_payload, LlmJsonPayload},
+    memory_policy, plan_governed_shared_memory, render_long_term_memory_block,
+    run_memory_governance_kernel, search_archive_records, ArchiveRecordSource, ArchiveSearchHit,
+    ArchiveSearchQuery, LongTermExtractionPolicy, LongTermMemoryConfidence, LongTermMemoryDraft,
+    LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryReadStore,
+    LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
+    LongTermMemoryStaleHint, MemoryEvidenceAuthority, MemoryGovernanceContext,
+    MemoryGovernanceInput, MemoryProfile, MemoryStore, SessionMessage, SessionStore,
+    SessionSummaryStore, SharedMemoryWriteAction, SharedMemoryWriteSource, TurnLedgerStore,
+    MAX_LONG_TERM_MEMORY_ITEMS,
 };
 #[cfg(any(test, feature = "nonproduction-replay-harness"))]
 use super::{write_governed_shared_memory, LongTermMemoryStore};
@@ -474,6 +476,109 @@ pub fn parse_long_term_memory_extraction_response(
         deletes,
         skill_writes,
     }
+}
+
+pub fn parse_long_term_memory_extraction_response_strict(
+    raw: &str,
+    chat_id: &str,
+) -> Result<ParsedLongTermMemoryExtraction> {
+    let values = match parse_strict_llm_json_payload(raw) {
+        LlmJsonPayload::Value(serde_json::Value::Array(values)) => values,
+        LlmJsonPayload::Absent | LlmJsonPayload::Null | LlmJsonPayload::Value(_) => {
+            return Err(Error::config(
+                "long_term_memory_extraction_output",
+                "model output must be one JSON array",
+            ));
+        }
+    };
+    if values.len() > LONG_TERM_MEMORY_EXTRACTION_BATCH {
+        return Err(Error::config(
+            "long_term_memory_extraction_output",
+            "model output exceeds the extraction batch limit",
+        ));
+    }
+    const ALLOWED_KEYS: &[&str] = &[
+        "plane",
+        "op",
+        "kind",
+        "topic",
+        "content",
+        "keywords",
+        "source_chat_id",
+        "source_type",
+        "source_scope",
+        "confidence",
+        "freshness",
+        "stale_hint",
+        "skill_summary",
+        "source_authority",
+    ];
+    for value in &values {
+        let object = value.as_object().ok_or_else(|| {
+            Error::config(
+                "long_term_memory_extraction_output",
+                "every extraction item must be an object",
+            )
+        })?;
+        if object
+            .keys()
+            .any(|key| !ALLOWED_KEYS.contains(&key.as_str()))
+        {
+            return Err(Error::config(
+                "long_term_memory_extraction_output",
+                "extraction item contains an unknown field",
+            ));
+        }
+        let item = serde_json::from_value::<LongTermMemoryExtractionItem>(value.clone()).map_err(
+            |_| {
+                Error::config(
+                    "long_term_memory_extraction_output",
+                    "extraction item differs from the governed schema",
+                )
+            },
+        )?;
+        if item.topic.trim().is_empty() {
+            return Err(Error::config(
+                "long_term_memory_extraction_output",
+                "extraction topic must not be empty",
+            ));
+        }
+        match item.plane.as_deref().map(str::trim) {
+            Some("factual") => {
+                if !object.contains_key("op")
+                    || !matches!(item.op.trim(), "upsert" | "delete")
+                    || item.kind.is_none()
+                    || item.source_authority.is_none()
+                    || (item.op.trim() == "upsert" && item.content.trim().is_empty())
+                    || (item.op.trim() == "upsert"
+                        && !factual_source_authority_allows_upsert(item.source_authority))
+                {
+                    return Err(Error::config(
+                        "long_term_memory_extraction_output",
+                        "factual extraction item is incomplete",
+                    ));
+                }
+            }
+            Some("skill") if !item.content.trim().is_empty() => {}
+            Some("ignore") => {}
+            _ => {
+                return Err(Error::config(
+                    "long_term_memory_extraction_output",
+                    "extraction plane is missing or unsupported",
+                ));
+            }
+        }
+    }
+    let normalized = serde_json::to_string(&values).map_err(|_| {
+        Error::config(
+            "long_term_memory_extraction_output",
+            "model output could not be normalized",
+        )
+    })?;
+    Ok(parse_long_term_memory_extraction_response(
+        &normalized,
+        chat_id,
+    ))
 }
 
 fn factual_source_authority_allows_upsert(authority: Option<MemoryEvidenceAuthority>) -> bool {
@@ -1409,6 +1514,29 @@ pub fn run_long_term_memory_refresh(
     pressure: PressureLevel,
     profile: MemoryProfile,
 ) -> LongTermMemoryRefreshOutcome {
+    run_long_term_memory_refresh_inner(http, llm, ctx, chat_id, pressure, profile, false)
+}
+
+pub fn run_long_term_memory_refresh_strict(
+    http: &mut dyn LlmHttpClient,
+    llm: &(dyn LlmClient + Send + Sync),
+    ctx: LongTermMemoryRefreshContext<'_>,
+    chat_id: &str,
+    pressure: PressureLevel,
+    profile: MemoryProfile,
+) -> LongTermMemoryRefreshOutcome {
+    run_long_term_memory_refresh_inner(http, llm, ctx, chat_id, pressure, profile, true)
+}
+
+fn run_long_term_memory_refresh_inner(
+    http: &mut dyn LlmHttpClient,
+    llm: &(dyn LlmClient + Send + Sync),
+    ctx: LongTermMemoryRefreshContext<'_>,
+    chat_id: &str,
+    pressure: PressureLevel,
+    profile: MemoryProfile,
+    strict_model_contract: bool,
+) -> LongTermMemoryRefreshOutcome {
     let previous_state = ctx.extraction_state_store.get(chat_id).ok().flatten();
     if pressure != PressureLevel::Normal {
         return LongTermMemoryRefreshOutcome::Deferred {
@@ -1417,7 +1545,7 @@ pub fn run_long_term_memory_refresh(
         };
     }
 
-    match extract_long_term_memory(http, llm, &ctx, chat_id, profile) {
+    match extract_long_term_memory(http, llm, &ctx, chat_id, profile, strict_model_contract) {
         Ok(apply_report) => {
             let after_count = ctx.session_store.message_count(chat_id).unwrap_or(0);
             let changed_count = apply_report.changed;
@@ -1465,6 +1593,7 @@ fn extract_long_term_memory(
     ctx: &LongTermMemoryRefreshContext<'_>,
     chat_id: &str,
     profile: MemoryProfile,
+    strict_model_contract: bool,
 ) -> Result<LongTermMemoryExtractionApplyReport> {
     let policy = memory_policy(profile).long_term_extraction;
     let recent = ctx
@@ -1542,7 +1671,11 @@ fn extract_long_term_memory(
         ToolChoicePolicy::Auto,
     )?;
     let now_secs = crate::util::current_unix_secs();
-    let mut parsed = parse_long_term_memory_extraction_response(response.content.trim(), chat_id);
+    let mut parsed = if strict_model_contract {
+        parse_long_term_memory_extraction_response_strict(response.content.trim(), chat_id)?
+    } else {
+        parse_long_term_memory_extraction_response(response.content.trim(), chat_id)
+    };
     let source_revision = ctx.session_store.message_count(chat_id).unwrap_or(0) as u64;
     for draft in &mut parsed.upserts {
         draft.observed_at.get_or_insert(now_secs);
@@ -2299,6 +2432,19 @@ mod tests {
         assert_eq!(parsed.deletes.len(), 0);
         assert_eq!(parsed.upserts[0].topic, "response_style");
         assert_eq!(parsed.upserts[1].topic, "current_focus");
+    }
+
+    #[test]
+    fn strict_extraction_accepts_one_fenced_array_but_rejects_surrounding_prose() {
+        let fenced = r#"```json
+[{"plane":"factual","op":"upsert","kind":"preference","topic":"drink","content":"User prefers cold brew.","source_authority":"user_asserted"}]
+```"#;
+        let parsed = parse_long_term_memory_extraction_response_strict(fenced, "chat-1").unwrap();
+        assert_eq!(parsed.upserts.len(), 1);
+        assert_eq!(parsed.upserts[0].topic, "drink");
+
+        let wrapped = format!("Here is the result:\n{fenced}");
+        assert!(parse_long_term_memory_extraction_response_strict(&wrapped, "chat-1").is_err());
     }
 
     #[test]

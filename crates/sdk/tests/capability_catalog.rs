@@ -451,6 +451,7 @@ fn privacy_gate_blocks_projection_and_export_visibility() {
     let privacy = MemoryPrivacyPolicy {
         prompt_projection_allowed: false,
         private_plane_projection_allowed: false,
+        governance_model_disclosure_allowed: false,
         operator_inspection_allowed: true,
         export_allowed: false,
         import_allowed: true,

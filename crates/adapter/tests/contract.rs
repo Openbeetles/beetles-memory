@@ -29,6 +29,7 @@ struct FixedClock;
 fn public_adapter_labels_are_stable_snake_case() {
     let operations = [
         (AdapterOperation::Write, "write"),
+        (AdapterOperation::FinalizeTurn, "finalize_turn"),
         (AdapterOperation::Recall, "recall"),
         (AdapterOperation::Project, "project"),
         (AdapterOperation::Maintain, "maintain"),
@@ -59,6 +60,10 @@ fn public_adapter_labels_are_stable_snake_case() {
         (AdapterErrorKey::Duplicated, "duplicated"),
         (AdapterErrorKey::PayloadTooLarge, "payload_too_large"),
         (AdapterErrorKey::OperationMismatch, "operation_mismatch"),
+        (
+            AdapterErrorKey::RuntimeBindingMismatch,
+            "runtime_binding_mismatch",
+        ),
         (
             AdapterErrorKey::UnsupportedOperation,
             "unsupported_operation",
@@ -114,6 +119,7 @@ fn idempotency_material_is_canonical_and_payload_sensitive() {
 fn idempotency_requirement_is_exhaustive_and_covers_long_term_mutations() {
     let operations = [
         (AdapterOperation::Write, true),
+        (AdapterOperation::FinalizeTurn, true),
         (AdapterOperation::Recall, false),
         (AdapterOperation::Project, false),
         (AdapterOperation::Maintain, true),
@@ -293,8 +299,17 @@ fn runtime() -> MemoryRuntime {
         .expect("runtime")
 }
 
-fn envelope<T>(operation: AdapterOperation, payload: T) -> AdapterEnvelope<T> {
+fn envelope<T>(
+    runtime: &MemoryRuntime,
+    operation: AdapterOperation,
+    payload: T,
+) -> AdapterEnvelope<T> {
+    let lease = runtime
+        .acquire_runtime_budget_lease()
+        .expect("runtime budget lease");
     AdapterEnvelope {
+        protocol_version: bm_adapter::ExternalAiMemoryProtocolVersion::V1,
+        runtime_binding: bm_adapter::AdapterProtocolBinding::for_runtime(runtime, &lease),
         request_id: "req-1".to_string(),
         transport: TransportKind::Http,
         mode: TransportMode::Server,
@@ -324,6 +339,7 @@ fn recall_command_dispatches_through_memory_runtime() {
     let response = dispatch_adapter_command(
         &runtime,
         envelope(
+            &runtime,
             AdapterOperation::Recall,
             AdapterCommand::Recall(MemoryRecallRequest {
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -356,6 +372,7 @@ fn project_command_returns_only_the_adapter_projection_contract() {
     let response = dispatch_adapter_command(
         &runtime,
         envelope(
+            &runtime,
             AdapterOperation::Project,
             AdapterCommand::Project(MemoryProjectionRequest {
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -414,6 +431,7 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
     let response = dispatch_adapter_command(
         &runtime,
         envelope(
+            &runtime,
             AdapterOperation::Write,
             AdapterCommand::Recall(MemoryRecallRequest {
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -549,6 +567,7 @@ fn adapter_safe_dto_is_strict_and_all_protocol_sources_delegate_to_its_owner() {
     let response = dispatch_adapter_command(
         &runtime,
         envelope(
+            &runtime,
             AdapterOperation::Recall,
             AdapterCommand::Recall(MemoryRecallRequest {
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -649,6 +668,15 @@ fn governed_request_schema_is_owned_once_by_the_adapter_contract() {
         json!(["temporal_operation", "user_query", "system_max_len"])
     );
     assert_eq!(project.input_schema["additionalProperties"], false);
+
+    let finalize = governed_adapter_json_command_schema(AdapterOperation::FinalizeTurn)
+        .expect("finalize turn schema");
+    assert_eq!(finalize.input_schema["required"], json!(["turn"]));
+    assert_eq!(finalize.input_schema["additionalProperties"], false);
+    assert_eq!(
+        finalize.input_schema["properties"]["turn"]["type"],
+        "object"
+    );
     assert!(governed_adapter_json_command_schema(AdapterOperation::Inspect).is_none());
 }
 
@@ -677,6 +705,7 @@ fn long_term_list_command_dispatches_through_memory_runtime() {
     let response = dispatch_adapter_command(
         &runtime,
         envelope(
+            &runtime,
             AdapterOperation::LongTermList,
             AdapterCommand::LongTermList(MemoryLongTermListRequest {
                 query: bm_sdk::LongTermMemoryQuery::default(),
@@ -803,6 +832,7 @@ fn transcript_attr_write_command_dispatches_through_memory_runtime() {
     let response = dispatch_adapter_command(
         &runtime,
         envelope(
+            &runtime,
             AdapterOperation::TranscriptAttrWrite,
             AdapterCommand::TranscriptAttrWrite(MemoryTranscriptAttrWriteRequest {
                 memory_space_id: key.memory_space_id,
@@ -885,6 +915,12 @@ fn json_decoder_covers_adapter_memory_operations() {
             decode_json_adapter_command(operation, body, &options).expect("decode command");
         assert_eq!(command.operation(), operation);
     }
+
+    let finalize_body = json!({"turn": transcript_turn()}).to_string();
+    let finalize =
+        decode_json_adapter_command(AdapterOperation::FinalizeTurn, &finalize_body, &options)
+            .expect("decode finalize turn command");
+    assert_eq!(finalize.operation(), AdapterOperation::FinalizeTurn);
 }
 
 #[test]
@@ -967,7 +1003,7 @@ fn maintain_dispatch_uses_injected_runtime_services() {
     let response = dispatch_adapter_command_with_services(
         &runtime,
         &lease,
-        envelope(AdapterOperation::Maintain, command),
+        envelope(&runtime, AdapterOperation::Maintain, command),
         AdapterRuntimeServices {
             http: Some(&mut http),
             llm: Some(&llm),
@@ -981,6 +1017,47 @@ fn maintain_dispatch_uses_injected_runtime_services() {
             ..
         } => {
             assert!(report.report.is_some());
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
+fn finalize_dispatch_queues_governance_even_when_request_services_are_injected() {
+    let runtime = runtime();
+    let mut http = StaticHttpClient;
+    let llm = StaticLlmClient;
+    let command = decode_json_adapter_command(
+        AdapterOperation::FinalizeTurn,
+        &json!({"turn": transcript_turn()}).to_string(),
+        &AdapterJsonCommandOptions::new("test-adapter"),
+    )
+    .expect("finalize command");
+    let lease = runtime
+        .acquire_runtime_budget_lease()
+        .expect("runtime budget lease");
+    let response = dispatch_adapter_command_with_services(
+        &runtime,
+        &lease,
+        envelope(&runtime, AdapterOperation::FinalizeTurn, command),
+        AdapterRuntimeServices {
+            http: Some(&mut http),
+            llm: Some(&llm),
+        },
+    )
+    .expect("dispatch");
+
+    match response {
+        AdapterResponse::Accepted {
+            report: AdapterSdkReport::FinalizeTurn(report),
+            ..
+        } => {
+            assert!(!report.maintenance_performed);
+            assert_eq!(
+                report.memory_consolidation.state,
+                bm_sdk::MemoryConsolidationState::Queued
+            );
+            assert!(report.memory_consolidation.job_id.is_some());
         }
         other => panic!("unexpected response: {other:?}"),
     }

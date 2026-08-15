@@ -1844,7 +1844,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             }
         }
         let mut entries = entries.into_values().collect::<Vec<_>>();
-        entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
         entries.truncate(limit);
         Ok(entries)
     }
@@ -1913,7 +1913,7 @@ impl LongTermMemoryControlReadStore for PlanningLongTermMemoryControlStore<'_> {
         let mut revisions = self
             .inner
             .list_long_term_control_revisions(record_id, limit)?;
-        revisions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        revisions.sort_by_key(|revision| std::cmp::Reverse(revision.created_at));
         revisions.truncate(limit);
         Ok(revisions)
     }
@@ -1951,7 +1951,7 @@ impl LongTermMemoryControlReadStore for PlanningLongTermMemoryControlStore<'_> {
                 .clone(),
         );
         let mut tombstones = tombstones.into_values().collect::<Vec<_>>();
-        tombstones.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        tombstones.sort_by_key(|tombstone| std::cmp::Reverse(tombstone.created_at));
         tombstones.truncate(limit);
         Ok(tombstones)
     }
@@ -1977,7 +1977,7 @@ impl LongTermMemoryControlReadStore for PlanningLongTermMemoryControlStore<'_> {
             }
         }
         let mut policies = policies.into_values().collect::<Vec<_>>();
-        policies.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        policies.sort_by_key(|policy| std::cmp::Reverse(policy.updated_at));
         policies.truncate(limit);
         Ok(policies)
     }
@@ -1988,7 +1988,7 @@ impl LongTermMemoryControlReadStore for PlanningLongTermMemoryControlStore<'_> {
     ) -> Result<Vec<LongTermMemoryControlAuditEvent>> {
         let mut audits = self.inner.list_long_term_control_audit(usize::MAX)?;
         audits.extend(self.audits.lock().expect("control audits lock").clone());
-        audits.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        audits.sort_by_key(|audit| std::cmp::Reverse(audit.created_at));
         audits.truncate(limit);
         Ok(audits)
     }

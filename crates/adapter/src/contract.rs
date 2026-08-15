@@ -6,8 +6,9 @@ use bm_sdk::{
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
     MemoryMaintenanceRequest, MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport,
     MemoryRecallRequest, MemoryRecallTemporalOperation, MemoryRecoverReport, MemoryRecoverRequest,
-    MemoryReplayReport, MemoryReplayRequest, MemoryTranscriptAttrWriteReport,
-    MemoryTranscriptAttrWriteRequest, MemoryWriteReport, MemoryWriteRequest,
+    MemoryReplayReport, MemoryReplayRequest, MemoryRuntime, MemoryTranscriptAttrWriteReport,
+    MemoryTranscriptAttrWriteRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
+    MemoryWriteReport, MemoryWriteRequest, ProfileId, RuntimeBudgetLease,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -181,6 +182,7 @@ const fn transport_identity_label(transport: TransportKind) -> &'static str {
 #[serde(rename_all = "snake_case")]
 pub enum AdapterOperation {
     Write,
+    FinalizeTurn,
     Recall,
     Project,
     Maintain,
@@ -201,6 +203,7 @@ impl AdapterOperation {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Write => "write",
+            Self::FinalizeTurn => "finalize_turn",
             Self::Recall => "recall",
             Self::Project => "project",
             Self::Maintain => "maintain",
@@ -221,6 +224,7 @@ impl AdapterOperation {
     pub const fn requires_idempotency(self) -> bool {
         match self {
             Self::Write
+            | Self::FinalizeTurn
             | Self::Maintain
             | Self::Recover
             | Self::LongTermMutate
@@ -262,8 +266,177 @@ pub struct AdapterAuthContext {
     pub principal: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExternalAiMemoryProtocolVersion {
+    #[serde(rename = "beetle-memory.external-ai.v1")]
+    V1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterProtocolPrivacyBinding {
+    pub prompt_projection_allowed: bool,
+    pub private_plane_projection_allowed: bool,
+    pub operator_inspection_allowed: bool,
+    pub export_allowed: bool,
+    pub import_allowed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterProtocolCapabilityBinding {
+    pub write_visible: bool,
+    pub recall_visible: bool,
+    pub projection_visible: bool,
+    pub maintenance_visible: bool,
+    pub inspection_visible: bool,
+    pub replay_visible: bool,
+    pub long_term_inspect_visible: bool,
+    pub long_term_mutation_visible: bool,
+    pub long_term_policy_visible: bool,
+    pub transcript_replay_visible: bool,
+    pub communication_adapter_visible: bool,
+    pub cli_visible: bool,
+    pub http_visible: bool,
+    pub wss_visible: bool,
+    pub mcp_visible: bool,
+    pub a2a_visible: bool,
+}
+
+impl AdapterProtocolCapabilityBinding {
+    fn from_runtime(runtime: &MemoryRuntime) -> Self {
+        let catalog = runtime.capabilities();
+        Self {
+            write_visible: catalog.write.visible,
+            recall_visible: catalog.recall.visible,
+            projection_visible: catalog.projection.visible,
+            maintenance_visible: catalog.maintenance.visible,
+            inspection_visible: catalog.inspection.visible,
+            replay_visible: catalog.replay.visible,
+            long_term_inspect_visible: catalog.long_term_control_inspect.visible,
+            long_term_mutation_visible: catalog.long_term_control_mutation.visible,
+            long_term_policy_visible: catalog.long_term_control_policy.visible,
+            transcript_replay_visible: catalog.transcript_replay.visible,
+            communication_adapter_visible: catalog.communication_adapter.visible,
+            cli_visible: catalog.adapter.cli.visible,
+            http_visible: catalog.adapter.http.visible,
+            wss_visible: catalog.adapter.wss.visible,
+            mcp_visible: catalog.adapter.mcp.visible,
+            a2a_visible: catalog.adapter.a2a.visible,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterProtocolRenderBudgetBinding {
+    pub system_block_max_chars: usize,
+    pub provider_prompt_max_chars: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterProtocolBinding {
+    pub memory_space_id: String,
+    pub mounted_subject_id: String,
+    pub agent_id: String,
+    pub owner_id: String,
+    pub channel: String,
+    pub chat_id: String,
+    pub conversation_id: String,
+    pub profile: ProfileId,
+    pub privacy: AdapterProtocolPrivacyBinding,
+    pub capabilities: AdapterProtocolCapabilityBinding,
+    pub render_budget: AdapterProtocolRenderBudgetBinding,
+    pub budget_report_id: String,
+}
+
+impl AdapterProtocolBinding {
+    pub fn for_runtime(runtime: &MemoryRuntime, lease: &RuntimeBudgetLease) -> Self {
+        let config = runtime.config();
+        let privacy = &config.privacy_policy;
+        let render_budget = lease.report().projection_render_budget;
+        Self {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            mounted_subject_id: runtime.subject_id().to_string(),
+            agent_id: runtime.identity().agent_id.clone(),
+            owner_id: runtime.identity().owner_id.clone(),
+            channel: runtime.scope().channel.clone(),
+            chat_id: runtime.scope().chat_id.clone(),
+            conversation_id: runtime.scope().conversation_id_or_chat_id().to_string(),
+            profile: config.profile,
+            privacy: AdapterProtocolPrivacyBinding {
+                prompt_projection_allowed: privacy.prompt_projection_allowed,
+                private_plane_projection_allowed: privacy.private_plane_projection_allowed,
+                operator_inspection_allowed: privacy.operator_inspection_allowed,
+                export_allowed: privacy.export_allowed,
+                import_allowed: privacy.import_allowed,
+            },
+            capabilities: AdapterProtocolCapabilityBinding::from_runtime(runtime),
+            render_budget: AdapterProtocolRenderBudgetBinding {
+                system_block_max_chars: render_budget.system_block_max_chars,
+                provider_prompt_max_chars: render_budget.provider_prompt_max_chars,
+            },
+            budget_report_id: lease.report_id().to_string(),
+        }
+    }
+
+    pub(crate) fn mismatch_reason(
+        &self,
+        runtime: &MemoryRuntime,
+        lease: &RuntimeBudgetLease,
+    ) -> Option<&'static str> {
+        let expected = Self::for_runtime(runtime, lease);
+        if self.memory_space_id != expected.memory_space_id {
+            return Some("memory_space_id_mismatch");
+        }
+        if self.mounted_subject_id != expected.mounted_subject_id {
+            return Some("mounted_subject_id_mismatch");
+        }
+        if self.agent_id != expected.agent_id {
+            return Some("agent_id_mismatch");
+        }
+        if self.owner_id != expected.owner_id {
+            return Some("owner_id_mismatch");
+        }
+        if self.channel != expected.channel
+            || self.chat_id != expected.chat_id
+            || self.conversation_id != expected.conversation_id
+        {
+            return Some("conversation_scope_mismatch");
+        }
+        if self.profile != expected.profile {
+            return Some("profile_mismatch");
+        }
+        if self.privacy != expected.privacy {
+            return Some("privacy_policy_mismatch");
+        }
+        if self.capabilities != expected.capabilities {
+            return Some("capability_snapshot_mismatch");
+        }
+        if self.render_budget != expected.render_budget {
+            return Some("render_budget_mismatch");
+        }
+        if self.budget_report_id != expected.budget_report_id {
+            return Some("budget_report_id_mismatch");
+        }
+        None
+    }
+
+    pub(crate) fn source_mismatch_reason(&self, source: &AdapterSource) -> Option<&'static str> {
+        (source.agent_id != self.agent_id
+            || source.owner_id != self.owner_id
+            || source.channel != self.channel
+            || source.chat_id != self.chat_id)
+            .then_some("source_identity_mismatch")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdapterEnvelope<T> {
+    pub protocol_version: ExternalAiMemoryProtocolVersion,
+    pub runtime_binding: AdapterProtocolBinding,
     pub request_id: String,
     pub transport: TransportKind,
     pub mode: TransportMode,
@@ -313,6 +486,7 @@ pub enum AdapterResponse<T> {
 
 pub enum AdapterCommand {
     Write(MemoryWriteRequest),
+    FinalizeTurn(Box<MemoryTurnFinalizeRequest>),
     Recall(MemoryRecallRequest),
     Project(MemoryProjectionRequest),
     Maintain(MemoryMaintenanceRequest),
@@ -433,6 +607,7 @@ impl AdapterCommand {
     pub const fn operation(&self) -> AdapterOperation {
         match self {
             Self::Write(_) => AdapterOperation::Write,
+            Self::FinalizeTurn(_) => AdapterOperation::FinalizeTurn,
             Self::Recall(_) => AdapterOperation::Recall,
             Self::Project(_) => AdapterOperation::Project,
             Self::Maintain(_) => AdapterOperation::Maintain,
@@ -469,6 +644,9 @@ impl AdapterCommand {
                 }
                 serde_json::to_vec(&request)?
             }
+            Self::FinalizeTurn(request) => {
+                serde_json::to_vec(&AdapterTurnFinalizeFingerprint::from(request.as_ref()))?
+            }
             Self::Recall(_) | Self::Project(_) => Vec::new(),
             Self::Maintain(request) => serde_json::to_vec(request)?,
             Self::Inspect(_) => Vec::new(),
@@ -494,8 +672,74 @@ impl AdapterCommand {
     }
 }
 
+#[derive(Serialize)]
+struct AdapterTurnFinalizeFingerprint<'a> {
+    turn: &'a bm_sdk::CanonicalTurnDelta,
+    tool_calls: u32,
+    runtime_skill_selected_ids: &'a [String],
+    task_learning_selected_ids: &'a [String],
+    reuse_outcome_note: &'a str,
+    tool_usage_feedback: &'a Option<bm_sdk::AgentToolUsageFeedback>,
+    pressure: bm_sdk::PressureLevel,
+    mode_input: bm_sdk::RuntimeLifecycleModeInput,
+}
+
+impl<'a> From<&'a MemoryTurnFinalizeRequest> for AdapterTurnFinalizeFingerprint<'a> {
+    fn from(request: &'a MemoryTurnFinalizeRequest) -> Self {
+        Self {
+            turn: &request.turn,
+            tool_calls: request.tool_calls,
+            runtime_skill_selected_ids: &request.runtime_skill_selected_ids,
+            task_learning_selected_ids: &request.task_learning_selected_ids,
+            reuse_outcome_note: &request.reuse_outcome_note,
+            tool_usage_feedback: &request.tool_usage_feedback,
+            pressure: request.pressure,
+            mode_input: request.mode_input,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterTurnFinalizeReport {
+    pub turn_id: String,
+    pub session_committed: bool,
+    pub transcript_committed: bool,
+    pub maintenance_performed: bool,
+    #[serde(rename = "memoryConsolidation")]
+    pub memory_consolidation: AdapterMemoryConsolidationReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdapterMemoryConsolidationReport {
+    pub state: bm_sdk::MemoryConsolidationState,
+    pub job_id: Option<String>,
+    pub reason: String,
+}
+
+impl AdapterTurnFinalizeReport {
+    pub(crate) fn from_sdk(turn_id: String, report: MemoryTurnFinalizeReport) -> Self {
+        Self {
+            turn_id,
+            session_committed: report.session_commit.committed,
+            transcript_committed: report
+                .transcript_commit
+                .as_ref()
+                .is_some_and(|commit| commit.committed),
+            maintenance_performed: report.maintenance.is_some(),
+            memory_consolidation: AdapterMemoryConsolidationReport {
+                state: report.memory_consolidation.state,
+                job_id: report.memory_consolidation.job_id,
+                reason: report.memory_consolidation.reason,
+            },
+        }
+    }
+}
+
 pub enum AdapterSdkReport {
     Write(Box<MemoryWriteReport>),
+    FinalizeTurn(Box<AdapterTurnFinalizeReport>),
     Recall(Box<MemoryRecallReport>),
     Project(Box<AdapterProjectionReport>),
     Maintain(Box<MemoryMaintenanceReport>),
@@ -515,6 +759,7 @@ impl AdapterSdkReport {
     pub const fn public_kind(&self) -> &'static str {
         match self {
             Self::Write(_) => "write",
+            Self::FinalizeTurn(_) => "finalize_turn",
             Self::Recall(_) => "recall",
             Self::Project(_) => "project",
             Self::Maintain(_) => "maintain",
@@ -559,6 +804,7 @@ impl std::fmt::Debug for AdapterSdkReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::Write(_) => "Write",
+            Self::FinalizeTurn(_) => "FinalizeTurn",
             Self::Recall(_) => "Recall",
             Self::Project(_) => "Project",
             Self::Maintain(_) => "Maintain",

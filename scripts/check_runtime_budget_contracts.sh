@@ -176,8 +176,8 @@ if rg -n 'GatewayProjectionConfig\s*\{[^}]*system_max_len|projection\.system_max
   fail "GatewayProjectionConfig must not own system_max_len"
 fi
 
-if rg -n 'GatewayMaintenanceConfig\s*\{[^}]*_(max|bytes|chars)|maintenance\.(user|max|reply).*_(chars|bytes|max)' crates/llm-gateway; then
-  fail "GatewayMaintenanceConfig must not own maintenance accumulator budgets"
+if rg -n 'GatewayMaintenanceConfig|maintenance\.(user|max|reply).*_(chars|bytes|max)' crates/llm-gateway; then
+  fail "GatewayMaintenanceConfig must not be reintroduced; automatic governance is Entry-owned"
 fi
 
 if rg -n 'acquire_budget_lease|execute_with_budget_lease' \
@@ -231,7 +231,7 @@ if rg -n 'profile.*transcript_page|transcript_page_size|host_refs_per_turn|max_a
   fail "StorePlatform must not own transcript governance profile budgets"
 fi
 
-if ! rg -n 'ten_profiles_have_distinct_budget_reports' crates/core/src/budget.rs >/dev/null; then
+if ! rg -n 'profiles_have_distinct_budget_reports' crates/core/src/budget.rs >/dev/null; then
   fail "runtime budget tests must cover profile-specific compiled reports"
 fi
 

@@ -95,7 +95,7 @@ fn finalize_turn_rejects_canonical_turn_scope_mismatch() {
     let mut request = finalize_request("叫我青川", Some("你好，青川。"));
     request.turn.conversation.chat_id = "chat-b".to_string();
 
-    let err = match runtime.finalize_turn_and_maintain(None, None, request) {
+    let err = match runtime.finalize_turn_with_inline_governance(None, None, request) {
         Ok(_) => panic!("scope mismatch should fail"),
         Err(err) => err,
     };
@@ -134,7 +134,7 @@ fn finalize_turn_commits_before_maintenance() {
     let llm = StaticLlmClient::summary_response("Summary: user asked to be called Qingchuan.");
 
     let report = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request("叫我青川", Some("你好，青川。")),
@@ -169,7 +169,7 @@ fn finalize_turn_commits_transcript_and_reports_semantic_governance_boundary() {
     let llm = StaticLlmClient::summary_response("Summary: unused");
 
     let report = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request("叫我青川", Some("你好，青川。")),
@@ -207,7 +207,7 @@ fn finalize_turn_commits_transcript_when_maintenance_services_are_unavailable() 
     );
 
     let report = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request("叫我青川", Some("你好，青川。")),
@@ -245,7 +245,7 @@ fn desktop_embedded_profile_runs_host_triggered_maintenance() {
     let llm = StaticLlmClient::summary_response("Summary: desktop host-triggered maintenance");
 
     let report = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request("叫我青川", Some("你好，青川。")),
@@ -279,7 +279,7 @@ fn desktop_embedded_public_lifecycle_keeps_capacity_after_sixty_four_turns() {
 
     for index in 0..64 {
         let report = runtime
-            .finalize_turn_and_maintain(
+            .finalize_turn_with_inline_governance(
                 None,
                 None,
                 finalize_request(
@@ -319,7 +319,7 @@ fn desktop_embedded_public_lifecycle_keeps_capacity_after_sixty_four_turns() {
     assert!(!export.slice.turns.is_empty());
 
     let next = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request(
@@ -348,7 +348,7 @@ fn finalize_turn_runs_private_garden_self_work_without_counting_it_as_semantic_m
     );
 
     let report = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request_with_tools(
@@ -393,7 +393,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
     );
 
     let report = runtime_a
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request("以后叫我青川", Some("好的，青川。")),
@@ -466,7 +466,7 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
     );
 
     let report = runtime_a
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request("你叫什么？", Some("我是 Beetle Memory 的记忆助手。")),
@@ -528,7 +528,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
     );
 
     let report = runtime_a
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request(
@@ -594,7 +594,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
     );
 
     let report = runtime_a
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             finalize_request_with_tools("根据外部资料回答", Some("外部资料说这是真的。"), 1, true),
@@ -658,7 +658,7 @@ fn finalize_turn_uses_canonical_delta_external_content_boundary() {
     request.turn.external_content_used = true;
 
     let report = runtime_a
-        .finalize_turn_and_maintain(Some(&mut http), Some(&llm), request)
+        .finalize_turn_with_inline_governance(Some(&mut http), Some(&llm), request)
         .expect("finalize turn");
 
     assert_eq!(report.semantic_governance.accepted_count, 0);

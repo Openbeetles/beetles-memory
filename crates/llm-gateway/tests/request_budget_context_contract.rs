@@ -1,11 +1,10 @@
 use serde_json::json;
 
 use bm_llm_gateway::{
-    handle_openai_request, serve_llm_gateway_http_accepted_stream_with_services_in_request,
-    GatewayConfig, GatewayErrorKey, GatewayHttpRequestBindings, GatewayProviderConfig,
-    GatewayRuntime, OllamaNativeUpstream, OllamaUpstreamRequest, OllamaUpstreamResponse,
-    OpenAiCompatibleUpstream, OpenAiGatewayRequest, OpenAiGatewayServices, OpenAiUpstreamRequest,
-    OpenAiUpstreamResponse,
+    handle_openai_request, serve_llm_gateway_http_accepted_stream_in_request, GatewayConfig,
+    GatewayErrorKey, GatewayHttpRequestBindings, GatewayProviderConfig, GatewayRuntime,
+    OllamaNativeUpstream, OllamaUpstreamRequest, OllamaUpstreamResponse, OpenAiCompatibleUpstream,
+    OpenAiGatewayRequest, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 
 mod support;
@@ -123,12 +122,10 @@ fn http_parser_scope_projection_upstream_and_response_share_one_pinned_report() 
     let (mut stream, client) = support::accepted_request(request);
     let mut upstream = StreamingUpstream::default();
     let mut ollama = UnusedOllamaUpstream;
-    let mut services = OpenAiGatewayServices::new();
-
-    serve_llm_gateway_http_accepted_stream_with_services_in_request(
+    serve_llm_gateway_http_accepted_stream_in_request(
         &gateway,
         &context,
-        GatewayHttpRequestBindings::new(&mut upstream, &mut ollama, &mut services),
+        GatewayHttpRequestBindings::new(&mut upstream, &mut ollama),
         &mut stream,
     )
     .expect("gateway HTTP request");

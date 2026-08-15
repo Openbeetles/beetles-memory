@@ -31,6 +31,11 @@ fn host_profile_name() -> &'static str {
 }
 
 #[test]
+fn cli_default_build_enables_entry_governance_model_client() {
+    assert!(bm_entry::entry_governance_model_client_compiled());
+}
+
+#[test]
 fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
     let commands: Vec<_> = command_specs().iter().map(|spec| spec.name).collect();
     assert_eq!(
@@ -42,6 +47,7 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
             "project",
             "replay",
             "write-procedural",
+            "finalize-turn",
             "long-term-list",
             "long-term-detail",
             "long-term-delete",
@@ -183,6 +189,30 @@ fn transcript_attr_write_command_is_public_and_requires_explicit_reason() {
     )
     .expect_err("transcript attr write without reason should fail");
     assert!(attr_write.contains("--reason is required"));
+}
+
+#[test]
+fn finalize_turn_command_is_public_and_uses_the_shared_json_contract() {
+    let spec = command_specs()
+        .iter()
+        .find(|spec| spec.name == "finalize-turn")
+        .expect("finalize turn command");
+    assert_eq!(spec.operation, bm_adapter::AdapterOperation::FinalizeTurn);
+
+    let error = run_cli(
+        [
+            "memory",
+            "finalize-turn",
+            "--profile",
+            host_profile_name(),
+            "--input",
+            "/tmp/missing-finalize-turn.json",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect_err("missing finalize request must fail before dispatch");
+    assert!(error.contains("failed to read finalize turn request"));
 }
 
 #[test]

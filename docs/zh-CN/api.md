@@ -44,13 +44,13 @@ Conversation Transcript Substrate 发布面是当前已落地的基础证据合�
 
 owner 仍然是 `MemoryRuntime`：宿主和 adapter 只提供 delivered turn delta、actor attribution 和 opaque host refs；Beetle Memory 负责提交 evidence、执行治理并返回 report。外部代码不能另写一套 transcript store，也不能从 raw conversation history 自行推断 memory facts。
 
-`MemoryScope::new(channel, chat_id)` 仍是单 agent 默认接入形态。若宿主有区别于 legacy chat id 的稳定 conversation id，可使用 `MemoryScope::with_conversation_id(...)`；`finalize_turn_and_maintain` 和 `commit_transcript` 也会记住最近一次提交的 transcript conversation，供后续 recall、projection、maintenance 和 inspection 使用。
+`MemoryScope::new(channel, chat_id)` 仍是单 agent 默认接入形态。若宿主有区别于 legacy chat id 的稳定 conversation id，可使用 `MemoryScope::with_conversation_id(...)`；`finalize_turn` 和 `commit_transcript` 也会记住最近一次提交的 transcript conversation，供后续 recall、projection、maintenance 和 inspection 使用。
 
 SDK transcript 操作：
 
 | 操作 | SDK surface | 用途 |
 | --- | --- | --- |
-| Transcript Commit | `MemoryRuntime::finalize_turn_and_maintain` + `CanonicalTurnDelta`；手动提交使用 `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport`，通过 `MemoryRuntime::commit_transcript` 调用 | 将 delivered turn 作为 governed evidence 提交到 `memory_space_id + channel_id + conversation_id`。 |
+| Transcript Commit | `MemoryRuntime::finalize_turn` + `CanonicalTurnDelta`；手动提交使用 `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport`，通过 `MemoryRuntime::commit_transcript` 调用 | 将 delivered turn 作为 governed evidence 提交到 `memory_space_id + channel_id + conversation_id`。 |
 | Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport`，通过 `MemoryRuntime::replay_transcript` 调用 | 通过 model context、host UI、operator audit 或 export 等分层视图读取 transcript evidence。 |
 | Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport`，通过 `MemoryRuntime::request_transcript_lifecycle` 调用 | 执行 archive、mask、delete raw content 或 lifecycle review，并产出 audit。 |
 | Transcript Repair | `MemoryTranscriptRepairRequest` / `MemoryTranscriptRepairReport`，通过 `MemoryRuntime::repair_transcript` 调用 | 检查 Memory-owned evidence link 断裂，不扫描宿主业务数据库。 |
@@ -90,7 +90,7 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 - `HostUi` replay 不得泄漏 private garden、inner-life、soul-private raw material、backend trace 或 operator-only audit 内容。
 - `ModelContext` replay 必须经过 privacy gate、profile budget 和模型可见 projection policy。
 - Host refs 默认保持 opaque；replay 可以展示 metadata 和 relation，不返回宿主对象 payload。`Export` 只返回 export-visible refs，`ModelContext` 只返回 model-context refs。
-- `MemoryRuntime::finalize_turn_and_maintain` 同时报告 session commit 和 transcript commit 状态；当 legacy session shadow 已有该 turn 但 transcript backfill 成功时，不会被误报成 no-op。
+- `MemoryRuntime::finalize_turn` 同时报告 session commit 和 transcript commit 状态；当 legacy session shadow 已有该 turn 但 transcript backfill 成功时，不会被误报成 no-op。
 
 ## Request Shapes
 

@@ -44,13 +44,13 @@ The Conversation Transcript Substrate release surface is the current base eviden
 
 The owner remains `MemoryRuntime`: hosts and adapters provide delivered turn deltas, actor attribution, and opaque host references; Beetle Memory commits evidence, applies governance, and returns reports. External code must not write a parallel transcript store or infer memory facts from raw conversation history.
 
-`MemoryScope::new(channel, chat_id)` remains the single-agent default. Hosts that have a stable conversation id distinct from the legacy chat id can set `MemoryScope::with_conversation_id(...)`; `finalize_turn_and_maintain` and `commit_transcript` also remember the last committed transcript conversation for subsequent recall, projection, maintenance, and inspection calls.
+`MemoryScope::new(channel, chat_id)` remains the single-agent default. Hosts that have a stable conversation id distinct from the legacy chat id can set `MemoryScope::with_conversation_id(...)`; `finalize_turn` and `commit_transcript` also remember the last committed transcript conversation for subsequent recall, projection, maintenance, and inspection calls.
 
 SDK-facing transcript operations:
 
 | Operation | SDK surface | Purpose |
 | --- | --- | --- |
-| Transcript Commit | `MemoryRuntime::finalize_turn_and_maintain` with `CanonicalTurnDelta`; manual commits use `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport` via `MemoryRuntime::commit_transcript` | Commit a delivered turn as governed evidence under `memory_space_id + channel_id + conversation_id`. |
+| Transcript Commit | `MemoryRuntime::finalize_turn` with `CanonicalTurnDelta`; manual commits use `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport` via `MemoryRuntime::commit_transcript` | Commit a delivered turn as governed evidence under `memory_space_id + channel_id + conversation_id`. |
 | Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport` via `MemoryRuntime::replay_transcript` | Read transcript evidence through a scoped view such as model context, host UI, operator audit, or export. |
 | Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport` via `MemoryRuntime::request_transcript_lifecycle` | Archive, mask, delete raw content, or run lifecycle review with audit output. |
 | Transcript Repair | `MemoryTranscriptRepairRequest` / `MemoryTranscriptRepairReport` via `MemoryRuntime::repair_transcript` | Inspect broken Memory-owned evidence links without scanning host business databases. |
@@ -90,7 +90,7 @@ Privacy and projection boundaries:
 - `HostUi` replay must not expose private garden, inner-life, soul-private raw material, backend traces, or operator-only audit content.
 - `ModelContext` replay must pass through privacy gates, profile budget, and model-facing projection policy.
 - Host references stay opaque by default; replay can show metadata and relation, not host object payloads. `Export` returns only export-visible refs, and `ModelContext` returns only model-context refs.
-- `MemoryRuntime::finalize_turn_and_maintain` reports both session commit and transcript commit status, so transcript backfill is not treated as a no-op when the legacy session shadow already contains the turn.
+- `MemoryRuntime::finalize_turn` reports both session commit and transcript commit status, so transcript backfill is not treated as a no-op when the legacy session shadow already contains the turn.
 
 ## Request Shapes
 

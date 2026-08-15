@@ -64,7 +64,6 @@ pub struct OllamaTransparentConfig {
     pub managed_process_receipt_path: PathBuf,
     pub managed_log_dir: PathBuf,
     pub memory_authority: OllamaTransparentMemoryAuthority,
-    pub maintenance_model: String,
     pub public_bind: SocketAddr,
     pub upstream_bind: SocketAddr,
     pub allow_stop_official_ollama: bool,
@@ -98,7 +97,6 @@ impl OllamaTransparentConfig {
                 .join("managed-processes.json"),
             managed_log_dir: data_dir.join("ollama").join("logs"),
             memory_authority,
-            maintenance_model: "local".to_string(),
             public_bind: loopback(11434),
             upstream_bind: loopback(11435),
             allow_stop_official_ollama: false,
@@ -140,11 +138,6 @@ impl OllamaTransparentConfig {
             require_absolute(name, path)?;
         }
         self.memory_authority.validate()?;
-        if self.maintenance_model.trim().is_empty() {
-            return Err(OllamaTransparentError::invalid_config(
-                "maintenance_model must not be empty",
-            ));
-        }
         if self.managed_runner_path == self.official_ollama_binary {
             return Err(OllamaTransparentError::invalid_config(
                 "managed_runner_path must not equal official_ollama_binary",

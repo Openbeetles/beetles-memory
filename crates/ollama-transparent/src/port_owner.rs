@@ -249,11 +249,7 @@ fn parse_lsof_process(output: &[u8]) -> Option<ObservedProcess> {
                 }
                 pid = value.parse::<u32>().ok();
             }
-            "c" => {
-                if command.is_none() {
-                    command = Some(value.to_string());
-                }
-            }
+            "c" if command.is_none() => command = Some(value.to_string()),
             _ => {}
         }
     }

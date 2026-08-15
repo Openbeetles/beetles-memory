@@ -80,7 +80,7 @@ require_fixed "MemoryTranscriptReplayRequest" dev-docs/conversation-transcript-s
 require_fixed "MemoryTranscriptLifecycleRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptExportRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptRepairRequest" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs
-require_fixed "MemoryRuntime::finalize_turn_and_maintain" docs/en/api.md docs/zh-CN/api.md
+require_fixed "MemoryRuntime::finalize_turn" docs/en/api.md docs/zh-CN/api.md
 require_fixed "memory_space_id + channel_id + conversation_id" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "HostUi" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md
 require_fixed "ModelContext" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md

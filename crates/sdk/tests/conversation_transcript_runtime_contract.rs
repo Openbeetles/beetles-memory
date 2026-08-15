@@ -146,7 +146,11 @@ fn finalize_turn_commits_conversation_transcript_in_runtime_memory_space() {
     );
 
     let report = runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("记住我是青川", "好的，青川。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("记住我是青川", "好的，青川。"),
+        )
         .unwrap();
     assert!(report.session_commit.committed);
 
@@ -442,7 +446,7 @@ fn finalize_turn_preserves_host_provided_actor_attribution() {
     });
 
     runtime
-        .finalize_turn_and_maintain(None, None, request)
+        .finalize_turn_with_inline_governance(None, None, request)
         .unwrap();
 
     let replay = runtime
@@ -484,7 +488,7 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request(
@@ -544,7 +548,7 @@ fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
         "subject-default",
     );
     let finalize = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request(
@@ -605,14 +609,14 @@ fn transcript_backed_projection_honors_recent_message_limit() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request("limit first user", "limit first assistant"),
         )
         .unwrap();
     runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request("limit second user", "limit second assistant"),
@@ -662,7 +666,7 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
         "subject-default",
     );
     let finalize = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request(
@@ -728,7 +732,7 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_raw_delete
         "subject-default",
     );
     let finalize = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request(
@@ -787,7 +791,7 @@ fn import_rejects_tampered_transcript_alias_before_runtime_projection() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request(
@@ -842,7 +846,7 @@ fn recall_inspect_and_maintenance_do_not_fallback_to_session_shadow_after_transc
         "subject-default",
     );
     let finalize = runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request(
@@ -930,7 +934,7 @@ fn runtime_lifecycle_request_deletes_raw_transcript_without_deleting_session_sha
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("需要脱敏", "已记录。"))
+        .finalize_turn_with_inline_governance(None, None, finalize_request("需要脱敏", "已记录。"))
         .unwrap();
 
     let lifecycle = runtime
@@ -980,7 +984,11 @@ fn lifecycle_request_without_affected_turns_reports_noop() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("存在的 turn", "已记录。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("存在的 turn", "已记录。"),
+        )
         .unwrap();
 
     let lifecycle = runtime
@@ -1010,7 +1018,11 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
         "subject-default",
     );
     let finalize = runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("我偏好简洁回答", "已记录。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("我偏好简洁回答", "已记录。"),
+        )
         .unwrap();
     assert!(finalize
         .transcript_commit
@@ -1097,7 +1109,7 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request("我发了一段不能直接变成长记忆的材料", "我会只保留证据。"),
@@ -1218,7 +1230,11 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("我喜欢结构化摘要", "已记录。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("我喜欢结构化摘要", "已记录。"),
+        )
         .unwrap();
     let replay = runtime
         .replay_transcript(MemoryTranscriptReplayRequest {
@@ -1319,7 +1335,7 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
     let turn_id = request.turn.turn_id.clone();
 
     let report = runtime
-        .finalize_turn_and_maintain(Some(&mut http), Some(&llm), request)
+        .finalize_turn_with_inline_governance(Some(&mut http), Some(&llm), request)
         .unwrap();
     assert_eq!(report.semantic_governance.accepted_count, 1);
     let entries = platform
@@ -1380,7 +1396,7 @@ fn soul_candidate_handoff_records_transcript_derived_ref_for_lifecycle_impact() 
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(
+        .finalize_turn_with_inline_governance(
             None,
             None,
             finalize_request("这段自我理解交给灵魂治理", "我会作为候选交给灵魂治理。"),
@@ -1473,7 +1489,11 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
         "subject-default",
     );
     let finalize = runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("导出前需要保护", "已记录。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("导出前需要保护", "已记录。"),
+        )
         .unwrap();
     let turn_id = finalize.transcript_commit.unwrap().turn_id;
     let key = ConversationKey::new(
@@ -1600,7 +1620,7 @@ fn private_garden_self_work_records_private_garden_derived_refs_without_raw_cont
     let turn_id = request.turn.turn_id.clone();
 
     let report = runtime
-        .finalize_turn_and_maintain(Some(&mut http), Some(&llm), request)
+        .finalize_turn_with_inline_governance(Some(&mut http), Some(&llm), request)
         .unwrap();
 
     assert!(report.private_garden_self_work.executed);
@@ -1750,10 +1770,18 @@ fn runtime_replay_and_export_transcript_support_cursor_pages() {
         "subject-default",
     );
     runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("第一页", "已记录第一页。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("第一页", "已记录第一页。"),
+        )
         .unwrap();
     runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("第二页内容", "已记录第二页。"))
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request("第二页内容", "已记录第二页。"),
+        )
         .unwrap();
 
     let first = runtime
@@ -1932,7 +1960,7 @@ fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_al
     assert!(legacy_session.committed);
 
     let report = runtime
-        .finalize_turn_and_maintain(None, None, request)
+        .finalize_turn_with_inline_governance(None, None, request)
         .unwrap();
 
     assert!(!report.session_commit.committed);

@@ -115,7 +115,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
         })
         .expect("project");
     runtime
-        .finalize_turn_and_maintain(None, None, finalize_request("turn-metrics-1"))
+        .finalize_turn_with_inline_governance(None, None, finalize_request("turn-metrics-1"))
         .expect("finalize");
 
     let report = runtime.runtime_metrics_report().expect("runtime metrics");

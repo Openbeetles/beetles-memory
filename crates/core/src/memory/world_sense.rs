@@ -734,11 +734,10 @@ fn describe_resource_tension(
     inbound_depth: u32,
     outbound_depth: u32,
 ) -> &'static str {
-    let storage_ratio = if storage_total_kb == 0 {
-        0
-    } else {
-        storage_used_kb.saturating_mul(100) / storage_total_kb
-    };
+    let storage_ratio = storage_used_kb
+        .saturating_mul(100)
+        .checked_div(storage_total_kb)
+        .unwrap_or(0);
     if pressure != PressureLevel::Normal
         || memory_available_bytes < 128 * 1024
         || storage_ratio >= 90

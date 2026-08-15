@@ -20,8 +20,13 @@ Use this checklist for maintainer release candidates.
 
 ```bash
 cargo fmt --all -- --check
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --exclude bm-desktop
+cargo clippy --locked --workspace --exclude bm-desktop --all-targets -- -D warnings
+# Run these desktop gates on macOS with the required production profile.
+cargo test --locked -p bm-desktop --no-default-features \
+  --features profile-desktop-macos-standalone-memory
+cargo clippy --locked -p bm-desktop --all-targets --no-default-features \
+  --features profile-desktop-macos-standalone-memory -- -D warnings
 cargo doc --locked --no-deps --no-default-features \
   -p bm-core \
   -p bm-sdk \
@@ -30,6 +35,8 @@ cargo doc --locked --no-deps --no-default-features \
   -p bm-adapter \
   -p bm-entry \
   -p bm-cli \
+  -p bm-llm-gateway \
+  -p bm-ollama-transparent \
   -p bm-http \
   -p bm-wss \
   -p bm-mcp \
@@ -59,10 +66,18 @@ bm-core
 bm-sdk
 bm-replay / bm-evolve / bm-adapter
 bm-entry
-bm-cli / bm-http / bm-wss / bm-mcp / bm-a2a
+bm-ollama-transparent
+bm-cli / bm-llm-gateway / bm-http / bm-wss / bm-mcp / bm-a2a
 ```
 
 Run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_surface.sh`. The release gate runs production hardening checks, uses temporary Cargo target directories, and fails if repository ignored artifacts change.
+
+## Rollback
+
+- Before the first real publish, stop on any failed gate, fix on `dev`, and freeze a new candidate; do not move `main` or a release tag to hide a failed candidate.
+- crates.io versions are immutable. If a published package is defective, do not overwrite the version or delete the tag as a rollback; stop announcing the release, fix the defect, and publish a new patch version in the same dependency order.
+- Before deploying a binary that may open an existing store, back up that exact store outside the data path. Deployment rollback restores the previous signed binary and its matching store backup; archive import/export is not an implicit schema migration or rollback path.
+- Create a release tag only from the verified `main` commit. Never retarget an existing release tag.
 
 ## Scope Checks
 

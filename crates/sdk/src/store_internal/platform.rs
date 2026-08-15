@@ -2780,6 +2780,8 @@ fn validate_protected_json_mutation_preconditions(
         ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE,
         TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
         RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
+        POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+        POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
     ];
     let mut by_address = BTreeMap::<(String, String), &StoreJsonPrecondition>::new();
     for precondition in preconditions {
@@ -8716,7 +8718,7 @@ impl bm_core::memory::LongTermMemoryReadStore for ScopedLongTermMemoryStore {
             }
             entries.push(self.current_projection_for_head(&head)?);
         }
-        entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
         if limit > 0 {
             entries.truncate(limit);
         }
@@ -8825,7 +8827,7 @@ impl LongTermMemoryControlReadStore for ScopedLongTermMemoryControlReadStore {
             .list_scoped::<LongTermMemoryControlRevision>(LONG_TERM_CONTROL_REVISION_NAMESPACE)?;
         revisions
             .retain(|revision| revision.transition.predecessor.owner_ref.owner_id == record_id);
-        revisions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        revisions.sort_by_key(|revision| std::cmp::Reverse(revision.created_at));
         revisions.truncate(limit);
         Ok(revisions)
     }
@@ -8846,7 +8848,7 @@ impl LongTermMemoryControlReadStore for ScopedLongTermMemoryControlReadStore {
     ) -> Result<Vec<LongTermMemoryTombstone>> {
         let mut tombstones =
             self.list_scoped::<LongTermMemoryTombstone>(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE)?;
-        tombstones.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        tombstones.sort_by_key(|tombstone| std::cmp::Reverse(tombstone.created_at));
         tombstones.truncate(limit);
         Ok(tombstones)
     }
@@ -8857,7 +8859,7 @@ impl LongTermMemoryControlReadStore for ScopedLongTermMemoryControlReadStore {
     ) -> Result<Vec<MemoryLongTermGovernancePolicy>> {
         let mut policies = self
             .list_scoped::<MemoryLongTermGovernancePolicy>(LONG_TERM_GOVERNANCE_POLICY_NAMESPACE)?;
-        policies.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        policies.sort_by_key(|policy| std::cmp::Reverse(policy.updated_at));
         policies.truncate(limit);
         Ok(policies)
     }
@@ -8868,7 +8870,7 @@ impl LongTermMemoryControlReadStore for ScopedLongTermMemoryControlReadStore {
     ) -> Result<Vec<LongTermMemoryControlAuditEvent>> {
         let mut events =
             self.list_scoped::<LongTermMemoryControlAuditEvent>(LONG_TERM_CONTROL_AUDIT_NAMESPACE)?;
-        events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        events.sort_by_key(|event| std::cmp::Reverse(event.created_at));
         events.truncate(limit);
         Ok(events)
     }
@@ -9011,7 +9013,7 @@ impl ContinuityCapsuleStore for StorePlatform {
 
     fn list(&self, limit: usize) -> Result<Vec<ContinuityCapsule>> {
         let mut items = self.json_list::<ContinuityCapsule>("continuity_capsule", limit)?;
-        items.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        items.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
         items.truncate(limit);
         Ok(items)
     }
@@ -9063,7 +9065,7 @@ impl PrivateGardenStore for StorePlatform {
                 docs.push(private_garden_record(&doc));
             }
         }
-        docs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        docs.sort_by_key(|doc| std::cmp::Reverse(doc.updated_at));
         docs.truncate(limit);
         Ok(docs)
     }
@@ -9171,7 +9173,7 @@ impl RemindAtStore for StorePlatform {
         let mut items =
             self.json_list::<bm_core::reminder::ReminderItem>("remind_at", usize::MAX)?;
         items.retain(|item| item.at_unix_secs > 0 && item.at_unix_secs <= now_unix_secs);
-        items.sort_by(|left, right| left.at_unix_secs.cmp(&right.at_unix_secs));
+        items.sort_by_key(|item| item.at_unix_secs);
         items.truncate(limit);
         Ok(items)
     }
@@ -9205,7 +9207,7 @@ impl RemindAtStore for StorePlatform {
         items.retain(|item| {
             item.channel == channel && item.chat_id == chat_id && item.at_unix_secs > now_unix_secs
         });
-        items.sort_by(|left, right| left.at_unix_secs.cmp(&right.at_unix_secs));
+        items.sort_by_key(|item| item.at_unix_secs);
         items.truncate(limit);
         Ok(items)
     }
@@ -9221,7 +9223,7 @@ impl TaskStore for StorePlatform {
                 && (query.include_completed || !task.status.is_terminal())
                 && (query.project.trim().is_empty() || task.project == query.project)
         });
-        items.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        items.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
         items.truncate(query.limit);
         Ok(items)
     }
@@ -9251,7 +9253,7 @@ impl TaskStore for StorePlatform {
                 && task.due_notified_at_unix_secs == 0
                 && !task.status.is_terminal()
         });
-        items.sort_by(|left, right| left.due_at_unix_secs.cmp(&right.due_at_unix_secs));
+        items.sort_by_key(|item| item.due_at_unix_secs);
         items.truncate(limit);
         Ok(items)
     }
@@ -9415,7 +9417,7 @@ impl TaskRunStore for StorePlatform {
 
     fn list_recent(&self, limit: usize) -> Result<Vec<TaskRunRecord>> {
         let mut records = self.json_list::<TaskRunRecord>("task_run", usize::MAX)?;
-        records.sort_by(|left, right| right.run.updated_at.cmp(&left.run.updated_at));
+        records.sort_by_key(|record| std::cmp::Reverse(record.run.updated_at));
         records.truncate(limit);
         Ok(records)
     }
@@ -9432,7 +9434,7 @@ impl TaskRunStore for StorePlatform {
                 && record.run.source_chat_id == chat_id
                 && record.run.status.is_active()
         });
-        records.sort_by(|left, right| right.run.updated_at.cmp(&left.run.updated_at));
+        records.sort_by_key(|record| std::cmp::Reverse(record.run.updated_at));
         records.truncate(limit);
         Ok(records)
     }
@@ -9450,7 +9452,7 @@ impl TaskArtifactStore for StorePlatform {
     fn list_for_run(&self, run_id: &str, limit: usize) -> Result<Vec<TaskArtifactRecord>> {
         let mut records = self.json_list::<TaskArtifactRecord>("task_artifact", usize::MAX)?;
         records.retain(|record| record.artifact.run_id == run_id);
-        records.sort_by(|left, right| right.artifact.created_at.cmp(&left.artifact.created_at));
+        records.sort_by_key(|record| std::cmp::Reverse(record.artifact.created_at));
         records.truncate(limit);
         Ok(records)
     }
@@ -9583,7 +9585,7 @@ impl TaskLearningStore for StorePlatform {
 
     fn list_recent(&self, limit: usize) -> Result<Vec<TaskLearningRecord>> {
         let mut records = self.json_list::<TaskLearningRecord>("task_learning", usize::MAX)?;
-        records.sort_by(|left, right| right.observed_at.cmp(&left.observed_at));
+        records.sort_by_key(|record| std::cmp::Reverse(record.observed_at));
         records.truncate(limit);
         Ok(records)
     }
@@ -9597,7 +9599,7 @@ impl TaskLearningStore for StorePlatform {
         let mut records = self.json_list::<TaskLearningRecord>("task_learning", usize::MAX)?;
         records
             .retain(|record| record.source_channel == channel && record.source_chat_id == chat_id);
-        records.sort_by(|left, right| right.observed_at.cmp(&left.observed_at));
+        records.sort_by_key(|record| std::cmp::Reverse(record.observed_at));
         records.truncate(limit);
         Ok(records)
     }
@@ -9605,7 +9607,7 @@ impl TaskLearningStore for StorePlatform {
     fn list_for_run(&self, run_id: &str, limit: usize) -> Result<Vec<TaskLearningRecord>> {
         let mut records = self.json_list::<TaskLearningRecord>("task_learning", usize::MAX)?;
         records.retain(|record| record.run_id == run_id);
-        records.sort_by(|left, right| right.observed_at.cmp(&left.observed_at));
+        records.sort_by_key(|record| std::cmp::Reverse(record.observed_at));
         records.truncate(limit);
         Ok(records)
     }

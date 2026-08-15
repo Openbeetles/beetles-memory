@@ -10,8 +10,10 @@ pub use contract::{
     AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterEvent,
     AdapterGovernedProjectSafeReportV1, AdapterGovernedRecallSafeReportV1,
     AdapterGovernedSafeReportV1, AdapterOperation, AdapterProjectionAuditSummary,
-    AdapterProjectionReport, AdapterRequestIdentity, AdapterRequestIdentityError,
-    AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport, AdapterSource, TransportKind,
+    AdapterProjectionReport, AdapterProtocolBinding, AdapterProtocolCapabilityBinding,
+    AdapterProtocolPrivacyBinding, AdapterProtocolRenderBudgetBinding, AdapterRequestIdentity,
+    AdapterRequestIdentityError, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
+    AdapterSource, AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion, TransportKind,
     TransportMode,
 };
 pub use dispatch::{

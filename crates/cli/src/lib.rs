@@ -5,7 +5,10 @@ use std::path::PathBuf;
 pub mod agent_rules;
 
 use agent_rules::{render_agent_rules_export, AgentRulesExportRequest, AgentRulesTarget};
-use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkReport};
+use bm_adapter::{
+    decode_json_adapter_command, AdapterCommand, AdapterJsonCommandOptions, AdapterOperation,
+    AdapterResponse, AdapterSdkReport,
+};
 use bm_entry::{
     EntryAuthConfig, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
     EntryIdempotencyConfig, EntryIdentity, EntryLocalTransport, EntryRuntime, EntryRuntimeConfig,
@@ -64,6 +67,11 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         name: "write-procedural",
         usage: "bm memory write-procedural --name <name> --content <content> --runtime-skill-subject <subject-id>|--runtime-skill-shared-program --replay-candidate-ref <safe-ref> --verification-receipt-digest <sha256> --runtime-skill-privacy <public-runtime|shared-with-subject>",
         operation: AdapterOperation::Write,
+    },
+    CommandSpec {
+        name: "finalize-turn",
+        usage: "bm memory finalize-turn --input <request.json>",
+        operation: AdapterOperation::FinalizeTurn,
     },
     CommandSpec {
         name: "long-term-list",
@@ -697,6 +705,21 @@ impl CliOptions {
                 })?,
                 source: RuntimeSkillWriteSource::Manual,
             })),
+            "finalize-turn" => {
+                let path = self
+                    .input_path
+                    .as_ref()
+                    .ok_or_else(|| "finalize-turn requires --input <request.json>".to_string())?;
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|err| format!("failed to read finalize turn request: {err}"))?;
+                decode_json_adapter_command(
+                    AdapterOperation::FinalizeTurn,
+                    &raw,
+                    &AdapterJsonCommandOptions::new("bm-cli")
+                        .with_default_source_chat_id(self.chat.clone()),
+                )
+                .map_err(|err| err.to_string())
+            }
             "long-term-list" => Ok(AdapterCommand::LongTermList(MemoryLongTermListRequest {
                 query: LongTermMemoryQuery {
                     topic: non_empty_string(&self.query),
@@ -881,6 +904,11 @@ fn render_sdk_report(report: AdapterSdkReport) -> Result<String, String> {
             "accepted": report.accepted,
             "changed": report.changed,
             "reason": report.reason,
+        }),
+        AdapterSdkReport::FinalizeTurn(report) => json!({
+            "status": "accepted",
+            "operation": "finalize_turn",
+            "result": report,
         }),
         AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
             unreachable!("governed DTO handled above")

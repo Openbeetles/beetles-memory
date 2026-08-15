@@ -1,22 +1,17 @@
 use bm_entry::EntryRuntimeBaseConfig;
 use bm_llm_gateway::{
-    handle_ollama_request, handle_ollama_request_with_services,
-    serve_llm_gateway_http_accepted_stream_with_services, GatewayAuditOutcome, GatewayAuditStage,
-    GatewayConfig, GatewayProjectionAuditStatus, GatewayProviderConfig, GatewayRuntime,
-    GatewayScopeRequest, GatewayScopeResolver, OllamaGatewayBody, OllamaGatewayRequest,
-    OllamaMaintenanceLlmClient, OllamaNativeUpstream, OllamaUpstreamRequest,
-    OllamaUpstreamResponse, OpenAiCompatibleUpstream, OpenAiGatewayServices, OpenAiUpstreamRequest,
-    OpenAiUpstreamResponse,
+    handle_ollama_request, serve_llm_gateway_http_accepted_stream, GatewayAuditOutcome,
+    GatewayAuditStage, GatewayConfig, GatewayProjectionAuditStatus, GatewayProviderConfig,
+    GatewayRuntime, GatewayScopeRequest, GatewayScopeResolver, OllamaGatewayBody,
+    OllamaGatewayRequest, OllamaNativeUpstream, OllamaUpstreamRequest, OllamaUpstreamResponse,
+    OpenAiCompatibleUpstream, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
 use bm_sdk::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy,
-    MemoryProjectionRequest, MemoryRuntime, MemoryTranscriptReplayReport,
-    MemoryTranscriptReplayRequest, MemoryWriteRequest, Message, PressureLevel, ResponseBody,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StopReason,
-    ToolChoicePolicy, ToolSpec, TranscriptReplayView,
+    MemoryCapabilityPolicy, MemoryRuntime, MemoryTranscriptReplayReport,
+    MemoryTranscriptReplayRequest, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    TranscriptReplayView,
 };
 use serde_json::{json, Value};
-use std::borrow::Cow;
 
 mod support;
 
@@ -235,77 +230,6 @@ impl OpenAiCompatibleUpstream for MockOpenAiUpstream {
     }
 }
 
-#[derive(Default)]
-struct StaticHttpClient;
-
-impl LlmHttpClient for StaticHttpClient {
-    fn do_post(
-        &mut self,
-        _url: &str,
-        _headers: &[(&str, &str)],
-        _body: &[u8],
-    ) -> bm_sdk::Result<(u16, ResponseBody)> {
-        Ok((200, ResponseBody::Heap(Vec::new())))
-    }
-}
-
-struct StaticLlmClient;
-
-impl LlmClient for StaticLlmClient {
-    fn model_compat(&self) -> LlmModelCompat {
-        LlmModelCompat::default()
-    }
-
-    fn chat(
-        &self,
-        _http: &mut dyn LlmHttpClient,
-        _system: &str,
-        _messages: &[Message],
-        _tools: Option<&[ToolSpec]>,
-        _tool_choice: ToolChoicePolicy,
-    ) -> bm_sdk::Result<LlmResponse> {
-        Ok(LlmResponse {
-            content: "Summary: ollama maintenance".to_string(),
-            stop_reason: StopReason::EndTurn,
-            tool_calls: None,
-        })
-    }
-}
-
-struct LongTermExtractionLlmClient;
-
-impl LlmClient for LongTermExtractionLlmClient {
-    fn model_compat(&self) -> LlmModelCompat {
-        LlmModelCompat::default()
-    }
-
-    fn chat(
-        &self,
-        _http: &mut dyn LlmHttpClient,
-        _system: &str,
-        _messages: &[Message],
-        _tools: Option<&[ToolSpec]>,
-        _tool_choice: ToolChoicePolicy,
-    ) -> bm_sdk::Result<LlmResponse> {
-        Ok(LlmResponse {
-            content: r#"[
-                {
-                    "plane": "factual",
-                    "op": "upsert",
-                    "kind": "profile",
-                    "source_authority": "user_asserted",
-                    "topic": "preferred_name",
-                    "content": "The user asked to be called Qingchuan.",
-                    "keywords": ["Qingchuan", "preferred name"]
-                }
-            ]"#
-            .to_string(),
-            stop_reason: StopReason::EndTurn,
-            tool_calls: None,
-        })
-    }
-}
-
 #[test]
 fn tags_and_version_proxy_without_projection_or_maintenance() {
     let config = gateway_config();
@@ -406,11 +330,8 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let mut upstream = MockOllamaUpstream::default();
-    let mut http = StaticHttpClient;
-    let llm = StaticLlmClient;
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    let response = handle_ollama_request_with_services(
+    let response = handle_ollama_request(
         &gateway,
         OllamaGatewayRequest::post_json(
             "/api/chat",
@@ -427,7 +348,6 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
             }),
         ),
         &mut upstream,
-        &mut services,
     )
     .expect("chat response");
 
@@ -435,7 +355,7 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
     assert_eq!(response.body.json()["message"]["content"], "ok");
     assert!(response.audit.stages.iter().any(|stage| {
         stage.stage == GatewayAuditStage::Maintenance
-            && stage.outcome == GatewayAuditOutcome::Succeeded
+            && stage.outcome == GatewayAuditOutcome::Queued
     }));
 
     let resolved = GatewayScopeResolver::new(config.scope.clone())
@@ -475,12 +395,9 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let mut upstream = MockOllamaUpstream::default();
-    let mut http = StaticHttpClient;
-    let llm = StaticLlmClient;
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
     let scope = scope_request();
 
-    handle_ollama_request_with_services(
+    handle_ollama_request(
         &gateway,
         OllamaGatewayRequest::post_json(
             "/api/chat",
@@ -492,11 +409,10 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
             }),
         ),
         &mut upstream,
-        &mut services,
     )
     .expect("first chat response");
 
-    handle_ollama_request_with_services(
+    handle_ollama_request(
         &gateway,
         OllamaGatewayRequest::post_json(
             "/api/chat",
@@ -512,7 +428,6 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
             }),
         ),
         &mut upstream,
-        &mut services,
     )
     .expect("second chat response");
 
@@ -545,66 +460,6 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
         vec!["call me Qingchuan", "ok", "I like cold brew", "ok"]
     );
     assert!(!recent_contents.contains(&"call me Qingchuan\nI like cold brew"));
-}
-
-#[test]
-fn chat_non_streaming_applies_long_term_memory_for_new_ollama_chat_projection() {
-    let config = gateway_config();
-    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
-    let mut upstream = MockOllamaUpstream::default();
-    let mut http = StaticHttpClient;
-    let llm = LongTermExtractionLlmClient;
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
-
-    let response = handle_ollama_request_with_services(
-        &gateway,
-        OllamaGatewayRequest::post_json(
-            "/api/chat",
-            scope_request(),
-            json!({
-                "model": "local",
-                "stream": false,
-                "messages": [{ "role": "user", "content": "以后叫我青川" }]
-            }),
-        ),
-        &mut upstream,
-        &mut services,
-    )
-    .expect("chat response");
-
-    assert_eq!(response.status_code, 200);
-    assert!(response.audit.stages.iter().any(|stage| {
-        stage.stage == GatewayAuditStage::Maintenance
-            && stage.outcome == GatewayAuditOutcome::Succeeded
-    }));
-
-    let mut next_chat_scope = scope_request();
-    next_chat_scope.client_conversation_hint = Some("thread-ollama-new".to_string());
-    let resolved = GatewayScopeResolver::new(config.scope.clone())
-        .resolve(&next_chat_scope)
-        .expect("scope");
-    let runtime = gateway
-        .runtime_for_scope(resolved.entry_scope)
-        .expect("scoped runtime");
-    let projection = runtime
-        .runtime()
-        .project(MemoryProjectionRequest {
-            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
-            structured_query_facets: Vec::new(),
-            user_query: "我叫什么？".to_string(),
-            system_max_len: 4096,
-            recent_messages_limit: 8,
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-            tool_registry_refs: Vec::new(),
-        })
-        .expect("projection");
-
-    assert!(projection.report().recall_delivery().rendered_count > 0);
-    assert!(projection
-        .provider_payload()
-        .system_memory_block()
-        .contains("Qingchuan"));
 }
 
 #[test]
@@ -714,11 +569,8 @@ fn chat_streaming_passes_ndjson_lines_and_runs_maintenance_after_drain() {
             "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n".to_string(),
         ],
     ));
-    let mut http = StaticHttpClient;
-    let llm = StaticLlmClient;
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    let mut response = handle_ollama_request_with_services(
+    let mut response = handle_ollama_request(
         &gateway,
         OllamaGatewayRequest::post_json(
             "/api/chat",
@@ -730,7 +582,6 @@ fn chat_streaming_passes_ndjson_lines_and_runs_maintenance_after_drain() {
             }),
         ),
         &mut upstream,
-        &mut services,
     )
     .expect("stream response");
 
@@ -753,10 +604,10 @@ fn chat_streaming_passes_ndjson_lines_and_runs_maintenance_after_drain() {
         OllamaGatewayBody::Ndjson(body) => while body.next_chunk().expect("ndjson").is_some() {},
         OllamaGatewayBody::Json(_) => panic!("expected ndjson body"),
     }
-    response.finish_deferred_maintenance(&mut services);
+    response.finish_deferred_maintenance();
     assert!(response.audit.stages.iter().any(|stage| {
         stage.stage == GatewayAuditStage::Maintenance
-            && stage.outcome == GatewayAuditOutcome::Succeeded
+            && stage.outcome == GatewayAuditOutcome::Queued
     }));
 }
 
@@ -772,11 +623,8 @@ fn chat_non_streaming_without_done_true_skips_maintenance() {
             "done": false
         }),
     ));
-    let mut http = StaticHttpClient;
-    let llm = StaticLlmClient;
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    let response = handle_ollama_request_with_services(
+    let response = handle_ollama_request(
         &gateway,
         OllamaGatewayRequest::post_json(
             "/api/chat",
@@ -788,7 +636,6 @@ fn chat_non_streaming_without_done_true_skips_maintenance() {
             }),
         ),
         &mut upstream,
-        &mut services,
     )
     .expect("chat response");
 
@@ -799,7 +646,7 @@ fn chat_non_streaming_without_done_true_skips_maintenance() {
     }));
     assert!(response.audit.stages.iter().all(|stage| {
         stage.stage != GatewayAuditStage::Maintenance
-            || stage.outcome != GatewayAuditOutcome::Succeeded
+            || stage.outcome != GatewayAuditOutcome::Queued
     }));
 }
 
@@ -903,18 +750,9 @@ fn llm_gateway_http_dispatch_writes_ollama_ndjson_without_sse_wrapping() {
             "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n".to_string(),
         ],
     ));
-    let mut http = StaticHttpClient;
-    let llm = StaticLlmClient;
-    let mut services = OpenAiGatewayServices::new().with_maintenance(&mut http, &llm);
 
-    serve_llm_gateway_http_accepted_stream_with_services(
-        &gateway,
-        &mut openai,
-        &mut ollama,
-        &mut services,
-        &mut stream,
-    )
-    .expect("serve ollama request");
+    serve_llm_gateway_http_accepted_stream(&gateway, &mut openai, &mut ollama, &mut stream)
+        .expect("serve ollama request");
 
     drop(stream);
     let response = support::finish_request(client);
@@ -928,77 +766,6 @@ fn llm_gateway_http_dispatch_writes_ollama_ndjson_without_sse_wrapping() {
         .contains("{\"message\":{\"role\":\"assistant\",\"content\":\"lo\"},\"done\":false}\n"));
     assert!(response
         .contains("{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n"));
-}
-
-struct CapturingHttpClient {
-    url: Option<String>,
-    body: Option<Vec<u8>>,
-}
-
-impl CapturingHttpClient {
-    fn new() -> Self {
-        Self {
-            url: None,
-            body: None,
-        }
-    }
-
-    fn body_json(&self) -> Value {
-        serde_json::from_slice(self.body.as_deref().expect("captured body")).expect("captured json")
-    }
-}
-
-impl LlmHttpClient for CapturingHttpClient {
-    fn do_post(
-        &mut self,
-        url: &str,
-        _headers: &[(&str, &str)],
-        body: &[u8],
-    ) -> bm_sdk::Result<(u16, ResponseBody)> {
-        self.url = Some(url.to_string());
-        self.body = Some(body.to_vec());
-        Ok((
-            200,
-            ResponseBody::Heap(
-                json!({
-                    "message": { "role": "assistant", "content": "maintenance summary" },
-                    "done": true,
-                    "done_reason": "stop"
-                })
-                .to_string()
-                .into_bytes(),
-            ),
-        ))
-    }
-}
-
-#[test]
-fn ollama_maintenance_llm_client_uses_native_chat_endpoint() {
-    let provider = GatewayProviderConfig::ollama_native("http://127.0.0.1:11434/api");
-    let llm = OllamaMaintenanceLlmClient::new(provider, "qwen2.5:7b");
-    let mut http = CapturingHttpClient::new();
-
-    let response = llm
-        .chat(
-            &mut http,
-            "Summarize safely.",
-            &[Message {
-                role: Cow::Borrowed("user"),
-                content: "remember ollama boundary".to_string(),
-            }],
-            None,
-            ToolChoicePolicy::Auto,
-        )
-        .expect("ollama maintenance response");
-
-    assert_eq!(http.url.as_deref(), Some("http://127.0.0.1:11434/api/chat"));
-    let body = http.body_json();
-    assert_eq!(body["model"], "qwen2.5:7b");
-    assert_eq!(body["stream"], false);
-    assert_eq!(body["messages"][0]["role"], "system");
-    assert_eq!(body["messages"][1]["role"], "user");
-    assert_eq!(response.content, "maintenance summary");
-    assert_eq!(response.stop_reason, StopReason::EndTurn);
 }
 
 trait OllamaGatewayBodyAssertions {

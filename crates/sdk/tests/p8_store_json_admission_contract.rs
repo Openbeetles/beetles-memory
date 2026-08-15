@@ -3,7 +3,7 @@
 mod support;
 
 #[test]
-fn direct_json_reads_reject_a_malformed_v6_typed_document() {
+fn direct_json_reads_reject_a_malformed_v7_typed_document() {
     let store = support::empty_store_platform(support::host_test_profile());
     let harness = store.replay_harness();
     let namespace = "runtime_skill_records";
@@ -31,4 +31,32 @@ fn direct_json_reads_reject_a_malformed_v6_typed_document() {
         .export_store_snapshot()
         .expect_err("snapshot export must reject malformed typed values");
     assert_eq!(export_error.stage(), "store_snapshot_export");
+}
+
+#[test]
+fn governance_job_namespace_rejects_unknown_fields_and_wrong_physical_keys() {
+    let store = support::empty_store_platform(support::host_test_profile());
+    let harness = store.replay_harness();
+    for (key, value) in [
+        (
+            "ptgj2:00000000000000000000000000000000000000000000000000000000",
+            serde_json::json!({"unexpected": true}),
+        ),
+        (
+            "wrong-job-key",
+            serde_json::json!({
+                "schemaVersion": 2,
+                "jobId": "ptgj2:00000000000000000000000000000000000000000000000000000000",
+                "unexpected": true
+            }),
+        ),
+    ] {
+        harness
+            .tamper_json_document_for_nonproduction_harness("post_turn_governance_jobs", key, value)
+            .expect("seed malformed governance job");
+        let error = harness
+            .read_json_docs_by_keys("post_turn_governance_jobs", &[key.to_string()])
+            .expect_err("typed governance job must fail closed");
+        assert_eq!(error.stage(), "store_json_known_key_read");
+    }
 }

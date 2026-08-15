@@ -8,6 +8,7 @@ use crate::EntryAcceptedTcpStream;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EntryOperationCapability {
     Write,
+    FinalizeTurn,
     Recall,
     Project,
     Maintain,
@@ -32,6 +33,7 @@ impl EntryOperationCapability {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Write => "write",
+            Self::FinalizeTurn => "finalize_turn",
             Self::Recall => "recall",
             Self::Project => "project",
             Self::Maintain => "maintain",
@@ -56,6 +58,7 @@ impl EntryOperationCapability {
     pub const fn for_adapter_operation(operation: AdapterOperation) -> Self {
         match operation {
             AdapterOperation::Write => Self::Write,
+            AdapterOperation::FinalizeTurn => Self::FinalizeTurn,
             AdapterOperation::Recall => Self::Recall,
             AdapterOperation::Project => Self::Project,
             AdapterOperation::Maintain => Self::Maintain,
@@ -76,6 +79,7 @@ impl EntryOperationCapability {
     pub const fn all() -> &'static [Self] {
         &[
             Self::Write,
+            Self::FinalizeTurn,
             Self::Recall,
             Self::Project,
             Self::Maintain,

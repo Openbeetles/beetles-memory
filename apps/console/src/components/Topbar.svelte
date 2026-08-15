@@ -11,6 +11,7 @@
     "llm-gateway": "ingress",
     transports: "ingress",
     devices: "ingress",
+    "model-config": "system",
     account: "system",
   };
 

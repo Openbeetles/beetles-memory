@@ -162,10 +162,11 @@ impl GovernedOwnerValidity {
                             failures.push(GovernedContractFailure::ValiditySuccessorMismatch);
                         }
                     }
-                    termination if termination.is_terminal_without_successor() => {
-                        if self.successor.is_some() {
-                            failures.push(GovernedContractFailure::ValiditySuccessorMismatch);
-                        }
+                    termination
+                        if termination.is_terminal_without_successor()
+                            && self.successor.is_some() =>
+                    {
+                        failures.push(GovernedContractFailure::ValiditySuccessorMismatch);
                     }
                     _ => {}
                 }

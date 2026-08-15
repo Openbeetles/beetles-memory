@@ -6,6 +6,12 @@ cd "$ROOT"
 
 source "$ROOT/scripts/lib_contract_checks.sh"
 
+case "$(uname -s)" in
+  Darwin) http_console_production_feature="profile-desktop-macos-standalone-memory" ;;
+  Linux) http_console_production_feature="profile-server-linux-memory-gateway" ;;
+  *) fail "bm-http-console has no production profile for this deployment target" ;;
+esac
+
 assert_feature_set_rejected() {
   local package="$1"
   local feature_set="$2"
@@ -24,9 +30,15 @@ assert_feature_set_rejected() {
   fi
 }
 
-cargo test --locked -p bm-http --features server-std --test http_runtime_contract
-cargo test --locked -p bm-http --features server-std --test http_backend_contract
-cargo test --locked -p bm-http --features server-std --bin bm-http-console
+cargo test --locked -p bm-http --no-default-features \
+  --features "server-std,$http_console_production_feature" \
+  --test http_runtime_contract
+cargo test --locked -p bm-http --no-default-features \
+  --features "server-std,$http_console_production_feature" \
+  --test http_backend_contract
+cargo test --locked -p bm-http --no-default-features \
+  --features "server-std,http-console-bin,$http_console_production_feature" \
+  --bin bm-http-console
 cargo test --locked -p bm-wss --features server-std --test wss_runtime_contract
 cargo test --locked -p bm-wss --features server-std --test wss_backend_contract
 cargo test --locked -p bm-mcp --features server-stdio --test mcp_runtime_contract

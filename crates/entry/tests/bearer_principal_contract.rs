@@ -222,6 +222,7 @@ fn operation_capability_public_labels_are_stable_snake_case() {
         labels,
         vec![
             "write",
+            "finalize_turn",
             "recall",
             "project",
             "maintain",

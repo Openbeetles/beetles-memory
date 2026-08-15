@@ -3,8 +3,11 @@ use std::sync::Mutex;
 use bm_core::memory::{
     commit_canonical_turn_delta, CanonicalTurnDelta, ConversationScope, GovernedWriteDecision,
     MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteAuthority, PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision,
-    SessionStore, TranscriptInputMessage,
+    MemoryWriteAuthority, PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
+    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV2,
+    PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision, SessionStore,
+    TranscriptInputMessage, MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS,
 };
 use bm_core::memory::{SessionMessage, SessionMessageRecord};
 use bm_core::Result;
@@ -276,4 +279,102 @@ fn private_garden_freeform_report_is_not_governed_write_decision() {
         format!("{:?}", report.admission),
         format!("{:?}", GovernedWriteDecision::Accepted)
     );
+}
+
+fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV2 {
+    PostTurnGovernanceJobV2::pending(
+        PostTurnGovernanceIdentityV2::new(
+            "space:owner-default",
+            "agent:governance",
+            "llm.gateway",
+            "chat-a",
+            conversation_id,
+            "turn-1",
+        )
+        .expect("identity"),
+        1,
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        1,
+        1,
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        vec!["candidate-1".to_string()],
+        0,
+        5,
+        1_800_000_000,
+    )
+    .expect("pending job")
+}
+
+#[test]
+fn governance_job_identity_includes_conversation_and_contains_no_raw_turn() {
+    let first = governance_job("conversation-a");
+    let second = governance_job("conversation-b");
+    assert_ne!(first.job_id, second.job_id);
+    assert_eq!(
+        first.scope_index_key, second.scope_index_key,
+        "one mounted Entry runtime needs one deterministic due index across conversations"
+    );
+    assert!(first.job_id.starts_with("ptgj2:"));
+    assert_eq!(first.job_id.len(), 62);
+
+    let encoded = serde_json::to_string(&first).expect("job json");
+    assert!(!encoded.contains("叫我青川"));
+    assert!(!encoded.contains("inputMessages"));
+    assert!(!encoded.contains("assistantMessage"));
+    assert!(!encoded.contains("turn\":"));
+}
+
+#[test]
+fn governance_job_validator_rejects_lease_and_terminal_state_drift() {
+    let mut leased_without_authority = governance_job("conversation-a");
+    leased_without_authority.status = PostTurnGovernanceJobStatusV2::Leased;
+    leased_without_authority.lease_owner = Some("worker-a".to_string());
+    leased_without_authority.lease_until = Some(1_800_000_030);
+    assert!(leased_without_authority.validate().is_err());
+
+    let mut success_without_receipt = governance_job("conversation-a");
+    success_without_receipt.status = PostTurnGovernanceJobStatusV2::Succeeded;
+    success_without_receipt.next_attempt_at = None;
+    success_without_receipt.terminal_at = Some(1_800_000_010);
+    assert!(success_without_receipt.validate().is_err());
+}
+
+#[test]
+fn governance_scope_index_is_exact_bounded_and_active_only() {
+    let job = governance_job("conversation-a");
+    let mut index = PostTurnGovernanceScopeIndexV2::empty(&job.identity, 1_800_000_000);
+    index
+        .active_jobs
+        .push(PostTurnGovernanceJobRefV1::from_job(&job));
+    assert!(index.validate().is_ok());
+    index
+        .set_reconciliation_cursor(PostTurnGovernanceReconciliationCursorV1 {
+            conversation_id: "conversation-a".to_string(),
+            sequence: 1,
+            turn_id: "turn-a".to_string(),
+        })
+        .expect("conversation a cursor");
+    index
+        .set_reconciliation_cursor(PostTurnGovernanceReconciliationCursorV1 {
+            conversation_id: "conversation-b".to_string(),
+            sequence: 1,
+            turn_id: "turn-b".to_string(),
+        })
+        .expect("conversation b cursor");
+    assert_eq!(index.reconciliation_cursors.len(), 2);
+
+    index
+        .active_jobs
+        .push(PostTurnGovernanceJobRefV1::from_job(&job));
+    assert!(index.validate().is_err());
+
+    index.active_jobs.clear();
+    for sequence in 0..=MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS {
+        let mut reference = PostTurnGovernanceJobRefV1::from_job(&job);
+        reference.job_id = format!("ptgj2:{sequence:056x}");
+        reference.job_key.clone_from(&reference.job_id);
+        index.active_jobs.push(reference);
+    }
+    assert!(index.validate().is_err());
 }

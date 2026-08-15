@@ -18,7 +18,6 @@ pub struct GatewayConfig {
     pub scope: GatewayScopeResolverConfig,
     pub runtime_cache: GatewayRuntimeCacheConfig,
     pub projection: GatewayProjectionConfig,
-    pub maintenance: GatewayMaintenanceConfig,
     pub audit: GatewayAuditConfig,
 }
 
@@ -64,17 +63,6 @@ impl Default for GatewayProjectionConfig {
         Self {
             pressure: PressureLevel::Normal,
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GatewayMaintenanceConfig {
-    pub enabled: bool,
-}
-
-impl Default for GatewayMaintenanceConfig {
-    fn default() -> Self {
-        Self { enabled: true }
     }
 }
 
@@ -128,7 +116,6 @@ impl GatewayConfig {
             scope: GatewayScopeResolverConfig::default_for_local_dev(),
             runtime_cache: GatewayRuntimeCacheConfig::default(),
             projection: GatewayProjectionConfig::default(),
-            maintenance: GatewayMaintenanceConfig::default(),
             audit: GatewayAuditConfig::default(),
         }
     }

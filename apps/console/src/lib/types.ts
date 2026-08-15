@@ -1,4 +1,4 @@
-export type PageId = "overview" | "workbench" | "skills" | "llm-gateway" | "transports" | "devices" | "account";
+export type PageId = "overview" | "workbench" | "skills" | "llm-gateway" | "transports" | "devices" | "model-config" | "account";
 export type IconComponent = typeof import("lucide-svelte")["Activity"];
 export type StatusKind =
   | "ready"
@@ -91,6 +91,45 @@ export type ConsoleApiLlmGateway = {
   protocols: ConsoleApiLlmGatewayProtocol[];
   ruleExports: ConsoleApiLlmGatewayRuleExport[];
   smokeChecks: ConsoleApiLlmGatewaySmokeCheck[];
+};
+export type GovernanceModelProtocol = "open_ai_compatible" | "ollama_native";
+export type GovernanceModelAuthMode =
+  | { kind: "credential_env"; credentialEnv: string }
+  | { kind: "local_unauthenticated" };
+export type ConsoleApiGovernanceModel = {
+  configured: boolean;
+  persistence: "durable" | "ephemeral";
+  bindingId: string | null;
+  enabled: boolean;
+  protocol: GovernanceModelProtocol | null;
+  endpoint: string | null;
+  model: string | null;
+  authMode: GovernanceModelAuthMode | null;
+  credentialEnv: string | null;
+  credentialConfigured: boolean;
+  requestTimeoutMs: number | null;
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
+  configRevision: number | null;
+};
+export type GovernanceModelConfigInput = {
+  enabled: boolean;
+  protocol: GovernanceModelProtocol;
+  endpoint: string;
+  model: string;
+  authMode: GovernanceModelAuthMode;
+  requestTimeoutMs: number;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+};
+export type ConsoleApiGovernanceModelConnectionReport = {
+  status: "ready";
+  protocol: GovernanceModelProtocol;
+  model: string;
+  credentialUsed: boolean;
+  responseBytes: number;
+  durationMs: number;
+  reason: string;
 };
 export type ConsoleApiCapabilityFeatureId = "ollamaTransparentApp" | string;
 export type ConsoleApiCapabilityFeature = {
