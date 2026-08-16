@@ -23,14 +23,14 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-bm-core = { version = "0.1.0", path = "crates/core" }
-bm-sdk = { version = "0.1.0", path = "crates/sdk" }
-bm-replay = { version = "0.1.0", path = "crates/replay" }
-bm-adapter = { version = "0.1.0", path = "crates/adapter" }
-bm-entry = { version = "0.1.0", path = "crates/entry" }
-bm-http = { version = "0.1.0", path = "crates/http" }
-bm-llm-gateway = { version = "0.1.0", path = "crates/llm-gateway" }
-bm-ollama-transparent = { version = "0.1.0", path = "crates/ollama-transparent" }
+bm-core = { version = "0.2.0", path = "crates/core" }
+bm-sdk = { version = "0.2.0", path = "crates/sdk" }
+bm-replay = { version = "0.2.0", path = "crates/replay" }
+bm-adapter = { version = "0.2.0", path = "crates/adapter" }
+bm-entry = { version = "0.2.0", path = "crates/entry" }
+bm-http = { version = "0.2.0", path = "crates/http" }
+bm-llm-gateway = { version = "0.2.0", path = "crates/llm-gateway" }
+bm-ollama-transparent = { version = "0.2.0", path = "crates/ollama-transparent" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"

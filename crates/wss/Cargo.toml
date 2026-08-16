@@ -1,6 +1,6 @@
 [package]
 name = "bm-wss"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 description = "WebSocket adapter contract surface for Beetle Memory."
@@ -38,7 +38,7 @@ profile-desktop-windows-dev-full = [
 
 [dependencies]
 bm-adapter.workspace = true
-bm-entry = { version = "0.1.0", path = "../entry", optional = true }
+bm-entry = { version = "0.2.0", path = "../entry", optional = true }
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -30,7 +30,7 @@ crates 发布后：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.1.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.2.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。

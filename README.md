@@ -19,7 +19,7 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Protocol contract and entry runtime | `bm-adapter`, `bm-entry` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-The Cargo workspace is versioned as `0.1.0`. The repository includes five smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
+The Cargo workspace is versioned as `0.2.0`. The repository includes five smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
 
 ## Capabilities
 
