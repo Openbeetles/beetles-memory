@@ -1,14 +1,20 @@
 use bm_core::memory::{
     bind_long_term_control_audit_batch, bind_long_term_version_creation,
-    bind_long_term_version_mutation, BoundLongTermVersionRetention, ControlEffectRef,
+    bind_long_term_version_mutation, long_term_version_material_key,
+    scoped_long_term_control_storage_key, validate_long_term_control_post_image,
+    BoundLongTermVersionRetention, ControlEffectRef, GovernedDocumentImage,
     GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef,
-    GovernedOwnerTermination, LongTermControlOperation, LongTermInvalidationReasonCode,
-    LongTermMemoryConfidence, LongTermMemoryControlRevisionIntent, LongTermMemoryFreshness,
-    LongTermMemoryGovernedContent, LongTermMemoryHeadManifest, LongTermMemoryKind,
-    LongTermMemoryRetainedRevisionDigest, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, LongTermMemoryVersionCreateIntent, LongTermMemoryVersionMaterial,
+    GovernedOwnerTermination, LongTermControlOperation, LongTermControlPostImageClosure,
+    LongTermInvalidationReasonCode, LongTermMemoryConfidence, LongTermMemoryControlRevisionIntent,
+    LongTermMemoryFreshness, LongTermMemoryGovernedContent, LongTermMemoryHeadManifest,
+    LongTermMemoryKind, LongTermMemoryRetainedRevisionDigest, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, LongTermMemoryVersionCreateIntent,
+    LongTermMemoryVersionMaterial, LongTermMemoryVersionMaterialImage,
     LongTermMemoryVersionMutationIntent, LongTermMemoryVersionOrigin, LongTermVersionOwnerSnapshot,
-    LongTermVersionRetentionLease, MemoryPrivacyClass, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+    LongTermVersionRetentionLease, MemoryPrivacyClass, MemorySubjectVisibilityPolicy,
+    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
+    LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
 
 const MEMORY_SPACE_ID: &str = "space-1";
@@ -111,6 +117,7 @@ fn predecessor_material() -> LongTermMemoryVersionMaterial {
             predecessor: None,
         },
         privacy_class: MemoryPrivacyClass::PublicRuntime,
+        subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
         content_digest: String::new(),
     };
     material.content_digest = material
@@ -306,8 +313,13 @@ fn delete_binds_typed_tombstone_to_material_digest_and_purge() {
     let bound = bind_long_term_version_mutation(intent, &snapshot, lease).expect("bound delete");
 
     let tombstone = bound.tombstone.expect("typed tombstone");
+    assert_eq!(
+        tombstone.schema_version,
+        LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION
+    );
     assert_eq!(tombstone.operation, LongTermControlOperation::Delete);
     assert_eq!(tombstone.previous_digest, predecessor.content_digest);
+    assert_eq!(tombstone.subject_visibility, predecessor.subject_visibility);
     assert_eq!(bound.retention, BoundLongTermVersionRetention::PurgeOwner);
     assert_eq!(bound.audit.effects.len(), 2);
     assert!(bound.audit.effects.iter().any(|effect| matches!(
@@ -315,6 +327,93 @@ fn delete_binds_typed_tombstone_to_material_digest_and_purge() {
         ControlEffectRef::Tombstone { tombstone_id, .. }
             if tombstone_id == &tombstone.tombstone_id
     )));
+}
+
+#[test]
+fn control_post_image_rejects_terminal_visibility_drift_from_exact_predecessor() {
+    let predecessor = predecessor_material();
+    let intent = terminal_intent(
+        &predecessor,
+        LongTermControlOperation::Delete,
+        Vec::new(),
+        Some("operator-1".into()),
+    );
+    let snapshot = owner_snapshot(predecessor.clone());
+    let bound = bind_long_term_version_mutation(
+        intent,
+        &snapshot,
+        LongTermVersionRetentionLease::try_new(2).expect("retention lease"),
+    )
+    .expect("bound delete");
+    let owner_key = long_term_version_material_key(
+        MEMORY_SPACE_ID,
+        FACTUAL_OWNER_ID,
+        &predecessor.owner_ref,
+        predecessor.owner_revision,
+    )
+    .expect("owner key");
+    let revision_key = scoped_long_term_control_storage_key(
+        MEMORY_SPACE_ID,
+        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+        &bound.control_revision.revision_id,
+    )
+    .expect("revision key");
+    let tombstone = bound.tombstone.expect("typed tombstone");
+    let tombstone_key = scoped_long_term_control_storage_key(
+        MEMORY_SPACE_ID,
+        LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+        &tombstone.record_id,
+    )
+    .expect("tombstone key");
+    let audit_key = scoped_long_term_control_storage_key(
+        MEMORY_SPACE_ID,
+        LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+        &bound.audit.event_id,
+    )
+    .expect("audit key");
+    let closure = LongTermControlPostImageClosure {
+        transaction_id: bound.audit.transaction_id.clone(),
+        operation: LongTermControlOperation::Delete,
+        memory_space_id: MEMORY_SPACE_ID.into(),
+        factual_owner_id: FACTUAL_OWNER_ID.into(),
+        actor_subject_id: Some("operator-1".into()),
+        owner_records: vec![LongTermMemoryVersionMaterialImage::deleted(
+            owner_key,
+            predecessor,
+        )],
+        revisions: vec![GovernedDocumentImage::created(
+            revision_key,
+            bound.control_revision,
+        )],
+        tombstones: vec![GovernedDocumentImage::created(tombstone_key, tombstone)],
+        policies: Vec::new(),
+        audits: vec![GovernedDocumentImage::created(audit_key, bound.audit)],
+    };
+    let valid = validate_long_term_control_post_image(&closure);
+    assert!(valid.accepted, "{:?}", valid.failures);
+
+    let mut drifted = closure.clone();
+    drifted.tombstones[0]
+        .after
+        .as_mut()
+        .expect("tombstone")
+        .subject_visibility =
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec!["operator-1".into()]);
+    let invalid = validate_long_term_control_post_image(&drifted);
+    assert!(invalid
+        .failures
+        .contains(&"long_term_control_tombstone_owner_version_or_digest_drift".to_string()));
+
+    let mut old_schema = closure;
+    old_schema.tombstones[0]
+        .after
+        .as_mut()
+        .expect("tombstone")
+        .schema_version = 3;
+    let invalid = validate_long_term_control_post_image(&old_schema);
+    assert!(invalid
+        .failures
+        .contains(&"long_term_control_tombstone_schema_version_drift".to_string()));
 }
 
 #[test]

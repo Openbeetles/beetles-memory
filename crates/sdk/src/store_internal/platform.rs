@@ -169,6 +169,15 @@ pub(crate) struct StoreMemorySpaceProjectionReport {
     pub max_retained_long_term_revisions_per_owner: usize,
 }
 
+struct StoreBatchEventContext<'a> {
+    batch: &'a StoreMutationBatch,
+    event_scope: StoreEventScope,
+    transaction_timestamp: u64,
+    kind: MemoryStoreEventKind,
+    plane: &'a str,
+    record_key: &'a str,
+}
+
 pub(crate) struct StorePlatformPreparation {
     config: StoreBackendConfig,
     runtime_budget_authority: Arc<RuntimeBudgetAuthority>,
@@ -840,9 +849,22 @@ impl StorePlatform {
         )?;
         validate_evidence_effect_address_closure(&batch, &preconditions)?;
         validate_governed_owner_facet_closure(&batch, &preconditions)?;
-        validate_graph_manifest_closure(&batch)?;
+        validate_graph_manifest_closure(&batch, &preconditions)?;
         validate_control_audit_closure(&batch, &preconditions)?;
         validate_evidence_lifecycle_closure(&batch)?;
+
+        let graph_scopes = if batch.mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                StoreMutation::PutJson { namespace, .. }
+                    | StoreMutation::DeleteJson { namespace, .. }
+                    if is_graph_namespace(namespace)
+            )
+        }) {
+            graph_transaction_scopes(&batch, &preconditions)?
+        } else {
+            Vec::new()
+        };
 
         let mut engine_mutations = Vec::new();
 
@@ -864,12 +886,17 @@ impl StorePlatform {
                         "memory_write_transaction",
                     )
                     .map_err(memory_write_transaction_preflight_error)?;
-                    let event = self.build_batch_event(
-                        &batch,
-                        transaction_timestamp,
-                        event_kind.clone(),
-                        plane,
-                        record_key,
+                    let event_scope =
+                        graph_effect_event_scope(&batch.scope, namespace, key, &graph_scopes);
+                    let event = self.build_batch_event_in_scope(
+                        StoreBatchEventContext {
+                            batch: &batch,
+                            event_scope,
+                            transaction_timestamp,
+                            kind: event_kind.clone(),
+                            plane,
+                            record_key,
+                        },
                         stable_hash_json(value)
                             .map_err(memory_write_transaction_preflight_error)?,
                     );
@@ -903,13 +930,17 @@ impl StorePlatform {
                         "memory_write_transaction",
                     )
                     .map_err(memory_write_transaction_preflight_error)?;
-                    let event_template = self.build_batch_event_template(
-                        &batch,
-                        transaction_timestamp,
-                        event_kind.clone(),
-                        plane,
-                        record_key,
-                    );
+                    let event_scope =
+                        graph_effect_event_scope(&batch.scope, namespace, key, &graph_scopes);
+                    let event_template =
+                        self.build_batch_event_template_in_scope(StoreBatchEventContext {
+                            batch: &batch,
+                            event_scope,
+                            transaction_timestamp,
+                            kind: event_kind.clone(),
+                            plane,
+                            record_key,
+                        });
                     engine_mutations.push(StoreEngineMutation::DeleteJsonIfPresent {
                         namespace: namespace.clone(),
                         key: key.clone(),
@@ -1016,43 +1047,25 @@ impl StorePlatform {
                 .max_retained_runtime_skill_owners_per_scope,
         )
         .include_governed_json_reads(governed_json_reads);
-        if batch.mutations.iter().any(|mutation| {
-            matches!(
-                mutation,
-                StoreMutation::PutJson { namespace, .. }
-                    | StoreMutation::DeleteJson { namespace, .. }
-                    if matches!(
-                        namespace.as_str(),
-                        MEMORY_GRAPH_MANIFEST_NAMESPACE
-                            | MEMORY_GRAPH_REVISION_NAMESPACE
-                            | MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE
-                            | MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE
-                            | MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE
-                            | MEMORY_GRAPH_INDEX_NAMESPACE
-                            | MEMORY_GRAPH_NODE_NAMESPACE
-                            | MEMORY_GRAPH_EDGE_NAMESPACE
-                            | MEMORY_GRAPH_BACKLINK_NAMESPACE
-                    )
-            )
-        }) {
-            let scope_digest =
-                memory_graph_scope_digest(&batch.scope.memory_space_id, &batch.scope.subject_id);
-            let prefix = format!("scope:{scope_digest}:doc:");
-            request = request.include_governed_json_prefix_reads(
-                [
-                    MEMORY_GRAPH_MANIFEST_NAMESPACE,
-                    MEMORY_GRAPH_REVISION_NAMESPACE,
-                    MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
-                    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
-                    MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
-                    MEMORY_GRAPH_INDEX_NAMESPACE,
-                    MEMORY_GRAPH_NODE_NAMESPACE,
-                    MEMORY_GRAPH_EDGE_NAMESPACE,
-                    MEMORY_GRAPH_BACKLINK_NAMESPACE,
-                ]
-                .into_iter()
-                .map(|namespace| (namespace.to_string(), prefix.clone())),
-            );
+        if !graph_scopes.is_empty() {
+            for (_, _, scope_digest) in &graph_scopes {
+                let prefix = format!("scope:{scope_digest}:doc:");
+                request = request.include_governed_json_prefix_reads(
+                    [
+                        MEMORY_GRAPH_MANIFEST_NAMESPACE,
+                        MEMORY_GRAPH_REVISION_NAMESPACE,
+                        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+                        MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+                        MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+                        MEMORY_GRAPH_INDEX_NAMESPACE,
+                        MEMORY_GRAPH_NODE_NAMESPACE,
+                        MEMORY_GRAPH_EDGE_NAMESPACE,
+                        MEMORY_GRAPH_BACKLINK_NAMESPACE,
+                    ]
+                    .into_iter()
+                    .map(|namespace| (namespace.to_string(), prefix.clone())),
+                );
+            }
         }
         if let Some(authority) = graph_repair_authority {
             request = request.authorize_graph_repair(authority);
@@ -2682,17 +2695,35 @@ impl StorePlatform {
         record_key: &str,
         content_hash: String,
     ) -> MemoryStoreEvent {
+        self.build_batch_event_in_scope(
+            StoreBatchEventContext {
+                batch,
+                event_scope: batch.scope.clone(),
+                transaction_timestamp,
+                kind,
+                plane,
+                record_key,
+            },
+            content_hash,
+        )
+    }
+
+    fn build_batch_event_in_scope(
+        &self,
+        context: StoreBatchEventContext<'_>,
+        content_hash: String,
+    ) -> MemoryStoreEvent {
         MemoryStoreEvent::new(
             next_event_id(),
-            kind,
-            batch.scope.clone(),
-            transaction_timestamp,
+            context.kind,
+            context.event_scope,
+            context.transaction_timestamp,
         )
-        .with_plane(plane)
-        .with_record_key(record_key)
+        .with_plane(context.plane)
+        .with_record_key(context.record_key)
         .with_content_hash(content_hash)
-        .with_payload("transaction_id", batch.transaction_id.as_str())
-        .with_payload("operation", batch.operation.as_str())
+        .with_payload("transaction_id", context.batch.transaction_id.as_str())
+        .with_payload("operation", context.batch.operation.as_str())
     }
 
     fn build_batch_event_template(
@@ -2703,16 +2734,30 @@ impl StorePlatform {
         plane: &str,
         record_key: &str,
     ) -> ConditionalDeleteEventTemplate {
+        self.build_batch_event_template_in_scope(StoreBatchEventContext {
+            batch,
+            event_scope: batch.scope.clone(),
+            transaction_timestamp,
+            kind,
+            plane,
+            record_key,
+        })
+    }
+
+    fn build_batch_event_template_in_scope(
+        &self,
+        context: StoreBatchEventContext<'_>,
+    ) -> ConditionalDeleteEventTemplate {
         StoreEngineMutation::conditional_delete_event_template(
             next_event_id(),
-            kind,
-            batch.scope.clone(),
-            transaction_timestamp,
+            context.kind,
+            context.event_scope,
+            context.transaction_timestamp,
         )
-        .with_plane(plane)
-        .with_record_key(record_key)
-        .with_payload("transaction_id", batch.transaction_id.as_str())
-        .with_payload("operation", batch.operation.as_str())
+        .with_plane(context.plane)
+        .with_record_key(context.record_key)
+        .with_payload("transaction_id", context.batch.transaction_id.as_str())
+        .with_payload("operation", context.batch.operation.as_str())
     }
 
     fn append_validated_event(&self, event: MemoryStoreEvent) -> Result<()> {
@@ -4375,8 +4420,8 @@ fn governed_transaction_dependency_json_reads(
                         .map(|key| (MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE.to_string(), key)),
                 );
                 reads.extend(governed_owner_storage_addresses(
-                    &batch.scope.memory_space_id,
-                    &batch.scope.subject_id,
+                    &membership.memory_space_id,
+                    &membership.mounted_subject_id,
                     &membership.owner_ref,
                     membership.owner_revision,
                 )?);
@@ -4450,7 +4495,7 @@ fn governed_transaction_dependency_json_reads(
 
 fn governed_owner_storage_addresses(
     memory_space_id: &str,
-    mounted_subject_id: &str,
+    _mounted_subject_id: &str,
     owner_ref: &GovernedMemoryOwnerRef,
     owner_revision: u64,
 ) -> Result<Vec<(String, String)>> {
@@ -4458,13 +4503,13 @@ fn governed_owner_storage_addresses(
         GovernedMemoryOwnerPlane::LongTerm => Ok(vec![
             (
                 crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
-                long_term_version_head_key(memory_space_id, mounted_subject_id, owner_ref)?,
+                long_term_version_head_key(memory_space_id, memory_space_id, owner_ref)?,
             ),
             (
                 crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
                 long_term_version_material_key(
                     memory_space_id,
-                    mounted_subject_id,
+                    memory_space_id,
                     owner_ref,
                     owner_revision,
                 )?,
@@ -4909,6 +4954,39 @@ fn batch_mutates_namespace(batch: &StoreMutationBatch, namespace: &str) -> bool 
     })
 }
 
+fn is_graph_namespace(namespace: &str) -> bool {
+    matches!(
+        namespace,
+        MEMORY_GRAPH_MANIFEST_NAMESPACE
+            | MEMORY_GRAPH_REVISION_NAMESPACE
+            | MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE
+            | MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE
+            | MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE
+            | MEMORY_GRAPH_INDEX_NAMESPACE
+            | MEMORY_GRAPH_NODE_NAMESPACE
+            | MEMORY_GRAPH_EDGE_NAMESPACE
+            | MEMORY_GRAPH_BACKLINK_NAMESPACE
+    )
+}
+
+fn graph_effect_event_scope(
+    batch_scope: &StoreEventScope,
+    namespace: &str,
+    key: &str,
+    graph_scopes: &[(String, String, String)],
+) -> StoreEventScope {
+    if !is_graph_namespace(namespace) {
+        return batch_scope.clone();
+    }
+    graph_scopes
+        .iter()
+        .find(|(_, _, scope_digest)| key.starts_with(&format!("scope:{scope_digest}:doc:")))
+        .map(|(_, mounted_subject_id, _)| {
+            batch_scope.clone().with_subject(mounted_subject_id.clone())
+        })
+        .unwrap_or_else(|| batch_scope.clone())
+}
+
 fn batch_json_keys(batch: &StoreMutationBatch, namespace: &str) -> BTreeSet<String> {
     batch
         .mutations
@@ -4926,6 +5004,18 @@ fn batch_json_keys(batch: &StoreMutationBatch, namespace: &str) -> BTreeSet<Stri
             } if mutated == namespace => Some(key.clone()),
             _ => None,
         })
+        .collect()
+}
+
+fn batch_graph_scope_json_keys(
+    batch: &StoreMutationBatch,
+    namespace: &str,
+    scope_digest: &str,
+) -> BTreeSet<String> {
+    let prefix = format!("scope:{scope_digest}:doc:");
+    batch_json_keys(batch, namespace)
+        .into_iter()
+        .filter(|key| key.starts_with(&prefix))
         .collect()
 }
 
@@ -5247,9 +5337,85 @@ fn validate_graph_post_image(
         .any(|namespace| batch_mutates_namespace(batch, namespace));
     let evidence_owner_touched =
         batch_mutates_namespace(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE);
-    let memory_space_id = batch.scope.memory_space_id.as_str();
-    let subject_id = batch.scope.subject_id.as_str();
+    if !graph_touched && !evidence_owner_touched {
+        return Ok(());
+    }
+    let manifest_keys = batch_json_keys(batch, MEMORY_GRAPH_MANIFEST_NAMESPACE);
+    if manifest_keys.is_empty() {
+        return Err(Error::config(
+            "memory_write_transaction_graph_post_image_invalid",
+            "governed graph effects require a typed graph manifest mutation",
+        ));
+    }
+    let mut scopes = BTreeSet::new();
+    for manifest_key in manifest_keys {
+        let manifest = governed_image::<MemoryGraphScopeManifest>(
+            MEMORY_GRAPH_MANIFEST_NAMESPACE,
+            &manifest_key,
+            before,
+            after,
+        )?;
+        let Some(scope_manifest) = manifest.after.as_ref().or(manifest.before.as_ref()) else {
+            return Err(Error::config(
+                "memory_write_transaction_graph_post_image_invalid",
+                "graph manifest mutation has no typed before or after image",
+            ));
+        };
+        if scope_manifest.memory_space_id != batch.scope.memory_space_id
+            || manifest_key
+                != memory_graph_scope_manifest_key(
+                    &scope_manifest.memory_space_id,
+                    &scope_manifest.mounted_subject_id,
+                )
+        {
+            return Err(Error::config(
+                "memory_write_transaction_graph_post_image_invalid",
+                "graph manifest scope is non-canonical or crosses MemorySpace ownership",
+            ));
+        }
+        scopes.insert((
+            scope_manifest.memory_space_id.clone(),
+            scope_manifest.mounted_subject_id.clone(),
+        ));
+    }
+    for (memory_space_id, subject_id) in scopes {
+        validate_graph_scope_post_image(
+            batch,
+            before,
+            after,
+            graph_repair_authorized,
+            &memory_space_id,
+            &subject_id,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_graph_scope_post_image(
+    batch: &StoreMutationBatch,
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+    graph_repair_authorized: bool,
+    memory_space_id: &str,
+    subject_id: &str,
+) -> Result<()> {
+    let graph_namespaces = [
+        MEMORY_GRAPH_MANIFEST_NAMESPACE,
+        MEMORY_GRAPH_REVISION_NAMESPACE,
+        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+        MEMORY_GRAPH_INDEX_NAMESPACE,
+        MEMORY_GRAPH_NODE_NAMESPACE,
+        MEMORY_GRAPH_EDGE_NAMESPACE,
+        MEMORY_GRAPH_BACKLINK_NAMESPACE,
+    ];
     let scope_digest = memory_graph_scope_digest(memory_space_id, subject_id);
+    let graph_touched = graph_namespaces
+        .iter()
+        .any(|namespace| !batch_graph_scope_json_keys(batch, namespace, &scope_digest).is_empty());
+    let evidence_owner_touched =
+        batch_mutates_namespace(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE);
     let manifest_key = memory_graph_scope_manifest_key(memory_space_id, subject_id);
     let manifest = governed_image::<MemoryGraphScopeManifest>(
         MEMORY_GRAPH_MANIFEST_NAMESPACE,
@@ -5315,7 +5481,7 @@ fn validate_graph_post_image(
         return Ok(());
     }
     if graph_touched
-        && batch_json_keys(batch, MEMORY_GRAPH_MANIFEST_NAMESPACE)
+        && batch_graph_scope_json_keys(batch, MEMORY_GRAPH_MANIFEST_NAMESPACE, &scope_digest)
             != BTreeSet::from([manifest_key.clone()])
     {
         return Err(Error::config(
@@ -5356,25 +5522,35 @@ fn validate_graph_post_image(
         MEMORY_GRAPH_INDEX_NAMESPACE,
         &scope_digest,
     ));
-    if graph_touched && batch_json_keys(batch, MEMORY_GRAPH_REVISION_NAMESPACE) != revision_keys {
+    if graph_touched
+        && batch_graph_scope_json_keys(batch, MEMORY_GRAPH_REVISION_NAMESPACE, &scope_digest)
+            != revision_keys
+    {
         return Err(Error::config(
             "memory_write_transaction_graph_post_image_invalid",
             "graph revision mutations must exactly match the scope manifest closure",
         ));
     }
-    node_membership_keys.extend(batch_json_keys(
+    node_membership_keys.extend(batch_graph_scope_json_keys(
         batch,
         MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+        &scope_digest,
     ));
-    edge_membership_keys.extend(batch_json_keys(
+    edge_membership_keys.extend(batch_graph_scope_json_keys(
         batch,
         MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+        &scope_digest,
     ));
-    backlink_membership_keys.extend(batch_json_keys(
+    backlink_membership_keys.extend(batch_graph_scope_json_keys(
         batch,
         MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+        &scope_digest,
     ));
-    index_keys.extend(batch_json_keys(batch, MEMORY_GRAPH_INDEX_NAMESPACE));
+    index_keys.extend(batch_graph_scope_json_keys(
+        batch,
+        MEMORY_GRAPH_INDEX_NAMESPACE,
+        &scope_digest,
+    ));
 
     if revision_keys.len() != 1 {
         return Err(Error::config(
@@ -5513,7 +5689,8 @@ fn validate_graph_post_image(
             ));
         }
     }
-    let mut node_keys = batch_json_keys(batch, MEMORY_GRAPH_NODE_NAMESPACE);
+    let mut node_keys =
+        batch_graph_scope_json_keys(batch, MEMORY_GRAPH_NODE_NAMESPACE, &scope_digest);
     node_keys.extend(scoped_graph_state_keys(
         after,
         MEMORY_GRAPH_NODE_NAMESPACE,
@@ -5527,7 +5704,8 @@ fn validate_graph_post_image(
             node_keys.insert(value.document_key.clone());
         }
     }
-    let mut edge_keys = batch_json_keys(batch, MEMORY_GRAPH_EDGE_NAMESPACE);
+    let mut edge_keys =
+        batch_graph_scope_json_keys(batch, MEMORY_GRAPH_EDGE_NAMESPACE, &scope_digest);
     edge_keys.extend(scoped_graph_state_keys(
         after,
         MEMORY_GRAPH_EDGE_NAMESPACE,
@@ -5538,7 +5716,8 @@ fn validate_graph_post_image(
             edge_keys.insert(value.document_key.clone());
         }
     }
-    let mut backlink_keys = batch_json_keys(batch, MEMORY_GRAPH_BACKLINK_NAMESPACE);
+    let mut backlink_keys =
+        batch_graph_scope_json_keys(batch, MEMORY_GRAPH_BACKLINK_NAMESPACE, &scope_digest);
     backlink_keys.extend(scoped_graph_state_keys(
         after,
         MEMORY_GRAPH_BACKLINK_NAMESPACE,
@@ -5777,6 +5956,12 @@ pub(crate) fn validate_control_document_for_scope(
                         format!("control tombstone decode failed: {error}"),
                     )
                 })?;
+            tombstone.validate_contract().map_err(|error| {
+                Error::config(
+                    "control_plane_scope_manifest",
+                    format!("control tombstone contract failed: {error}"),
+                )
+            })?;
             if tombstone.memory_space_id != memory_space_id
                 || tombstone.factual_owner_id != factual_owner_id
             {
@@ -5854,7 +6039,98 @@ pub(crate) fn validate_control_document_for_scope(
     Ok(())
 }
 
-fn validate_graph_manifest_closure(batch: &StoreMutationBatch) -> Result<()> {
+fn graph_transaction_scopes(
+    batch: &StoreMutationBatch,
+    preconditions: &[StoreJsonPrecondition],
+) -> Result<Vec<(String, String, String)>> {
+    let mut manifests = Vec::new();
+    for mutation in &batch.mutations {
+        match mutation {
+            StoreMutation::PutJson {
+                namespace,
+                key,
+                value,
+                ..
+            } if namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE => {
+                manifests.push((key.clone(), value.clone()));
+            }
+            StoreMutation::DeleteJson { namespace, key, .. }
+                if namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE =>
+            {
+                let value = preconditions
+                    .iter()
+                    .find_map(|precondition| match precondition {
+                        StoreJsonPrecondition::Exact {
+                            namespace,
+                            key: precondition_key,
+                            value,
+                        } if namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE
+                            && precondition_key == key =>
+                        {
+                            Some(value.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::config(
+                            "memory_write_transaction_graph_manifest_closure_missing",
+                            "graph manifest deletion requires its exact typed precondition",
+                        )
+                    })?;
+                manifests.push((key.clone(), value));
+            }
+            _ => {}
+        }
+    }
+
+    let mut scopes = BTreeMap::new();
+    for (key, value) in manifests {
+        let manifest =
+            serde_json::from_value::<MemoryGraphScopeManifest>(value).map_err(|error| {
+                Error::config(
+                    "memory_write_transaction_graph_manifest_closure_missing",
+                    format!("invalid typed graph manifest: {error}"),
+                )
+            })?;
+        let memory_space_id = manifest.memory_space_id.trim();
+        let mounted_subject_id = manifest.mounted_subject_id.trim();
+        let expected_scope_digest = memory_graph_scope_digest(memory_space_id, mounted_subject_id);
+        let expected_key = memory_graph_scope_manifest_key(memory_space_id, mounted_subject_id);
+        if memory_space_id.is_empty()
+            || mounted_subject_id.is_empty()
+            || memory_space_id != manifest.memory_space_id
+            || mounted_subject_id != manifest.mounted_subject_id
+            || memory_space_id != batch.scope.memory_space_id
+            || manifest.scope_digest != expected_scope_digest
+            || key != expected_key
+        {
+            return Err(Error::config(
+                "memory_write_transaction_graph_scope_mismatch",
+                "typed graph manifest is not canonical or belongs to another MemorySpace",
+            ));
+        }
+        let scope = (
+            manifest.memory_space_id,
+            manifest.mounted_subject_id,
+            expected_scope_digest.clone(),
+        );
+        if scopes
+            .insert(expected_scope_digest, scope.clone())
+            .is_some_and(|existing| existing != scope)
+        {
+            return Err(Error::config(
+                "memory_write_transaction_graph_scope_mismatch",
+                "typed graph scope digest maps to conflicting scope identities",
+            ));
+        }
+    }
+    Ok(scopes.into_values().collect())
+}
+
+fn validate_graph_manifest_closure(
+    batch: &StoreMutationBatch,
+    preconditions: &[StoreJsonPrecondition],
+) -> Result<()> {
     const GRAPH_NAMESPACES: &[&str] = &[
         "memory_graph_nodes",
         "memory_graph_edges",
@@ -5897,18 +6173,25 @@ fn validate_graph_manifest_closure(batch: &StoreMutationBatch) -> Result<()> {
         ));
     }
 
-    let scope_digest = memory_graph_scope_digest(
-        batch.scope.memory_space_id.as_str(),
-        batch.scope.subject_id.as_str(),
-    );
-    let expected_prefix = format!("scope:{scope_digest}:doc:");
+    let graph_scopes = graph_transaction_scopes(batch, preconditions)?;
+    if graph_scopes.is_empty() {
+        return Err(Error::config(
+            "memory_write_transaction_graph_manifest_closure_missing",
+            "graph mutations require at least one typed graph scope manifest",
+        ));
+    }
+    let expected_prefixes = graph_scopes
+        .iter()
+        .map(|(_, _, scope_digest)| format!("scope:{scope_digest}:doc:"))
+        .collect::<Vec<_>>();
     for (namespace, key) in &graph_mutations {
-        let Some(document_digest) = key.strip_prefix(&expected_prefix) else {
+        let Some(document_digest) = expected_prefixes
+            .iter()
+            .find_map(|prefix| key.strip_prefix(prefix))
+        else {
             return Err(Error::config(
                 "memory_write_transaction_graph_scope_mismatch",
-                format!(
-                    "graph mutation {namespace}/{key} is outside transaction scope {scope_digest}"
-                ),
+                format!("graph mutation {namespace}/{key} is outside every typed graph scope"),
             ));
         };
         let Some(document_digest) = document_digest.strip_prefix("sha256:") else {
@@ -5929,20 +6212,24 @@ fn validate_graph_manifest_closure(batch: &StoreMutationBatch) -> Result<()> {
         }
     }
 
-    let expected_manifest_key =
-        memory_graph_scope_manifest_key(&batch.scope.memory_space_id, &batch.scope.subject_id);
+    let expected_manifest_keys = graph_scopes
+        .iter()
+        .map(|(memory_space_id, mounted_subject_id, _)| {
+            memory_graph_scope_manifest_key(memory_space_id, mounted_subject_id)
+        })
+        .collect::<BTreeSet<_>>();
     let manifest_keys = graph_mutations
         .iter()
         .filter_map(|(namespace, key)| {
             (*namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE).then_some(*key)
         })
         .collect::<BTreeSet<_>>();
-    if manifest_keys == BTreeSet::from([expected_manifest_key.as_str()]) {
+    if manifest_keys == expected_manifest_keys.iter().map(String::as_str).collect() {
         Ok(())
     } else {
         Err(Error::config(
             "memory_write_transaction_graph_manifest_closure_missing",
-            "graph mutations require exactly the transaction scope manifest mutation",
+            "graph mutations require exactly one manifest mutation for every typed graph scope",
         ))
     }
 }
@@ -6212,6 +6499,7 @@ fn validate_typed_json_mutation(
         StoreJsonDecoderKind::LongTermVersionMaterial
             | StoreJsonDecoderKind::LongTermHeadManifest
             | StoreJsonDecoderKind::LongTermVersionScopeManifest
+            | StoreJsonDecoderKind::LongTermControlTombstone
             | StoreJsonDecoderKind::RuntimeSkillOwnerRecord
             | StoreJsonDecoderKind::RuntimeSkillScopeManifest
     ) {

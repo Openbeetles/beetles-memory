@@ -331,6 +331,10 @@ fn runtime_lists_details_and_deletes_accepted_long_term_memory_with_audit() {
     assert_eq!(delete.tombstones[0].tombstone_id, tombstone.tombstone_id);
     assert_eq!(delete.tombstones[0].operation, tombstone.operation);
     assert_eq!(
+        tombstone.subject_visibility,
+        MemorySubjectVisibilityPolicy::AllSubjects
+    );
+    assert_eq!(
         delete.affected_records[0].previous_digest,
         tombstone.previous_digest
     );
@@ -877,9 +881,9 @@ fn runtime_dry_run_does_not_mutate_long_term_store() {
             operation: MemoryLongTermMutation::ChangeScope {
                 target: MemoryLongTermTarget::RecordId(record_id.clone()),
                 source_scope: bm_sdk::LongTermMemorySourceScope::User,
-                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
-                    "subject-human".to_string(),
-                ]),
+                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![runtime
+                    .subject_id()
+                    .to_string()]),
             },
             reason: "preview_scope_change".to_string(),
             dry_run: true,

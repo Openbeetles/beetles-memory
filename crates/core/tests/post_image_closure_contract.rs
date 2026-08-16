@@ -17,8 +17,9 @@ use bm_core::memory::{
     MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetOwnerVersion,
     MemoryFacetPostImageClosure, MemoryFacetPostingDoc, MemoryFacetPostingRevision,
     MemoryGraphEdge, MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphOwnerBinding,
-    MemoryGraphPostImageClosure, MemoryPrivacyClass, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
+    MemoryGraphPostImageClosure, MemoryPrivacyClass, MemorySubjectVisibilityPolicy,
+    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    MEMORY_FACET_SCHEMA_VERSION,
 };
 
 const SPACE: &str = "space:main";
@@ -50,6 +51,7 @@ fn owner_entry(id: &str, owner_revision: u64) -> LongTermMemoryEntry {
         source_chat_id: Some("chat:p7".to_string()),
         source_type: LongTermMemorySourceType::Conversation,
         source_scope: LongTermMemorySourceScope::User,
+        subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
         confidence: LongTermMemoryConfidence::High,
         freshness: LongTermMemoryFreshness::Dynamic,
         stale_hint: Default::default(),
@@ -722,6 +724,40 @@ fn graph_post_image_rejects_evidence_owner_privacy_drift() {
         "{:?}",
         invalid.failures
     );
+}
+
+#[test]
+fn graph_post_image_rejects_long_term_owner_hidden_from_mounted_subject() {
+    for policy in [
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec!["subject:other".to_string()]),
+        MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec![SUBJECT.to_string()]),
+    ] {
+        let mut closure = graph_closure(1);
+        closure.long_term_owners[0]
+            .after
+            .as_mut()
+            .expect("long-term owner")
+            .subject_visibility = policy;
+        let material = closure.long_term_owners[0]
+            .after
+            .as_mut()
+            .expect("long-term owner");
+        material.content_digest = material
+            .canonical_content_digest()
+            .expect("canonical visibility digest");
+        assert!(
+            material.validate_contract().accepted,
+            "hidden-owner fixture must remain a canonical material: {material:#?}"
+        );
+        let invalid = validate_memory_graph_post_image(&closure);
+        assert!(
+            invalid
+                .failures
+                .contains(&"memory_graph_persistent_node_owner_not_visible".to_string()),
+            "{:?}",
+            invalid.failures
+        );
+    }
 }
 
 #[test]

@@ -274,6 +274,37 @@ pub fn test_runtime_with_delegated_actor(
         .expect("delegated runtime")
 }
 
+pub fn test_runtime_with_subject_registry(
+    platform: MemoryStoreHandle,
+    mounted_agent_id: &str,
+    actor_subject_id: &str,
+    chat_id: &str,
+    subject_registry: SubjectRegistry,
+) -> MemoryRuntime {
+    let owner_id = "owner-default";
+    let mounted_subject_id = default_agent_subject_id(mounted_agent_id);
+    MemoryRuntime::builder()
+        .identity(MemoryIdentity::new(mounted_agent_id, owner_id).expect("identity"))
+        .scope(MemoryScope::new("llm.gateway", chat_id).expect("scope"))
+        .store(platform)
+        .subject_registry(subject_registry)
+        .scoped_runtime(SubjectScopedRuntime {
+            memory_space_id: default_memory_space_id(owner_id),
+            mounted_subject_id,
+            actor_subject_id: actor_subject_id.to_string(),
+            agent_id: mounted_agent_id.to_string(),
+            relationship_scope: None,
+            projection_policy: "subject_aware_default".to_string(),
+            write_policy: "subject_candidate_then_space_governance".to_string(),
+        })
+        .clock(Arc::new(FixedMemoryClock::new(1_800_000_000)))
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(NoopMemoryAuditSink))
+        .build()
+        .expect("multi-subject runtime")
+}
+
 pub fn test_runtime_with_chat(
     platform: MemoryStoreHandle,
     profile: ProfileId,

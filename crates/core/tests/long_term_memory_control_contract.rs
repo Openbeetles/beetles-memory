@@ -74,6 +74,15 @@ impl LongTermMemoryStore for InMemoryLongTermStore {
         Ok(changed)
     }
 
+    fn create_exact_owner(&self, entry: &LongTermMemoryEntry) -> Result<()> {
+        let mut entries = self.entries.lock().expect("entries lock");
+        if entries.contains_key(&entry.id) {
+            panic!("exact owner already exists: {}", entry.id);
+        }
+        entries.insert(entry.id.clone(), entry.clone());
+        Ok(())
+    }
+
     fn mutate_owner(
         &self,
         id: &str,
@@ -998,7 +1007,7 @@ fn forget_by_query_evidence_ref_narrows_bulk_target() {
 }
 
 #[test]
-fn change_scope_reports_subject_visibility_without_host_role_names() {
+fn change_scope_persists_subject_visibility_and_owner_revision_without_host_role_names() {
     let store = InMemoryLongTermStore::default();
     let control = InMemoryControlStore::default();
     let record_id = store.seed(draft(
@@ -1015,8 +1024,8 @@ fn change_scope_reports_subject_visibility_without_host_role_names() {
                 target: MemoryLongTermTarget::TranscriptDerivedRef(derived_ref(&record_id)),
                 source_scope: LongTermMemorySourceScope::User,
                 subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
-                    "subject-human".to_string(),
                     "agent:assistant-main".to_string(),
+                    "subject-human".to_string(),
                 ]),
             },
             reason: "user_limited_subject_visibility".to_string(),
@@ -1033,14 +1042,284 @@ fn change_scope_reports_subject_visibility_without_host_role_names() {
     assert_eq!(
         report.projection_impact.subject_visibility,
         MemorySubjectVisibilityPolicy::OnlySubjects(vec![
-            "subject-human".to_string(),
-            "agent:assistant-main".to_string()
+            "agent:assistant-main".to_string(),
+            "subject-human".to_string()
+        ])
+    );
+    assert_ne!(
+        report.affected_records[0].previous_digest,
+        report.affected_records[0]
+            .new_digest
+            .as_deref()
+            .expect("policy-only successor digest"),
+        "a policy-only owner mutation must change the governed owner digest"
+    );
+    let persisted = store
+        .get(&record_id)
+        .expect("read changed owner")
+        .expect("persisted changed owner");
+    assert_eq!(persisted.owner_revision, 2);
+    assert_eq!(persisted.source_scope, LongTermMemorySourceScope::User);
+    assert_eq!(
+        persisted.subject_visibility,
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+            "agent:assistant-main".to_string(),
+            "subject-human".to_string()
         ])
     );
     let rendered = format!("{report:?}");
     assert!(!rendered.contains("CEO"));
     assert!(!rendered.contains("BOSS"));
     assert!(!rendered.contains("财务总监"));
+}
+
+#[test]
+fn supersede_inherits_restricted_subject_visibility_without_implicit_widening() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let old_id = store.seed(draft(
+        LongTermMemoryKind::Project,
+        "restricted-release-gate",
+        "Only agent-a may recall the restricted release gate.",
+    ));
+    let restricted = MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".to_string()]);
+
+    let scoped = apply_long_term_memory_control_mutation(
+        &store,
+        &control,
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(old_id.clone()),
+                source_scope: LongTermMemorySourceScope::User,
+                subject_visibility: restricted.clone(),
+            },
+            reason: "restrict predecessor".to_string(),
+            dry_run: false,
+            factual_owner_id: "space-user".to_string(),
+            actor_subject_id: Some("subject-human".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 2,
+        },
+    )
+    .expect("restrict predecessor");
+    assert!(scoped.accepted, "{scoped:#?}");
+
+    let replacement = draft(
+        LongTermMemoryKind::Project,
+        "restricted-release-gate-v2",
+        "The successor remains restricted to agent-a.",
+    );
+    let successor_id = replacement.stable_id().expect("successor id");
+    let supersede = apply_long_term_memory_control_mutation(
+        &store,
+        &control,
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::Supersede {
+                target: MemoryLongTermTarget::RecordId(old_id.clone()),
+                replacement,
+            },
+            reason: "replace without widening visibility".to_string(),
+            dry_run: false,
+            factual_owner_id: "space-user".to_string(),
+            actor_subject_id: Some("subject-human".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 3,
+        },
+    )
+    .expect("supersede restricted owner");
+
+    assert!(supersede.accepted, "{supersede:#?}");
+    assert_eq!(supersede.projection_impact.subject_visibility, restricted);
+    assert!(store.get(&old_id).expect("old owner read").is_none());
+    let successor = store
+        .get(&successor_id)
+        .expect("successor read")
+        .expect("successor owner");
+    assert_eq!(successor.owner_revision, 1);
+    assert_eq!(successor.subject_visibility, restricted);
+    let predecessor_tombstone = control
+        .get_long_term_control_tombstone(&old_id)
+        .expect("tombstone read")
+        .expect("restricted predecessor tombstone");
+    assert_eq!(predecessor_tombstone.last_owner_revision, 2);
+    assert_eq!(predecessor_tombstone.subject_visibility, restricted);
+}
+
+#[test]
+fn supersede_rejects_an_existing_successor_without_owner_or_control_writes() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let predecessor_id = store.seed(draft(
+        LongTermMemoryKind::Project,
+        "existing-successor-predecessor",
+        "The predecessor is governed independently.",
+    ));
+    let successor_draft = draft(
+        LongTermMemoryKind::Project,
+        "existing-successor",
+        "The already-existing owner cannot be adopted as a supersede successor.",
+    );
+    let successor_id = store.seed(successor_draft.clone());
+    let predecessor_before = store
+        .get(&predecessor_id)
+        .expect("predecessor read")
+        .expect("predecessor");
+    let successor_before = store
+        .get(&successor_id)
+        .expect("successor read")
+        .expect("successor");
+
+    let plan = plan_long_term_memory_control_mutation(
+        &store,
+        &ReadOnlyControlView(&control),
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::Supersede {
+                target: MemoryLongTermTarget::RecordId(predecessor_id.clone()),
+                replacement: successor_draft,
+            },
+            reason: "existing owner must not be adopted".to_string(),
+            dry_run: false,
+            factual_owner_id: "space-user".to_string(),
+            actor_subject_id: Some("subject-human".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 4,
+        },
+    )
+    .expect("plan conflicting supersede");
+
+    assert!(!plan.report.accepted, "{:#?}", plan.report);
+    assert_eq!(
+        plan.report.policy_decision.reason,
+        "replacement_owner_already_exists"
+    );
+    assert!(plan.owner_writes.is_empty(), "{:#?}", plan.owner_writes);
+    assert!(plan.control_writes.is_empty(), "{:#?}", plan.control_writes);
+    assert_eq!(
+        store.get(&predecessor_id).expect("predecessor after"),
+        Some(predecessor_before)
+    );
+    assert_eq!(
+        store.get(&successor_id).expect("successor after"),
+        Some(successor_before)
+    );
+}
+
+#[test]
+fn terminal_planner_rejects_a_noncanonical_persisted_visibility_without_writes() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let record_id = store.seed(draft(
+        LongTermMemoryKind::Project,
+        "invalid-terminal-visibility",
+        "A malformed persisted policy must never enter a terminal control closure.",
+    ));
+    store
+        .entries
+        .lock()
+        .expect("entries lock")
+        .get_mut(&record_id)
+        .expect("seeded owner")
+        .subject_visibility = MemorySubjectVisibilityPolicy::OnlySubjects(Vec::new());
+
+    let error = apply_long_term_memory_control_mutation(
+        &store,
+        &control,
+        LongTermMemoryControlMutationRequest {
+            operation: MemoryLongTermMutation::Delete {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+            },
+            reason: "invalid policy must fail closed".to_string(),
+            dry_run: false,
+            factual_owner_id: "space-user".to_string(),
+            actor_subject_id: Some("subject-human".to_string()),
+            memory_space_id: Some("space-user".to_string()),
+            now_secs: NOW_SECS + 9,
+        },
+    )
+    .expect_err("noncanonical terminal policy must be rejected");
+
+    assert_eq!(error.stage(), "long_term_subject_visibility");
+    assert!(store.get(&record_id).expect("owner read").is_some());
+    assert!(control.revision_intents.lock().unwrap().is_empty());
+    assert!(control.tombstones.lock().unwrap().is_empty());
+    assert!(control.audits.lock().unwrap().is_empty());
+}
+
+#[test]
+fn non_scope_owner_mutation_reports_match_the_persisted_restricted_policy() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let original = draft(
+        LongTermMemoryKind::Preference,
+        "restricted-owner-report",
+        "The restricted owner starts with one governed value.",
+    );
+    let record_id = store.seed(original.clone());
+    let restricted = MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".to_string()]);
+    let request = |operation, now_secs| LongTermMemoryControlMutationRequest {
+        operation,
+        reason: "restricted owner mutation must report exact policy".to_string(),
+        dry_run: false,
+        factual_owner_id: "space-user".to_string(),
+        actor_subject_id: Some("subject-human".to_string()),
+        memory_space_id: Some("space-user".to_string()),
+        now_secs,
+    };
+
+    let scoped = apply_long_term_memory_control_mutation(
+        &store,
+        &control,
+        request(
+            MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                source_scope: LongTermMemorySourceScope::User,
+                subject_visibility: restricted.clone(),
+            },
+            NOW_SECS + 1,
+        ),
+    )
+    .expect("restrict owner");
+    assert!(scoped.accepted, "{scoped:#?}");
+
+    let mut correction = original;
+    correction.content = "The restricted owner has a corrected governed value.".to_string();
+    for (operation, now_secs) in [
+        (
+            MemoryLongTermMutation::Correct {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                replacement: correction,
+            },
+            NOW_SECS + 2,
+        ),
+        (
+            MemoryLongTermMutation::MarkStale {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                stale_hint: LongTermMemoryStaleHint::ReviewBeforeUse,
+            },
+            NOW_SECS + 3,
+        ),
+        (
+            MemoryLongTermMutation::ChangePrivacy {
+                target: MemoryLongTermTarget::RecordId(record_id.clone()),
+                privacy: MemoryPrivacyClass::PublicRuntime,
+            },
+            NOW_SECS + 4,
+        ),
+    ] {
+        let report =
+            apply_long_term_memory_control_mutation(&store, &control, request(operation, now_secs))
+                .expect("mutate restricted owner");
+        assert!(report.accepted, "{report:#?}");
+        assert_eq!(report.projection_impact.subject_visibility, restricted);
+        assert_eq!(
+            store
+                .get(&record_id)
+                .expect("read restricted owner")
+                .expect("restricted owner")
+                .subject_visibility,
+            restricted
+        );
+    }
 }
 
 #[test]

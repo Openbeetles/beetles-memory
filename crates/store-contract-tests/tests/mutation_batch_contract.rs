@@ -20,8 +20,9 @@ use bm_core::memory::{
     MemoryFacetIndexManifest, MemoryFacetOwnerVersion, MemoryFacetPostingDoc,
     MemoryFacetPostingRevision, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
     MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphOwnerBinding, MemoryLongTermGovernancePolicy,
-    MemoryPrivacyClass, LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    MemoryPrivacyClass, MemorySubjectVisibilityPolicy, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_SCHEMA_VERSION,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MEMORY_FACET_INDEX_NAMESPACE,
     MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
     MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_BACKLINK_NAMESPACE,
@@ -133,6 +134,7 @@ fn graph_owner_for(owner_id: &str) -> LongTermMemoryEntry {
         source_chat_id: Some("chat:graph".to_string()),
         source_type: LongTermMemorySourceType::Conversation,
         source_scope: LongTermMemorySourceScope::User,
+        subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
         confidence: LongTermMemoryConfidence::High,
         freshness: LongTermMemoryFreshness::Dynamic,
         stale_hint: Default::default(),
@@ -1073,7 +1075,7 @@ fn in_memory_batch_rejects_untyped_temporal_memory_graph_closure_atomically() {
         .expect_err("untyped graph closure must fail closed");
     assert_eq!(
         error.stage(),
-        "memory_write_transaction_graph_scope_mismatch"
+        "memory_write_transaction_graph_manifest_closure_missing"
     );
 
     let snapshot = platform.export_store_snapshot().expect("snapshot");
@@ -1135,6 +1137,149 @@ fn typed_graph_closure_rejects_an_extra_revision_atomically() {
     ));
 
     assert_graph_batch_rejected_without_partial_state("txn-extra-graph-revision", mutations);
+}
+
+#[test]
+fn typed_graph_transaction_commits_two_subject_closures_in_one_memory_space_atomically() {
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let platform = support::open_store(config).expect("platform");
+    let memory_space_id = "space:multi-subject-graph";
+    let owner_id = "owner:shared-graph";
+    let owner_docs = typed_long_term_scope_docs(
+        memory_space_id,
+        memory_space_id,
+        vec![graph_owner_for(owner_id)],
+    );
+    let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
+    snapshot.json_docs.extend(owner_docs.clone());
+    platform
+        .import_store_snapshot(&snapshot)
+        .expect("seed shared graph owner");
+
+    let mut mutations = typed_graph_closure_for(memory_space_id, "agent:a", owner_id);
+    mutations.extend(typed_graph_closure_for(
+        memory_space_id,
+        "agent:b",
+        owner_id,
+    ));
+    let batch = StoreMutationBatch {
+        transaction_id: "txn-two-subject-graph-closures".to_string(),
+        operation: "memory_graph.maintain".to_string(),
+        scope: StoreEventScope::system("memory_graph.maintain")
+            .with_memory_space(memory_space_id)
+            .with_subject("agent:a"),
+        mutations,
+    };
+    let mut preconditions = absent_json_preconditions(&batch);
+    preconditions.extend(owner_docs.iter().map(|doc| StoreJsonPrecondition::Exact {
+        namespace: doc.namespace.clone(),
+        key: doc.key.clone(),
+        value: doc.value.clone(),
+    }));
+    platform
+        .commit_governed_memory_transaction_with_preconditions(batch, &preconditions)
+        .expect("one transaction commits both typed graph closures");
+
+    let snapshot = platform.export_store_snapshot().expect("post-image");
+    for subject_id in ["agent:a", "agent:b"] {
+        assert!(snapshot.json_docs.iter().any(|doc| {
+            doc.namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE
+                && doc.key
+                    == bm_core::memory::memory_graph_scope_manifest_key(memory_space_id, subject_id)
+        }));
+    }
+    let graph_events = snapshot
+        .events
+        .iter()
+        .filter(|event| {
+            event.payload.get("transaction_id").map(String::as_str)
+                == Some("txn-two-subject-graph-closures")
+        })
+        .collect::<Vec<_>>();
+    assert!(!graph_events.is_empty());
+    let event_subjects = graph_events
+        .iter()
+        .map(|event| event.scope.subject_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        event_subjects,
+        std::collections::BTreeSet::from(["agent:a".to_string(), "agent:b".to_string()])
+    );
+}
+
+#[test]
+fn graph_manifest_absent_guard_rejects_concurrent_scope_creation_atomically() {
+    let config = StoreBackendConfig::in_memory(
+        ProfileId::native_dev_full().expect("native dev-full profile"),
+    )
+    .expect("config");
+    let platform = support::open_store(config).expect("platform");
+    let memory_space_id = "space:graph-guard";
+    let subject_id = "agent:b";
+    let owner_id = "owner:guarded-graph";
+    let owner_docs = typed_long_term_scope_docs(
+        memory_space_id,
+        memory_space_id,
+        vec![graph_owner_for(owner_id)],
+    );
+    let mut snapshot = platform.export_store_snapshot().expect("seed snapshot");
+    snapshot.json_docs.extend(owner_docs.clone());
+    platform
+        .import_store_snapshot(&snapshot)
+        .expect("seed guarded graph owner");
+    let seed_batch = StoreMutationBatch {
+        transaction_id: "txn-create-guarded-graph".to_string(),
+        operation: "memory_graph.write".to_string(),
+        scope: StoreEventScope::system("memory_graph.write")
+            .with_memory_space(memory_space_id)
+            .with_subject(subject_id),
+        mutations: typed_graph_closure_for(memory_space_id, subject_id, owner_id),
+    };
+    let mut seed_preconditions = absent_json_preconditions(&seed_batch);
+    seed_preconditions.extend(owner_docs.iter().map(|doc| StoreJsonPrecondition::Exact {
+        namespace: doc.namespace.clone(),
+        key: doc.key.clone(),
+        value: doc.value.clone(),
+    }));
+    platform
+        .commit_governed_memory_transaction_with_preconditions(seed_batch, &seed_preconditions)
+        .expect("concurrent graph scope creation");
+    let before = platform
+        .export_store_snapshot()
+        .expect("before guarded batch");
+
+    let guard_batch = StoreMutationBatch {
+        transaction_id: "txn-stale-absent-graph-guard".to_string(),
+        operation: "test.graph_guard".to_string(),
+        scope: StoreEventScope::system("test.graph_guard")
+            .with_memory_space(memory_space_id)
+            .with_subject("agent:a"),
+        mutations: vec![put_blob("graph-guard-should-not-commit", b"blocked")],
+    };
+    let error = platform
+        .commit_governed_memory_transaction_with_preconditions(
+            guard_batch,
+            &[StoreJsonPrecondition::Absent {
+                namespace: MEMORY_GRAPH_MANIFEST_NAMESPACE.to_string(),
+                key: bm_core::memory::memory_graph_scope_manifest_key(memory_space_id, subject_id),
+            }],
+        )
+        .expect_err("stale absent graph manifest guard must reject the whole transaction");
+    assert_eq!(
+        error.stage(),
+        "memory_write_transaction_precondition_failed"
+    );
+    assert_eq!(platform.export_store_snapshot().unwrap(), before);
+    assert_eq!(
+        platform
+            .state_fs()
+            .read("graph-guard-should-not-commit")
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -2591,13 +2736,14 @@ fn long_term_control_namespaces_require_read_set_preconditions() {
                 .expect("revision value"),
                 LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE => {
                     serde_json::to_value(LongTermMemoryTombstone {
-                        schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+                        schema_version: LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
                         tombstone_id: "tombstone-precondition".to_string(),
                         record_id: logical_key.clone(),
                         operation: LongTermControlOperation::Delete,
                         last_owner_revision: 1,
                         last_source_revision: Some(1),
                         previous_digest: "a".repeat(64),
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
                         reason: "precondition contract".to_string(),
                         factual_owner_id: "system".to_string(),
                         actor_subject_id: None,
@@ -2661,10 +2807,100 @@ fn long_term_control_namespaces_require_read_set_preconditions() {
                 mutation,
             ))
             .expect_err("unconditional control mutation must fail closed");
+        let expected_stage = if namespace == LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE {
+            "memory_write_transaction_typed_precondition_missing"
+        } else {
+            "memory_write_transaction_precondition_missing"
+        };
+        assert_eq!(error.stage(), expected_stage, "{error}");
+    }
+}
+
+#[test]
+fn invalid_terminal_visibility_tombstones_fail_preflight_without_partial_state() {
+    let valid = serde_json::to_value(LongTermMemoryTombstone {
+        schema_version: LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
+        tombstone_id: "tombstone-invalid-preflight".to_string(),
+        record_id: "owner-invalid-preflight".to_string(),
+        operation: LongTermControlOperation::Delete,
+        last_owner_revision: 2,
+        last_source_revision: Some(1),
+        previous_digest: "a".repeat(64),
+        subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(
+            vec!["agent-a".to_string()],
+        ),
+        reason: "invalid tombstone preflight contract".to_string(),
+        factual_owner_id: "system".to_string(),
+        actor_subject_id: Some("agent-a".to_string()),
+        memory_space_id: "system".to_string(),
+        created_at: 2,
+    })
+    .expect("tombstone value");
+    let mut missing_policy = valid.clone();
+    missing_policy
+        .as_object_mut()
+        .expect("tombstone object")
+        .remove("subject_visibility");
+    let mut old_schema = valid.clone();
+    old_schema["schema_version"] = json!(3);
+    let mut noncanonical = valid;
+    noncanonical["subject_visibility"] =
+        serde_json::to_value(MemorySubjectVisibilityPolicy::OnlySubjects(Vec::new()))
+            .expect("invalid policy shape");
+
+    for (case, value) in [
+        ("missing-policy", missing_policy),
+        ("old-schema", old_schema),
+        ("noncanonical-policy", noncanonical),
+    ] {
+        let platform = support::open_store_in_memory(
+            StoreBackendConfig::in_memory(
+                ProfileId::native_dev_full().expect("native dev-full profile"),
+            )
+            .expect("config"),
+        )
+        .expect("store");
+        let events_before = platform.read_events().expect("events before").len();
+        let key = scoped_long_term_control_storage_key(
+            "system",
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+            "owner-invalid-preflight",
+        )
+        .expect("tombstone key");
+        let batch = StoreMutationBatch {
+            transaction_id: format!("txn-invalid-tombstone-{case}"),
+            operation: "test.invalid_terminal_visibility_tombstone".to_string(),
+            scope: StoreEventScope::system("test.invalid_terminal_visibility_tombstone"),
+            mutations: vec![StoreMutation::PutJson {
+                namespace: LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE.to_string(),
+                key: key.clone(),
+                value,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE.to_string(),
+                record_key: "owner-invalid-preflight".to_string(),
+            }],
+        };
+        let error = platform
+            .commit_governed_memory_transaction_with_preconditions(
+                batch,
+                &[StoreJsonPrecondition::Absent {
+                    namespace: LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE.to_string(),
+                    key,
+                }],
+            )
+            .expect_err("invalid tombstone must fail before any write");
         assert_eq!(
             error.stage(),
-            "memory_write_transaction_precondition_missing",
-            "{error}"
+            "control_plane_scope_manifest",
+            "{case}: {error}"
+        );
+        assert!(platform
+            .read_json_namespace(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE)
+            .expect("tombstone namespace")
+            .is_empty());
+        assert_eq!(
+            platform.read_events().expect("events after").len(),
+            events_before
         );
     }
 }

@@ -6,10 +6,10 @@ use bm_core::memory::{
     canonical_evidence_ref_from_source, governed_memory_recall_candidate_id,
     memory_facet_manifest_key, primary_human_subject_id, scoped_memory_facet_owner_storage_key,
     CanonicalEntityKey, CanonicalEntityKind, CanonicalEntityRef, GovernedMemoryOwnerPlane,
-    GovernedMemoryOwnerRef, LongTermMemoryControlRevision, LongTermMemorySlot,
-    LongTermMemoryTombstone, MemoryFacetIndexManifest, QueryFacetInput,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
-    MEMORY_FACET_POSTING_NAMESPACE,
+    GovernedMemoryOwnerRef, LongTermMemoryControlRevision, LongTermMemoryHeadManifest,
+    LongTermMemorySlot, LongTermMemoryTombstone, LongTermMemoryVersionMaterial,
+    MemoryFacetIndexManifest, QueryFacetInput, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_core::platform::Platform as _;
 use bm_core::task_execution::{
@@ -17,22 +17,23 @@ use bm_core::task_execution::{
     TaskRunRecord, TaskRunStatus,
 };
 use bm_sdk::{
-    AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistrySnapshot,
-    AgentToolUsageFeedback, EvidenceBacklink, IngressKind, LongTermMemoryDraft, LongTermMemoryKind,
-    LongTermMemoryQuery, LongTermMemorySourceScope, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
-    MemoryGovernanceSuppressionDuration, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode,
-    MemoryGraphNodeKind, MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest,
-    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
-    MemoryLongTermTarget, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
-    ProceduralMemoryPromotionInput, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig, StoreRuntimeBudget,
-    TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, TemporalValidity,
-    TranscriptLifecycleTransition,
+    default_agent_subject_id, AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome,
+    AgentToolRegistrySnapshot, AgentToolUsageFeedback, EvidenceBacklink, IngressKind,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryQuery, LongTermMemorySourceScope,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
+    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryGraphEdge,
+    MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
+    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
+    MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptLifecycleRequest, MemoryWriteCandidate, MemoryWriteRequest,
+    ParsedLongTermMemoryExtraction, PressureLevel, ProceduralMemoryPromotionInput,
+    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
+    RuntimeSkillWriteSource, StoreBackendConfig, StoreRuntimeBudget, SubjectDescriptor,
+    SubjectRegistry, TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest,
+    TemporalValidity, TranscriptLifecycleTransition,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope, StaticHttpClient, StaticLlmClient};
@@ -1819,6 +1820,133 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
 }
 
 #[test]
+fn subject_visibility_event_budget_rejects_without_partial_owner_or_indexes() {
+    let seed_platform = support::empty_store_platform(support::host_test_profile());
+    let subject_a = default_agent_subject_id("agent-a");
+    let subject_b = default_agent_subject_id("agent-b");
+    let mut registry =
+        SubjectRegistry::single_agent_default("owner-default", "agent-a").expect("registry");
+    registry
+        .upsert_subject(SubjectDescriptor::agent_persona(&subject_b, "Agent B"))
+        .expect("agent-b subject");
+    let seed_runtime_a = support::test_runtime_with_subject_registry(
+        seed_platform.clone(),
+        "agent-a",
+        &subject_a,
+        "chat-a",
+        registry.clone(),
+    );
+    let seed_runtime_b = support::test_runtime_with_subject_registry(
+        seed_platform.clone(),
+        "agent-b",
+        &subject_b,
+        "chat-b",
+        registry.clone(),
+    );
+    seed_runtime_a
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed governed long-term");
+    let seeded_owner = seed_platform
+        .replay_harness()
+        .memory_space_long_term_memory_read_store("space:owner-default")
+        .expect("scoped long-term store")
+        .list(10)
+        .expect("seeded owner list")
+        .into_iter()
+        .next()
+        .expect("seeded owner");
+    for runtime in [&seed_runtime_a, &seed_runtime_b] {
+        let graph_write = runtime
+            .write_temporal_memory_graph(TemporalMemoryGraphWriteRequest {
+                operation: "memory_graph.write".to_string(),
+                nodes: vec![graph_node(&seeded_owner.id, "turn:visibility-budget")],
+                node_owners: vec![long_term_graph_owner(&seeded_owner.id, &seeded_owner.id)],
+                edges: Vec::new(),
+                backlinks: vec![EvidenceBacklink {
+                    source_kind: "long_term_memory".to_string(),
+                    source_id: "turn:visibility-budget".to_string(),
+                    fingerprint: "fp:visibility-budget".to_string(),
+                }],
+            })
+            .expect("seed per-subject graph closure");
+        assert!(graph_write.accepted, "{graph_write:#?}");
+    }
+    let mut seed_snapshot = seed_platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("seed snapshot");
+    seed_snapshot.events.clear();
+    let platform = store_with_event_budget(3);
+    platform
+        .replay_harness()
+        .import_store_snapshot(&seed_snapshot)
+        .expect("import governed seed");
+    let runtime = support::test_runtime_with_subject_registry(
+        platform.clone(),
+        "agent-a",
+        &subject_a,
+        "chat-a",
+        registry,
+    );
+    let owner = runtime
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: None,
+            limit: 10,
+            view: MemoryLongTermControlView::HostUi,
+        })
+        .expect("list")
+        .records[0]
+        .record
+        .clone();
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("before snapshot");
+
+    let error = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(owner.id.clone()),
+                source_scope: LongTermMemorySourceScope::Chat,
+                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![subject_a]),
+            },
+            reason: "visibility closure must be transactional".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect_err("event budget rejects the complete visibility transaction");
+
+    assert_eq!(error.stage(), "memory_write_transaction_preflight_failed");
+    let after = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("after snapshot");
+    assert_eq!(after.json_docs, before.json_docs);
+    assert_eq!(after.events, before.events);
+    let unchanged = runtime
+        .replay_harness()
+        .memory_space_long_term_memory_read_store("space:owner-default")
+        .expect("scoped long-term store")
+        .get(&owner.id)
+        .expect("owner get")
+        .expect("owner unchanged");
+    assert_eq!(unchanged.owner_revision, owner.owner_revision);
+    assert_eq!(
+        unchanged.subject_visibility,
+        MemorySubjectVisibilityPolicy::AllSubjects
+    );
+}
+
+#[test]
 fn long_term_control_delete_removes_facet_index_in_same_transaction() {
     let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
@@ -2071,7 +2199,96 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
 }
 
 #[test]
-fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_indexed() {
+fn restricted_supersede_persists_successor_policy_material_and_facet_exactly() {
+    let platform = store_with_transaction_budget(128, 256);
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+    );
+    runtime
+        .write(MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![extraction_draft()],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        })
+        .expect("seed extraction");
+    let predecessor = runtime
+        .replay_harness()
+        .memory_space_long_term_memory_read_store("space:owner-default")
+        .expect("scoped long-term store")
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_extraction")
+        .expect("predecessor owner");
+    let restricted =
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec![runtime.subject_id().to_string()]);
+    runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(predecessor.id.clone()),
+                source_scope: predecessor.source_scope,
+                subject_visibility: restricted.clone(),
+            },
+            reason: "restrict predecessor before supersede".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("restrict predecessor");
+    let mut replacement = extraction_draft();
+    replacement.topic = "transaction_restricted_successor".to_string();
+    replacement.content = "Restricted successor keeps the exact policy.".to_string();
+    let report = runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Supersede {
+                target: MemoryLongTermTarget::RecordId(predecessor.id.clone()),
+                replacement,
+            },
+            reason: "supersede without widening visibility".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("supersede restricted predecessor");
+    assert!(report.accepted, "{report:#?}");
+    assert_eq!(report.projection_impact.subject_visibility, restricted);
+    let successor = runtime
+        .replay_harness()
+        .memory_space_long_term_memory_read_store("space:owner-default")
+        .expect("scoped long-term store")
+        .list(20)
+        .expect("long-term list")
+        .into_iter()
+        .find(|entry| entry.topic == "transaction_restricted_successor")
+        .expect("successor owner");
+    assert_eq!(successor.owner_revision, 1);
+    assert_eq!(successor.subject_visibility, restricted);
+    let facet = assert_facet_index_doc_for_owner(&platform, &successor.id);
+    assert_eq!(facet["owner_revision"].as_u64(), Some(1));
+    assert_eq!(facet["facet_index_revision"].as_u64(), Some(1));
+    let successor_material = platform
+        .replay_harness()
+        .read_json_namespace("long_term_version_materials")
+        .expect("version materials")
+        .into_iter()
+        .map(|document| {
+            serde_json::from_value::<LongTermMemoryVersionMaterial>(document.value)
+                .expect("typed version material")
+        })
+        .find(|material| {
+            material.owner_ref.owner_id == successor.id && material.owner_revision == 1
+        })
+        .expect("successor material");
+    assert_eq!(successor_material.subject_visibility, restricted);
+}
+
+#[test]
+fn long_term_control_change_scope_persists_visibility_with_owner_and_facet_revision() {
     let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
@@ -2120,7 +2337,7 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
 
     assert!(report.accepted);
     assert_eq!(report.operation, "change_scope");
-    assert!(report
+    assert!(!report
         .projection_impact
         .notes
         .contains(&"report_only_subject_visibility_not_indexed".to_string()));
@@ -2134,9 +2351,66 @@ fn long_term_control_change_scope_updates_facet_and_reports_visibility_not_index
     assert_eq!(updated.source_revision, Some(1));
     assert_eq!(updated.owner_revision, 2);
     assert_eq!(updated.source_scope, LongTermMemorySourceScope::Chat);
+    assert_eq!(
+        updated.subject_visibility,
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec![runtime.subject_id().to_string()])
+    );
     let facet_doc = assert_facet_index_doc_for_owner(&platform, &owner_id);
     assert_eq!(facet_doc["owner_revision"].as_u64(), Some(2));
     assert_eq!(facet_doc["facet_index_revision"].as_u64(), Some(2));
+    let successor_material = platform
+        .replay_harness()
+        .read_json_namespace("long_term_version_materials")
+        .expect("version materials")
+        .into_iter()
+        .map(|document| {
+            serde_json::from_value::<LongTermMemoryVersionMaterial>(document.value)
+                .expect("typed version material")
+        })
+        .find(|material| material.owner_ref.owner_id == owner_id && material.owner_revision == 2)
+        .expect("visibility successor material");
+    assert_eq!(successor_material.owner_revision, updated.owner_revision);
+    assert_eq!(
+        successor_material.subject_visibility,
+        updated.subject_visibility
+    );
+    let head = platform
+        .replay_harness()
+        .read_json_namespace("long_term_head_manifests")
+        .expect("head manifests")
+        .into_iter()
+        .map(|document| {
+            serde_json::from_value::<LongTermMemoryHeadManifest>(document.value)
+                .expect("typed head manifest")
+        })
+        .find(|head| head.owner_ref.owner_id == owner_id)
+        .expect("visibility owner head");
+    assert_eq!(head.current_revision, updated.owner_revision);
+    let control = platform
+        .replay_harness()
+        .read_json_namespace(LONG_TERM_CONTROL_REVISION_NAMESPACE)
+        .expect("control revisions")
+        .into_iter()
+        .map(|document| {
+            serde_json::from_value::<LongTermMemoryControlRevision>(document.value)
+                .expect("typed control revision")
+        })
+        .find(|revision| {
+            revision.operation == bm_core::memory::LongTermControlOperation::ChangeScope
+                && revision
+                    .transition
+                    .successor
+                    .as_ref()
+                    .is_some_and(|successor| {
+                        successor.owner_ref.owner_id == owner_id
+                            && successor.owner_revision == updated.owner_revision
+                    })
+        })
+        .expect("visibility control revision");
+    assert_eq!(
+        control.successor_material_digest.as_deref(),
+        Some(successor_material.content_digest.as_str())
+    );
     assert_operation_events_include_planes(
         &platform,
         "long_term_control.mutation",

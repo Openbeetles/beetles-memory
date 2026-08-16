@@ -16,9 +16,9 @@ use bm_core::memory::{
     LongTermMemoryKind, LongTermMemoryRetainedRevisionDigest, LongTermMemorySourceScope,
     LongTermMemorySourceType, LongTermMemoryStaleHint, LongTermMemoryVersionMaterial,
     LongTermMemoryVersionOrigin, LongTermMemoryVersionScopeManifest,
-    LongTermMemoryVersionTransitionBinding, MemoryPrivacyClass,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_SCHEMA_VERSION,
-    LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+    LongTermMemoryVersionTransitionBinding, MemoryPrivacyClass, MemorySubjectVisibilityDecision,
+    MemorySubjectVisibilityPolicy, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
 
 const MEMORY_SPACE_ID: &str = "space-1";
@@ -81,12 +81,80 @@ fn material(
             predecessor,
         },
         privacy_class: MemoryPrivacyClass::PublicRuntime,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
         content_digest: String::new(),
     };
     material.content_digest = material
         .canonical_content_digest()
         .expect("canonical digest");
     material
+}
+
+#[test]
+fn subject_visibility_policy_is_canonical_and_exact_subject_bound() {
+    let only_a = MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".into()]);
+    assert_eq!(
+        only_a
+            .decision_for_subject("agent-a")
+            .expect("canonical allow decision"),
+        MemorySubjectVisibilityDecision::Allowed
+    );
+    assert_eq!(
+        only_a
+            .decision_for_subject("agent-b")
+            .expect("canonical deny decision"),
+        MemorySubjectVisibilityDecision::Denied
+    );
+    let hidden_b = MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec!["agent-b".into()]);
+    assert_eq!(
+        hidden_b
+            .decision_for_subject("agent-a")
+            .expect("canonical hidden allow decision"),
+        MemorySubjectVisibilityDecision::Allowed
+    );
+    assert_eq!(
+        hidden_b
+            .decision_for_subject("agent-b")
+            .expect("canonical hidden deny decision"),
+        MemorySubjectVisibilityDecision::Denied
+    );
+
+    for invalid in [
+        MemorySubjectVisibilityPolicy::OnlySubjects(Vec::new()),
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-b".into(), "agent-a".into()]),
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".into(), "agent-a".into()]),
+        MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec![" agent-b".into()]),
+        MemorySubjectVisibilityPolicy::HiddenFromSubjects(Vec::new()),
+    ] {
+        assert!(invalid.decision_for_subject("agent-a").is_err());
+    }
+    assert!(only_a.decision_for_subject(" agent-a").is_err());
+}
+
+#[test]
+fn version_v3_requires_and_digests_exact_subject_visibility() {
+    let all = material(1, 10, None, "visibility-bound material");
+    let mut only_a = all.clone();
+    only_a.subject_visibility = MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".into()]);
+    only_a.content_digest = only_a
+        .canonical_content_digest()
+        .expect("visibility-bound digest");
+    assert!(only_a.validate_contract().accepted);
+    assert_ne!(all.content_digest, only_a.content_digest);
+
+    let mut missing = serde_json::to_value(&only_a).expect("material JSON");
+    missing
+        .as_object_mut()
+        .expect("material object")
+        .remove("subject_visibility");
+    assert!(serde_json::from_value::<LongTermMemoryVersionMaterial>(missing).is_err());
+
+    let mut invalid = only_a;
+    invalid.subject_visibility = MemorySubjectVisibilityPolicy::OnlySubjects(Vec::new());
+    invalid.content_digest = invalid
+        .canonical_content_digest()
+        .expect("invalid payload still has bytes");
+    assert!(!invalid.validate_contract().accepted);
 }
 
 fn transition(

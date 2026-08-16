@@ -98,8 +98,9 @@ use bm_core::memory::{
     MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
     MemoryGraphWritePlan, MemoryHygieneContext, MemoryLongTermAffectedFacetDoc,
     MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryPlaneGovernanceReport,
-    MemoryPrivacyClass, MemoryUpdateLineageReport, MemoryWriteAuthority, MemoryWriteCandidate,
-    MemoryWriteDomain, ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
+    MemoryPrivacyClass, MemorySubjectVisibilityDecision, MemorySubjectVisibilityPolicy,
+    MemoryUpdateLineageReport, MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
+    ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
     PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV2,
     PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
     PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PremiseTypedSource,
@@ -1167,6 +1168,7 @@ struct FacetRecallBuildContext<'a> {
     source_candidate_ids: &'a [String],
     source_graph_anchor_candidate_ids: &'a [String],
     source_candidate_owner_refs: &'a BTreeMap<String, GovernedMemoryOwnerRef>,
+    subject_visibility_denied_owner_refs: &'a BTreeSet<GovernedMemoryOwnerRef>,
     feature_flags: RecallFeatureFlags,
 }
 
@@ -1389,6 +1391,7 @@ struct MaterializedLongTermRecallState {
 
 struct MaterializedLongTermRecallClosure {
     owner_states: BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermRecallState>,
+    subject_visibility_denied_owner_refs: BTreeSet<GovernedMemoryOwnerRef>,
     eligibility_report: GovernedRecallEligibilityReport,
     #[cfg(feature = "nonproduction-replay-harness")]
     p8_counterfactual_inputs: Vec<crate::P8SemanticLongTermCounterfactualInput>,
@@ -3043,7 +3046,39 @@ impl MemoryRuntime {
         {
             report.tombstone = None;
         }
+        let metadata_visible = if report.record.is_some() {
+            true
+        } else {
+            self.terminal_long_term_detail_metadata_visible(&report)?
+        };
+        if !metadata_visible {
+            report.revisions.clear();
+            report.tombstone = None;
+            report.transcript_refs.clear();
+        }
         Ok(report)
+    }
+
+    fn terminal_long_term_detail_metadata_visible(
+        &self,
+        report: &MemoryLongTermDetailReport,
+    ) -> Result<bool> {
+        let Some(tombstone) = report.tombstone.as_ref() else {
+            return Ok(false);
+        };
+        if tombstone.memory_space_id != self.config.memory_space_id {
+            return Ok(false);
+        }
+        if tombstone.validate_contract().is_err() {
+            return Err(Error::config(
+                "long_term_control_detail",
+                "terminal tombstone subject visibility is invalid",
+            ));
+        }
+        Ok(self.subject_visibility_decision_for_subject(
+            &tombstone.subject_visibility,
+            &self.config.scoped_runtime.mounted_subject_id,
+        )? == MemorySubjectVisibilityDecision::Allowed)
     }
 
     pub fn read_governed_evidence_documents(
@@ -5094,22 +5129,29 @@ impl MemoryRuntime {
         entries: Vec<LongTermMemoryEntry>,
         facet_store: Option<&StorePlatform>,
     ) -> Result<Vec<LongTermMemoryEntry>> {
-        let governed_ids = entries
-            .iter()
-            .filter(|entry| entry.privacy.projection_content_allowed())
-            .map(|entry| {
-                let owner_ref = GovernedMemoryOwnerRef::new(
-                    GovernedMemoryOwnerPlane::LongTerm,
-                    entry.id.clone(),
-                );
+        let mut governed_ids = Vec::new();
+        let mut visible_owner_refs = BTreeSet::new();
+        for entry in &entries {
+            if !entry.privacy.projection_content_allowed()
+                || self.subject_visibility_decision_for_subject(
+                    &entry.subject_visibility,
+                    &self.config.scoped_runtime.mounted_subject_id,
+                )? != MemorySubjectVisibilityDecision::Allowed
+            {
+                continue;
+            }
+            let owner_ref =
+                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id.clone());
+            governed_ids.push(
                 scoped_memory_facet_owner_storage_key(
                     &self.config.memory_space_id,
                     &self.config.memory_space_id,
                     &owner_ref,
                 )
-                .map_err(|error| Error::config("memory_facet_index_read", error.to_string()))
-            })
-            .collect::<Result<Vec<_>>>()?;
+                .map_err(|error| Error::config("memory_facet_index_read", error.to_string()))?,
+            );
+            visible_owner_refs.insert(owner_ref);
+        }
         let facet_docs = if governed_ids.is_empty() {
             BTreeMap::new()
         } else {
@@ -5133,9 +5175,10 @@ impl MemoryRuntime {
                     GovernedMemoryOwnerPlane::LongTerm,
                     entry.id.clone(),
                 );
-                facet_docs
-                    .get(&owner_ref)
-                    .is_some_and(|facet| self.long_term_entry_matches_governed_facet(entry, facet))
+                visible_owner_refs.contains(&owner_ref)
+                    && facet_docs.get(&owner_ref).is_some_and(|facet| {
+                        self.long_term_entry_matches_governed_facet(entry, facet)
+                    })
             })
             .collect())
     }
@@ -5156,6 +5199,10 @@ impl MemoryRuntime {
                     GovernedRecallEligibility::EligibleHistoricalAsOf
                 }
             };
+            let subject_visibility = self.subject_visibility_decision_for_subject(
+                &state.projection.material.subject_visibility,
+                &self.config.scoped_runtime.mounted_subject_id,
+            )?;
             if state.selected_decision.eligibility != expected_eligibility
                 || owner_ref != &state.projection.material.owner_ref
                 || !state
@@ -5163,6 +5210,7 @@ impl MemoryRuntime {
                     .material
                     .privacy_class
                     .projection_content_allowed()
+                || subject_visibility != MemorySubjectVisibilityDecision::Allowed
             {
                 continue;
             }
@@ -5222,7 +5270,37 @@ impl MemoryRuntime {
                     operation_time,
                 )?;
                 let temporal_query = GovernedRecallTemporalQuery::Current { query_time };
+                let mut subject_visibility_denied_owner_refs = BTreeSet::new();
                 let states = projections
+                    .into_iter()
+                    .filter_map(|(owner_ref, authority)| {
+                        match self.subject_visibility_decision_for_subject(
+                            &authority.projection().material.subject_visibility,
+                            &self.config.scoped_runtime.mounted_subject_id,
+                        ) {
+                            Ok(MemorySubjectVisibilityDecision::Allowed) => {
+                                Some(Ok((owner_ref, authority)))
+                            }
+                            Ok(MemorySubjectVisibilityDecision::Denied) => {
+                                self.audit(
+                                    "memory_recall.subject_visibility",
+                                    false,
+                                    "subject_visibility_blocked",
+                                );
+                                subject_visibility_denied_owner_refs.insert(owner_ref);
+                                None
+                            }
+                            Err(error) => {
+                                self.audit(
+                                    "memory_recall.subject_visibility",
+                                    false,
+                                    "subject_visibility_policy_invalid",
+                                );
+                                Some(Err(error))
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?
                     .into_iter()
                     .map(|(owner_ref, authority)| {
                         let lifecycle =
@@ -5266,6 +5344,7 @@ impl MemoryRuntime {
                 )?;
                 Ok(MaterializedLongTermRecallClosure {
                     owner_states: states,
+                    subject_visibility_denied_owner_refs,
                     eligibility_report,
                     #[cfg(feature = "nonproduction-replay-harness")]
                     p8_counterfactual_inputs,
@@ -5298,7 +5377,37 @@ impl MemoryRuntime {
                     query_time,
                     as_of_time,
                 };
+                let mut subject_visibility_denied_owner_refs = BTreeSet::new();
                 let states = authorities
+                    .into_iter()
+                    .filter_map(|(owner_ref, authority)| {
+                        match self.subject_visibility_decision_for_subject(
+                            &authority.projection().material.subject_visibility,
+                            &self.config.scoped_runtime.mounted_subject_id,
+                        ) {
+                            Ok(MemorySubjectVisibilityDecision::Allowed) => {
+                                Some(Ok((owner_ref, authority)))
+                            }
+                            Ok(MemorySubjectVisibilityDecision::Denied) => {
+                                self.audit(
+                                    "memory_recall.subject_visibility",
+                                    false,
+                                    "subject_visibility_blocked",
+                                );
+                                subject_visibility_denied_owner_refs.insert(owner_ref);
+                                None
+                            }
+                            Err(error) => {
+                                self.audit(
+                                    "memory_recall.subject_visibility",
+                                    false,
+                                    "subject_visibility_policy_invalid",
+                                );
+                                Some(Err(error))
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?
                     .into_iter()
                     .map(|(owner_ref, authority)| {
                         let lifecycle =
@@ -5358,6 +5467,7 @@ impl MemoryRuntime {
                 )?;
                 Ok(MaterializedLongTermRecallClosure {
                     owner_states: states,
+                    subject_visibility_denied_owner_refs,
                     eligibility_report,
                     #[cfg(feature = "nonproduction-replay-harness")]
                     p8_counterfactual_inputs,
@@ -5387,13 +5497,23 @@ impl MemoryRuntime {
                 .any(|subject_id| subject_id == factual_owner_id)
     }
 
-    fn evidence_document_visible_to_runtime(&self, document: &GovernedEvidenceDocument) -> bool {
+    fn evidence_document_visible_to_subject(
+        &self,
+        document: &GovernedEvidenceDocument,
+        mounted_subject_id: &str,
+    ) -> bool {
         validate_governed_evidence_document(document).is_ok()
             && document.memory_space_id == self.config.memory_space_id
             && document.privacy.projection_content_allowed()
             && (document.privacy == MemoryPrivacyClass::PublicRuntime
-                || document.mounted_subject_id
-                    == self.config.scoped_runtime.mounted_subject_id.trim())
+                || document.mounted_subject_id == mounted_subject_id.trim())
+    }
+
+    fn evidence_document_visible_to_runtime(&self, document: &GovernedEvidenceDocument) -> bool {
+        self.evidence_document_visible_to_subject(
+            document,
+            &self.config.scoped_runtime.mounted_subject_id,
+        )
     }
 
     fn evidence_document_matches_governed_facet(
@@ -6058,6 +6178,7 @@ impl MemoryRuntime {
             source_candidate_ids,
             source_graph_anchor_candidate_ids,
             source_candidate_owner_refs,
+            subject_visibility_denied_owner_refs,
             feature_flags,
         } = context;
         let passthrough = |index_report: MemoryFacetRecallIndexReport,
@@ -6496,6 +6617,9 @@ impl MemoryRuntime {
             {
                 manifest_integrity_verified = false;
                 failures.push("memory_facet_read_chain_contract_mismatch".to_string());
+                continue;
+            }
+            if subject_visibility_denied_owner_refs.contains(&doc.owner_ref) {
                 continue;
             }
             let owner = match self.load_governed_recall_owner_material(
@@ -7742,38 +7866,58 @@ impl MemoryRuntime {
         if affected_owner_refs.is_empty() {
             return Ok(());
         }
-        let Some(closure) = self
-            .load_current_graph_closure_for_mutation()
-            .map_err(|failures| {
-                Error::config(
-                    "memory_graph_owner_cascade_integrity_failed",
-                    failures.join(","),
-                )
-            })?
-        else {
-            return Ok(());
-        };
-        let affected_node_ids = closure
-            .node_memberships
-            .iter()
-            .filter(|membership| affected_owner_refs.contains(&membership.owner_ref))
-            .map(|membership| membership.node_id.clone())
-            .collect::<BTreeSet<_>>();
-        let mut removed_node_ids = self.invalid_graph_owner_ids(&closure)?;
-        removed_node_ids.extend(affected_node_ids);
-        if removed_node_ids.is_empty() {
-            return Ok(());
+        let graph_subject_ids = self
+            .config
+            .subject_registry
+            .registered_subject_ids()
+            .map_err(|reason| Error::config("subject_registry_contract_invalid", reason))?;
+        for graph_subject_id in graph_subject_ids {
+            let closure = self
+                .load_graph_closure_for_mutation(&graph_subject_id)
+                .map_err(|failures| {
+                    Error::config(
+                        "memory_graph_owner_cascade_integrity_failed",
+                        failures.join(","),
+                    )
+                })?;
+            merge_json_preconditions(
+                preconditions,
+                vec![memory_graph_manifest_precondition(
+                    closure.as_ref().map(|closure| &closure.manifest),
+                    &self.config.memory_space_id,
+                    &graph_subject_id,
+                )?],
+            )?;
+            let Some(closure) = closure else {
+                continue;
+            };
+            let affected_node_ids = closure
+                .node_memberships
+                .iter()
+                .filter(|membership| affected_owner_refs.contains(&membership.owner_ref))
+                .map(|membership| membership.node_id.clone())
+                .collect::<BTreeSet<_>>();
+            let mut removed_node_ids =
+                self.invalid_graph_owner_ids_for_subject(&closure, &graph_subject_id)?;
+            removed_node_ids.extend(affected_node_ids);
+            if removed_node_ids.is_empty() {
+                continue;
+            }
+            let rewrite = self.plan_graph_closure_removal_for_subject(
+                &closure,
+                &removed_node_ids,
+                &graph_subject_id,
+            )?;
+            merge_json_preconditions(
+                preconditions,
+                memory_graph_closure_preconditions(
+                    Some(&closure),
+                    &self.config.memory_space_id,
+                    &graph_subject_id,
+                )?,
+            )?;
+            mutations.extend(rewrite.mutations);
         }
-        let rewrite = self.plan_graph_closure_removal(&closure, &removed_node_ids)?;
-        merge_json_preconditions(
-            preconditions,
-            memory_graph_closure_preconditions(
-                Some(&closure),
-                &self.config.memory_space_id,
-                &self.config.scoped_runtime.mounted_subject_id,
-            )?,
-        )?;
-        mutations.extend(rewrite.mutations);
         Ok(())
     }
 
@@ -8212,6 +8356,12 @@ impl MemoryRuntime {
         bm_core::memory::MemoryLongTermMutationReport,
         MemoryStoreMutationPlan,
     )> {
+        if let MemoryLongTermMutation::ChangeScope {
+            subject_visibility, ..
+        } = &request.operation
+        {
+            self.validate_subject_visibility_policy_against_registry(subject_visibility)?;
+        }
         let store = self.config.long_term_memory_read_store.clone();
         let governed_store = GovernedLongTermMemoryReadView {
             runtime: self,
@@ -8256,6 +8406,55 @@ impl MemoryRuntime {
             mutation_plan.merge(facet_index_mutations)?;
         }
         Ok((report, mutation_plan))
+    }
+
+    fn validate_subject_visibility_policy_against_registry(
+        &self,
+        policy: &MemorySubjectVisibilityPolicy,
+    ) -> Result<()> {
+        self.validate_subject_visibility_policy_registry_membership(policy)
+    }
+
+    fn validate_subject_visibility_policy_registry_membership(
+        &self,
+        policy: &MemorySubjectVisibilityPolicy,
+    ) -> Result<()> {
+        policy.validate_canonical()?;
+        let subject_ids = match policy {
+            MemorySubjectVisibilityPolicy::AllSubjects => return Ok(()),
+            MemorySubjectVisibilityPolicy::OnlySubjects(subject_ids)
+            | MemorySubjectVisibilityPolicy::HiddenFromSubjects(subject_ids) => subject_ids,
+        };
+        if subject_ids
+            .iter()
+            .any(|subject_id| self.config.subject_registry.subject(subject_id).is_none())
+        {
+            return Err(Error::config(
+                "long_term_subject_visibility",
+                "subject visibility policy references a subject absent from SubjectRegistry",
+            ));
+        }
+        Ok(())
+    }
+
+    fn subject_visibility_decision_for_subject(
+        &self,
+        policy: &MemorySubjectVisibilityPolicy,
+        mounted_subject_id: &str,
+    ) -> Result<MemorySubjectVisibilityDecision> {
+        self.validate_subject_visibility_policy_registry_membership(policy)?;
+        if self
+            .config
+            .subject_registry
+            .subject(mounted_subject_id)
+            .is_none()
+        {
+            return Err(Error::config(
+                "long_term_subject_visibility",
+                "mounted subject is absent from SubjectRegistry",
+            ));
+        }
+        policy.decision_for_subject(mounted_subject_id)
     }
 
     fn long_term_control_affected_facet_docs(
@@ -9989,6 +10188,8 @@ impl MemoryRuntime {
                     source_candidate_ids: &source_candidate_ids,
                     source_graph_anchor_candidate_ids: &source_graph_anchor_candidate_ids,
                     source_candidate_owner_refs: &source_candidate_owner_refs,
+                    subject_visibility_denied_owner_refs: &long_term_recall_closure
+                        .subject_visibility_denied_owner_refs,
                     feature_flags,
                 });
                 let graph_anchor_candidate_ids = facet
@@ -11109,7 +11310,8 @@ impl MemoryRuntime {
                         node_id: node.node_id.clone(),
                         owner_ref: owner_ref.clone(),
                         owner_revision: document.owner_revision,
-                        visible: self.evidence_document_visible_to_runtime(&document),
+                        visible: self
+                            .evidence_document_visible_to_subject(&document, mounted_subject_id),
                     });
                 }
                 _ => {
@@ -11270,24 +11472,21 @@ impl MemoryRuntime {
         &self,
         memberships: &[MemoryGraphNodeMembership],
     ) -> Result<Vec<MemoryGraphOwnerBinding>> {
-        self.graph_owner_bindings_from_store(
+        self.graph_owner_bindings_from_store_for_subject(
             self.config.long_term_memory_read_store.as_ref(),
             self.config.store_platform.as_ref(),
             memberships,
+            &self.config.scoped_runtime.mounted_subject_id,
         )
     }
 
-    fn graph_owner_bindings_from_store(
+    fn graph_owner_bindings_from_store_for_subject(
         &self,
         inner: &dyn LongTermMemoryReadStore,
         facet_store: Option<&StorePlatform>,
         memberships: &[MemoryGraphNodeMembership],
+        mounted_subject_id: &str,
     ) -> Result<Vec<MemoryGraphOwnerBinding>> {
-        let governed = GovernedLongTermMemoryReadView {
-            runtime: self,
-            inner,
-            facet_store,
-        };
         let mut bindings = Vec::new();
         for membership in memberships {
             match membership.owner_ref.owner_plane {
@@ -11300,7 +11499,11 @@ impl MemoryRuntime {
                         node_id: membership.node_id.clone(),
                         owner_ref: membership.owner_ref.clone(),
                         owner_revision: owner.owner_revision,
-                        visible: governed.get(owner_id)?.is_some(),
+                        visible: owner.privacy.projection_content_allowed()
+                            && self.subject_visibility_decision_for_subject(
+                                &owner.subject_visibility,
+                                mounted_subject_id,
+                            )? == MemorySubjectVisibilityDecision::Allowed,
                     });
                 }
                 GovernedMemoryOwnerPlane::EvidenceDocument => {
@@ -11318,7 +11521,8 @@ impl MemoryRuntime {
                         node_id: membership.node_id.clone(),
                         owner_ref: membership.owner_ref.clone(),
                         owner_revision: document.owner_revision,
-                        visible: self.evidence_document_visible_to_runtime(&document),
+                        visible: self
+                            .evidence_document_visible_to_subject(&document, mounted_subject_id),
                     });
                 }
                 _ => {}
@@ -11345,7 +11549,11 @@ impl MemoryRuntime {
                         node_id: membership.node_id.clone(),
                         owner_ref: membership.owner_ref.clone(),
                         owner_revision: owner.owner_revision,
-                        visible: owner.privacy.projection_content_allowed(),
+                        visible: owner.privacy.projection_content_allowed()
+                            && self.subject_visibility_decision_for_subject(
+                                &owner.subject_visibility,
+                                &self.config.scoped_runtime.mounted_subject_id,
+                            )? == MemorySubjectVisibilityDecision::Allowed,
                     });
                 }
                 GovernedMemoryOwnerPlane::EvidenceDocument => {
@@ -11438,13 +11646,20 @@ impl MemoryRuntime {
     fn load_current_graph_closure_for_mutation(
         &self,
     ) -> std::result::Result<Option<LoadedMemoryGraphClosure>, Vec<String>> {
+        self.load_graph_closure_for_mutation(&self.config.scoped_runtime.mounted_subject_id)
+    }
+
+    fn load_graph_closure_for_mutation(
+        &self,
+        mounted_subject_id: &str,
+    ) -> std::result::Result<Option<LoadedMemoryGraphClosure>, Vec<String>> {
         let store = self
             .config
             .store_platform
             .as_ref()
             .ok_or_else(|| vec!["memory_graph_transactional_store_unavailable".to_string()])?;
         let memory_space_id = self.config.memory_space_id.as_str();
-        let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
+        let mounted_subject_id = mounted_subject_id.trim();
         let Some(manifest) =
             read_memory_graph_scope_manifest(store, memory_space_id, mounted_subject_id)?
         else {
@@ -11489,6 +11704,19 @@ impl MemoryRuntime {
         &self,
         closure: &LoadedMemoryGraphClosure,
         removed_node_ids: &BTreeSet<String>,
+    ) -> Result<GraphClosureRewritePlan> {
+        self.plan_graph_closure_removal_for_subject(
+            closure,
+            removed_node_ids,
+            &closure.manifest.mounted_subject_id,
+        )
+    }
+
+    fn plan_graph_closure_removal_for_subject(
+        &self,
+        closure: &LoadedMemoryGraphClosure,
+        removed_node_ids: &BTreeSet<String>,
+        mounted_subject_id: &str,
     ) -> Result<GraphClosureRewritePlan> {
         let retained_nodes = closure
             .nodes
@@ -11569,7 +11797,12 @@ impl MemoryRuntime {
             .filter(|membership| retained_node_ids.contains(&membership.node_id))
             .cloned()
             .collect::<Vec<_>>();
-        let owner_bindings = self.graph_owner_bindings(&retained_memberships)?;
+        let owner_bindings = self.graph_owner_bindings_from_store_for_subject(
+            self.config.long_term_memory_read_store.as_ref(),
+            self.config.store_platform.as_ref(),
+            &retained_memberships,
+            mounted_subject_id,
+        )?;
         let graph_plan = plan_temporal_memory_graph_write(
             "memory_graph.maintain",
             retained_nodes,
@@ -11615,8 +11848,24 @@ impl MemoryRuntime {
         &self,
         closure: &LoadedMemoryGraphClosure,
     ) -> Result<BTreeSet<String>> {
+        self.invalid_graph_owner_ids_for_subject(
+            closure,
+            &self.config.scoped_runtime.mounted_subject_id,
+        )
+    }
+
+    fn invalid_graph_owner_ids_for_subject(
+        &self,
+        closure: &LoadedMemoryGraphClosure,
+        mounted_subject_id: &str,
+    ) -> Result<BTreeSet<String>> {
         let current = self
-            .graph_owner_bindings(&closure.node_memberships)?
+            .graph_owner_bindings_from_store_for_subject(
+                self.config.long_term_memory_read_store.as_ref(),
+                self.config.store_platform.as_ref(),
+                &closure.node_memberships,
+                mounted_subject_id,
+            )?
             .into_iter()
             .map(|binding| {
                 (
@@ -23728,6 +23977,16 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             }
         }
         Ok(changed)
+    }
+
+    fn create_exact_owner(&self, entry: &LongTermMemoryEntry) -> Result<()> {
+        if LongTermMemoryStore::get(self, &entry.id)?.is_some() {
+            return Err(Error::config(
+                "long_term_exact_owner_create",
+                "exact owner creation requires an absent owner id",
+            ));
+        }
+        self.stage_entries(std::slice::from_ref(entry))
     }
 
     fn mutate_owner(

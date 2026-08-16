@@ -1018,6 +1018,7 @@ mod tests {
                 source_chat_id: Some("chat-1".to_string()),
                 source_type: LongTermMemorySourceType::Conversation,
                 source_scope: LongTermMemorySourceScope::User,
+                subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
                 confidence: LongTermMemoryConfidence::Medium,
                 freshness: LongTermMemoryFreshness::Stable,
                 stale_hint: LongTermMemoryStaleHint::None,

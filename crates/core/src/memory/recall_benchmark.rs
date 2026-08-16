@@ -582,6 +582,7 @@ mod tests {
                 source_chat_id: Some("chat-a".to_string()),
                 source_type: LongTermMemorySourceType::Conversation,
                 source_scope: LongTermMemorySourceScope::User,
+                subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
                 confidence: LongTermMemoryConfidence::High,
                 freshness: LongTermMemoryFreshness::Dynamic,
                 stale_hint: crate::memory::LongTermMemoryStaleHint::ReviewBeforeUse,

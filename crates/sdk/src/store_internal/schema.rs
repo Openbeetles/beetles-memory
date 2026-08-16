@@ -2469,4 +2469,76 @@ mod tests {
             .insert("legacy_alias".to_string(), serde_json::Value::Bool(true));
         assert!(serde_json::from_value::<StoreSchemaManifest>(value).is_err());
     }
+
+    #[test]
+    fn terminal_visibility_tombstone_admission_is_exact_v4_and_canonical() {
+        let tombstone = bm_core::memory::LongTermMemoryTombstone {
+            schema_version: bm_core::memory::LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
+            tombstone_id: "tombstone-v4".to_string(),
+            record_id: "owner-v4".to_string(),
+            operation: bm_core::memory::LongTermControlOperation::Delete,
+            last_owner_revision: 2,
+            last_source_revision: Some(1),
+            previous_digest: "a".repeat(64),
+            subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                "agent-a".to_string(),
+            ]),
+            reason: "terminal visibility contract".to_string(),
+            factual_owner_id: "space-v4".to_string(),
+            actor_subject_id: Some("agent-a".to_string()),
+            memory_space_id: "space-v4".to_string(),
+            created_at: 10,
+        };
+        let key = scoped_long_term_control_storage_key(
+            "space-v4",
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+            "owner-v4",
+        )
+        .expect("tombstone key");
+        let valid = serde_json::to_value(tombstone).expect("tombstone value");
+        admit_store_json_document(
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+            &key,
+            &valid,
+            "test_tombstone_admission",
+        )
+        .expect("canonical v4 tombstone");
+
+        let mut missing_policy = valid.clone();
+        missing_policy
+            .as_object_mut()
+            .expect("tombstone object")
+            .remove("subject_visibility");
+        let error = admit_store_json_document(
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+            &key,
+            &missing_policy,
+            "test_tombstone_admission",
+        )
+        .expect_err("missing policy must fail closed");
+        assert_eq!(error.stage(), "test_tombstone_admission");
+
+        let mut old_schema = valid.clone();
+        old_schema["schema_version"] = serde_json::json!(3);
+        admit_store_json_document(
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+            &key,
+            &old_schema,
+            "test_tombstone_admission",
+        )
+        .expect_err("old v3 tombstone must fail closed");
+
+        let mut noncanonical = valid;
+        noncanonical["subject_visibility"] = serde_json::to_value(
+            bm_core::memory::MemorySubjectVisibilityPolicy::OnlySubjects(Vec::new()),
+        )
+        .expect("invalid policy shape");
+        admit_store_json_document(
+            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+            &key,
+            &noncanonical,
+            "test_tombstone_admission",
+        )
+        .expect_err("noncanonical policy must fail closed");
+    }
 }

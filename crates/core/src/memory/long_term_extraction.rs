@@ -2067,6 +2067,7 @@ mod tests {
             source_chat_id: source_chat_id.map(str::to_string),
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
+            subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
             confidence: crate::memory::LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,

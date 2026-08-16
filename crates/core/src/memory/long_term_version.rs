@@ -15,19 +15,19 @@ use super::{
     GovernedUpdateLineageItem, LongTermControlOperation, LongTermMemoryConfidence,
     LongTermMemoryControlRevision, LongTermMemoryEntry, LongTermMemoryFreshness,
     LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, MemoryPrivacyClass, MemorySpaceId, MemoryUpdateLineageReport,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LongTermMemoryStaleHint, MemoryPrivacyClass, MemorySpaceId, MemorySubjectVisibilityPolicy,
+    MemoryUpdateLineageReport, LONG_TERM_CONTROL_REVISION_NAMESPACE,
 };
 
-pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 2;
-const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v2";
-const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v2";
-const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v2";
-const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v2";
+pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 3;
+const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v3";
+const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v3";
+const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v3";
+const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v3";
 const LONG_TERM_VERSION_HEAD_CONTENT_DIGEST_DOMAIN: &str =
-    "long_term_version_head_content_digest_v2";
+    "long_term_version_head_content_digest_v3";
 const LONG_TERM_VERSION_SCOPE_CLOSURE_DIGEST_DOMAIN: &str =
-    "long_term_version_scope_closure_digest_v2";
+    "long_term_version_scope_closure_digest_v3";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LongTermVersionRetentionLease {
@@ -134,6 +134,7 @@ pub struct LongTermMemoryVersionMaterial {
     pub governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
     pub origin: LongTermMemoryVersionOrigin,
     pub privacy_class: MemoryPrivacyClass,
+    pub subject_visibility: MemorySubjectVisibilityPolicy,
     pub content_digest: String,
 }
 
@@ -184,6 +185,7 @@ impl LongTermMemoryVersionMaterial {
                 predecessor,
             },
             privacy_class: entry.privacy,
+            subject_visibility: entry.subject_visibility.clone(),
             content_digest: String::new(),
         };
         material.content_digest = material.canonical_content_digest()?;
@@ -214,6 +216,7 @@ impl LongTermMemoryVersionMaterial {
             source_chat_id: self.governed_content.source_chat_id.clone(),
             source_type: self.governed_content.source_type,
             source_scope: self.governed_content.source_scope,
+            subject_visibility: self.subject_visibility.clone(),
             confidence: self.governed_content.confidence,
             freshness: self.governed_content.freshness,
             stale_hint: self.governed_content.stale_hint,
@@ -249,6 +252,7 @@ impl LongTermMemoryVersionMaterial {
             governed_evidence_refs: &'a [GovernedOwnerRevisionRef],
             origin: &'a LongTermMemoryVersionOrigin,
             privacy_class: MemoryPrivacyClass,
+            subject_visibility: &'a MemorySubjectVisibilityPolicy,
         }
 
         let bytes = serde_json::to_vec(&DigestInput {
@@ -261,6 +265,7 @@ impl LongTermMemoryVersionMaterial {
             governed_evidence_refs: &self.governed_evidence_refs,
             origin: &self.origin,
             privacy_class: self.privacy_class,
+            subject_visibility: &self.subject_visibility,
         })
         .map_err(|error| Error::config("long_term_version_digest", error.to_string()))?;
         Ok(domain_separated_sha256(
@@ -284,6 +289,9 @@ impl LongTermMemoryVersionMaterial {
             failures.push(GovernedContractFailure::OwnerRevisionRefInvalid);
         }
         failures.extend(self.origin.validate_for(&revision_ref).failures);
+        if self.subject_visibility.validate_canonical().is_err() {
+            failures.push(GovernedContractFailure::ContentDigestMismatch);
+        }
         let evidence_refs = self
             .governed_evidence_refs
             .iter()

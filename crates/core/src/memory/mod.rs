@@ -268,8 +268,9 @@ pub use long_term::{
     LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryQuery, LongTermMemoryReadStore,
     LongTermMemorySlot, LongTermMemorySlotLookup, LongTermMemorySourceScope,
     LongTermMemorySourceType, LongTermMemoryStaleHint, LongTermMemoryStore,
-    MAX_LONG_TERM_MEMORY_BLOCK_LEN, MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS,
-    MAX_LONG_TERM_MEMORY_KEYWORDS, MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
+    MemorySubjectVisibilityDecision, MemorySubjectVisibilityPolicy, MAX_LONG_TERM_MEMORY_BLOCK_LEN,
+    MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS, MAX_LONG_TERM_MEMORY_KEYWORDS,
+    MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
 };
 pub(crate) use long_term::{
     canonicalize_long_term_memory_entry, compare_long_term_memory_query_results,
@@ -300,9 +301,9 @@ pub use long_term_control::{
     MemoryLongTermDetailReport, MemoryLongTermGovernancePolicy, MemoryLongTermListReport,
     MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermRecordReport,
     MemoryLongTermSelector, MemoryLongTermTarget, MemoryLongTermTargetResolutionReport,
-    MemoryLongTermTombstoneRef, MemoryProjectionImpactReport, MemorySubjectVisibilityPolicy,
-    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    MemoryLongTermTombstoneRef, MemoryProjectionImpactReport, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_SCHEMA_VERSION,
+    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
 };
 #[cfg(any(test, feature = "nonproduction-replay-harness"))]

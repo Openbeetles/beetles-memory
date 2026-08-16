@@ -19,7 +19,7 @@ use super::recall_anchor::{
 };
 use super::{
     memory_policy, shared_long_term_governance_policy, LongTermRecallPolicy, MemoryPrivacyClass,
-    MemoryProfile, SessionMessage,
+    MemoryProfile, SessionMessage, SubjectId,
 };
 
 /// 结构化长期记忆存储路径（相对状态根）。
@@ -128,6 +128,79 @@ pub const MAX_LONG_TERM_MEMORY_BLOCK_LEN: usize = 1024;
 const LONG_TERM_MEMORY_TASK_TTL_SECS: u64 = 45 * 86_400;
 /// 长期记忆治理：项目超时后视为陈旧。
 const LONG_TERM_MEMORY_PROJECT_TTL_SECS: u64 = 180 * 86_400;
+
+/// accepted long-term owner 对挂载主体的持久可见性策略。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySubjectVisibilityPolicy {
+    #[default]
+    AllSubjects,
+    OnlySubjects(Vec<SubjectId>),
+    HiddenFromSubjects(Vec<SubjectId>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemorySubjectVisibilityDecision {
+    Allowed,
+    Denied,
+}
+
+impl MemorySubjectVisibilityPolicy {
+    pub fn validate_canonical(&self) -> Result<()> {
+        let subject_ids = match self {
+            Self::AllSubjects => return Ok(()),
+            Self::OnlySubjects(subject_ids) | Self::HiddenFromSubjects(subject_ids) => subject_ids,
+        };
+        if subject_ids.is_empty()
+            || subject_ids
+                .iter()
+                .any(|subject_id| subject_id.trim().is_empty() || subject_id != subject_id.trim())
+            || subject_ids.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(Error::config(
+                "long_term_subject_visibility",
+                "subject visibility sets must be non-empty, trimmed, unique, and strictly sorted",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn decision_for_subject(
+        &self,
+        mounted_subject_id: &str,
+    ) -> Result<MemorySubjectVisibilityDecision> {
+        self.validate_canonical()?;
+        if mounted_subject_id.trim().is_empty() || mounted_subject_id != mounted_subject_id.trim() {
+            return Err(Error::config(
+                "long_term_subject_visibility",
+                "mounted subject id must be non-empty and canonical",
+            ));
+        }
+        Ok(match self {
+            Self::AllSubjects => MemorySubjectVisibilityDecision::Allowed,
+            Self::OnlySubjects(subject_ids) => {
+                if subject_ids
+                    .binary_search_by(|subject_id| subject_id.as_str().cmp(mounted_subject_id))
+                    .is_ok()
+                {
+                    MemorySubjectVisibilityDecision::Allowed
+                } else {
+                    MemorySubjectVisibilityDecision::Denied
+                }
+            }
+            Self::HiddenFromSubjects(subject_ids) => {
+                if subject_ids
+                    .binary_search_by(|subject_id| subject_id.as_str().cmp(mounted_subject_id))
+                    .is_ok()
+                {
+                    MemorySubjectVisibilityDecision::Denied
+                } else {
+                    MemorySubjectVisibilityDecision::Allowed
+                }
+            }
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -599,6 +672,7 @@ pub struct LongTermMemoryEntry {
     pub source_type: LongTermMemorySourceType,
     #[serde(default)]
     pub source_scope: LongTermMemorySourceScope,
+    pub subject_visibility: MemorySubjectVisibilityPolicy,
     #[serde(default)]
     pub confidence: LongTermMemoryConfidence,
     #[serde(default)]
@@ -1153,7 +1227,10 @@ impl LongTermMemoryEntryPlan {
 pub enum LongTermMemoryOwnerMutation {
     Correct(LongTermMemoryDraft),
     MarkStale(LongTermMemoryStaleHint),
-    ChangeScope(LongTermMemorySourceScope),
+    ChangeScope {
+        source_scope: LongTermMemorySourceScope,
+        subject_visibility: MemorySubjectVisibilityPolicy,
+    },
     ChangePrivacy(MemoryPrivacyClass),
     CompactEvidenceMetadata {
         supporting_citations: Vec<String>,
@@ -1188,6 +1265,7 @@ fn long_term_memory_entry_from_normalized_draft(
         source_chat_id: normalized.source_chat_id,
         source_type: meta.source_type,
         source_scope: meta.source_scope,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
         confidence: meta.confidence,
         freshness: meta.freshness,
         stale_hint: meta.stale_hint,
@@ -1484,7 +1562,18 @@ pub fn plan_long_term_memory_owner_mutation(
             }
         }
         LongTermMemoryOwnerMutation::MarkStale(stale_hint) => next.stale_hint = *stale_hint,
-        LongTermMemoryOwnerMutation::ChangeScope(source_scope) => next.source_scope = *source_scope,
+        LongTermMemoryOwnerMutation::ChangeScope {
+            source_scope,
+            subject_visibility,
+        } => {
+            if subject_visibility.validate_canonical().is_err() {
+                return LongTermMemoryEntryPlan::Rejected(
+                    LongTermMemoryEntryRejection::InvalidDraft,
+                );
+            }
+            next.source_scope = *source_scope;
+            next.subject_visibility = subject_visibility.clone();
+        }
         LongTermMemoryOwnerMutation::ChangePrivacy(privacy) => next.privacy = *privacy,
         LongTermMemoryOwnerMutation::CompactEvidenceMetadata {
             supporting_citations,
@@ -1522,6 +1611,12 @@ pub(crate) fn long_term_memory_entry_from_draft(
 /// 结构化长期记忆存储接口。实现负责持久化、去重与轻量召回。
 pub trait LongTermMemoryStore: Send + Sync {
     fn upsert_many(&self, drafts: &[LongTermMemoryDraft], now_secs: u64) -> Result<usize>;
+    fn create_exact_owner(&self, _entry: &LongTermMemoryEntry) -> Result<()> {
+        Err(Error::config(
+            "long_term_exact_owner_create_unsupported",
+            "long-term store does not support exact governed owner creation",
+        ))
+    }
     fn recall(
         &self,
         query: &str,
@@ -3023,6 +3118,7 @@ mod tests {
             source_chat_id: source_chat_id.map(str::to_string),
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -3242,6 +3338,7 @@ mod tests {
             source_chat_id: None,
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -3274,6 +3371,7 @@ mod tests {
             source_chat_id: None,
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -3602,6 +3700,7 @@ mod tests {
             source_chat_id: None,
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::World,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Dynamic,
             stale_hint: LongTermMemoryStaleHint::ReviewBeforeUse,

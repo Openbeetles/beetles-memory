@@ -130,6 +130,7 @@ fn fixture_long_term_entry() -> LongTermMemoryEntry {
         source_chat_id: Some("chat-alpha".to_string()),
         source_type: LongTermMemorySourceType::Conversation,
         source_scope: LongTermMemorySourceScope::User,
+        subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
         confidence: LongTermMemoryConfidence::High,
         freshness: LongTermMemoryFreshness::Dynamic,
         stale_hint: Default::default(),

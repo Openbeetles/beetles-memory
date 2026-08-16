@@ -18,7 +18,8 @@ use super::CoreRevisionConflictClass;
 use super::{
     governed_memory_recall_candidate_id, CoreRevisionLedger, CoreRevisionOutcome,
     CoreRevisionRecord, CoreRevisionRecordChange, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
-    MemoryPrivacyClass, RelationshipConstitutionAudit, SelfAuthoredCore, TurnSoulFeedbackLedger,
+    MemoryPrivacyClass, MemorySubjectVisibilityDecision, RelationshipConstitutionAudit,
+    SelfAuthoredCore, TurnSoulFeedbackLedger,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -976,10 +977,21 @@ pub fn validate_memory_graph_post_image(
             failures.push("memory_graph_owner_revision_successor_drift".to_string());
         }
         if let Some(owner) = image.after.as_ref() {
+            let subject_visible = match owner
+                .subject_visibility
+                .decision_for_subject(mounted_subject_id)
+            {
+                Ok(MemorySubjectVisibilityDecision::Allowed) => true,
+                Ok(MemorySubjectVisibilityDecision::Denied) => false,
+                Err(_) => {
+                    failures.push("memory_graph_owner_subject_visibility_invalid".to_string());
+                    false
+                }
+            };
             append_graph_owner_bindings(
                 owner.owner_ref.clone(),
                 owner.owner_revision,
-                owner.privacy_class.projection_content_allowed(),
+                owner.privacy_class.projection_content_allowed() && subject_visible,
                 &memberships_by_owner,
                 &mut owner_refs,
                 &mut owner_bindings,

@@ -21,8 +21,8 @@ use super::{
     GovernedOwnerTransition, LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryEntryPlan,
     LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryQuery, LongTermMemoryReadStore,
     LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemoryStaleHint, LongTermMemoryStore,
-    LongTermMemoryVersionMaterial, MemoryPrivacyClass, MemorySpaceId, SubjectId,
-    TranscriptEvidenceRef,
+    LongTermMemoryVersionMaterial, MemoryPrivacyClass, MemorySpaceId,
+    MemorySubjectVisibilityPolicy, SubjectId, TranscriptEvidenceRef,
 };
 
 fn plan_or_apply_owner_mutation(
@@ -46,6 +46,7 @@ pub const LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE: &str = "long_term_control_tombs
 pub const LONG_TERM_GOVERNANCE_POLICY_NAMESPACE: &str = "long_term_governance_policy";
 pub const LONG_TERM_CONTROL_AUDIT_NAMESPACE: &str = "long_term_control_audit";
 pub const LONG_TERM_CONTROL_SCHEMA_VERSION: u32 = 3;
+pub const LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -173,15 +174,6 @@ pub enum MemoryLongTermTarget {
     Slot(LongTermMemorySlot),
     TranscriptDerivedRef(DerivedMemoryRef),
     Query(MemoryLongTermSelector),
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum MemorySubjectVisibilityPolicy {
-    #[default]
-    AllSubjects,
-    OnlySubjects(Vec<SubjectId>),
-    HiddenFromSubjects(Vec<SubjectId>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -750,6 +742,7 @@ pub struct LongTermMemoryTombstone {
     pub last_owner_revision: u64,
     pub last_source_revision: Option<u64>,
     pub previous_digest: String,
+    pub subject_visibility: MemorySubjectVisibilityPolicy,
     pub reason: String,
     pub factual_owner_id: MemorySpaceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -760,7 +753,7 @@ pub struct LongTermMemoryTombstone {
 
 impl LongTermMemoryTombstone {
     pub fn validate_contract(&self) -> Result<()> {
-        if self.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
+        if self.schema_version != LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION
             || self.tombstone_id.trim().is_empty()
             || self.tombstone_id != self.tombstone_id.trim()
             || self.record_id.trim().is_empty()
@@ -773,6 +766,7 @@ impl LongTermMemoryTombstone {
             )
             || self.last_owner_revision == 0
             || !is_control_sha256(&self.previous_digest)
+            || self.subject_visibility.validate_canonical().is_err()
             || self.reason.trim().is_empty()
             || self.reason != self.reason.trim()
             || self.factual_owner_id.trim().is_empty()
@@ -1166,13 +1160,14 @@ pub fn bind_long_term_version_mutation(
             effective_at,
         )?;
         let tombstone = LongTermMemoryTombstone {
-            schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+            schema_version: LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
             tombstone_id,
             record_id: predecessor.owner_ref.owner_id.clone(),
             operation,
             last_owner_revision: predecessor.owner_revision,
             last_source_revision: predecessor.governed_content.source_revision,
             previous_digest: predecessor.content_digest.clone(),
+            subject_visibility: predecessor.subject_visibility.clone(),
             reason: control_revision.reason.clone(),
             factual_owner_id: predecessor.factual_owner_id.clone(),
             actor_subject_id: control_revision.actor_subject_id.clone(),
@@ -1469,7 +1464,8 @@ pub fn validate_long_term_control_post_image(
             Some(owner)
                 if owner.owner_revision == tombstone.last_owner_revision
                     && owner.governed_content.source_revision == tombstone.last_source_revision
-                    && owner.content_digest == tombstone.previous_digest => {}
+                    && owner.content_digest == tombstone.previous_digest
+                    && owner.subject_visibility == tombstone.subject_visibility => {}
             _ => failures
                 .push("long_term_control_tombstone_owner_version_or_digest_drift".to_string()),
         }
@@ -1774,6 +1770,24 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
             }
         }
         Ok(changed)
+    }
+
+    fn create_exact_owner(&self, entry: &LongTermMemoryEntry) -> Result<()> {
+        if LongTermMemoryStore::get(self, &entry.id)?.is_some() {
+            return Err(Error::config(
+                "long_term_control_plan_exact_create",
+                "exact owner creation requires an absent owner id",
+            ));
+        }
+        self.overlay
+            .lock()
+            .expect("owner overlay lock")
+            .insert(entry.id.clone(), Some(entry.clone()));
+        self.writes
+            .lock()
+            .expect("owner writes lock")
+            .push(LongTermMemoryOwnerWrite::Put(Box::new(entry.clone())));
+        Ok(())
     }
 
     fn recall(
@@ -2514,7 +2528,7 @@ fn apply_correct(
             None,
         ));
     }
-    let previous_digest = digest_entry(&previous);
+    let previous_digest = digest_entry(&previous)?;
     let mutation = LongTermMemoryOwnerMutation::Correct(replacement.clone());
     let plan = plan_or_apply_owner_mutation(
         store,
@@ -2535,7 +2549,7 @@ fn apply_correct(
                 None,
                 MemoryProjectionImpactReport {
                     affected_record_ids: Vec::new(),
-                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    subject_visibility: previous.subject_visibility.clone(),
                     recall_projection_must_refresh: false,
                     notes: vec!["noop".to_string()],
                 },
@@ -2557,7 +2571,7 @@ fn apply_correct(
             ))
         }
     };
-    let new_digest = digest_entry(&updated);
+    let new_digest = digest_entry(&updated)?;
     if !request.dry_run {
         let revision = control_revision_intent_for(
             LongTermControlOperation::Correct,
@@ -2594,7 +2608,7 @@ fn apply_correct(
         audit_event_id,
         MemoryProjectionImpactReport {
             affected_record_ids: vec![previous.id.clone()],
-            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            subject_visibility: updated.subject_visibility.clone(),
             recall_projection_must_refresh: true,
             notes: Vec::new(),
         },
@@ -2633,17 +2647,18 @@ fn apply_supersede(
             None,
         ));
     }
-    let replacement_plan =
-        plan_long_term_memory_upsert(store.get(&new_id)?.as_ref(), replacement, request.now_secs);
-    let replacement_is_noop = matches!(&replacement_plan, LongTermMemoryEntryPlan::Noop);
-    let replacement_entry = match replacement_plan {
-        LongTermMemoryEntryPlan::Created(entry) | LongTermMemoryEntryPlan::Updated(entry) => entry,
-        LongTermMemoryEntryPlan::Noop => store.get(&new_id)?.ok_or_else(|| {
-            Error::config(
-                "long_term_control_supersede",
-                "replacement planner returned noop without an existing record",
-            )
-        })?,
+    if store.get(&new_id)?.is_some() {
+        return Ok(rejected_report(
+            "supersede",
+            request,
+            resolved.report,
+            "replacement_owner_already_exists",
+            None,
+        ));
+    }
+    let replacement_plan = plan_long_term_memory_upsert(None, replacement, request.now_secs);
+    let mut replacement_entry = match replacement_plan {
+        LongTermMemoryEntryPlan::Created(entry) => entry,
         LongTermMemoryEntryPlan::Rejected(reason) => {
             return Ok(rejected_report(
                 "supersede",
@@ -2653,16 +2668,21 @@ fn apply_supersede(
                 None,
             ))
         }
+        LongTermMemoryEntryPlan::Updated(_) | LongTermMemoryEntryPlan::Noop => {
+            return Err(Error::config(
+                "long_term_control_supersede",
+                "absent replacement owner did not produce an exact creation",
+            ))
+        }
     };
-    let previous_digest = digest_entry(&previous);
-    let new_digest = digest_entry(&replacement_entry);
+    replacement_entry.subject_visibility = previous.subject_visibility.clone();
+    let previous_digest = digest_entry(&previous)?;
+    let new_digest = digest_entry(&replacement_entry)?;
     let tombstone = tombstone_for(&previous, LongTermControlOperation::Supersede, request)?;
     if !request.dry_run {
         control_store.put_long_term_control_tombstone(&tombstone)?;
         store.delete(&previous.id)?;
-        if !replacement_is_noop {
-            store.upsert_many(std::slice::from_ref(replacement), request.now_secs)?;
-        }
+        store.create_exact_owner(&replacement_entry)?;
         let revision = control_revision_intent_for(
             LongTermControlOperation::Supersede,
             &previous,
@@ -2704,7 +2724,7 @@ fn apply_supersede(
         audit_event_id,
         MemoryProjectionImpactReport {
             affected_record_ids: vec![previous.id.clone(), new_id],
-            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            subject_visibility: replacement_entry.subject_visibility.clone(),
             recall_projection_must_refresh: true,
             notes: Vec::new(),
         },
@@ -2742,7 +2762,7 @@ fn apply_invalidate(
             None,
         ));
     };
-    let previous_digest = digest_entry(&previous);
+    let previous_digest = digest_entry(&previous)?;
     if !request.dry_run {
         let memory_space_id = request.memory_space_id.clone().ok_or_else(|| {
             Error::config(
@@ -2821,7 +2841,7 @@ fn apply_delete(
             None,
         ));
     };
-    let previous_digest = digest_entry(&previous);
+    let previous_digest = digest_entry(&previous)?;
     let operation = LongTermControlOperation::from_label(operation_label).ok_or_else(|| {
         Error::config(
             "long_term_control_revision_intent",
@@ -2906,7 +2926,7 @@ fn apply_forget_by_query(
     let mut affected = Vec::new();
     let mut tombstones = Vec::new();
     for previous in &resolved.records {
-        let previous_digest = digest_entry(previous);
+        let previous_digest = digest_entry(previous)?;
         let tombstone = tombstone_for(previous, LongTermControlOperation::ForgetByQuery, request)?;
         let revision = control_revision_intent_for(
             LongTermControlOperation::ForgetByQuery,
@@ -2985,7 +3005,6 @@ fn apply_mark_stale(
         resolved,
         previous,
         LongTermMemoryOwnerMutation::MarkStale(stale_hint),
-        MemorySubjectVisibilityPolicy::AllSubjects,
         Vec::new(),
     )
 }
@@ -3008,14 +3027,15 @@ fn apply_change_scope(
             None,
         ));
     };
-    let notes = if matches!(
-        subject_visibility,
-        MemorySubjectVisibilityPolicy::AllSubjects
-    ) {
-        Vec::new()
-    } else {
-        vec!["report_only_subject_visibility_not_indexed".to_string()]
-    };
+    if subject_visibility.validate_canonical().is_err() {
+        return Ok(rejected_report(
+            "change_scope",
+            request,
+            resolved.report,
+            "subject_visibility_policy_invalid",
+            None,
+        ));
+    }
     apply_owner_field_mutation(
         "change_scope",
         store,
@@ -3023,9 +3043,11 @@ fn apply_change_scope(
         request,
         resolved,
         previous,
-        LongTermMemoryOwnerMutation::ChangeScope(source_scope),
-        subject_visibility,
-        notes,
+        LongTermMemoryOwnerMutation::ChangeScope {
+            source_scope,
+            subject_visibility,
+        },
+        Vec::new(),
     )
 }
 
@@ -3054,7 +3076,6 @@ fn apply_change_privacy(
         resolved,
         previous,
         LongTermMemoryOwnerMutation::ChangePrivacy(privacy),
-        MemorySubjectVisibilityPolicy::AllSubjects,
         vec!["privacy_transition_requires_facet_refresh".to_string()],
     )
 }
@@ -3068,10 +3089,9 @@ fn apply_owner_field_mutation(
     resolved: ResolvedTarget,
     previous: LongTermMemoryEntry,
     mutation: LongTermMemoryOwnerMutation,
-    subject_visibility: MemorySubjectVisibilityPolicy,
     notes: Vec<String>,
 ) -> Result<MemoryLongTermMutationReport> {
-    let previous_digest = digest_entry(&previous);
+    let previous_digest = digest_entry(&previous)?;
     let plan = plan_or_apply_owner_mutation(
         store,
         &previous,
@@ -3091,7 +3111,7 @@ fn apply_owner_field_mutation(
                 None,
                 MemoryProjectionImpactReport {
                     affected_record_ids: Vec::new(),
-                    subject_visibility,
+                    subject_visibility: previous.subject_visibility.clone(),
                     recall_projection_must_refresh: false,
                     notes: vec!["noop".to_string()],
                 },
@@ -3113,7 +3133,7 @@ fn apply_owner_field_mutation(
             ))
         }
     };
-    let new_digest = digest_entry(&updated);
+    let new_digest = digest_entry(&updated)?;
     if !request.dry_run {
         let typed_operation = LongTermControlOperation::from_label(operation).ok_or_else(|| {
             Error::config(
@@ -3156,7 +3176,7 @@ fn apply_owner_field_mutation(
         audit_event_id,
         MemoryProjectionImpactReport {
             affected_record_ids: vec![previous.id],
-            subject_visibility,
+            subject_visibility: updated.subject_visibility,
             recall_projection_must_refresh: true,
             notes,
         },
@@ -3412,6 +3432,7 @@ fn tombstone_for(
     operation: LongTermControlOperation,
     request: &LongTermMemoryControlMutationRequest,
 ) -> Result<LongTermMemoryTombstone> {
+    entry.subject_visibility.validate_canonical()?;
     let memory_space_id = request.memory_space_id.clone().ok_or_else(|| {
         Error::config(
             "long_term_control_memory_space_required",
@@ -3419,19 +3440,21 @@ fn tombstone_for(
         )
     })?;
     let tombstone = LongTermMemoryTombstone {
-        schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
+        schema_version: LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
         tombstone_id: stable_id("ltmt", &(operation.as_str(), &entry.id, request.now_secs)),
         record_id: entry.id.clone(),
         operation,
         last_owner_revision: entry.owner_revision,
         last_source_revision: entry.source_revision,
-        previous_digest: digest_entry(entry),
+        previous_digest: digest_entry(entry)?,
+        subject_visibility: entry.subject_visibility.clone(),
         reason: request.reason.clone(),
         factual_owner_id: request.factual_owner_id.clone(),
         actor_subject_id: request.actor_subject_id.clone(),
         memory_space_id,
         created_at: request.now_secs,
     };
+    tombstone.validate_contract()?;
     Ok(tombstone)
 }
 
@@ -3822,29 +3845,13 @@ fn mutation_label(operation: &MemoryLongTermMutation) -> &'static str {
     }
 }
 
-fn digest_entry(entry: &LongTermMemoryEntry) -> String {
-    let mut hasher = DefaultHasher::new();
-    "canonical_long_term_owner_v2".hash(&mut hasher);
-    entry.id.hash(&mut hasher);
-    entry.kind.hash(&mut hasher);
-    entry.topic.hash(&mut hasher);
-    entry.content.hash(&mut hasher);
-    entry.keywords.hash(&mut hasher);
-    entry.privacy.label().hash(&mut hasher);
-    entry.source_chat_id.hash(&mut hasher);
-    entry.source_type.hash(&mut hasher);
-    entry.source_scope.hash(&mut hasher);
-    entry.confidence.hash(&mut hasher);
-    entry.freshness.hash(&mut hasher);
-    entry.stale_hint.hash(&mut hasher);
-    entry.supporting_citations.hash(&mut hasher);
-    entry.canonical_entities.hash(&mut hasher);
-    entry.evidence_count.hash(&mut hasher);
-    entry.observed_at.hash(&mut hasher);
-    entry.last_confirmed_at.hash(&mut hasher);
-    entry.source_revision.hash(&mut hasher);
-    entry.owner_revision.hash(&mut hasher);
-    format!("ltmd-{:016x}", hasher.finish())
+fn digest_entry(entry: &LongTermMemoryEntry) -> Result<String> {
+    let encoded = serde_json::to_vec(entry)
+        .map_err(|error| Error::config("long_term_control_owner_digest", error.to_string()))?;
+    let mut hasher = Sha256::new();
+    hash_control_field(&mut hasher, b"canonical_long_term_owner_v3");
+    hash_control_field(&mut hasher, &encoded);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn stable_id<T: Hash>(prefix: &str, value: &T) -> String {
@@ -3878,6 +3885,7 @@ mod digest_tests {
             source_chat_id: Some("conversation-a".to_string()),
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             confidence: LongTermMemoryConfidence::High,
             freshness: LongTermMemoryFreshness::Dynamic,
             stale_hint: LongTermMemoryStaleHint::ReviewBeforeUse,
@@ -3900,13 +3908,16 @@ mod digest_tests {
         let mut changed = baseline.clone();
         changed.privacy = MemoryPrivacyClass::PublicRuntime;
 
-        assert_ne!(digest_entry(&baseline), digest_entry(&changed));
+        assert_ne!(
+            digest_entry(&baseline).expect("baseline digest"),
+            digest_entry(&changed).expect("changed digest")
+        );
     }
 
     #[test]
     fn canonical_owner_digest_covers_governed_owner_contract() {
         let baseline = owner_fixture();
-        let baseline_digest = digest_entry(&baseline);
+        let baseline_digest = digest_entry(&baseline).expect("baseline digest");
         let mut variants = Vec::new();
 
         let mut changed = baseline.clone();
@@ -3916,6 +3927,11 @@ mod digest_tests {
         let mut changed = baseline.clone();
         changed.source_scope = LongTermMemorySourceScope::World;
         variants.push(("source_scope", changed));
+
+        let mut changed = baseline.clone();
+        changed.subject_visibility =
+            MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".to_string()]);
+        variants.push(("subject_visibility", changed));
 
         let mut changed = baseline.clone();
         changed.supporting_citations = vec!["transcript:turn-2".to_string()];
@@ -3940,7 +3956,7 @@ mod digest_tests {
         for (field, changed) in variants {
             assert_ne!(
                 baseline_digest,
-                digest_entry(&changed),
+                digest_entry(&changed).expect("changed digest"),
                 "governed owner field missing from digest: {field}"
             );
         }

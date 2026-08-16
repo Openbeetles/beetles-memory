@@ -172,8 +172,7 @@ for required in \
   "long_term_control_correct_updates_facet_index_revision_in_same_transaction" \
   "long_term_control_delete_removes_facet_index_in_same_transaction" \
   "long_term_control_supersede_replaces_owner_facet_index_in_same_transaction" \
-  "long_term_control_change_scope_updates_facet_and_reports_visibility_not_indexed" \
-  "report_only_subject_visibility_not_indexed" \
+  "long_term_control_change_scope_persists_visibility_with_owner_and_facet_revision" \
   "transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted" \
   "same_scope_restore_preserves_v6_long_term_facet_and_control_closure" \
   "same_scope_restore_replaces_only_that_scope"; do

@@ -259,6 +259,31 @@ impl SubjectRegistry {
             .find(|subject| subject.subject_id == subject_id.trim())
     }
 
+    pub fn registered_subject_ids(&self) -> Result<Vec<SubjectId>, String> {
+        let validation = self.validate_contract();
+        if !validation.accepted {
+            return Err(validation.reason);
+        }
+        if self
+            .subjects
+            .iter()
+            .any(|subject| subject.subject_id != subject.subject_id.trim())
+        {
+            return Err("subject_id_non_canonical".to_string());
+        }
+        let subject_ids = self
+            .subjects
+            .iter()
+            .map(|subject| subject.subject_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if subject_ids.is_empty() {
+            return Err("subject_registry_empty".to_string());
+        }
+        Ok(subject_ids)
+    }
+
     pub fn system_governor(&self) -> Option<&SubjectDescriptor> {
         self.subjects
             .iter()

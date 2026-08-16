@@ -2487,6 +2487,7 @@ mod tests {
                 predecessor,
             },
             privacy_class: MemoryPrivacyClass::PublicRuntime,
+            subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
             content_digest: String::new(),
         };
         material.content_digest = material

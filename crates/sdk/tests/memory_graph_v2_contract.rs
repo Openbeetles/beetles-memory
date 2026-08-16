@@ -3,23 +3,28 @@
 mod support;
 
 use bm_core::memory::{
-    governed_memory_recall_candidate_id, long_term_version_head_key,
-    long_term_version_material_key, scoped_long_term_memory_storage_key, GovernedOwnerRevisionRef,
-    LongTermInvalidationContract, LongTermInvalidationReasonCode, LongTermMemoryEntry,
-    LongTermMemoryHeadManifest, LongTermMemoryStaleHint, LongTermMemoryVersionMaterial,
-    MemoryGraphNodeMembership, MemoryGraphScopeManifest, MEMORY_GRAPH_SCHEMA_VERSION,
+    canonical_recall_evidence_group, governed_memory_recall_candidate_id,
+    long_term_version_head_key, long_term_version_material_key,
+    scoped_long_term_memory_storage_key, GovernedOwnerRevisionRef, LongTermInvalidationContract,
+    LongTermInvalidationReasonCode, LongTermMemoryEntry, LongTermMemoryHeadManifest,
+    LongTermMemoryStaleHint, LongTermMemoryVersionMaterial, MemoryGraphNodeMembership,
+    MemoryGraphScopeManifest, MEMORY_GRAPH_SCHEMA_VERSION,
 };
 use bm_sdk::{
-    EvidenceBacklink, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, LongTermMemoryDraft,
-    LongTermMemoryKind, LongTermMemoryQuery, MemoryCandidateContent,
+    default_agent_subject_id, governed_evidence_document_content_digest, EvidenceBacklink,
+    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft,
+    GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryQuery, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryEvalRecallBenchmarkContext, MemoryEvalRecallRequest, MemoryEvidenceAuthority,
-    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphIntegrityMaintenanceRequest, MemoryGraphNode,
-    MemoryGraphNodeKind, MemoryLongTermMutation, MemoryLongTermMutationRequest,
-    MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallReport,
-    MemoryRecallRequest, MemorySemanticJudgmentSource, MemoryStoreHandle, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, RuntimeLifecycleModeInput,
-    TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, TemporalValidity,
+    MemoryEvidenceDocumentMutation, MemoryGraphEdge, MemoryGraphEdgeKind,
+    MemoryGraphIntegrityMaintenanceRequest, MemoryGraphNode, MemoryGraphNodeKind,
+    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermTarget,
+    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
+    MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
+    RuntimeLifecycleModeInput, SubjectDescriptor, SubjectRegistry, TemporalMemoryGraphNodeOwnerRef,
+    TemporalMemoryGraphWriteRequest, TemporalValidity,
 };
 
 use support::test_runtime;
@@ -95,6 +100,16 @@ fn long_term_node_owner(node_id: &str, owner_id: &str) -> TemporalMemoryGraphNod
     TemporalMemoryGraphNodeOwnerRef {
         node_id: node_id.to_string(),
         owner_ref: GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner_id),
+    }
+}
+
+fn graph_node_owner(
+    node_id: &str,
+    owner_ref: GovernedMemoryOwnerRef,
+) -> TemporalMemoryGraphNodeOwnerRef {
+    TemporalMemoryGraphNodeOwnerRef {
+        node_id: node_id.to_string(),
+        owner_ref,
     }
 }
 
@@ -687,6 +702,299 @@ fn stale_neighbor_reintroduced_after_control_is_exact_zero_before_graph_rerank()
         .any(|node| node.node_id == stale_candidate));
     assert!(!recall.compact_graph.edges.iter().any(|edge| {
         edge.from_node_id == stale_candidate || edge.to_node_id == stale_candidate
+    }));
+}
+
+#[test]
+fn subject_restricted_neighbor_is_exact_zero_before_graph_expansion() {
+    let platform = support::empty_store_platform(support::host_test_profile());
+    let subject_a = default_agent_subject_id("agent-a");
+    let subject_b = default_agent_subject_id("agent-b");
+    let mut registry =
+        SubjectRegistry::single_agent_default("owner-default", "agent-a").expect("registry");
+    registry
+        .upsert_subject(SubjectDescriptor::agent_persona(&subject_b, "Agent B"))
+        .expect("agent-b subject");
+    let runtime_a = support::test_runtime_with_subject_registry(
+        platform.clone(),
+        "agent-a",
+        &subject_a,
+        "chat-graph-visibility",
+        registry.clone(),
+    );
+    let runtime_b = support::test_runtime_with_subject_registry(
+        platform.clone(),
+        "agent-b",
+        &subject_b,
+        "chat-graph-visibility",
+        registry,
+    );
+    let entries = seed_drafts(
+        &platform,
+        &runtime_a,
+        vec![
+            draft(
+                "visible graph anchor",
+                "Visible graph anchor remains available.",
+                "evidence:visible-anchor",
+            ),
+            draft(
+                "restricted graph neighbor",
+                "PSV1_GRAPH_RESTRICTED_SENTINEL must never influence agent-main recall.",
+                "evidence:restricted-neighbor-private",
+            ),
+        ],
+    );
+    let (anchor_id, restricted_id) = owner_ids(
+        &entries,
+        "visible graph anchor",
+        "restricted graph neighbor",
+    );
+    let restricted_source_scope = entries
+        .iter()
+        .find(|entry| entry.id == restricted_id)
+        .expect("restricted owner")
+        .source_scope;
+    for runtime in [&runtime_a, &runtime_b] {
+        let graph_write = write_shared_graph(runtime, &anchor_id, &restricted_id);
+        assert!(graph_write.accepted, "{:?}", graph_write.gate_failures);
+    }
+    let before_memberships = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("pre-visibility graph snapshot")
+        .json_docs
+        .into_iter()
+        .filter(|doc| doc.namespace == "memory_graph_node_memberships")
+        .map(|doc| {
+            serde_json::from_value::<MemoryGraphNodeMembership>(doc.value)
+                .expect("typed graph membership")
+        })
+        .filter(|membership| membership.owner_ref.owner_id == restricted_id)
+        .map(|membership| membership.mounted_subject_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        before_memberships,
+        std::collections::BTreeSet::from([subject_a.clone(), subject_b.clone()])
+    );
+    runtime_a
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(restricted_id.clone()),
+                source_scope: restricted_source_scope,
+                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                    subject_a.clone()
+                ]),
+            },
+            reason: "graph neighbor visibility must fail closed".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("restrict graph neighbor");
+
+    let post_memberships = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("post-visibility graph snapshot")
+        .json_docs
+        .into_iter()
+        .filter(|doc| doc.namespace == "memory_graph_node_memberships")
+        .map(|doc| {
+            serde_json::from_value::<MemoryGraphNodeMembership>(doc.value)
+                .expect("typed graph membership")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        post_memberships
+            .iter()
+            .all(|membership| membership.owner_ref.owner_id != restricted_id),
+        "one visibility transaction must atomically remove every registered-subject predecessor membership"
+    );
+    let retained_anchor_subjects = post_memberships
+        .iter()
+        .filter(|membership| membership.owner_ref.owner_id == anchor_id)
+        .map(|membership| membership.mounted_subject_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        retained_anchor_subjects,
+        std::collections::BTreeSet::from([subject_a, subject_b.clone()]),
+        "both subject graph closures must retain their visible anchor"
+    );
+
+    let recall = recall(&runtime_b, "visible graph anchor");
+    let anchor_ref = GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, anchor_id);
+    let restricted_ref =
+        GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, restricted_id);
+    assert!(recall
+        .source_candidate_ids
+        .contains(&governed_memory_recall_candidate_id(&anchor_ref)));
+    assert_owner_is_exact_zero_after_graph_expansion(
+        &recall,
+        &restricted_ref,
+        "PSV1_GRAPH_RESTRICTED_SENTINEL",
+    );
+}
+
+#[test]
+fn cross_subject_long_term_cascade_preserves_other_subject_private_evidence_owner() {
+    let platform = support::empty_store_platform(support::host_test_profile());
+    let subject_a = default_agent_subject_id("agent-a");
+    let subject_b = default_agent_subject_id("agent-b");
+    let mut registry =
+        SubjectRegistry::single_agent_default("owner-default", "agent-a").expect("registry");
+    registry
+        .upsert_subject(SubjectDescriptor::agent_persona(&subject_b, "Agent B"))
+        .expect("agent-b subject");
+    let runtime_a = support::test_runtime_with_subject_registry(
+        platform.clone(),
+        "agent-a",
+        &subject_a,
+        "chat-graph-evidence-visibility",
+        registry.clone(),
+    );
+    let runtime_b = support::test_runtime_with_subject_registry(
+        platform.clone(),
+        "agent-b",
+        &subject_b,
+        "chat-graph-evidence-visibility",
+        registry,
+    );
+    let evidence_id = "evidence:agent-b-private-graph-owner";
+    let source_locator = "opaque://psv1/agent-b-private-graph-owner";
+    let evidence_group = canonical_recall_evidence_group("psv1:agent-b-private-graph-owner");
+    let chunks = vec![GovernedEvidenceDocumentChunk {
+        identity: "section:private".to_string(),
+        ordinal: 0,
+        body: "PSV1_AGENT_B_PRIVATE_EVIDENCE_SENTINEL".to_string(),
+    }];
+    runtime_b
+        .write(MemoryWriteRequest::GovernedEvidenceDocuments {
+            mutations: vec![MemoryEvidenceDocumentMutation::Upsert {
+                draft: Box::new(GovernedEvidenceDocumentDraft {
+                    memory_space_id: "space:owner-default".to_string(),
+                    mounted_subject_id: subject_b.clone(),
+                    document_id: evidence_id.to_string(),
+                    source_kind: GovernedEvidenceDocumentSourceKind::StructuredMaterial,
+                    source_locator: source_locator.to_string(),
+                    canonical_evidence_group: evidence_group.clone(),
+                    evidence_family_group: None,
+                    source_revision: 1,
+                    body: "PSV1_AGENT_B_PRIVATE_EVIDENCE_SENTINEL".to_string(),
+                    content_digest: governed_evidence_document_content_digest(
+                        source_locator,
+                        &evidence_group,
+                        None,
+                        "PSV1_AGENT_B_PRIVATE_EVIDENCE_SENTINEL",
+                        &chunks,
+                    ),
+                    chunks,
+                    authority: MemoryEvidenceAuthority::WorldObservation,
+                    privacy: MemoryPrivacyClass::SharedWithSubject,
+                    observed_at: 1_800_000_000,
+                }),
+            }],
+        })
+        .expect("seed agent-b evidence owner");
+
+    let entries = seed_drafts(
+        &platform,
+        &runtime_a,
+        vec![
+            draft(
+                "cross graph anchor",
+                "Cross-subject graph anchor remains available.",
+                "evidence:cross-subject-anchor",
+            ),
+            draft(
+                "cross graph target",
+                "Cross-subject graph target becomes restricted.",
+                "evidence:cross-subject-target",
+            ),
+        ],
+    );
+    let (anchor_id, target_id) = owner_ids(&entries, "cross graph anchor", "cross graph target");
+    let target_scope = entries
+        .iter()
+        .find(|entry| entry.id == target_id)
+        .expect("target owner")
+        .source_scope;
+    let evidence_ref =
+        GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::EvidenceDocument, evidence_id);
+    let evidence_node_id = governed_memory_recall_candidate_id(&evidence_ref);
+    runtime_b
+        .write_temporal_memory_graph(TemporalMemoryGraphWriteRequest {
+            operation: "memory_graph.write".to_string(),
+            nodes: vec![
+                MemoryGraphNode {
+                    node_id: evidence_node_id.clone(),
+                    kind: MemoryGraphNodeKind::MemoryRecord,
+                    label: "agent-b governed evidence".to_string(),
+                    evidence_refs: vec![evidence_group.clone()],
+                },
+                graph_node(&anchor_id, "evidence:cross-subject-shared"),
+                graph_node(&target_id, "evidence:cross-subject-shared"),
+            ],
+            node_owners: vec![
+                graph_node_owner(&evidence_node_id, evidence_ref.clone()),
+                long_term_node_owner(&anchor_id, &anchor_id),
+                long_term_node_owner(&target_id, &target_id),
+            ],
+            edges: vec![graph_edge(
+                "edge:cross-subject-anchor-target",
+                &anchor_id,
+                &target_id,
+                "evidence:cross-subject-shared",
+            )],
+            backlinks: vec![
+                EvidenceBacklink {
+                    source_kind: "governed_evidence_document".to_string(),
+                    source_id: evidence_group,
+                    fingerprint: "fp:agent-b-private-evidence".to_string(),
+                },
+                EvidenceBacklink {
+                    source_kind: "long_term_memory".to_string(),
+                    source_id: "evidence:cross-subject-shared".to_string(),
+                    fingerprint: "fp:cross-subject-shared".to_string(),
+                },
+            ],
+        })
+        .expect("write agent-b mixed-owner graph");
+
+    runtime_a
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::ChangeScope {
+                target: MemoryLongTermTarget::RecordId(target_id.clone()),
+                source_scope: target_scope,
+                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![subject_a]),
+            },
+            reason: "restrict shared target without deleting agent-b evidence".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("restrict target from agent-a runtime");
+
+    let retained = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("post-cascade snapshot")
+        .json_docs
+        .into_iter()
+        .filter(|doc| doc.namespace == "memory_graph_node_memberships")
+        .map(|doc| {
+            serde_json::from_value::<MemoryGraphNodeMembership>(doc.value)
+                .expect("typed graph membership")
+        })
+        .collect::<Vec<_>>();
+    assert!(retained.iter().any(|membership| {
+        membership.mounted_subject_id == subject_b
+            && membership.owner_ref == evidence_ref
+            && membership.owner_revision == 1
+    }));
+    assert!(!retained.iter().any(|membership| {
+        membership.mounted_subject_id == subject_b && membership.owner_ref.owner_id == target_id
+    }));
+    assert!(retained.iter().any(|membership| {
+        membership.mounted_subject_id == subject_b && membership.owner_ref.owner_id == anchor_id
     }));
 }
 
